@@ -2990,6 +2990,7 @@ class FinishUpTui(App[int]):
                 Option("add", "Add a server"),
                 Option("remove", "Remove a server"),
                 Option("login", "Store an HTTPS server's API key"),
+                Option("folders", "Let a server read a folder outside your projects"),
             )
         )
         choice = await self.ask(
@@ -3000,7 +3001,7 @@ class FinishUpTui(App[int]):
         if choice == "status":
             self.say(Level.ACTIVE, "Server status", await self.runtime.server_status_lines())
             return
-        if choice in {"add", "remove", "login"}:
+        if choice in {"add", "remove", "login", "folders"}:
             self.say(Level.OPTIONAL, "Run this in your shell", _SERVER_SHELL_COMMANDS[choice])
             return
         name = choice.removeprefix("use:")
@@ -3267,6 +3268,13 @@ _SERVER_SHELL_COMMANDS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "remove": ("    finishup server remove NAME",),
     "login": ("    finishup server login NAME",),
+    "folders": (
+        "    finishup server folders add NAME /full/path/to/folder",
+        "    finishup server folders list NAME",
+        "    finishup server folders remove NAME /full/path/to/folder",
+        "",
+        "Adding a folder asks you to confirm it in your terminal.",
+    ),
 }
 
 
