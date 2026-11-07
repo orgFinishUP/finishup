@@ -619,6 +619,15 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 def _attachment_recovery_context(reason: str) -> str:
     """Render only trusted classifications, never host/error payload text."""
 
+    from finishup.client.targets import PRE_DIAL_REFUSALS
+
+    if reason in PRE_DIAL_REFUSALS:
+        # ADR-051 decision 8: this computer refused the selected server before anything was sent
+        # (zero-network, or an older disclosure). Name the reason and the owner's fix, as MCP
+        # ``start`` and the CLI do; the server was never asked, so no budget was spent on it.
+        from finishup.cli.hooks import remote_refusal_context
+
+        return remote_refusal_context(reason)
     if reason == "service_incompatible":
         return (
             "FinishUP attachment pending: service_incompatible. The selected service has an "
@@ -3478,6 +3487,13 @@ async def _try_auto_start(
 
     if workspace_locator is None:
         return AutoAttachOutcome(None, "auto_attach_workspace_unbound")
+    from finishup.client.targets import active_remote_refusal
+
+    refusal = active_remote_refusal()
+    if refusal is not None:
+        # The connect seams refuse this before any dial (ADR-051 decision 8); naming it here sends
+        # nothing, starts no connector and keeps the closed reason for the context and diagnostics.
+        return AutoAttachOutcome(None, refusal)
 
     from pydantic import ValidationError
 
@@ -3555,6 +3571,11 @@ async def _try_auto_start(
             # A running service of this installation closed the hello (#1040 follow-up): not a
             # service that still has to start, and not another installation to replace.
             return AutoAttachOutcome(None, "service_handshake_failed")
+        from finishup.client.targets import PRE_DIAL_REFUSALS
+
+        if error.phase in PRE_DIAL_REFUSALS:
+            # A selection that changed after the check above: the connect seam refused it.
+            return AutoAttachOutcome(None, error.phase)
         return AutoAttachOutcome(
             None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
         )

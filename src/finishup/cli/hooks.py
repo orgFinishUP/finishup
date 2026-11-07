@@ -164,6 +164,58 @@ _LOCKED_CONTEXT: Final = (
     "FinishUP vault is locked for this mapped session; no live receipt can be promised."
     + render_hook_recovery_suffix("vault_locked")
 )
+# ADR-051: the selected server is on another machine. Its vault is unlocked there, never by a
+# local `service unlock`; no host or name is in either text.
+_REMOTE_LOCKED_CONTEXT: Final = (
+    "The selected FinishUP server's vault is locked for this mapped session; no live receipt "
+    "can be promised." + render_hook_recovery_suffix("remote_vault_locked")
+)
+
+
+def remote_refusal_context(phase: str) -> str:
+    """The hook text for a connection this computer refused before any dial (ADR-051 decision 8).
+
+    ``phase`` is one of ``targets.PRE_DIAL_REFUSALS`` (``zero_network_remote_selected``,
+    ``target_reauthorization_required``): not an outage of the server, so the text names the
+    closed reason, the registry directive (that nothing was sent, why, and the command the owner
+    runs in their own terminal) and its continuation token, as MCP ``start`` and the CLI do, and
+    never a hook budget that was not spent.
+    """
+
+    from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+    from finishup.protocol.recovery import directive_for
+
+    token = REASON_CODE_CONTINUATIONS[phase]
+    directive = directive_for(token)
+    assert directive is not None
+    nudge = "" if directive.nudge is None else f" {directive.nudge}"
+    return (
+        f"FinishUP refused the selected server's connection before anything was sent ({phase}). "
+        f"{directive.directive}{nudge} Continuation: {token}. "
+    )
+
+
+def unavailable_context(phase: str | None) -> str:
+    """The SessionStart text for an unavailable service; a remote phase is named with its token."""
+
+    from finishup.client.targets import PRE_DIAL_REFUSALS
+
+    if phase in PRE_DIAL_REFUSALS:
+        return remote_refusal_context(phase).rstrip()
+    if phase not in REMOTE_CONNECTION_PHASES:
+        return _UNAVAILABLE_CONTEXT
+    return (
+        f"The selected FinishUP server is unavailable for this mapped session ({phase}); no "
+        "live receipt can be promised." + render_hook_recovery_suffix(phase)
+    )
+
+
+def locked_context() -> str:
+    """The SessionStart text for a locked vault: the remote server's own when one is selected."""
+
+    from finishup.client.targets import active_target_is_remote
+
+    return _REMOTE_LOCKED_CONTEXT if active_target_is_remote() else _LOCKED_CONTEXT
 
 
 def _stale_mapping_context(

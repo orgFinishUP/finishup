@@ -66,6 +66,7 @@ from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json
 __all__ = [
     "CLAIM_SALT_BYTES",
     "DISCLOSURE_VERSION",
+    "PRE_DIAL_REFUSALS",
     "REMOTE_KINDS",
     "RESERVED_NAMES",
     "TARGET_KINDS",
@@ -76,6 +77,7 @@ __all__ = [
     "TargetError",
     "TargetKind",
     "TargetRecordUnreadable",
+    "active_remote_refusal",
     "active_root_may_be_remote",
     "active_target_record",
     "clear_selection",
@@ -172,6 +174,10 @@ _REASONS: Final = frozenset(
         "selection_invalid",
         "zero_network_remote_selected",
     }
+)
+# The refusals ``require_current_authorization`` makes before anything is sent to a remote target.
+PRE_DIAL_REFUSALS: Final = frozenset(
+    {"target_reauthorization_required", "zero_network_remote_selected"}
 )
 
 

@@ -7882,7 +7882,12 @@ reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
-`storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
+`storage_unsafe`, and `storage_corrupt` tokens. A selected remote server this computer refuses
+before any dial (ADR-051 decision 8) records its own reason, `zero_network_remote_selected` or
+`target_reauthorization_required`, read from the target record and this computer's last-reported
+policy marker without a connection attempt; the SessionStart context of every host then names that
+reason with its registry directive (the owner's fix, `finishup server use local` for zero-network)
+and continuation, never a hook-budget outage. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
 bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
