@@ -12,7 +12,8 @@ trusted console; refusals name a target by its id or not at all, with a closed r
   typed confirmation. ``use local`` is the reverse. A switch away from a remote target also stops
   what this client runs for it, as ``disconnect`` does (``TargetSwitch``).
 * ``login``/``logout`` store or delete an HTTPS target's API key (platform store or owner-only
-  file); ``connect``/``disconnect`` make the target usable or stop what this client runs for it.
+  file), then stop what this client runs for it, which kept the key it read in memory;
+  ``connect``/``disconnect`` make the target usable or stop what this client runs for it.
 * ``list``, ``status [--json]`` and ``test`` show the deciding source, the target, and a probe.
 
 An isolation root or a runtime pin outranks the selection; while one is in force every command
@@ -1960,6 +1961,25 @@ def _read_secret_on_console() -> str:
         raise ServerCommandRefused(error.reason)
 
 
+def _close_connection_keeping_a_key(record: ServerTarget, *, which: str) -> None:
+    """Stop what this client runs for ``record`` after its stored key changed.
+
+    A running connection keeps the key it read in memory: after ``logout`` it would keep sending
+    the deleted key, and after ``login`` an earlier one. It is stopped through the target's
+    runtime, exactly as ``server disconnect`` stops it; the next client starts it again with the
+    key now stored. One that did not stop in time is named, by generated id, with that fix.
+    """
+
+    if not _leave(None, record).left_open:
+        return
+    typer.echo(
+        f"The connection to the server {record.target_id} ({record.kind}) did not close in time, "
+        f"so it may still use the {which} key until it stops. Run 'finishup server disconnect' "
+        "with that server's name ('finishup server list' shows it).",
+        err=True,
+    )
+
+
 @server_app.command("login")
 @_cli
 def server_login(
@@ -2011,13 +2031,14 @@ def server_login(
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
     if unanswered is None:
         typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
-        return
-    typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
-    typer.echo(
-        f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
-        f"checked on the first connection; run 'finishup server test {record.name}' once the "
-        "server is up to check it now."
-    )
+    else:
+        typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+        typer.echo(
+            f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
+            f"checked on the first connection; run 'finishup server test {record.name}' once the "
+            "server is up to check it now."
+        )
+    _close_connection_keeping_a_key(record, which="earlier")
 
 
 @server_app.command("logout")
@@ -2050,6 +2071,7 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
         if removed
         else f"No API key was stored for {record.target_id}."
     )
+    _close_connection_keeping_a_key(record, which="deleted")
 
 
 _KEY_KEPT: Final = (

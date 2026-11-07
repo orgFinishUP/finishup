@@ -551,3 +551,71 @@ def test_a_stop_never_waits_on_the_closing_delete(home: Path, zero_network: bool
     else:
         assert reason == "stop_requested"
         assert len(transport.deletes) == 1
+
+
+def test_a_key_stored_after_the_connector_started_is_read_where_it_now_lives(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``server add`` stores no key, and a hook or ``server test`` may start the connector before
+    ``server login`` stores one. The connector reads the key where the target record now says it
+    lives, so the next connection after the refusal authenticates without a restart."""
+
+    from dataclasses import replace
+
+    from finishup.client.credentials import KeyringOrFileCredential
+
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
+    with targets.registry_lock():
+        record, root = targets.new_remote_target("gw", "https", base_url="https://gw.example")
+    assert record.credential is None
+    keys = home / "gateway"
+    _key_record, key = create_key(keys, label="client", scope="agent")
+    daemon = ScriptedDaemon()
+
+    async def connect_upstream() -> object:
+        client, server = memory_pair()
+        asyncio.get_running_loop().create_task(daemon.serve(server))
+        return client
+
+    _state, app = build_gateway_app(
+        keys_directory=keys,
+        connect_upstream=connect_upstream,  # type: ignore[arg-type]
+        audit=_Audit(),
+    )
+    # The connector's own stored-key reader, not a test credential.
+    connector = Connector(root, record, https_transport=httpx.ASGITransport(app=app))
+
+    async def hello(nonce: str) -> bytes:
+        client, local = _pair()
+        relay = asyncio.create_task(connector._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(
+            encode_control_frame(
+                {
+                    "protocol_version": "1.0",
+                    "client_kind": "cli",
+                    "client_version": "0.1.0",
+                    "connection_nonce": nonce * 32,
+                    "schema_manifest_digest": load_schema_catalog().manifest_digest,
+                }
+            )
+        )
+        async with asyncio.timeout(5):
+            answer = await client.receive(65_536)
+            await client.aclose()
+            await relay
+        return answer
+
+    async def exercise() -> None:
+        assert await hello("1a") == b""
+        status = read_connector_status(root)
+        assert status is not None and status.reason == "remote_auth_failed"
+        # ``server login``: the key is stored, then the record names where.
+        location = KeyringOrFileCredential(record.target_id, root, recorded=None).store(key)
+        with targets.registry_lock():
+            targets.write_target(root, replace(record, credential=location))
+        assert await hello("2b") != b""
+        status = read_connector_status(root)
+        assert status is not None and status.phase == "ready"
+
+    with selection_override(root):
+        asyncio.run(exercise())

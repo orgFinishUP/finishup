@@ -770,6 +770,10 @@ answers bounded `workspace_call`s on a connection that declared it.
   nothing was stored, and the fix. A server that cannot be reached keeps the key, and the command
   says it is not verified yet, that it is checked on the first connection, and that `server test
   NAME` checks it once the server is up.
+  Approach A: when `login` stores a key or `logout` deletes one, the command then stops the
+  target's connector through its runtime, as `server disconnect` does, since a running connector
+  keeps the key it read in memory; a stop that does not finish in time is named on stderr with
+  `server disconnect` as the fix.
 - The credential never appears in argv, the environment, `target.json`, a host registration, a
   log, hook output, an MCP frame or JSON output.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks
@@ -1147,8 +1151,9 @@ through the same relay; human-control and secret channels never leave the server
   gateway forgets an unused session on its own, so a stop never waits on a black-holed network
   for it. TLS uses the target's CA
   file, or its `sha256:` pin of the leaf certificate, checked right after the handshake and before
-  any request byte. Only the connector reads the API key, and it rereads it after a refusal so a
-  key rotated with `server login` takes effect without a restart.
+  any request byte. Only the connector reads the API key, and it rereads it after a refusal, from
+  wherever the target record now says it lives, so a key `server login` stored or moved after the
+  connector started takes effect without a restart.
 - **Gateway** (`finishup.gateway`; `finishup service gateway run --listen H:P (--tls-cert F
   --tls-key F | --behind-proxy)` and `service gateway key create|list|revoke`, all `server_host`).
   A same-user process with no vault, storage or policy authority: it may import SHARED modules and

@@ -291,10 +291,21 @@ class Connector:
     # -- upstream ---------------------------------------------------------------------------
 
     def _stored_credential(self) -> str:
-        from finishup.client.credentials import KeyringOrFileCredential
+        """The key where the target's record says it lives now, read on each first use.
 
+        ``server login`` may have stored a key after this connector started (``server add`` stores
+        none) or moved it between the platform store and the owner-only file, so the record is
+        read again rather than taken from the one this connector started with.
+        """
+
+        from finishup.client.credentials import CredentialError, KeyringOrFileCredential
+        from finishup.client.targets import read_target
+
+        current = read_target(self._root)
+        if current is None or current.target_id != self._record.target_id:
+            raise CredentialError("credential_unavailable")
         return KeyringOrFileCredential(
-            self._record.target_id, self._root, recorded=self._record.credential
+            current.target_id, self._root, recorded=current.credential
         ).read()
 
     def _https_upstream(self) -> object:

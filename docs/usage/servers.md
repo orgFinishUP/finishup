@@ -199,6 +199,11 @@ FinishUP says why and what to do. If the server cannot be reached right now, Fin
 and says it is not verified yet: it is checked on the first connection, and `finishup server test
 NAME` checks it as soon as the server is up.
 
+When `login` stores a key or `logout` deletes one, the command closes the connection FinishUP keeps
+open to that server, so it never goes on using an earlier or deleted key; the next request opens it
+again with the key now stored. If it does not close in time, the command says so and `finishup
+server disconnect` closes it.
+
 SSH servers need no FinishUP sign-in. Your SSH keys, `ssh-agent` and known hosts stay with SSH;
 FinishUP stores no SSH key and never asks for an SSH password.
 
