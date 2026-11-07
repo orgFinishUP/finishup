@@ -631,12 +631,18 @@ class HttpsTransport:
             self._target.target_id, self._root, recorded=self._target.credential
         )
 
-    async def connect(self) -> ControlStream:
+    async def connect(self, *, start_service: bool = True) -> ControlStream:
+        """A fresh binding stream. With ``start_service`` false its session asks the gateway never
+        to start a stopped service (the MCP bridge's background agent)."""
+
         from finishup.client.https_binding import open_binding_stream
 
         refuse_zero_network()
         return await open_binding_stream(
-            self._target, self.credential_source(), http_transport=self._http_transport
+            self._target,
+            self.credential_source(),
+            http_transport=self._http_transport,
+            start_service=start_service,
         )
 
 

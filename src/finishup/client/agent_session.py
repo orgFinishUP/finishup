@@ -282,8 +282,11 @@ def capture_pending(workspace: WorkspaceLocator, state: Path | None = None) -> b
 async def _connect_running(binding: ClientWorkspaceBinding) -> AgentConnection:
     from finishup.service.client import connect_service
 
-    # No on-demand start: background work never asks for a remote service to be started.
-    return await connect_service(ControlClientKind.CLI, workspace_binding=binding)
+    # No on-demand start: background work never asks for a remote service to be started, and an
+    # HTTPS or port target's gateway is asked not to start one either.
+    return await connect_service(
+        ControlClientKind.CLI, workspace_binding=binding, start_service=False
+    )
 
 
 @dataclass(frozen=True, slots=True)

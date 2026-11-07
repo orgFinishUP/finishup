@@ -562,6 +562,28 @@ def test_the_bridges_background_work_stops_for_good_once_its_target_is_removed(
     assert len(probed) == 1 and work.connection is None
 
 
+def test_the_bridges_background_agent_asks_that_no_service_be_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A-SVC-RESTART: the background agent dials without the on-demand start, and its connection
+    asks an HTTPS or port target's gateway never to start a stopped service either."""
+
+    from finishup.service import client as service_client
+
+    asked: list[dict[str, object]] = []
+
+    async def connect(*_args: object, **kwargs: object) -> object:
+        asked.append(kwargs)
+        return _Connection()
+
+    monkeypatch.setattr(service_client, "connect_service", connect)
+    connection = asyncio.run(
+        agent_session._connect_running(_BINDING)  # pyright: ignore[reportPrivateUsage]
+    )
+    assert isinstance(connection, _Connection)
+    assert asked == [{"workspace_binding": _BINDING, "start_service": False}]
+
+
 def test_only_a_remote_root_starts_the_bridges_background_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

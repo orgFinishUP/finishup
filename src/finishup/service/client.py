@@ -2159,6 +2159,7 @@ async def _connect_remote_attempt(
     output_is_controlling_tty: bool,
     timeout_seconds: float,
     workspace_binding: ClientWorkspaceBinding | None = None,
+    start_service: bool = True,
 ) -> ServiceClient:
     """Dial a remote target and handshake within one attempt budget (ADR-051, approach B).
 
@@ -2168,9 +2169,11 @@ async def _connect_remote_attempt(
     alone (``_target_binding`` without an agent), so a short-lived process such as a hook is
     claim-bound without offering an agent. Every transport failure is a retryable ``service_unavailable``
     whose ``phase`` is one closed remote phase; nothing local is probed, spawned or superseded.
+    With ``start_service`` false an HTTPS or port target's gateway session asks never to start a
+    stopped service (``FinishUP-Service-Start: never``); an SSH dial never starts one anyway.
     """
 
-    from finishup.client.transports import TransportError
+    from finishup.client.transports import HttpsTransport, TransportError
 
     target = transport.target
     if target is None:
@@ -2185,7 +2188,11 @@ async def _connect_remote_attempt(
                 # and must never become the agent a server calls after it exits.
                 binding = await _target_binding(target, workspace_locator, serve_workspace=False)
             agent = None if binding is None else binding.agent
-            stream = await transport.connect()
+            stream = await (
+                transport.connect(start_service=False)
+                if not start_service and isinstance(transport, HttpsTransport)
+                else transport.connect()
+            )
             session = await client_handshake(
                 stream,
                 client_kind,
@@ -2325,12 +2332,14 @@ async def _connect_service_attempt(
     timeout_seconds: float,
     workspace_binding: ClientWorkspaceBinding | None = None,
     transport: ControlTransport | None = None,
+    start_service: bool = True,
 ) -> ServiceClient:
     """Connect and handshake within one attempt budget, preserving accepted-socket identity.
 
     The stream comes from the active root's transport (``_control_transport``); a remote target
     is dialled by ``_connect_remote_attempt``. A ``workspace_binding`` sends its claim (and
-    declares its agent) in place of a locator.
+    declares its agent) in place of a locator. ``start_service`` false reaches only a remote
+    service that already runs (a local endpoint is never started here either).
     """
 
     if transport is None:
@@ -2344,6 +2353,7 @@ async def _connect_service_attempt(
             output_is_controlling_tty=output_is_controlling_tty,
             timeout_seconds=timeout_seconds,
             workspace_binding=workspace_binding,
+            start_service=start_service,
         )
     agent = None if workspace_binding is None else workspace_binding.agent
     stream: ControlStream | None = None
@@ -2423,11 +2433,15 @@ async def connect_service(
     projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
     output_is_controlling_tty: bool = False,
     workspace_binding: ClientWorkspaceBinding | None = None,
+    start_service: bool = True,
 ) -> ServiceClient:
     """Connect only to the verified fixed ordinary endpoint and perform the handshake.
 
     ``workspace_binding`` is for a FinishUP server on another machine: the hello carries its claim
     instead of a locator, and its agent, if any, answers the server's workspace calls.
+    ``start_service`` false is for the MCP bridge's background agent: an HTTPS or port target's
+    gateway then never starts a service the owner stopped (``FinishUP-Service-Start: never``),
+    as an SSH connection never does.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -2439,6 +2453,8 @@ async def connect_service(
         raise TypeError("projection_render_mode_invalid")
     if type(output_is_controlling_tty) is not bool:
         raise TypeError("projection_tty_fact_invalid")
+    if type(start_service) is not bool:
+        raise TypeError("start_service_invalid")
     return await _connect_service_attempt(
         client_kind,
         workspace_locator=workspace_locator,
@@ -2446,6 +2462,7 @@ async def connect_service(
         output_is_controlling_tty=output_is_controlling_tty,
         timeout_seconds=_CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
         workspace_binding=workspace_binding,
+        start_service=start_service,
     )
 
 

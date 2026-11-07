@@ -94,7 +94,9 @@ def _transport(gateway: object, key: str) -> HttpsTransport:
     )
 
 
-async def _connect(transport: HttpsTransport) -> client_module.ServiceClient:
+async def _connect(
+    transport: HttpsTransport, *, start_service: bool = True
+) -> client_module.ServiceClient:
     return await client_module._connect_service_attempt(  # pyright: ignore[reportPrivateUsage]
         ControlClientKind.CLI,
         workspace_locator=None,
@@ -102,6 +104,7 @@ async def _connect(transport: HttpsTransport) -> client_module.ServiceClient:
         output_is_controlling_tty=False,
         timeout_seconds=5.0,
         transport=transport,
+        start_service=start_service,
     )
 
 
@@ -194,6 +197,52 @@ def test_a_key_the_gateway_does_not_know_or_revoked_is_an_auth_failure(keys: Pat
         True,
         "remote_auth_failed",
     )
+
+
+def test_a_background_agents_session_never_has_the_gateway_start_a_stopped_service(
+    keys: Path,
+) -> None:
+    """A-SVC-RESTART: the MCP bridge's background agent reconnects on its own. Its session asks the
+    gateway never to start a service (``FinishUP-Service-Start: never``), so one the owner
+    stopped stays stopped, as over SSH; a client's own connection still has it started."""
+
+    running = [False]
+    started: list[str] = []
+
+    async def start_and_connect() -> ControlStream:
+        if not running[0]:
+            started.append("started")
+            running[0] = True
+        return await _upstream()
+
+    async def reach_running() -> ControlStream:
+        if not running[0]:
+            raise ControlError("service_unavailable", retryable=True)
+        return await _upstream()
+
+    gateway = real_gateway(keys, start_and_connect, reach_upstream=reach_running)
+
+    async def exercise() -> str | None:
+        transport = _transport(gateway, gateway.key)
+        with pytest.raises(ControlError) as stopped:
+            await _connect(transport, start_service=False)
+        assert started == []
+        client = await _connect(transport)  # a client's own connection: demand
+        await client.close()
+        assert started == ["started"]
+        background = await _connect(transport, start_service=False)  # reaches the running one
+        await background.close()
+        await gateway.state.sessions.close_all()
+        return stopped.value.phase
+
+    assert asyncio.run(exercise()) == "remote_service_not_running"
+    assert started == ["started"]
+    opened = [
+        "finishup-service-start" in names
+        for method, path, names in gateway.requests
+        if method == "POST" and path.endswith("/v1/sessions")
+    ]
+    assert opened == [True, False, True]
 
 
 def test_a_call_outside_the_keys_scope_is_the_gateways_method_forbidden(keys: Path) -> None:

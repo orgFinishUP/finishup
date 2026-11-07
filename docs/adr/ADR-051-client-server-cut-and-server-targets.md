@@ -1220,8 +1220,9 @@ HTTPS and LOCALHOST PORT
     service call the bridge makes, and each row it delivers, renews a 15-minute lease, and the
     connection is released when the lease has run out and nothing waits, so the server's idle
     relock and idle stop still apply. It dials with a back-off and without the on-demand start, so
-    over SSH it never starts a stopped service (an HTTPS gateway starts its own service for any
-    session it opens, for this connection as for every other). Over the same connection it
+    over SSH it never starts a stopped service, and its HTTPS or port session carries
+    `FinishUP-Service-Start: never`, so the gateway never starts one for it either: a service the
+    owner stopped stays stopped until a client's own connection asks. Over the same connection it
     delivers what hooks captured and could not deliver themselves (`ClientObservationDrain`),
     after a read-only probe of the client's store, so an idle bridge opens no connection to
     deliver nothing. Once `server remove` deleted the bridge's target, the work closes what it

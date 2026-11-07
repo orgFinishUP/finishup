@@ -4818,7 +4818,9 @@ dials its own stream.
 - `finishup.client.agent_session.BridgeBackgroundWork(*, lease_seconds=900.0,
   drain_interval=30.0, connect=None, binding_for=None, pending=None, clock=time.monotonic,
   root=None, zero_network_check=1.0)`: the MCP bridge's background agent connection
-  (`connect_service`, never on demand) and drain; `note_activity(locator)` (each bridge service
+  (`connect_service(..., start_service=False)`: never on demand, and an HTTPS or port session
+  sent with `FinishUP-Service-Start: never`, so the gateway starts no stopped service for it) and
+  drain; `note_activity(locator)` (each bridge service
   call) renews the lease, `run_pass() -> BackgroundPass(connected, drained, refused)`, `run()`,
   `aclose()`. Once `root`'s `target.json` is gone or unreadable (`server remove`), `run_pass`
   closes what the work holds and returns `refused="target_removed"`, and `run` returns: it never
@@ -5441,7 +5443,10 @@ the locator in the hello, and `agent`, a `WorkspaceCallHandler` (a `declaration`
 synchronous `answer(call, *, workspace_handle) -> WorkspaceReply`), is declared there and serves
 the connection's `workspace_call` frames. `connect_service`, `connect_service_on_demand` and
 `_connect_service_attempt` take `workspace_binding=`; passing it with a locator raises
-`workspace_binding_conflict`. `ServiceClient.workspace_binding` and `ServiceClient.workspace_handle`
+`workspace_binding_conflict`. `connect_service` and `_connect_service_attempt` also take
+`start_service: bool = True`; with `False` an `HttpsTransport.connect(start_service=False)` opens
+its session with `FinishUP-Service-Start: never` (`open_binding_stream(...,
+start_service=False)`), and other transports dial as before. `ServiceClient.workspace_binding` and `ServiceClient.workspace_handle`
 expose the hello-result's answer. A remote direct-dial connect whose claim the server answered
 without a handle is closed and raised as the server's state: `vault_locked` (retryable for the
 service's own retryable lock reasons), or `service_unavailable` with phase

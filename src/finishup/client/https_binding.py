@@ -5,7 +5,10 @@ the very length-prefixed frames it writes to a Unix socket, and this adapter map
 the binding the server's gateway speaks (``docs/INTERFACES.md``, *HTTPS binding v1*):
 
 * the hello → ``POST /v1/sessions`` (``201`` hello-result and ``Location``; ``409`` the daemon's
-  hello-result on a manifest mismatch, which the handshake names);
+  hello-result on a manifest mismatch, which the handshake names). A stream opened with
+  ``start_service=False`` (the MCP bridge's background agent) sends it with
+  ``FinishUP-Service-Start: never``, so the gateway never starts a service the owner stopped for
+  it, as over SSH;
 * a call → ``POST …/calls?wait_ms=`` with a short first wait (``CALL_WAIT_MS``); a ``202`` is
   followed by ``GET …/results/{rpc_id}?wait_ms=`` long-polls until the result arrives. A call is
   never posted twice: after an ambiguous failure the adapter only asks for the result (at most
@@ -66,6 +69,7 @@ from finishup.client.targets import ServerTarget
 from finishup.client.transports import RemotePeerIdentity, TransportError, refuse_zero_network
 from finishup.protocol.canonical import JsonValue, strict_json_parse
 from finishup.protocol.ids import IdKind, validate_id
+from finishup.protocol.rest_binding import SERVICE_START_HEADER, SERVICE_START_NEVER
 from finishup.service.control_protocol import MAX_CONTROL_FRAME_BYTES
 
 __all__ = [
@@ -295,21 +299,24 @@ async def _request(
     wait_ms: int | None = None,
     limit: int = MAX_CONTROL_FRAME_BYTES,
     trace: _Trace | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> tuple[int, httpx.Headers, bytes]:
     """One bounded request; every ``httpx`` failure becomes a closed phase, never its text.
 
-    ``trace`` receives the connection's progress events (``httpcore``'s ``trace`` extension).
+    ``trace`` receives the connection's progress events (``httpcore``'s ``trace`` extension);
+    ``headers`` are added to the client's own.
     """
 
     params = None if wait_ms is None else {"wait_ms": str(wait_ms)}
     read = _REQUEST_SECONDS if wait_ms is None else wait_ms / 1_000 + _POLL_MARGIN_SECONDS
+    sent = {**(_JSON if content is not None else {}), **(headers or {})}
     try:
         async with client.stream(
             method,
             path,
             content=content,
             params=params,
-            headers=_JSON if content is not None else None,
+            headers=sent or None,
             timeout=httpx.Timeout(read, connect=_CONNECT_SECONDS),
             extensions=None if trace is None else {"trace": trace},
         ) as response:
@@ -365,6 +372,7 @@ class BindingControlStream:
         "_posted",
         "_readable",
         "_session",
+        "_start_service",
         "_tasks",
     )
 
@@ -382,10 +390,12 @@ class BindingControlStream:
     _posted: dict[str, asyncio.Event]
     _readable: asyncio.Event
     _session: str | None
+    _start_service: bool
     _tasks: set[asyncio.Task[None]]
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient, *, start_service: bool = True) -> None:
         self._client = client
+        self._start_service = start_service
         self._peer = RemotePeerIdentity("https")
         self._agent = False
         self._closed = False
@@ -512,7 +522,12 @@ class BindingControlStream:
 
     async def _open_session(self, payload: bytes) -> None:
         status, headers, body = await self._request(
-            "POST", "/v1/sessions", content=payload, trace=self._trace_hello
+            "POST",
+            "/v1/sessions",
+            content=payload,
+            trace=self._trace_hello,
+            # The bridge's background agent never has the gateway start a stopped service.
+            headers=None if self._start_service else {SERVICE_START_HEADER: SERVICE_START_NEVER},
         )
         self._hello = "answered"
         if status == 409:
@@ -537,12 +552,19 @@ class BindingControlStream:
         content: bytes | None = None,
         wait_ms: int | None = None,
         trace: _Trace | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> tuple[int, httpx.Headers, bytes]:
         # Read before every request, a background long-poll's included: once this computer
         # reported zero-network nothing more starts, and the stream ends naming why.
         refuse_zero_network()
         answer = await _request(
-            self._client, method, path, content=content, wait_ms=wait_ms, trace=trace
+            self._client,
+            method,
+            path,
+            content=content,
+            wait_ms=wait_ms,
+            trace=trace,
+            headers=headers,
         )
         self._last_activity = time.monotonic()
         return answer
@@ -697,9 +719,16 @@ async def _read_off_loop(credential: CredentialSource) -> str:
 
 
 async def open_binding_stream(
-    target: ServerTarget, credential: CredentialSource, *, http_transport: object | None = None
+    target: ServerTarget,
+    credential: CredentialSource,
+    *,
+    http_transport: object | None = None,
+    start_service: bool = True,
 ) -> BindingControlStream:
     """A fresh binding stream for ``target``; the key is read here, in this process.
+
+    With ``start_service`` false (the MCP bridge's background agent) the session asks the gateway
+    never to start a service that is not running (``FinishUP-Service-Start: never``).
 
     The read runs in a daemon thread, bounded: a keyring that blocks on an unlock or permission
     prompt (a locked Secret Service collection, a Keychain asking again) never blocks the event
@@ -715,7 +744,9 @@ async def open_binding_stream(
         raise TransportError("remote_auth_failed") from None
     if http_transport is not None and not isinstance(http_transport, httpx.AsyncBaseTransport):
         raise TypeError("http_transport_invalid")
-    return BindingControlStream(binding_client(target, secret, http_transport=http_transport))
+    return BindingControlStream(
+        binding_client(target, secret, http_transport=http_transport), start_service=start_service
+    )
 
 
 @dataclass(frozen=True, slots=True)

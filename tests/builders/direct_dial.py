@@ -425,8 +425,13 @@ def real_gateway(
     scope: str = "agent",
     mount: str = "/base",
     idle_seconds: float | None = None,
+    reach_upstream: Callable[[], Awaitable[ControlStream]] | None = None,
 ) -> RecordingGateway:
-    """The real gateway with one fresh key of ``scope``, served under ``mount`` (the base path)."""
+    """The real gateway with one fresh key of ``scope``, served under ``mount`` (the base path).
+
+    ``reach_upstream`` serves sessions sent with ``FinishUP-Service-Start: never`` (``None``:
+    ``upstream`` serves them too).
+    """
 
     from starlette.applications import Starlette
     from starlette.routing import Mount
@@ -454,6 +459,7 @@ def real_gateway(
         connect_upstream=upstream,
         audit=_Audit(),
         idle_seconds=idle_seconds,
+        reach_upstream=reach_upstream,  # type: ignore[arg-type]
     )
     inner = Starlette(routes=[Mount(mount, app=application)]) if mount else application
     return RecordingGateway(state, inner, key)
