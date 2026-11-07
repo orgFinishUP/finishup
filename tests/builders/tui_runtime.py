@@ -170,6 +170,7 @@ class FakeRuntime:
     server_error: RuntimeError_ | None = None
     # The zero-network item (ADR-051 decision 8): lines ``/server`` shows, and how often it was read.
     zero_network: tuple[str, ...] = ()
+    zero_network_title: str = "This computer is zero-network: the selected server is refused"
     zero_network_reads: int = 0
     # The remote server whose privacy policy a questionnaire changes (ADR-051 decision 8), how
     # often the interface read it, and whether the owner switches away from it during the
@@ -517,6 +518,9 @@ class FakeRuntime:
     async def refresh_zero_network_item(self) -> tuple[str, ...]:
         self.zero_network_reads += 1
         return self.zero_network
+
+    def zero_network_heading(self) -> str:
+        return self.zero_network_title
 
     def selected_policy_server(self) -> PolicyServer | None:
         self.policy_server_reads += 1
