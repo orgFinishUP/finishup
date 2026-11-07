@@ -772,7 +772,13 @@ answers bounded `workspace_call`s on a connection that declared it.
     `zero_network_local_server_required`, so the CLI, MCP, hooks and the terminal interface say
     why and the remedy for a process whose selection predates the change, and no stream is dialled
     and no agent is started for it. The check reads the marker only, never the service, so hooks keep
-    their budgets. `server login` refuses its key check the same way.
+    their budgets. `server login` refuses its key check the same way. A client-owned process
+    that holds connections to a remote target open, or connects again on its own, enforces the
+    same marker itself, because it would otherwise keep sending after the change: it checks
+    before every connection it opens or relays and at least once a second while it runs, and on
+    finding the marker it closes what it holds, sends nothing more (no last delivery of captured
+    observations), and names `zero_network_remote_selected`. Each approach names its own such
+    processes in its topology below.
 
   **Where the choice can arise.** While a remote target is selected, a fresh process does not
   set this computer's policy: every `server_host` privacy command (the privacy ceremonies,
@@ -795,12 +801,13 @@ answers bounded `workspace_call`s on a connection that declared it.
   `target_root_unsafe`, `target_record_invalid`) and `finishup server use local` as the way back,
   never as "no server".
 
-  **Honest limits:** a connection already open when the policy changes is
-  not cut (its next connection is refused); after switching, open agent sessions keep the
-  target they started with until they restart, and their connections are refused; after an
-  upgrade from a release without the marker, nothing is remembered until this computer's policy
-  is next reported. Agents cannot change the policy or the selection, so no MCP tool surfaces or
-  answers the choice.
+  **Honest limits:** everything acts on the marker, which a change made here writes when the
+  change is read back (if that read fails, at this computer's next report), so connections already
+  open to a remote target are closed within about a second of it (a request under way in that
+  second may still finish); after switching, open agent sessions keep the target they started with
+  until they restart, and their connections are refused; after an upgrade from a release without
+  the marker, nothing is remembered until this computer's policy is next reported. Agents cannot
+  change the policy or the selection, so no MCP tool surfaces or answers the choice.
 - **Which server's policy a command changes is said before and after** (maintainer principle "be
   clear on what happened", 2026-11-06). While a remote target is selected, `privacy tighten`,
   `privacy propose` and the privacy step of `setup run` (the trusted questionnaire, which the
