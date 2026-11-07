@@ -1348,16 +1348,18 @@ class FinishUpTui(App[int]):
 
         A ceremony that fails or is cancelled (Ctrl-C at its prompt, #1326) still hands the
         terminal back before its error reaches the caller. Textual's ``suspend`` resumes the
-        interface only when its block exits normally, so the error is held until then. Task
-        cancellation and interpreter exits are not held: the interface is shutting down.
+        interface only when its block exits normally, so the error is held until then. A
+        cancelled task is held the same way (a dismissed screen or a newer exclusive worker
+        cancels it while the interface keeps running) and its cancellation is raised again
+        once the interface is back. Interpreter exits are not held.
         """
 
-        failure: Exception | None = None
+        failure: Exception | asyncio.CancelledError | None = None
         result: Any = None
         with self.suspend():
             try:
                 result = await operation()
-            except Exception as error:
+            except (Exception, asyncio.CancelledError) as error:
                 failure = error
         if failure is not None:
             raise failure

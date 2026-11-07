@@ -9,6 +9,7 @@ records the mode changes instead of touching a terminal.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -99,5 +100,23 @@ async def test_an_unexpected_ceremony_failure_still_resumes_the_interface(
         modes = _record_terminal_modes(app, monkeypatch)
         with pytest.raises(OSError, match="console unavailable"):
             await app.hand_over_terminal(failed)
+
+    assert modes == ["suspended", "resumed"]
+
+
+async def test_a_ceremony_whose_task_is_cancelled_resumes_the_interface_then_stays_cancelled(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker cancelled during the hand-over (a dismissed screen, a newer exclusive worker)
+    must not leave the interface suspended; the cancellation still reaches the caller."""
+
+    async def cancelled() -> None:
+        raise asyncio.CancelledError
+
+    app = make_app(suspendable=False)
+    async with app.run_test(size=WIDE):
+        modes = _record_terminal_modes(app, monkeypatch)
+        with pytest.raises(asyncio.CancelledError):
+            await app.hand_over_terminal(cancelled)
 
     assert modes == ["suspended", "resumed"]
