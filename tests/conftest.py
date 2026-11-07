@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -16,36 +15,9 @@ from builders import operations as operation_builder_module
 from fixture_loader import FixtureLoader, build_fixture_loader
 
 
-@pytest.fixture(scope="session")
-def _autouse_state_parent(  # pyright: ignore[reportUnusedFunction]
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Path:
-    """Make, once per session, the folder that holds every test's autouse state folder.
-
-    ``tmp_path_factory.mktemp`` chooses its number by reading the whole base temporary directory,
-    which grows by a few folders with every test. When each autouse redirect below called it for
-    every test, that read made per-test setup grow with the number of tests already run in the
-    process, and a long run grow quadratically.
-    """
-
-    return tmp_path_factory.mktemp("autouse-state")
-
-
-@pytest.fixture
-def _autouse_state(_autouse_state_parent: Path) -> Path:  # pyright: ignore[reportUnusedFunction]
-    """Give each test one private (0700) folder for the autouse redirects below.
-
-    ``tempfile.mkdtemp`` chooses a random name and reads no directory, so its cost does not grow
-    with the number of tests run. Each redirect uses a fixed-name subfolder of it; a new autouse
-    redirect should do the same rather than call ``tmp_path_factory.mktemp`` for every test.
-    """
-
-    return Path(tempfile.mkdtemp(dir=_autouse_state_parent))
-
-
 @pytest.fixture(autouse=True)
 def _isolated_diagnostic_log(  # pyright: ignore[reportUnusedFunction]
-    _autouse_state: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep the durable diagnostic ring out of the developer's real log directory.
 
@@ -66,14 +38,13 @@ def _isolated_diagnostic_log(  # pyright: ignore[reportUnusedFunction]
     except ImportError:
         return  # No project dependencies installed, so there is no durable sink to redirect.
 
-    root = _autouse_state / "diagnostics"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("diagnostics")
     monkeypatch.setattr(diagnostics_module, "log_dir", lambda: Path(root))
 
 
 @pytest.fixture(autouse=True)
 def _isolated_connection_observation_store(  # pyright: ignore[reportUnusedFunction]
-    _autouse_state: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep the observation consent a Claude or Cursor connection grants out of real state.
 
@@ -86,8 +57,7 @@ def _isolated_connection_observation_store(  # pyright: ignore[reportUnusedFunct
         from finishup.adapters.integrations.observation_local import LocalObservationStore
     except ImportError:
         return
-    root = _autouse_state / "connection-observation"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("connection-observation")
     root.chmod(0o700)
     monkeypatch.setattr(
         host_connection_module,
@@ -98,7 +68,7 @@ def _isolated_connection_observation_store(  # pyright: ignore[reportUnusedFunct
 
 @pytest.fixture(autouse=True)
 def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
-    _autouse_state: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep setup's per-configuration lock files out of the developer's real state directory.
 
@@ -110,8 +80,7 @@ def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
         import finishup.adapters.integrations.host_projects as host_projects_module
     except ImportError:
         return
-    root = _autouse_state / "host-config-locks"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("host-config-locks")
     root.chmod(0o700)
     monkeypatch.setattr(host_projects_module, "state_dir", lambda: Path(root))
 
@@ -156,7 +125,7 @@ def _isolated_command_identity_key() -> Iterator[None]:  # pyright: ignore[repor
 
 @pytest.fixture(autouse=True)
 def _isolated_hook_pass_timing(  # pyright: ignore[reportUnusedFunction]
-    _autouse_state: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep the per-pass hook timing aggregate out of the developer's real state directory.
 
@@ -172,15 +141,14 @@ def _isolated_hook_pass_timing(  # pyright: ignore[reportUnusedFunction]
     except ImportError:
         return
 
-    root = _autouse_state / "hook-pass-timing"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("hook-pass-timing")
     root.chmod(0o700)
     monkeypatch.setattr(hook_timing_module, "state_dir", lambda: Path(root))
 
 
 @pytest.fixture(autouse=True)
 def _isolated_rejected_finishup_calls(  # pyright: ignore[reportUnusedFunction]
-    _autouse_state: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep the MCP bridge's rejected-call record out of the developer's real state directory.
 
@@ -196,8 +164,7 @@ def _isolated_rejected_finishup_calls(  # pyright: ignore[reportUnusedFunction]
     except ImportError:
         return
 
-    root = _autouse_state / "rejected-yoetz-calls"
-    root.mkdir(mode=0o700)
+    root = tmp_path_factory.mktemp("rejected-yoetz-calls")
     root.chmod(0o700)
     monkeypatch.setattr(rejections_module, "state_dir", lambda: Path(root))
 
