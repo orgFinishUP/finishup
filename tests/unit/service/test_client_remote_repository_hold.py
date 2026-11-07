@@ -133,6 +133,10 @@ def test_a_kept_repository_is_refused_as_kept(remote: Path, nothing_dialled: lis
 def test_an_allowed_repository_connects(remote: Path, nothing_dialled: list[str]) -> None:
     workspace = _workspace(remote)
     key = _report_no_network(workspace)
+    assert {phase for _reason, phase, _retry in _refused_phase(workspace)} == {
+        "repository_egress_held"
+    }
+    assert nothing_dialled == []
     with targets.registry_lock():
         add_override(remote, remote.name, key, workspace.path, _STAMP)
 

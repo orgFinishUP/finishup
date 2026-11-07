@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -121,6 +121,19 @@ def confirmed(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
     return seen
 
 
+def _answers(state: str) -> Callable[[str], str]:
+    """This computer's FinishUP answering ``state`` for any repository."""
+
+    def read(_worktree: str) -> str:
+        return state
+
+    return read
+
+
+def _authorized(*_args: object, **_kwargs: object) -> None:
+    """The owner's typed confirmation, given."""
+
+
 def _invoke(*arguments: str) -> Result:
     reset_selection_memo()
     return _RUNNER.invoke(cli.app, ["server", "repositories", *arguments])
@@ -149,9 +162,12 @@ def test_every_repositories_command_renders_its_help(home: Path, command: str) -
 
 
 def test_the_command_runs_only_on_this_client() -> None:
-    from finishup.cli.command_scope import command_scope
+    """Named on its own, as 'server folders' is: this client's record, never sent anywhere."""
 
-    assert command_scope("server repositories") == "client_only"
+    from finishup.cli.command_scope import COMMAND_SCOPES, command_scope
+
+    assert COMMAND_SCOPES["server repositories"] == "client_only"
+    assert command_scope("server repositories keep") == "client_only"
 
 
 # --- add ------------------------------------------------------------------------------------------
@@ -237,7 +253,7 @@ def test_a_live_answer_and_a_changed_policy_are_said_before_the_name(
     root = targets.target_root(remote.target_id)
     with targets.registry_lock():
         add_override(root, remote.target_id, key, repository, "2026-11-01T00:00:00.000Z")
-    monkeypatch.setattr(zero_network, "_repository_reader", lambda _worktree: "no_network")
+    monkeypatch.setattr(zero_network, "_repository_reader", _answers("no_network"))
     assert _invoke("add").exit_code == 0
     (_id, _worktree, state) = confirmed[0]
     assert state.splitlines() == [
@@ -267,7 +283,7 @@ def test_the_four_informational_outcomes_record_nothing(
 ) -> None:
     root = targets.target_root(remote.target_id)
     if setup == "never_set_up":
-        monkeypatch.setattr(zero_network, "_repository_reader", lambda _worktree: "no_policy")
+        monkeypatch.setattr(zero_network, "_repository_reader", _answers("no_policy"))
     elif setup == "permitted":
         record_repository_report(_key(repository), repository, no_network=False, now=_AT)
     elif setup == "sent":
@@ -577,7 +593,7 @@ def test_server_use_says_this_repository_is_held(
 ) -> None:
     record = _remote(select=False)
     _held(repository)
-    monkeypatch.setattr(server_cli, "_authorize_remote", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server_cli, "_authorize_remote", _authorized)
     reset_selection_memo()
     result = _RUNNER.invoke(cli.app, ["server", "use", "lab"])
     assert result.exit_code == 0, result.output
@@ -597,7 +613,7 @@ def test_server_use_counts_the_held_repositories_elsewhere(
         folder = tmp_path / f"r{number}"
         folder.mkdir()
         record_repository_report(f"sha256:{number:064x}", os.fspath(folder), no_network=True)
-    monkeypatch.setattr(server_cli, "_authorize_remote", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server_cli, "_authorize_remote", _authorized)
     reset_selection_memo()
     result = _RUNNER.invoke(cli.app, ["server", "use", "lab"])
     assert result.exit_code == 0, result.output
