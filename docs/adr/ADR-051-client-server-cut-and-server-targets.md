@@ -1201,8 +1201,11 @@ through the same relay; human-control and secret channels never leave the server
 | This computer's everyday service reports its machine-scope policy (the zero-network check, `privacy show`, a privacy change here): the owner-only marker of what it last reported (decision 8) | the next report replaces it; deleting FinishUP's folders removes it; the zero-network check removes it once the everyday installation no longer exists | `server status [--json]` (`policy_read`, `last_reported_at`), `server list`, `setup status --next`, the menu home, `/server` and the header |
 | Server-side key or edge setup | its revoke or teardown, named in the topology section | the server's own key listing |
 
-Deleting a target's root removes every client-side artifact of that target. The ambient
-installation is never touched by a target operation.
+Deleting a target's root removes every client-side artifact of that target except an API key
+kept in the platform credential store (service `yoetz.server-credential.v1`, account = target id),
+which lives outside the root: `server remove` and `server logout` delete it, deleting the folder
+does not. A target's connection keeps running until `server disconnect` or `server remove` stops
+it, or it exits once idle. The ambient installation is never touched by a target operation.
 
 ## Consequences
 
