@@ -102,7 +102,7 @@ class ReadStop:
 
     Called, it answers whether the stop has passed: the ``expired`` every trusted reader takes.
     ``seconds_left`` is the time until it, so a read answered elsewhere (a claim-bound task's
-    workspace agent, ADR-051) waits no longer than a local read would run.
+    workspace agent, ADR-051) gives its answer no more time than a local read would still run.
     """
 
     __slots__ = ("_clock", "_stop_at")
