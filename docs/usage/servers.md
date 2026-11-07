@@ -431,8 +431,10 @@ JSON result (outside its code mode), so a Codex agent does not see these two lin
 says where the evidence was read in its own workspace evidence section and never leaves that
 section out, even when a long receipt has its other sections shortened to fit; a Codex agent sees
 that section too. When a Claude Code or Cursor agent receives a long receipt in pages, every page
-names the service, and the receipt's workspace evidence section, on one of those pages, is the
-only place it says where the evidence was read. A receipt is never
+names the service, and a text or markdown receipt's workspace evidence section, on one of those
+pages, is the only place it says where the evidence was read. A JSON receipt has no such section,
+so an agent that receives a long JSON receipt in pages, like a Codex agent reading any JSON
+receipt, is not told where the evidence was read. A receipt is never
 refused because the server cannot tell where the evidence was read. If the server cannot read the
 record of how the task's session was opened, the receipt is still made and says so, in three
 lines: what happened (that record could not be read from the server's ledger), why it matters
@@ -633,10 +635,13 @@ kept for each server separately: consent you gave while one server was in use do
 observations to another, so after `finishup server use` run `finishup observe grant` (and trust
 your approved checks) again for the projects you want observed there. Each observation this
 computer delivers carries those settings with it; the server accepts them as your computer's own
-statement and does not check them itself. Receipts of such a task say so in one more line,
-wherever FinishUP shows you or your agent the receipt (JSON output, as above, carries no such
-line). With a server elsewhere, `finishup observe drain` delivers one project's waiting
-observations at a time: the one you name with `--workspace`, or the folder you run it in.
+statement and does not check them itself. Receipts of such a task say so in one more line, next
+to the line saying where the workspace evidence was read, and reach the same readers (above): a
+text or markdown receipt carries it on every host, while a JSON receipt shows it only in the
+`finishup` command, the terminal interface and the text a Claude Code or Cursor agent reads for a
+receipt not split into pages. With a server elsewhere, `finishup observe drain` delivers one
+project's waiting observations at a time: the one you name with `--workspace`, or the folder you
+run it in.
 
 A server keeps the observation settings your last delivery carried. A pause, resume or revoke here
 reaches it with the next observation this computer delivers, so if nothing is left to deliver (or
