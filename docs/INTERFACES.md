@@ -4728,6 +4728,10 @@ add` prints a remote target's mode and the command that changes it. `server stat
 target its `target.outside_reads` carries `mode` (`local|listed`), `mode_source`
 (`owner|official_endpoint|not_chosen|unreadable`) and the listed `folders`, and is null for any
 other target (the golden vector is `fixtures/service/server-target-status.case.json`). The text
+form (`cli.server.status_lines`) heads with the target and, only for the server this process uses
+(`cli.server.target_in_use`), `chosen by: <source>`; a target named that is not in use reads `not
+the server in use` instead, in `server status NAME`, `server test NAME` and `/server`, while the
+JSON `source` keeps naming what decides this process's root. The text
 form, `server folders list` and the terminal's `/server` status show the same, and for
 `not_chosen` the two `server folders mode` commands that choose. For `unreadable` they say the
 record is damaged or not private, and name the one repair with the target's name and where to run
