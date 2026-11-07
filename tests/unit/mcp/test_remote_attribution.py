@@ -68,6 +68,31 @@ def _receipt() -> ReceiptResultModel:
     return ReceiptResultModel.model_validate(_receipt_result_wire())
 
 
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_codex_outside_code_mode_reads_no_attribution_as_its_runbook_records(host: str) -> None:
+    """ADR-051 and codex-integration.md (Remote server): the lines ride the text channel only.
+
+    Codex outside code mode hands its model the serialized structured result, so a Codex agent
+    reads neither line there; Claude Code and Cursor read the text, which carries both.
+    """
+
+    status = compact_status().result
+    receipt = _receipt()
+    for result in (status, receipt):
+        attributed = bridge.result_from_public_model(
+            result, host_profile=cast(bridge.McpHostProfile, host), attribution=_ATTRIBUTION
+        )
+        assert _text(attributed).endswith(_REACHED)
+        structured = canonical_encode(cast(JsonValue, attributed.structuredContent)).decode()
+        assert _REACHED not in structured and _SERVICE_ID not in structured
+        assert (
+            attributed.structuredContent
+            == bridge.result_from_public_model(
+                result, host_profile=cast(bridge.McpHostProfile, host)
+            ).structuredContent
+        )
+
+
 def test_a_status_text_ends_with_the_attribution_and_its_record_is_unchanged() -> None:
     status = compact_status().result
     local = bridge.result_from_public_model(status)
