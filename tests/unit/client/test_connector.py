@@ -650,6 +650,64 @@ def test_a_running_connector_stops_within_a_tick_once_this_computer_reports_zero
     assert not (root / "run" / "control.sock").exists()
 
 
+def test_a_delivery_under_way_does_not_hold_up_the_zero_network_stop(home: Path) -> None:
+    """A delivery pass can run for its whole sweep budget (20 seconds) per leased workspace. The
+    zero-network check runs every second beside it, never behind it: once this computer reports
+    zero-network the pass is cut off and the connector stops within about a second."""
+
+    import time
+
+    from finishup.client import everyday_policy
+
+    record, root = _ssh_target(home)
+    sent: list[float] = []
+    delivering = asyncio.Event()
+    cut_off: list[bool] = []
+
+    class _BacklogAgent(_Agent):
+        async def drain(self) -> None:
+            self.drains += 1
+            delivering.set()
+            try:
+                for _row in range(600):  # a backlog over a slow link: one row every 50 ms
+                    sent.append(time.monotonic())
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                cut_off.append(True)
+                raise
+
+    agent = _BacklogAgent()
+
+    async def opener(_root: Path, _claim: WorkspaceClaim, _dial: object) -> _Agent:
+        return agent
+
+    async def exercise() -> tuple[str, float, float]:
+        listener = await bind_control_listener()
+        connector = Connector(root, record, agent_opener=opener, drain_interval=0.2)
+        await connector._observe_claim(  # pyright: ignore[reportPrivateUsage]
+            WorkspaceClaim(identity_kind="directory", digest=CLAIM_DIGEST, worktree=WORKTREE_DIGEST)
+        )
+        connector._ssh = _StubMaster(root, restarts=[])  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        serving = asyncio.create_task(connector.serve(listener))
+        async with asyncio.timeout(5):
+            await delivering.wait()
+        assert everyday_policy.record_reported_policy(zero_network=True) is True
+        reported = time.monotonic()
+        # Without the separate tick this waits out the whole 30-second pass.
+        async with asyncio.timeout(5):
+            reason = await serving
+        return reason, reported, time.monotonic()
+
+    with selection_override(root):
+        reason, reported, stopped = asyncio.run(exercise())
+    assert reason == _ZERO_NETWORK
+    assert stopped - reported < 2.0
+    assert cut_off == [True]
+    # Nothing was sent once the connector had stopped, and nothing after its tick found the record.
+    assert not [moment for moment in sent if moment > stopped]
+    assert agent.alive is False
+
+
 def test_nothing_is_relayed_for_a_client_or_an_agent_while_zero_network(home: Path) -> None:
     from finishup.adapters.control.unix_socket import LocalControlTransportError
     from finishup.client import everyday_policy

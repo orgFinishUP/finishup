@@ -5636,11 +5636,12 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   until the connector stops (`server disconnect`, a `server use` that leaves the target, the idle
   exit). Every
   `DRAIN_INTERVAL_SECONDS` (30), and once more as it stops before closing the agents, it calls
-  each live agent's `drain()`. While `last_reported_zero_network()` answers (read before warming
+  each live agent's `drain()`; a pass runs as its own task beside the once-a-second tick, and a
+  stop cancels a pass under way. While `last_reported_zero_network()` answers (read before warming
   the upstream, before every relayed connection, and every second) it relays nothing: it writes
   status `unavailable`/`zero_network_remote_selected` before closing the refused connection,
-  stops at once with that reason (closing every relay and agent, with no last `drain()`), and
-  `service.client` names the phase from either status.
+  stops at once with that reason (cancelling a pass under way and closing every relay and agent,
+  with no last `drain()`), and `service.client` names the phase from either status.
 - `finishup.client.connector_agent`: `ConnectorAgent(binding, drain, dial, *, root)` holds one
   claim-bound connection offering the real `WorkspaceAgentHandler` and reconnects (0.5 s,
   doubling to 30 s) whenever the service ends it, after `require_current_authorization(

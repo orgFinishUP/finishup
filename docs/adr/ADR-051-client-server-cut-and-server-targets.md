@@ -1193,8 +1193,9 @@ through the same relay; human-control and secret channels never leave the server
   a client's or its own background agent's, before it first brings the upstream up, and every
   second while it runs. On finding it, it writes `unavailable`/`zero_network_remote_selected` to
   its status before it closes the refused connection, so the client that dialled names the phase,
-  and stops at once: every relayed connection and background agent is closed, no last delivery
-  is made, and its status ends `stopped`/`zero_network_remote_selected`. Each background agent
+  and stops at once: a delivery pass under way is cut off (passes run beside that check, never in
+  it), every relayed connection and background agent is closed, no last delivery is made, and its
+  status ends `stopped`/`zero_network_remote_selected`. Each background agent
   also runs `require_current_authorization` on its target's record before every reconnect, and
   stops for good on a refusal or once that record is gone (`server remove`), and its `drain()`
   sends nothing while the marker says zero-network.

@@ -206,6 +206,8 @@ class Connector:
         self._agent_opener = agent_opener or open_background_agent
         self._drain_interval = drain_interval
         self._last_drain = time.monotonic()
+        # The delivery pass under way, if any: it runs beside the once-a-second tick, never in it.
+        self._delivery: asyncio.Task[None] | None = None
         self._status: ConnectorStatus | None = read_connector_status(root)
         self._started_at = now_stamp()
         self._active = 0
@@ -518,8 +520,12 @@ class Connector:
             if self._refuse_zero_network():
                 return
             await self._expire_claims()
-            if time.monotonic() - self._last_drain >= self._drain_interval:
-                await self._drain()
+            delivering = self._delivery is not None and not self._delivery.done()
+            if not delivering and time.monotonic() - self._last_drain >= self._drain_interval:
+                # A pass may run for its whole sweep budget per leased workspace: it runs as its
+                # own task, so this tick still checks for zero-network and idleness every second,
+                # and a stop cancels the pass instead of waiting for it.
+                self._delivery = asyncio.create_task(self._drain())
             idle = time.monotonic() - self._last_activity
             if self._active == 0 and idle >= self._idle_seconds:
                 self.request_stop("idle_timeout")
@@ -534,9 +540,12 @@ class Connector:
         try:
             await self._stop.wait()
         finally:
-            for task in (accept, warm, watch):
+            running = [accept, warm, watch]
+            if self._delivery is not None:
+                running.append(self._delivery)
+            for task in running:
                 task.cancel()
-            await asyncio.gather(accept, warm, watch, return_exceptions=True)
+            await asyncio.gather(*running, return_exceptions=True)
             # A last delivery of what was captured, while the upstream is still open; never for
             # a stop because this computer is zero-network.
             if self._stop_reason != _ZERO_NETWORK:
