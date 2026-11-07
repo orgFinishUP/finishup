@@ -205,7 +205,7 @@ def test_add_proposes_and_requires_the_trusted_decision(
         proposed.append(candidate)
         return "ppr_10000000-0000-4000-8000-000000000009"
 
-    async def decide(proposal_id: str) -> object:
+    async def decide(proposal_id: str, **_kwargs: object) -> object:
         decided.append(proposal_id)
         return SimpleNamespace(status="committed")
 

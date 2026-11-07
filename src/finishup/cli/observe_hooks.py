@@ -4384,6 +4384,39 @@ def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
     return "workspace_unconsented"
 
 
+def _refresh_repository_report(
+    event: str,
+    payload: Mapping[str, JsonValue],
+    workspace_locator: str | None,
+    *,
+    skip_service: bool,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """At a SessionStart other than ``clear`` that may use a service, ask this computer's
+    FinishUP about the session's repository, within the hook budget.
+
+    ``client.everyday_repository.refresh_at_session_start``: only on this computer's everyday
+    root or while a server elsewhere is selected, only for a missing or stale report, at most
+    0.5 s, in a fresh context on its own event loop. Never raises.
+    """
+
+    if (
+        event != "SessionStart"
+        or skip_service
+        or workspace_locator is None
+        or _session_start_source(payload) == "clear"
+    ):
+        return
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return
+    with contextlib.suppress(Exception):
+        from finishup.client.everyday_repository import refresh_at_session_start
+
+        refresh_at_session_start(workspace_locator, budget_seconds=remaining)
+
+
 def _session_start_source(payload: Mapping[str, JsonValue]) -> str | None:
     """Resolve the closed SessionStart lifecycle source from a host envelope.
 
@@ -5689,6 +5722,19 @@ def handle_observe(
             # different commitment, including a legacy exact-subdirectory grant.
             workspace_commitment = store.find_workspace_for_codex_session(host_session_id)
             workspace_locator = None
+        # ADR-051 decision 8 (2026-11-07, round 4): before any attach, status or drain
+        # connection, in both consent branches, a SessionStart asks this computer's FinishUP about
+        # the session's repository when its report is missing or stale. On the everyday root the
+        # report then exists before the owner switches to a server elsewhere; with one selected,
+        # a repository just found to allow no network use is held in this pass.
+        _refresh_repository_report(
+            resolved_event,
+            payload,
+            workspace_locator,
+            skip_service=skip_service,
+            deadline=entry_started + _HOOK_TOTAL_BUDGET_SECONDS - 0.1,
+            monotonic=_monotonic,
+        )
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0,

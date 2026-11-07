@@ -1217,7 +1217,7 @@ def _record_steps(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
         steps.append(("guard", (forbids_network, interactive)))
         return "clear"
 
-    async def after() -> None:
+    async def after(workspace_locator: Path | None = None, *, sweep: bool = False) -> None:
         steps.append(("after", None))
 
     monkeypatch.setattr(zero_network, "guard_policy_change", guard)
@@ -1389,7 +1389,7 @@ def test_the_privacy_commands_offer_the_two_choices_on_the_owners_terminal(
 ) -> None:
     steps: list[str] = []
 
-    async def after() -> None:
+    async def after(*_args: object, **_kwargs: object) -> None:
         steps.append("after")
 
     record = _remote(select=False)
@@ -1970,7 +1970,7 @@ def test_decide_policy_json_refuses_the_approval_and_never_asks(
     monkeypatch.setattr(cli, "_auto_unlock_store", lambda: _NoStoredPassphrase(None))
     steps: list[str] = []
 
-    async def after() -> None:
+    async def after(*_args: object, **_kwargs: object) -> None:
         steps.append("after")
 
     monkeypatch.setattr(zero_network, "after_policy_change_async", after)
@@ -1993,7 +1993,7 @@ def test_the_questionnaire_reports_a_guarded_decision_as_cancelled_with_its_reas
 ) -> None:
     import finishup.cli.privacy_setup as privacy_setup
 
-    async def stopped(_proposal_id: str) -> object:
+    async def stopped(_proposal_id: str, **_kwargs: object) -> object:
         raise zero_network.ZeroNetworkChangeStopped(zero_network.REMOTE_SELECTED, cancelled=True)
 
     monkeypatch.setattr(privacy_setup, "_decide", stopped)
@@ -2382,3 +2382,280 @@ def test_setup_reading_the_update_policy_remembers_this_computers_policy(
 
     assert network is True
     assert cast(ReportedPolicy, read_marker()).zero_network is False
+
+
+# --- a repository whose own policy here allows no network use (2026-11-07, round 4) -----------
+
+
+def _git_repository(path: Path) -> str:
+    import subprocess
+
+    path.mkdir()
+    subprocess.run(
+        ["git", "-C", os.fspath(path), "init"],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    return os.fspath(path.resolve())
+
+
+def _everyday_repository_service(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    machine: bool = True,
+    grant: str = "granted",
+    permitted: bool = False,
+) -> list[object]:
+    """This computer's set-up everyday installation answering for one repository; records reads.
+
+    ``machine`` is its machine-scope ``network_egress_permitted``; ``grant`` and ``permitted``
+    the repository's ``grant_state`` and composed ``network_egress_permitted``.
+    """
+
+    bundle = home / "data" / "finishup"
+    bundle.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (bundle / "installation-state.json").write_bytes(b"{}\n")
+    requests: list[object] = []
+
+    class Client:
+        async def privacy_get_effective(self, request: object) -> object:
+            requests.append("effective")
+            return JsonObject({"policy": {"network_egress_permitted": machine}})
+
+        async def privacy_get_setup(self, request: object) -> object:
+            requests.append("setup")
+            return JsonObject(
+                {
+                    "schema_version": "2.0.0",
+                    "grant_state": grant,
+                    "composed_policy": {"network_egress_permitted": permitted},
+                }
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object, *, workspace_locator: object = None) -> Client:
+        path = getattr(workspace_locator, "path", None)
+        # Inside the read this computer's own installation is used, whatever is selected.
+        requests.append(("connect", path, active_root()))
+        return Client()
+
+    async def on_demand(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a policy read never starts or supersedes a service")
+
+    monkeypatch.setattr("finishup.service.client.connect_service", connect)
+    monkeypatch.setattr("finishup.service.client.connect_service_on_demand", on_demand)
+    monkeypatch.setattr(
+        "finishup.cli.provider_status.machine_scope_request", lambda: _MACHINE_SCOPE
+    )
+    return requests
+
+
+def _repository_key(worktree: str) -> str:
+    from finishup.client.everyday_repository import repository_key_for
+
+    key = asyncio.run(repository_key_for(worktree))
+    assert key is not None
+    return key
+
+
+def test_the_repository_read_records_a_grant_that_allows_no_network_use(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from finishup.client.everyday_policy import repository_report
+
+    worktree = _git_repository(tmp_path / "repository")
+    requests = _everyday_repository_service(home, monkeypatch)
+
+    assert zero_network.everyday_repository_state(worktree) == "no_network"
+
+    assert requests == [("connect", worktree, None), "effective", "setup"]
+    report = repository_report(_repository_key(worktree))
+    assert report is not None and report.no_network and report.worktrees == (worktree,)
+    assert cast(ReportedPolicy, read_marker()).zero_network is False
+
+
+def test_the_repository_read_works_from_a_cli_commands_event_loop(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import anyio
+
+    worktree = _git_repository(tmp_path / "repository")
+    _everyday_repository_service(home, monkeypatch, grant="missing", permitted=True)
+
+    async def command() -> str:
+        return await asyncio.to_thread(zero_network.everyday_repository_state, worktree)
+
+    assert anyio.run(command) == "network_permitted"
+
+
+@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+def test_a_change_here_that_holds_this_repository_says_so_for_a_server_selected_elsewhere(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    from finishup.client.everyday_policy import repository_report
+
+    monkeypatch.setattr(
+        zero_network,
+        "_repository_reader",
+        zero_network._read_repository,  # pyright: ignore[reportPrivateUsage]
+    )
+    monkeypatch.setattr(zero_network, "_after_change_state", lambda: "network_permitted")
+    worktree = _git_repository(tmp_path / "repository")
+    _everyday_repository_service(home, monkeypatch)
+    record = _remote(kind, select=False)
+    reset_selection_memo()
+    assert active_root() is None
+    _select_elsewhere(record, monkeypatch)
+
+    asyncio.run(zero_network.after_policy_change_async(Path(worktree)))
+
+    assert repository_report(_repository_key(worktree)) is not None
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == (
+        "This repository's privacy policy on this computer allows no network use, so FinishUP "
+        f"holds its work for the selected server {record.target_id} ({kind}); 'finishup server "
+        "repositories add' in this repository sends it anyway, and 'finishup server "
+        "repositories keep' keeps it here without asking again."
+    )
+    assert err[1] == zero_network.OPEN_SESSIONS_LINE
+    assert _NAME not in "\n".join(err) and worktree not in "\n".join(err)
+
+
+def test_a_change_here_says_nothing_of_a_repository_that_allows_network_use_or_without_a_server(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        zero_network,
+        "_repository_reader",
+        zero_network._read_repository,  # pyright: ignore[reportPrivateUsage]
+    )
+    monkeypatch.setattr(zero_network, "_after_change_state", lambda: "network_permitted")
+    worktree = _git_repository(tmp_path / "repository")
+    _everyday_repository_service(home, monkeypatch)
+    # No server selected: recorded, nothing to say.
+    zero_network.after_policy_change(Path(worktree))
+    assert capsys.readouterr() == ("", "")
+    # A server selected elsewhere, but the repository's policy allows network use.
+    _everyday_repository_service(home, monkeypatch, grant="granted", permitted=True)
+    _select_elsewhere(_remote(select=False), monkeypatch)
+    zero_network.after_policy_change(Path(worktree))
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_decision_of_an_unknown_repository_reads_every_permitting_one_again(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``privacy decide-policy`` may run in any folder: every repository last reported to allow
+    network use is read again through its recorded worktree; one that cannot be is forgotten."""
+
+    from finishup.client.everyday_policy import record_repository_report, repository_report
+
+    monkeypatch.setattr(zero_network, "_after_change_state", lambda: "network_permitted")
+    here = _git_repository(tmp_path / "here")
+    tightened = _git_repository(tmp_path / "tightened")
+    gone = "sha256:" + "e" * 64
+    for worktree in (here, tightened):
+        record_repository_report(_repository_key(worktree), worktree, no_network=False, now=_AT)
+    record_repository_report(gone, os.fspath(tmp_path / "moved"), no_network=False, now=_AT)
+    read: list[str] = []
+
+    def reader(worktree: str) -> str:
+        read.append(worktree)
+        assert record_repository_report(_repository_key(worktree), worktree, no_network=True)
+        return "no_network"
+
+    monkeypatch.setattr(zero_network, "_repository_reader", reader)
+    monkeypatch.chdir(here)
+
+    zero_network.after_policy_change(sweep=True)
+
+    # The current folder's repository first, then each other one once.
+    assert read == [here, tightened]
+    tightened_report = repository_report(_repository_key(tightened))
+    assert tightened_report is not None and tightened_report.no_network
+    assert repository_report(gone) is None
+
+
+def test_privacy_changes_read_the_repository_whose_change_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ceremony passes its own folder; 'privacy decide-policy' (any folder) sweeps."""
+
+    import finishup.cli.privacy_setup as privacy_setup
+
+    seen: list[tuple[object, bool]] = []
+
+    async def after(workspace_locator: Path | None = None, *, sweep: bool = False) -> None:
+        seen.append((workspace_locator, sweep))
+
+    monkeypatch.setattr(zero_network, "after_policy_change_async", after)
+    asyncio.run(privacy_setup._after_policy_change(tmp_path))  # pyright: ignore[reportPrivateUsage]
+    asyncio.run(cli._after_policy_change(sweep=True))  # pyright: ignore[reportPrivateUsage]
+    assert seen == [(tmp_path, False), (None, True)]
+
+    monkeypatch.setattr(cli, "_auto_unlock_store", lambda: _NoStoredPassphrase(None))
+
+    def clear(**_kwargs: object) -> str:
+        return "clear"
+
+    monkeypatch.setattr(zero_network, "guard_policy_change", clear)
+
+    async def decide(_pending_id: str) -> object:
+        return _decision("committed")
+
+    monkeypatch.setattr("finishup.cli.privacy_control.decide_policy", decide)
+    seen.clear()
+    result = _invoke("privacy", "decide-policy", "ppr_1", "--json")
+    assert result.exit_code == 0, result.output
+    assert seen == [(None, True)]
+
+
+def test_the_ceremonys_setup_read_remembers_this_repositorys_policy(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import finishup.cli.privacy_setup as privacy_setup
+    from finishup.client.everyday_policy import repository_report
+
+    worktree = _git_repository(tmp_path / "repository")
+    record_reported_policy(zero_network=False, now=_AT)
+    setup = JsonObject(
+        {
+            "schema_version": "2.0.0",
+            "grant_state": "granted",
+            "composed_policy": {"network_egress_permitted": False},
+        }
+    )
+
+    class Client:
+        async def privacy_get_setup(self, request: object) -> object:
+            return setup
+
+        async def close(self) -> None:
+            return None
+
+    async def build(**_kwargs: object) -> Client:
+        return Client()
+
+    monkeypatch.setattr(cli, "build_service_client", build)
+
+    def unchanged(raw: object) -> object:
+        return raw
+
+    monkeypatch.setattr(privacy_setup, "_setup_snapshot_from_wire", unchanged)
+
+    assert asyncio.run(privacy_setup.get_privacy_setup_snapshot(Path(worktree))) is setup
+    report = repository_report(_repository_key(worktree))
+    assert report is not None and report.no_network

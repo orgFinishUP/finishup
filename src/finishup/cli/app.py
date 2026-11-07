@@ -2162,12 +2162,14 @@ def _zero_network_change_refused(request: JsonObject, json_output: bool) -> int 
     return None
 
 
-async def _after_policy_change() -> None:
-    """After this computer's policy changed: remember it (ADR-051 decision 8, 2026-11-07)."""
+async def _after_policy_change(*, sweep: bool = False) -> None:
+    """After this computer's policy changed: remember it (ADR-051 decision 8, 2026-11-07), and
+    the current folder's repository's policy; with ``sweep`` every repository last reported to
+    allow network use too."""
 
     from finishup.cli.zero_network_selection import after_policy_change_async
 
-    await after_policy_change_async()
+    await after_policy_change_async(sweep=sweep)
 
 
 def _effective_credential_heuristic_line(value: JsonValue) -> str | None:
@@ -5885,7 +5887,10 @@ def _privacy_decision_command(kind: str) -> Callable[..., None]:
             with machine_readable_answer(json_output):
                 code = await _trusted_call(run_decision, json_output)
             if code == 0 and decided and getattr(decided[-1], "status", None) == "committed":
-                await _after_policy_change()
+                # The decided proposal's repository is not known here (the command may run in
+                # any folder), so every repository last reported to allow network use is read
+                # again too (ADR-051 decision 8, 2026-11-07, round 4).
+                await _after_policy_change(sweep=True)
             return code
 
         _finish(run_async(decide))
