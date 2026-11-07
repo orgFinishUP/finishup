@@ -651,8 +651,7 @@ reaches it with the next observation this computer delivers, so if nothing is le
 you stop using that server), it keeps the settings from before. They allow nothing by
 themselves: every observation it receives carries this computer's settings at that moment, and a
 check you approved runs only while this computer still trusts it. FinishUP does not yet have a
-command that lists or clears these kept settings on the server; deleting FinishUP's folders on the
-server removes them.
+command that lists or clears these kept settings on the server.
 
 For an SSH server you can run the service commands through SSH, from a terminal:
 
