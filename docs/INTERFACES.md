@@ -5687,7 +5687,9 @@ the MCP text) adds it after the connection's workspace-evidence line when the re
 `coverage.publication_channels` names `hook_observed` (`attribution_lines(..., hook_observed=)`,
 `client.attribution.coverage_hook_observed`), never on a receipt page or beside an unknown
 provenance; raw JSON output carries none. A claim-bound `check` with `await_observations` reports
-the wait `unavailable`.
+the wait `unavailable`; `render_human_check(..., claim_bound=True)` (the CLI, when the connection
+is claim-bound) renders it as `cli.render.CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE`, naming
+`finishup observe drain` on the client, instead of "local outbox not readable".
 
 **Closed tokens** (`protocol/errors.py` protocol reason codes, each with an ADR-030 directive in
 `protocol/recovery.py` or, for the two workspace-agent reasons, a recorded exemption):
