@@ -5549,12 +5549,18 @@ approved-check trust here either. A route whose task was not opened under
 the same claim, and a claim-bound row without an attestation, are refused `consent_missing` before
 any write. Claim stores persist with no operator surface yet: nothing lists or clears them, and a
 client that stops sending rows leaves the last mirrored consent and trust in place, inert because
-every row is mirrored from its own attestation first (ADR-051 decision 12, Limits). A route naming a session its task has since replaced is judged by the task's current
-route (`StartCatalog.session_binding`), and the coordinator then follows `session_superseded` to
-the successor as it does locally; an attestation on a connection without a claim is `frame_invalid`. Text and markdown
-receipts of a claim-bound task with hook-observed evidence add `CLIENT_ATTESTED_OBSERVATION_LINE`
-after the workspace-evidence line. A claim-bound `check` with `await_observations` reports the
-wait `unavailable`.
+every row is mirrored from its own attestation first (ADR-051 decision 12, Limits). A route naming
+a session its task has since replaced is judged by the task's current route
+(`StartCatalog.session_binding`), and the coordinator then follows `session_superseded` to the
+successor as it does locally; an attestation on a connection without a claim is `frame_invalid`.
+Text and markdown receipts of a claim-bound task with hook-observed evidence add
+`CLIENT_ATTESTED_OBSERVATION_LINE` after the workspace-evidence line. A claim-bound connection's
+rendering of a receipt without that trailer (a JSON receipt in the CLI, the terminal interface or
+the MCP text) adds it after the connection's workspace-evidence line when the result's
+`coverage.publication_channels` names `hook_observed` (`attribution_lines(..., hook_observed=)`,
+`client.attribution.coverage_hook_observed`), never on a receipt page or beside an unknown
+provenance; raw JSON output carries none. A claim-bound `check` with `await_observations` reports
+the wait `unavailable`.
 
 **Closed tokens** (`protocol/errors.py` protocol reason codes, each with an ADR-030 directive in
 `protocol/recovery.py` or, for the two workspace-agent reasons, a recorded exemption):

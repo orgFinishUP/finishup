@@ -20,6 +20,7 @@ from builders.status_wire import compact_status
 from finishup.application.result_delivery import decode_handle, page_result
 from finishup.client.attribution import ServiceAttribution
 from finishup.domain.receipts import (
+    CLIENT_ATTESTED_OBSERVATION_LINE,
     CLIENT_ATTESTED_WORKSPACE_LINE,
     WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     client_attested_receipt_block,
@@ -112,6 +113,25 @@ def test_a_receipt_keeps_its_exact_canonical_copy_ahead_of_the_attribution() -> 
     assert (
         attributed.structuredContent == bridge.result_from_public_model(receipt).structuredContent
     )
+
+
+def test_a_json_receipt_with_hook_observed_evidence_carries_the_caveat_in_its_text() -> None:
+    """ADR-051 decision 12: an agent reading a JSON receipt's text learns, as from a text one,
+    that the server took the hook observations' consent and commitments unverified."""
+
+    wire = public_model_to_wire(_receipt())
+    coverage = cast(dict[str, JsonValue], wire["coverage"])
+    channels = cast(list[JsonValue], coverage["publication_channels"])
+    wire["coverage"] = {**coverage, "publication_channels": [*channels, "hook_observed"]}
+    receipt = ReceiptResultModel.model_validate(wire)
+    canonical = canonical_encode(cast(JsonValue, public_model_to_wire(receipt))).decode("utf-8")
+    attributed = bridge.result_from_public_model(receipt, attribution=_ATTRIBUTION)
+    assert _text(attributed) == "\n".join(
+        (canonical, CLIENT_ATTESTED_WORKSPACE_LINE, CLIENT_ATTESTED_OBSERVATION_LINE, _REACHED)
+    )
+    assert CLIENT_ATTESTED_OBSERVATION_LINE not in _text(bridge.result_from_public_model(receipt))
+    status = bridge.result_from_public_model(compact_status().result, attribution=_ATTRIBUTION)
+    assert CLIENT_ATTESTED_OBSERVATION_LINE not in _text(status)
 
 
 _REASONS: tuple[WorkspaceProvenanceReason, ...] = WORKSPACE_PROVENANCE_REASONS

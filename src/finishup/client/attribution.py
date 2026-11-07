@@ -4,8 +4,9 @@ A connection to a FinishUP server on another machine binds its workspace by clai
 (``workspace_binding == "client_claim"``, ADR-051), and every piece of workspace evidence that
 server holds came from this client's workspace agent. The human status and receipt renderings of
 such a connection — CLI text, MCP text and the terminal interface — end with the fixed
-provenance line, then name the producing service by the instance id its hello-result carried and
-by how this client reached it. A receipt whose service text says the provenance is unknown, and
+provenance line, then, for a receipt whose coverage includes hook-observed evidence, the fixed
+client-attested observation line (decision 12), then name the producing service by the instance
+id its hello-result carried and by how this client reached it. A receipt whose service text says the provenance is unknown, and
 every page of a receipt delivered in pages, keep only the second line. Nothing user-controlled
 joins either line: no target name, host, address or path. JSON output stays unattributed. A
 connection that is not claim-bound renders nothing here, so local output keeps its exact bytes.
@@ -25,10 +26,12 @@ Transport tokens (closed; whoever builds the connection supplies one, ``unix`` b
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from finishup.domain.receipts import (
+    CLIENT_ATTESTED_OBSERVATION_LINE,
     CLIENT_ATTESTED_WORKSPACE_LINE,
     WORKSPACE_PROVENANCE_UNKNOWN_LINE,
 )
@@ -41,6 +44,7 @@ __all__ = [
     "ServiceAttribution",
     "attribution_lines",
     "connection_attribution",
+    "coverage_hook_observed",
 ]
 
 type ConnectionTransport = Literal["unix", "connector", "ssh", "https"]
@@ -95,12 +99,25 @@ def connection_attribution(connection: object) -> ServiceAttribution | None:
     return ServiceAttribution(service_instance_id, transport)
 
 
+def coverage_hook_observed(publication_channels: object) -> bool:
+    """Whether a receipt result's ``coverage.publication_channels`` names hook-observed evidence.
+
+    Takes the member as the wire or a model carries it (a sequence of channel tokens); anything
+    else names none.
+    """
+
+    if isinstance(publication_channels, str) or not isinstance(publication_channels, (list, tuple)):
+        return False
+    return "hook_observed" in cast(Sequence[object], publication_channels)
+
+
 def attribution_lines(
     attribution: ServiceAttribution | None,
     *,
     shown: str = "",
     receipt_page: bool = False,
     provenance_unknown: bool = False,
+    hook_observed: bool = False,
 ) -> tuple[str, ...]:
     """The lines a status or receipt rendering ends with; none without an attribution.
 
@@ -118,13 +135,25 @@ def attribution_lines(
     evidence was client-attested or that this is unknown. Every such page, the first and each
     continuation, names only the producing service; the section itself is part of the text the
     agent must read before the set is actionable-complete.
+
+    ``hook_observed`` marks a receipt whose coverage includes hook-observed evidence: the fixed
+    client-attested observation line follows the provenance line, on the same terms (never on a
+    page or beside an unknown provenance, never twice), so a JSON receipt's rendering says what
+    the service's text and markdown trailer says (decision 12).
     """
 
     if attribution is None:
         return ()
     withheld = receipt_page or provenance_unknown or WORKSPACE_PROVENANCE_UNKNOWN_LINE in shown
+    workspace, service = attribution.lines()
+    candidates = (
+        (workspace, CLIENT_ATTESTED_OBSERVATION_LINE, service)
+        if hook_observed
+        else (
+            workspace,
+            service,
+        )
+    )
     return tuple(
-        line
-        for line in attribution.lines()
-        if line not in shown and not (withheld and line == CLIENT_ATTESTED_WORKSPACE_LINE)
+        line for line in candidates if line not in shown and not (withheld and line != service)
     )
