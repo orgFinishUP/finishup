@@ -83,14 +83,15 @@ def test_a_missing_credential_is_a_closed_reason(root: Path) -> None:
 class _LockedKeyring:
     """A platform store that is present but cannot be used now (a locked keychain)."""
 
-    def get_password(self, _service: str, _username: str) -> str | None:
-        raise RuntimeError("locked")
+    def get_password(self, service: str, username: str) -> str | None:
+        raise RuntimeError("locked", service, username)
 
-    def set_password(self, _service: str, _username: str, _password: str) -> None:
-        raise RuntimeError("locked")
+    def set_password(self, service: str, username: str, password: str) -> None:
+        del password
+        raise RuntimeError("locked", service, username)
 
-    def delete_password(self, _service: str, _username: str) -> None:
-        raise RuntimeError("locked")
+    def delete_password(self, service: str, username: str) -> None:
+        raise RuntimeError("locked", service, username)
 
 
 def test_a_store_the_key_is_not_recorded_in_never_blocks_its_delete(root: Path) -> None:
