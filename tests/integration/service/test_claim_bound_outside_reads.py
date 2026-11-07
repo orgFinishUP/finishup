@@ -26,6 +26,7 @@ from builders.workspace_agent_fake import FakeWorkspaceAgent
 from finishup.adapters.task_input_read import read_declared_test
 from finishup.domain.receipts import OUTSIDE_READS_NOT_LISTED_GAP, OutsideReadsKeptBack
 from finishup.kernel.declared_checks import DeclaredTestCandidate
+from finishup.protocol.canonical import JsonValue
 from finishup.service.workspace_hub import WorkspaceAgentHub
 from integration.service import test_claim_bound_sessions as claim_bound
 from integration.service.test_ready_composition import (  # noqa: F401 - autouse SQLite policy
@@ -286,3 +287,121 @@ async def test_a_task_input_beneath_a_client_listed_folder_reaches_review_with_n
     # Not listed in mode listed is not "kept back from a listed folder": no server root covers
     # it either, so the owner's step is the not-admitted one, which names the client's command.
     assert OUTSIDE_READS_NOT_LISTED_GAP not in result.case_content_gaps
+
+
+@pytest.mark.parametrize(
+    ("mode", "listed"),
+    [("listed", False), ("listed", True), ("local", False)],
+    ids=["folder-removed", "folder-listed", "local-mode"],
+)
+async def test_the_reviewer_reads_a_kept_copy_only_while_its_folder_is_still_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, listed: bool
+) -> None:
+    """ADR-051 decision 5: a kept copy (#1118) whose folder the owner no longer lists is not
+    sent, by the check-time read nor by the reviewer's ``read_file``. The server's own policy
+    still admits the root the copy was kept beneath; the task started with the folder listed (or
+    in ``local`` mode), and the owner has since removed it (``server folders remove``, or ``mode
+    NAME listed``). The reviewer asks for the kept copy by its root alias; a removed folder's
+    copy is never offered, so its bytes never reach the AI provider."""
+
+    from dataclasses import replace
+
+    import builders.privacy_policies as policies
+    from finishup.ports.change_capture import SnapshotFile, TaskInputSnapshotSet
+    from integration.service import test_reviewer_conversation_composition as reviewer
+
+    data = (tmp_path / "data").resolve()
+    specs = data / "specs"
+    specs.mkdir(parents=True, mode=0o700)
+    data.chmod(0o700)
+    spec = specs / "api.md"
+    spec.write_text("CURRENT_SPEC\n")
+    spec.chmod(0o600)
+    roomy = replace(reviewer._ROOMY, admitted_input_roots=(os.fspath(data),))  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(policies, "minimal_external_policy", lambda: roomy)
+    kept = TaskInputSnapshotSet(
+        "task_start", (SnapshotFile(os.fspath(spec), os.fspath(data), b"KEPT_COPY\n", 10),)
+    )
+
+    async def snapshots(_runtime: object, _request_id: object) -> tuple[TaskInputSnapshotSet, ...]:
+        return (kept,)
+
+    def review_inputs(_case: object, _selection: object) -> tuple[tuple[str, ...], frozenset[str]]:
+        return (os.fspath(spec),), frozenset()
+
+    monkeypatch.setattr(ready_composition_module, "load_input_snapshots", snapshots)
+    monkeypatch.setattr(ready_composition_module, "_review_inputs", review_inputs)
+    _with_statement(monkeypatch, f"Port the rules in {spec} to the calculator.")
+    hub = WorkspaceAgentHub(inline_wait_seconds=0.5, background_wait_seconds=0.5)
+    agent = FakeWorkspaceAgent(claim_bound._reviewed_repository(tmp_path), mode=mode)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    if listed:
+        agent.admitted_folders.append(os.fspath(specs))
+    await claim_bound._attach(hub, agent)  # pyright: ignore[reportPrivateUsage]
+    read_kept: dict[str, JsonValue] = {
+        "reply": {
+            "action": "read_file",
+            "args": {
+                "root_id": "s1",
+                "path": "specs/api.md",
+                "mode": "text",
+                "start_line": 1,
+                "line_count": 20,
+            },
+        }
+    }
+    result, gateway = await claim_bound._review(  # pyright: ignore[reportPrivateUsage]
+        tmp_path,
+        monkeypatch,
+        hub,
+        read_kept,
+        reviewer._FINAL,  # pyright: ignore[reportPrivateUsage]
+    )
+    assert result.status.value == "succeeded", (result.status, result.reason)
+    offered = mode == "local" or listed
+    first = gateway.exchanges[0][1]
+    catalog = json.loads(first[2][1])["reviewer_catalog"]["read_file_roots"]
+    assert ("s1" in [row["root_id"] for row in catalog]) is offered
+    sent = "".join(text for _, history in gateway.exchanges for _, text in history)
+    assert ("KEPT_COPY" in sent) is offered
+    # Kept back from a folder the owner no longer lists: the check says so, never in silence.
+    assert (OUTSIDE_READS_NOT_LISTED_GAP in result.case_content_gaps) is not offered
+
+
+async def test_no_kept_copy_is_offered_when_the_agent_cannot_say_it_is_still_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server never offers a claim-bound task's kept copy on its own word: with no agent to
+    say whether the owner still lists its folder, the reviewer gets no ``s`` root, only the
+    current one, which the agent itself answers or refuses."""
+
+    from typing import cast
+
+    from builders.policy_cases import make_case
+    from finishup.ports.change_capture import SnapshotFile, TaskInputSnapshotSet
+    from finishup.ports.runtime import TaskRuntime
+    from finishup.service.workspace_routing import WorkspaceRouting
+    from unit.application import test_semantic_case_prior_findings as prior
+
+    data = os.fspath((tmp_path / "data").resolve())
+    kept = TaskInputSnapshotSet(
+        "task_start", (SnapshotFile(f"{data}/specs/api.md", data, b"KEPT_COPY\n", 10),)
+    )
+
+    async def snapshots(_runtime: object, _request_id: object) -> tuple[TaskInputSnapshotSet, ...]:
+        return (kept,)
+
+    monkeypatch.setattr(ready_composition_module, "load_input_snapshots", snapshots)
+    routing = WorkspaceRouting.compose(None, claim_bound.SpyLocalCapture())
+    roots = await getattr(ready_composition_module, "_reviewer_read_roots")(
+        cast(TaskRuntime, object()),
+        "request",
+        prior._build(make_case()),  # pyright: ignore[reportPrivateUsage]
+        workspace_root=claim_bound._HANDLE,  # pyright: ignore[reportPrivateUsage]
+        outside=(data,),
+        inputs=(f"{data}/specs/api.md",),
+        protected=(),
+        withheld=(),
+        change_capture=routing.change_capture,
+        routing=routing,
+    )
+    assert [root.alias for root in roots] == ["w1", "o1"]

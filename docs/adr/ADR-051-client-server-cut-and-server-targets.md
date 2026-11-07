@@ -458,7 +458,11 @@ answers bounded `workspace_call`s on a connection that declared it.
   (receipt-document 1.4.0), whose line says how many); so a listed-mode input costs
   only that input, never the whole check-time change, and is never passed over in silence. A
   kept copy (#1118) whose folder the owner no longer lists is not sent, as a copy whose root the
-  owner no longer admits is not: the current read that compares it names it `unlisted` too.
+  owner no longer admits is not: the current read that compares it names it `unlisted` too. Nor
+  is it offered to the reviewer's `read_file` (its `s` root): when a review is prepared, the
+  server asks the agent once, reading no bytes, which kept copies its owner no longer lists, and
+  offers only the rest; an agent that cannot say gets no `s` root at all, so no copy is offered
+  on the server's word alone (a review already prepared may still send what it read).
   Listed mode refuses or skips only what exists (same amendment): a path the read reaches that
   does not exist reads as nothing, as it does locally, and is never counted, so a stray path in a
   task statement costs nothing. Whether a path exists is answered only for one the local
