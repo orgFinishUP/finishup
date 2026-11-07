@@ -339,7 +339,9 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   Cursor once you turn on content capture for a project, they can hold your prompts, the agent's
   messages, and tool inputs and outputs, which can name file paths on your machine and hold the
   contents of files the agent read, even outside your project or the folders you list for that
-  server. The server keeps them as FinishUP on your machine would. The confirmation you give when
+  server. They go unchanged to every such server, in local or listed mode alike (below): a server in
+  listed mode receives them too, even when they name or hold files outside its listed folders.
+  The server keeps them as FinishUP on your machine would. The confirmation you give when
   adding or choosing a server says so first (disclosure 2); a server confirmed under an earlier
   disclosure is used again only after you confirm the current one. To keep this content on your
   machine: for Claude Code and Cursor, leave content capture off (`finishup observe
@@ -357,8 +359,8 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   `finishup server folders add`, after typing its name in a terminal you are typing in, lets it
   read the files a task names there in either mode, even where the server's own privacy policy
   admits no folder for task inputs; that policy still decides what may be sent on for AI-powered
-  review. The mode limits what the server reads, not what your hooks deliver: hook observations
-  (above) carry what your agent itself read. The list stays on this computer and is never sent to
+  review. The mode limits only what the server reads, not what your hooks deliver: hook
+  observations (above) carry what your agent itself read, in either mode. The list stays on this computer and is never sent to
   the server; removing a folder applies from the server's next read, to the copies of files there
   that FinishUP kept when a task started too, though a review the server has already prepared may
   still send what it read there.

@@ -5537,8 +5537,13 @@ pending and never carries the workspace path):
 
 Workspace-locator content in the row is replaced by the connection's `client:` handle; every other
 content chunk (prompts, agent messages, tool inputs and outputs captured under the client's consent
-and content profiles) is sent unchanged, as a local service would receive it, which the server
-disclosure names (`cli.server.DISCLOSURE_LINES`, `client.targets.DISCLOSURE_VERSION` 2). The service
+and content profiles) is sent unchanged to every remote server, whatever its outside-read mode, as
+a local service would receive it (maintainer decision of 2026-11-07, ADR-051 decision 12). A
+`listed`-mode server therefore also receives content that can name or hold files outside its
+listed folders: the outside-read mode limits only what the server reads, never what the client's
+hooks deliver. The server disclosure names it (`cli.server.DISCLOSURE_LINES`,
+`client.targets.DISCLOSURE_VERSION` 2), and a target confirmed under disclosure 1 is refused
+`target_reauthorization_required` until the owner confirms again. The service
 (`application.observation_claims.ClaimObservationRouter`) accepts the envelope's session
 commitment and the attestation as `client_attested`, records them in the claimed worktree's own
 store `<state dir>/observation-claims/<16 hex of the handle>/` (`ClientAttestedObservationStore`,
