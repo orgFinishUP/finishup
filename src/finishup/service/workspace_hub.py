@@ -95,13 +95,25 @@ class _CallScope:
 
     ``live``: a live control call (the caller's connection is open and waiting), which waits the
     shorter bound for an agent; background work (verification supervisors, sweeps, recovered
-    jobs) runs outside any scope and waits longer. ``channel``: the agent the serving connection
-    itself offered, preferred for its own handle. ``deadline``: the handler's own deadline on the
-    monotonic clock, past which no workspace call it makes may wait. The cancel hooks are those
-    of blocking calls in flight under this scope; ``cancel`` runs them from any thread.
+    jobs) runs outside any scope and waits longer. Work a call left running once it returned (the
+    detached review its caller stopped waiting for, a timer it set) is background too: ``live``
+    holds only while this scope, and the scope it was entered in, are still open. ``channel``: the
+    agent the serving connection itself offered, preferred for its own handle while the call is
+    live. ``deadline``: the handler's own deadline on the monotonic clock, past which no
+    workspace call it makes may wait. The cancel hooks are those of blocking calls in flight
+    under this scope; ``cancel`` runs them from any thread.
     """
 
-    __slots__ = ("_cancelled", "_guard", "_hooks", "_open", "channel", "deadline", "live")
+    __slots__ = (
+        "_cancelled",
+        "_channel",
+        "_guard",
+        "_hooks",
+        "_live",
+        "_open",
+        "_parent",
+        "deadline",
+    )
 
     def __init__(
         self,
@@ -109,9 +121,11 @@ class _CallScope:
         live: bool,
         channel: WorkspaceAgentChannel | None,
         deadline: float | None = None,
+        parent: _CallScope | None = None,
     ) -> None:
-        self.live = live
-        self.channel = channel
+        self._live = live
+        self._channel = channel
+        self._parent = parent
         self.deadline = deadline
         self._guard = threading.Lock()
         self._hooks: dict[object, Callable[[], object]] = {}
@@ -120,6 +134,21 @@ class _CallScope:
 
     def __repr__(self) -> str:
         return "_CallScope(<redacted>)"
+
+    @property
+    def live(self) -> bool:
+        """Whether the work below serves a live control call that is still waiting for it."""
+
+        with self._guard:
+            if not (self._live and self._open):
+                return False
+        return self._parent is None or self._parent.live
+
+    @property
+    def channel(self) -> WorkspaceAgentChannel | None:
+        """The serving connection's own agent, while the call it serves is live."""
+
+        return self._channel if self.live else None
 
     @property
     def cancelled(self) -> bool:
@@ -185,10 +214,13 @@ def live_call_scope(channel: WorkspaceAgentChannel | None = None) -> Generator[N
 
     if channel is not None and type(channel) is not WorkspaceAgentChannel:
         raise TypeError("workspace_agent_channel_invalid")
-    token = _SCOPE.set(_CallScope(live=True, channel=channel))
+    scope = _CallScope(live=True, channel=channel)
+    token = _SCOPE.set(scope)
     try:
         yield
     finally:
+        # The call has returned: whatever it left running is background work from now on.
+        scope.close()
         _SCOPE.reset(token)
 
 
@@ -206,7 +238,9 @@ def workspace_call_deadline(deadline_at: float | None = None) -> Generator[None]
     waits past it, and is not sent when no time is left. When the handler is cancelled or times
     out, every workspace call it left in flight is cancelled at once, a blocking one included, so
     no worker thread or agent slot stays held for a caller that has gone. The live-call facts
-    (the shorter agent wait, the serving connection's agent) are kept from the enclosing scope.
+    (the shorter agent wait, the serving connection's agent) are kept from the enclosing scope for
+    as long as its call is live: a handler still running after that call returned (a detached
+    check whose caller stopped waiting) waits as background work does.
     """
 
     parent = _SCOPE.get()
@@ -217,6 +251,7 @@ def workspace_call_deadline(deadline_at: float | None = None) -> Generator[None]
         live=parent is not None and parent.live,
         channel=None if parent is None else parent.channel,
         deadline=deadline,
+        parent=parent,
     )
     token = _SCOPE.set(scope)
     try:

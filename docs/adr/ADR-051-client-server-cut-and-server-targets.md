@@ -526,7 +526,8 @@ answers bounded `workspace_call`s on a connection that declared it.
   `WorkspaceAgentHub.call(handle, operation, arguments, *, timeout_seconds)` sends a
   `workspace_call` under that session's write lock and awaits the correlated reply. With no channel
   it waits a bounded time for one — 5 seconds inside a live control call, 30 seconds for
-  background work such as the detached review and recovered jobs — then raises the typed
+  background work such as the detached review and recovered jobs (work a call left running is
+  background from the moment the call returns) — then raises the typed
   `WorkspaceAgentUnavailable`, whose reason is closed. Each call is bounded by the catalog's call
   deadline, and by the deadline of the control call it serves, whose cancellation or timeout
   cancels it at once (a call blocked in a worker thread included); the agent is told only the
