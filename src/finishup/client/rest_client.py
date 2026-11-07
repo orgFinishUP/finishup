@@ -49,7 +49,7 @@ import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import httpx
 
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MARKER_CHECK_SECONDS",
     "ZERO_NETWORK_PHASE",
+    "KeyCheck",
     "RestEndpoint",
     "RestServiceClient",
     "check_api_key",
@@ -116,6 +117,10 @@ __all__ = [
 ZERO_NETWORK_PHASE: Final = "zero_network_remote_selected"
 # A client that holds connections to a server elsewhere reads that record at least this often.
 MARKER_CHECK_SECONDS: Final = 0.5
+
+# What ``check_api_key`` learned of a key: the server accepted it, or the server answered that
+# it cannot check any key until its operator repairs its key file there (the key was not judged).
+type KeyCheck = Literal["accepted", "server_keys_unusable"]
 
 # Room past the long-poll window for the server to answer.
 _READ_SLACK_SECONDS: Final = 10.0
@@ -866,6 +871,12 @@ async def read_server_info(
         response = await http.request("GET", "/v1/server", headers=_base_headers(endpoint, claim))
     except httpx.HTTPError as error:
         raise _transport_failure(error, endpoint) from None
+    return _server_info(response, claim)
+
+
+def _server_info(response: httpx.Response, claim: WorkspaceClaim | None) -> ServerInfo:
+    """``GET /v1/server``'s answer held to this release's contract, or its closed refusal."""
+
     if response.status_code != 200:
         raise _refusal_error(response)
     try:
@@ -921,14 +932,17 @@ async def check_api_key(
     secret: str,
     *,
     _transport: httpx.AsyncBaseTransport | None = None,
-) -> None:
+) -> KeyCheck:
     """``GET /v1/server`` with ``secret`` before ``server login`` stores it (ADR-051 decision 7).
 
-    Returns when the server accepted the key and runs this release. Raises the
-    ``service_unavailable`` of its remote phase otherwise: ``remote_auth_failed`` (the server
-    refused the key), ``remote_identity_changed`` (the TLS trust recorded for the target did not
-    match, checked in the handshake before the key is sent), ``remote_incompatible`` (another
-    release), or a phase that says the server could not be asked (``remote_unreachable``,
+    ``accepted`` when the server accepted the key and runs this release; ``server_keys_unusable``
+    when the server answered that it cannot check any key until its operator repairs its key file
+    there, so this key was not judged (a connection reports that as ``remote_auth_failed``, but
+    login keeps such a key, not verified yet). Raises the ``service_unavailable`` of its remote
+    phase otherwise: ``remote_auth_failed`` (the server refused the key),
+    ``remote_identity_changed`` (the TLS trust recorded for the target did not match, checked in
+    the handshake before the key is sent), ``remote_incompatible`` (another release), or a phase
+    that says the server could not be asked (``remote_unreachable``,
     ``remote_service_not_running``, or the shared check's refusal, with nothing sent).
     """
 
@@ -936,10 +950,22 @@ async def check_api_key(
     endpoint = rest_endpoint_for(record, root, credential=secret)
     http = _client(endpoint, transport=_transport)
     try:
-        await read_server_info(http, endpoint, None)
+        try:
+            response = await http.request(
+                "GET", "/v1/server", headers=_base_headers(endpoint, None)
+            )
+        except httpx.HTTPError as error:
+            raise _transport_failure(error, endpoint) from None
+        if (
+            response.status_code != 200
+            and parse_rest_error(response.content) == "server_keys_unusable"
+        ):
+            return "server_keys_unusable"
+        _server_info(response, None)
     finally:
         with contextlib.suppress(Exception):
             await http.aclose()
+    return "accepted"
 
 
 def open_rest_http(record: ServerTarget, root: Path) -> tuple[Any, dict[str, str]]:

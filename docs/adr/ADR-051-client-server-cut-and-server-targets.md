@@ -745,7 +745,11 @@ answers bounded `workspace_call`s on a connection that declared it.
     runs another release (`remote_incompatible`) stores nothing, and the message says why, that
     nothing was stored, and the fix. A server that cannot be reached keeps the key, and the
     command says it is not verified yet, that it is checked on the first connection, and that
-    `server test NAME` checks it once the server is up; a target confirmed under an older
+    `server test NAME` checks it once the server is up. So does a server that answers
+    `server_keys_unusable` (503: its own key file cannot be used, so it judged no key; a
+    connection reports it as `remote_auth_failed`): the command names that cause and that the
+    server's operator repairs the file (`finishup service api-key list` there names what is wrong
+    and the fix), since refusal is the last resort. A target confirmed under an older
     disclosure is not sent the key either, and the command says so and names `finishup server use
     NAME`. Until 2026-11-07 approach C stored any key without checking it.
 - Which client process reads the credential is part of each approach's topology. Any process

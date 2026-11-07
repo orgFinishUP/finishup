@@ -5625,9 +5625,11 @@ StrictHostKeyChecking=ask -o ControlMaster=no -o PasswordAuthentication=no -o
 KbdInteractiveAuthentication=no -T` within 180 s; an unknown host key not confirmed raises
 `TargetRuntimeError("remote_host_key_unconfirmed")`, a changed one `remote_identity_changed`;
 `api_socket_unconfigured` is refused with the `api_socket = true` line). `server login` checks
-the key first with `rest_client.check_api_key(record, root, secret)` (`GET /v1/server`, the shared
-check first): `remote_auth_failed`, `remote_identity_changed` and `remote_incompatible` store
-nothing; any other phase stores the key, reported as not verified yet. `ensure_master` and
+the key first with `rest_client.check_api_key(record, root, secret) -> KeyCheck` (`GET
+/v1/server`, the shared check first; `"accepted"`, or `"server_keys_unusable"` when the server
+answered that refusal, which judged no key): `remote_auth_failed`, `remote_identity_changed` and
+`remote_incompatible` store nothing; `server_keys_unusable` and any other phase store the key,
+reported as not verified yet with the cause. `ensure_master` and
 `start_remote_service` raise the shared check's refusal as `TargetRuntimeError(<reason>)` before
 running ssh, and `probe` answers it as `ProbeResult("unavailable", reason=<reason>)` with nothing
 sent. `ensure_master(record, root, *, timeout, honor_recent_failure=True, supervise=True)` starts

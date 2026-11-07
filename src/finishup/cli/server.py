@@ -739,21 +739,25 @@ _LOGIN_REFUSED: Final[Mapping[str, str]] = {
 
 
 def _check_api_key(record: ServerTarget, secret: str) -> str | None:
-    """``GET /v1/server`` with ``secret``: ``None`` when the server accepted it, else the phase."""
+    """``GET /v1/server`` with ``secret``: ``None`` when the server accepted it, else the phase.
+
+    ``server_keys_unusable`` when the server answered that it cannot check any key until its
+    operator repairs its key file there: the key was not judged, so login keeps it.
+    """
 
     import anyio
 
-    from finishup.client.rest_client import check_api_key
+    from finishup.client.rest_client import KeyCheck, check_api_key
     from finishup.ports.control import ControlError
 
-    async def check() -> None:
-        await check_api_key(record, target_root(record.target_id), secret)
+    async def check() -> KeyCheck:
+        return await check_api_key(record, target_root(record.target_id), secret)
 
     try:
-        anyio.run(check)
+        outcome = anyio.run(check)
     except ControlError as error:
         return error.phase or error.reason
-    return None
+    return None if outcome == "accepted" else outcome
 
 
 def _emit(lines: tuple[str, ...]) -> None:
@@ -1723,8 +1727,9 @@ def server_login(
         raise ServerCommandRefused(error.reason)
     # The key is checked against the server before it is kept (decision 7, server add and login
     # parity): a refused key, a server whose identity does not match the recorded trust, or
-    # another release is never stored. A server that cannot be asked now keeps the key, and the
-    # command says it is not verified yet.
+    # another release is never stored. A server that cannot be asked now, or that cannot check
+    # any key until its key file is repaired, keeps the key, and the command says it is not
+    # verified yet and why.
     unanswered = _check_api_key(record, secret)
     refused = _LOGIN_REFUSED.get(unanswered or "")
     if refused is not None:
@@ -1745,6 +1750,15 @@ def server_login(
         typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
         return
     typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+    if unanswered == "server_keys_unusable":
+        typer.echo(
+            "The server answered, but it cannot check any API key until its operator repairs "
+            "its key file there (server_keys_unusable), so it did not judge this one. Ask the "
+            "server's operator to run 'finishup service api-key list' on the server, which names "
+            "what is wrong with the file and how to fix it. The key is checked on the first "
+            f"connection after that; run 'finishup server test {record.name}' then to check it now."
+        )
+        return
     if unanswered == "target_reauthorization_required":
         typer.echo(
             "It was not sent: you confirmed this server under an older disclosure, so nothing is "

@@ -1262,6 +1262,36 @@ def test_login_keeps_a_key_it_could_not_check_and_says_it_is_not_verified_yet(
     assert targets.list_targets()[0].credential == "file"
 
 
+def test_login_keeps_a_key_a_server_with_a_broken_key_file_could_not_check(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    no_platform_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusal is the last resort: a server that cannot check any key until its operator
+    repairs its key file did not refuse this key, so login keeps it, not verified yet, and says
+    what happened and who fixes it (never "the server refused this API key")."""
+
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+
+    def keys_unusable(_record: object, _secret: str) -> str:
+        return "server_keys_unusable"
+
+    monkeypatch.setattr(server_cli, "_check_api_key", keys_unusable)
+
+    result = _invoke("login", "fu", "--key-file", str(_key_file(home)))
+
+    assert result.exit_code == 0, result.output
+    assert "in an owner-only file, not verified yet." in result.stdout
+    assert "cannot check any API key until its operator repairs its key file" in result.stdout
+    assert "(server_keys_unusable)" in result.stdout
+    assert "'finishup service api-key list' on the server" in result.stdout
+    assert "'finishup server test fu'" in result.stdout
+    assert "refused" not in result.output
+    assert targets.list_targets()[0].credential == "file"
+    assert _KEY not in result.output
+
+
 def test_login_says_when_the_server_accepted_the_key(
     home: Path, authorized: list[tuple[str, str]], no_platform_store: None
 ) -> None:
@@ -1292,10 +1322,10 @@ def test_login_checks_the_key_with_the_servers_own_api(
 
     async def check(secret: str, transport: httpx.AsyncBaseTransport) -> str | None:
         try:
-            await rest_client.check_api_key(record, root, secret, _transport=transport)
+            outcome = await rest_client.check_api_key(record, root, secret, _transport=transport)
         except ControlError as error:
             return error.phase
-        return None
+        return None if outcome == "accepted" else outcome
 
     def asgi() -> httpx.AsyncBaseTransport:
         return httpx.ASGITransport(app=app)  # type: ignore[arg-type]
@@ -1306,6 +1336,9 @@ def test_login_checks_the_key_with_the_servers_own_api(
     assert anyio.run(check, token, asgi()) is None
     assert anyio.run(check, "fu_" + "x" * 43, asgi()) == "remote_auth_failed"
     assert anyio.run(check, token, httpx.MockTransport(refuse)) == "remote_unreachable"
+    # A server whose own key file is damaged cannot check any key: it did not judge this one.
+    (home / "network" / "api-keys.json").write_bytes(b"not json")
+    assert anyio.run(check, token, asgi()) == "server_keys_unusable"
 
 
 class _SshDiscovery:

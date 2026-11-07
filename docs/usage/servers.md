@@ -203,9 +203,10 @@ status.
 
 `login` checks the key with the server before keeping it. If the server refuses the key, or runs
 another FinishUP release, or its certificate is not the one you trusted, nothing is stored and
-FinishUP says why and what to do. If the server cannot be reached right now, FinishUP stores the key
-and says it is not verified yet: it is checked on the first connection, and `finishup server test
-NAME` checks it as soon as the server is up.
+FinishUP says why and what to do. If the server cannot be reached right now, or answers that it
+cannot check any key until its operator repairs its key file (`server_keys_unusable`), FinishUP
+stores the key and says it is not verified yet and why: it is checked on the first connection, and
+`finishup server test NAME` checks it as soon as the server is up or its key file is repaired.
 
 SSH servers need no FinishUP sign-in. Your SSH keys, `ssh-agent` and known hosts stay with SSH;
 FinishUP stores no SSH key and never asks for an SSH password.
