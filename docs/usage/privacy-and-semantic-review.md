@@ -117,9 +117,12 @@ content capture you enabled. Only disabling the profile or revoking observation 
 off; after a revoke, enable it again if you still want it.
 
 Native content capture and AI-powered review have separate authority. Enabling a host profile does
-not authorize external review, choose a provider, or permit any content to leave the computer.
-AI-powered review still requires its own provider readiness and repository privacy decision
-described below.
+not authorize external review, choose a provider, or permit any content to go to an AI-powered
+review provider. AI-powered review still requires its own provider readiness and repository
+privacy decision described below. If you use a FinishUP server on another machine, a port or the
+web, what your hooks capture is delivered to that server, which keeps it as FinishUP on this
+computer would; adding or choosing the server told you so first (see
+[FinishUP servers](servers.md#what-leaves-this-computer)).
 
 ## Privacy menu and policy profiles
 

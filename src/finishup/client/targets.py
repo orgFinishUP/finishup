@@ -108,8 +108,9 @@ TARGET_KINDS: Final = ("local", "local_port", "ssh", "https")
 REMOTE_KINDS: Final = frozenset({"local_port", "ssh", "https"})
 RESERVED_NAMES: Final = frozenset({"local"})
 # The versioned disclosure the owner confirmed for a remote target (design section 6). A new
-# version forces the owner to confirm again before the target is used.
-DISCLOSURE_VERSION: Final = 1
+# version forces the owner to confirm again before the target is used. Version 2 names the hook
+# observations sent to the server, the captured content among them (ADR-051 decision 12).
+DISCLOSURE_VERSION: Final = 2
 CLAIM_SALT_BYTES: Final = 32
 
 type TargetKind = Literal["local", "local_port", "ssh", "https"]

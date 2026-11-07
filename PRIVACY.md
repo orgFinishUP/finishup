@@ -335,16 +335,28 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   server asks for — the change since the task started, facts about files the task names, files the
   reviewer reads, task inputs, declared tests, observation checks, and results of checks you
   approved — read on your machine by FinishUP's workspace agent within the usual limits.
-- **What does not:** the project folder's path, your vault passphrase, the server's API key, and
-  the unlock, consent, and owner-view prompts, which run only on the server's own machine.
+- **Hook observations carry what your agent saw and did.** From Codex, and from Claude Code or
+  Cursor once you turn on content capture for a project, they can hold your prompts, the agent's
+  messages, and tool inputs and outputs, which can name file paths on your machine and hold the
+  contents of files the agent read, even outside your project or the folders you list for that
+  server. The server keeps them as FinishUP on your machine would. The confirmation you give when
+  adding or choosing a server says so first (disclosure 2); a server confirmed under an earlier
+  disclosure is used again only after you confirm the current one. To keep this content on your
+  machine, leave content capture off (`finishup observe content-disable`) or do not give
+  observation consent for that project.
+- **What does not:** the project folder's path as its name (a path can still appear inside what
+  your agents write and inside hook observations, above), your vault passphrase, the server's API
+  key, and the unlock, consent, and owner-view prompts, which run only on the server's own
+  machine.
 - **Outside your project, you choose what it may read.** Each such server reads outside your
   project folder either as FinishUP on this computer would (local mode) or only beneath folders
   you list for it (listed mode), chosen when you add it. A folder you list for a server with
   `finishup server folders add`, after typing its name in a terminal you are typing in, lets it
   read the files a task names there in either mode, even where the server's own privacy policy
   admits no folder for task inputs; that policy still decides what may be sent on for AI-powered
-  review. The list stays on this computer and is never sent to the
-  server; removing a folder applies from the server's next read, to the copies of files there
+  review. The mode limits what the server reads, not what your hooks deliver: hook observations
+  (above) carry what your agent itself read. The list stays on this computer and is never sent to
+  the server; removing a folder applies from the server's next read, to the copies of files there
   that FinishUP kept when a task started too, though a review the server has already prepared may
   still send what it read there.
 - **The server's policy governs AI-powered review.** Whether anything is sent on to an AI-powered

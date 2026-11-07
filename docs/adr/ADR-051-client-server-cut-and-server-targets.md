@@ -798,10 +798,17 @@ answers bounded `workspace_call`s on a connection that declared it.
   respond and receipt traffic, the workspace claim (a keyed digest, not a path), observation rows,
   and the workspace evidence the server asks the workspace agent for — the task base and
   check-time change, requested-output facts, reviewer file reads, task inputs, declared tests,
-  observation inspection and approved-check results, each within its existing bound. It says what
-  does not leave: the workspace's absolute path, credentials, and the human-control and secret
-  channels. It says that the server's own privacy policy decides any AI-powered review egress from
-  there.
+  observation inspection and approved-check results, each within its existing bound. It names the
+  native content observation rows carry (decision 12): from Codex under observation consent, and
+  from Claude Code or Cursor under an enabled content profile, prompts, agent messages and tool
+  inputs and outputs, which can name paths and hold the contents of files the agent read outside
+  the project and outside listed folders; the server keeps them as a local service would. It says
+  what does not leave: the workspace's absolute path as its name, credentials, and the
+  human-control and secret channels. It says that the server's own privacy policy decides any
+  AI-powered review egress from there. Disclosure 2 (2026-11-07) added the observation content
+  sentences; a target confirmed under disclosure 1 is refused `target_reauthorization_required`
+  until the owner confirms again, so no content reaches a server whose disclosure did not name
+  it.
 - Agents cannot select or add a remote target: there is no MCP tool for it, and the CLI refuses
   without a trusted console.
 - The hop is refused in the zero-network state, for every remote kind (`local_port` included).
@@ -1038,8 +1045,21 @@ the rows were captured there. The server holds none of it and must not borrow it
   policy digest the owner trusted there, or null) and `route` (the FinishUP task, session and
   writer the client's mapping names for the host session, or null). The client builds it from its
   own store and mapping when it sends the row (hook pass, `observe drain` and the background
-  drain alike), and replaces any workspace-locator content with the connection's handle, so no
-  path leaves the client.
+  drain alike), and replaces any workspace-locator content with the connection's handle, so the
+  workspace path itself never leaves the client.
+- **Captured content travels as a local service receives it** (maintainer decision of
+  2026-11-07). Every other content chunk (prompts, agent messages, tool inputs and outputs from
+  Codex under observation consent, and from Claude Code or Cursor under an enabled content
+  profile) is sent unchanged, so with a content profile on the server holds what a service on the
+  client would: "local mode is as local" holds for observation too. Those chunks can name
+  absolute paths and hold the contents of files the agent read outside the project and outside
+  the target's listed folders; the outside-read mode (decision 5) limits what the server reads,
+  not what the client's hooks deliver. That is honest only because it is disclosed before
+  consent: the server disclosure (decision 6, disclosure 2) names it, and a target confirmed
+  under an older disclosure sends nothing until the owner confirms again. Withholding content
+  chunks on claim-bound connections was rejected: the server would then hold less than a local
+  service for the same consent, and the owner already controls the content with the client's
+  own consent and content profiles.
 - **Accepted as `client_attested`, never verified.** The server cannot recompute a commitment made
   under the client's key, so on a claim-bound connection it accepts the envelope's session
   commitment and the attested consent, profiles, fence, trust and route as client-attested. It
