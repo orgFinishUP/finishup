@@ -4677,7 +4677,11 @@ NAME FOLDER|--all|mode NAME local|listed` (`cli/server.py`). A registry folder t
 `targets.list_targets()` skips it (a record that cannot be read still fails closed),
 `leftover_target_ids()` names it, `server list` prints one line per leftover with the command
 that deletes it, and `server remove ID` (an id is never a name) deletes it under the registry
-lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`). `server add` for any remote kind
+lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`).
+`use`, `login` and `logout` read a target's record again under the registry lock after their
+slow step (the typed name, the key prompt and check) and change only their own field
+(authorization or `credential`); a target removed meanwhile is `target_unknown` (for `login`,
+after deleting the key it just stored) and its folder is never recreated. `server add` for any remote kind
 asks the outside-read mode on the trusted console inside its typed confirmation, after the
 disclosure and before the typed name: the question `client.server_folders.OUTSIDE_READ_QUESTION`
 with one line per mode (`OUTSIDE_READ_MODE_LINES`), answered `local` or `listed`; Enter alone or
