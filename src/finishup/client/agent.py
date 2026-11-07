@@ -856,6 +856,8 @@ class WorkspaceAgentLoop:
         # The server waits for this reply until the call's own deadline; so may delivering it.
         deadline = self._clock() + call.deadline_ms / 1_000
         work = asyncio.ensure_future(self._answer_in_slot(handler, call, handle))
+        # An answer that comes after the deadline reply is dropped, its failure included.
+        work.add_done_callback(_drop_late_answer)
         try:
             # Bounded by the call's deadline, as a local connection's worker is: an answer the
             # handler has not given by then is ``deadline_exceeded`` at once (the server's read
@@ -890,6 +892,13 @@ class WorkspaceAgentLoop:
             if not delivered:
                 _record("workspace_agent_reply", "reply_refused")
             return
+
+
+def _drop_late_answer(work: asyncio.Future[WorkspaceReply]) -> None:
+    """Retrieve a finished answer's outcome, so one nobody waits for any more logs nothing."""
+
+    if not work.cancelled():
+        work.exception()
 
 
 def _closed_reply(call: WorkspaceCall, reason: str) -> WorkspaceReply:
