@@ -34,6 +34,7 @@ client's own (``finishup.client.server_folders``) and never sent to the server.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import re
 import sys
@@ -1257,16 +1258,34 @@ def use_target(name: str, *, authorize: Callable[[str, str], None] | None = None
     record = _target_or_fail(name)
     if record.is_remote:
         (authorize or _authorize_remote)(record.name, record.kind)
-        record = reauthorized(record)
     try:
         with registry_lock():
+            # Read again: the confirmation may have taken minutes, and only the authorization
+            # changes here (a key stored meanwhile stays recorded; a removed target stays gone).
+            record = _stored_record(record)
             previous = _selected_remote()
             if record.is_remote:
+                record = reauthorized(record)
                 write_target(target_root(record.target_id), record)
             write_selection(record)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     return _leave(record, previous)
+
+
+def _stored_record(record: ServerTarget) -> ServerTarget:
+    """``record`` as stored now, read under the registry lock (SRV-12).
+
+    A command that read a target before a slow step (a typed confirmation, a key prompt, a
+    server round trip) changes only its own field on what this returns, so a change another
+    command made meanwhile is kept. A target removed meanwhile is ``target_unknown``, and
+    nothing recreates its folder.
+    """
+
+    current = read_target(target_root(record.target_id))
+    if current is None:
+        raise TargetError("target_unknown")
+    return current
 
 
 @server_app.command("use")
@@ -1842,11 +1861,17 @@ def server_login(
     unanswered = _check_https_key(record, secret)
     try:
         root = target_root(record.target_id)
-        location = KeyringOrFileCredential(
-            record.target_id, root, recorded=record.credential
-        ).store(secret)
+        credential = KeyringOrFileCredential(record.target_id, root, recorded=record.credential)
+        location = credential.store(secret)
         with registry_lock():
-            write_target(root, replace(record, credential=location))
+            try:
+                current = _stored_record(record)
+            except TargetError:
+                # Removed while the key was asked for: it keeps no key either.
+                with contextlib.suppress(CredentialError):
+                    credential.delete()
+                raise
+            write_target(root, replace(current, credential=location))
     except CredentialError as error:
         raise ServerCommandRefused(error.reason)
     except TargetError as error:
@@ -1880,7 +1905,9 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
             record.target_id, root, recorded=record.credential
         ).delete()
         with registry_lock():
-            write_target(root, replace(record, credential=None))
+            current = read_target(root)
+            if current is not None:  # one removed meanwhile keeps no record to update
+                write_target(root, replace(current, credential=None))
     except CredentialError as error:
         raise ServerCommandRefused(error.reason)
     except TargetError as error:
