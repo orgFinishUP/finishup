@@ -17,7 +17,9 @@ store, mappings and consent are never read or written for a claim.
 
 The service still decides three things itself. Only the connection's own claim is touched. The
 attested route must name a task whose route was opened under the same claim; any other route is
-refused with ``consent_missing`` before anything is written. And its own observation switch and
+refused with ``consent_missing`` before anything is written. A route naming a session the task
+has since replaced is the claim's when the task's current route is: the coordinator then follows
+``session_superseded`` to the successor, as it does locally. And its own observation switch and
 vault gate apply as for every ingest. Logs carry closed tokens and the ``client_attested`` label
 only; nothing the client sent is ever written to a log or an error.
 """
@@ -63,7 +65,7 @@ from finishup.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from finishup.ports.control import RepositoryPrivacyContext
-from finishup.ports.start_catalog import TaskRoute
+from finishup.ports.start_catalog import SessionBinding, TaskRoute
 from finishup.ports.workspace_agent import workspace_handle_valid
 from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -87,6 +89,7 @@ _UNAPPLIED: Final = object()
 
 type ClaimCoordinatorFactory = Callable[[str, LocalObservationStore, Path], ObservationCoordinator]
 type RouteResolver = Callable[[str], Awaitable[TaskRoute | None]]
+type SessionBindingResolver = Callable[[str], Awaitable[SessionBinding | None]]
 
 
 def _reject(reason: str) -> ObservationIngestResult:
@@ -319,7 +322,9 @@ class ClaimObservationRouter:
 
     ``coordinator_for(handle, store, state)`` builds the claim's coordinator, normally the
     service's own coordinator with ``local`` and ``state_root`` replaced and
-    ``client_workspace_handle`` set. ``resolve_route`` is the catalog's session route lookup.
+    ``client_workspace_handle`` set. ``resolve_route`` is the catalog's session route lookup,
+    which answers only a task's active session; ``session_binding`` is the catalog's binding
+    lookup, which also answers a session the task has replaced with the task's current one.
     """
 
     __slots__ = (
@@ -330,6 +335,7 @@ class ClaimObservationRouter:
         "_observation_enabled",
         "_open_lock",
         "_resolve_route",
+        "_session_binding",
         "_state_root",
     )
 
@@ -339,6 +345,7 @@ class ClaimObservationRouter:
         state_root: Path,
         coordinator_for: ClaimCoordinatorFactory,
         resolve_route: RouteResolver,
+        session_binding: SessionBindingResolver,
         observation_enabled: bool,
         max_claims: int = _MAX_OPEN_CLAIMS,
     ) -> None:
@@ -347,6 +354,7 @@ class ClaimObservationRouter:
         self._state_root = state_root
         self._coordinator_for = coordinator_for
         self._resolve_route = resolve_route
+        self._session_binding = session_binding
         self._observation_enabled = observation_enabled
         self._max_claims = max_claims
         self._claims: OrderedDict[str, _Claim] = OrderedDict()
@@ -415,9 +423,22 @@ class ClaimObservationRouter:
             claim.in_flight -= 1
 
     async def _route_in_claim(self, route: ObservationClientRoute, commitment: str) -> bool:
-        """Whether the attested route's task was opened under this very claim."""
+        """Whether the attested route's task was opened under this very claim.
+
+        A session the task has replaced no longer resolves; its task's current session does, and
+        that route decides. The coordinator then follows the replacement as it does locally.
+        """
 
         task_route = await self._resolve_route(route.session_id)
+        if task_route is None:
+            binding = await self._session_binding(route.session_id)
+            if (
+                binding is None
+                or binding.task_id != route.task_id
+                or binding.session_id == route.session_id
+            ):
+                return False
+            task_route = await self._resolve_route(binding.session_id)
         if task_route is None or task_route.task_id != route.task_id:
             return False
         recorded = task_route.repository_privacy_commitment

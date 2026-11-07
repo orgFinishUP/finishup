@@ -500,6 +500,70 @@ async def test_an_attested_route_outside_the_claim_is_refused_before_any_write(
         await connection.close()
 
 
+async def test_a_row_naming_a_replaced_session_of_the_claims_task_is_delivered(
+    tmp_path: Path,
+    spy: _Spy,  # noqa: F811
+    service: _Service,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real catalog answers only a task's active session; a replaced one is still the claim's.
+
+    Another host session re-attaches the task, so its route moves to a successor session while
+    this client's mapping still names the old one. The row is delivered, as locally, never refused
+    as missing consent, and the claim's mapping follows the successor.
+    """
+
+    del spy
+    client = _Client(tmp_path)
+    client.consent()
+    connection = await _connect(service, monkeypatch, client, None)
+    try:
+        started = await _start(connection, client)
+        client.map(started)
+        attached = (
+            await connection.start(
+                start_request_for_connection(
+                    StartRequest.model_validate(
+                        {
+                            **_COMMON,
+                            "request_id": new_id(IdKind.REQUEST),
+                            "mode": "attach",
+                            "session_id": started.session_id,
+                            "task_title": "Change the client's app module",
+                            "requested_view": "compact",
+                        }
+                    ),
+                    connection,
+                )
+            )
+        ).root
+        assert attached.ok is True, attached
+        assert attached.task_id == started.task_id
+        assert attached.session_id != started.session_id
+        client.hook("PostToolUse", {"tool_name": "shell", "exit_status": 0, "event_ordinal": 2})
+        mapped = load_mapping(_HOST_SESSION, _state=client.state)
+        assert mapped is not None and mapped.finishup_session_id == started.session_id
+        drain = ClientObservationDrain(WorkspaceLocator(client.path), state=client.state)
+        try:
+            summary = await drain.drain(connection)
+        finally:
+            drain.close()
+        assert summary.delivery is not None, summary
+        assert dict(summary.delivery.reasons).get("consent_missing", 0) == 0, summary
+        assert summary.delivery.quarantined == 0, summary
+        assert summary.delivery.acknowledged >= 1, summary
+        claim_root = service_state(tmp_path) / CLAIM_OBSERVATION_DIRECTORY
+        (claim,) = list(claim_root.iterdir())
+        followed = load_mapping(_HOST_SESSION, _state=claim)
+        assert followed is not None
+        assert (followed.finishup_task_id, followed.finishup_session_id) == (
+            started.task_id,
+            attached.session_id,
+        )
+    finally:
+        await connection.close()
+
+
 async def test_an_attestation_on_a_connection_without_a_claim_is_malformed(
     tmp_path: Path,
     spy: _Spy,  # noqa: F811
