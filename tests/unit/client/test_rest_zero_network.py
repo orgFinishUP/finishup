@@ -24,7 +24,7 @@ from builders.network_api import FakeService, key_store, make_api
 from finishup.client import rest_client
 from finishup.client.everyday_policy import record_reported_policy, remove_marker
 from finishup.client.rest_client import RestEndpoint, connect_rest_service, open_rest_http
-from finishup.client.targets import ServerTarget
+from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 from finishup.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from finishup.service import client as service_client
 from finishup.service.api_keys import ApiKeyStore
@@ -39,7 +39,7 @@ _RECORD = ServerTarget(
     base_url="https://api.test",
     claim_salt=base64.b64encode(b"\x01" * 32).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 _SSH_RECORD = ServerTarget(
     "t_0a1b2c3e",
@@ -52,7 +52,7 @@ _SSH_RECORD = ServerTarget(
     remote_launcher="/opt/finishup/bin/finishup",
     claim_salt=base64.b64encode(b"\x02" * 32).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 _LOCAL_PORT_RECORD = ServerTarget(
     "t_0a1b2c3f",
@@ -62,7 +62,7 @@ _LOCAL_PORT_RECORD = ServerTarget(
     base_url="https://127.0.0.1:8443",
     claim_salt=base64.b64encode(b"\x03" * 32).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 
 

@@ -29,7 +29,7 @@ from builders.network_api import (
 from builders.server_targets import ambient_home
 from finishup.client import rest_client
 from finishup.client.rest_client import RestEndpoint, RestServiceClient, connect_rest_service
-from finishup.client.targets import ServerTarget
+from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 from finishup.domain.values import JsonObject
 from finishup.ports.control import (
     ControlClientKind,
@@ -53,7 +53,7 @@ _RECORD = ServerTarget(
     base_url="https://api.test",
     claim_salt=base64.b64encode(b"\x01" * 32).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 
 

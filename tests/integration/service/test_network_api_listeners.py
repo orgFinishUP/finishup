@@ -38,7 +38,7 @@ from finishup.adapters.control.unix_socket import (
     bind_secret_listener,
 )
 from finishup.client.rest_client import RestEndpoint, connect_rest_service, rest_endpoint_for
-from finishup.client.targets import ServerTarget
+from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 from finishup.config.models import FinishUpConfig, NetworkConfig
 from finishup.ports.control import ControlClientKind, ControlError
 from finishup.service.api_keys import ApiKeyStore
@@ -180,7 +180,7 @@ def _https_record(port: int, **trust: str) -> ServerTarget:
         base_url=f"https://127.0.0.1:{port}",
         claim_salt=_SALT,
         authorized_at="2026-11-05T00:00:00.000Z",
-        disclosure_version=1,
+        disclosure_version=DISCLOSURE_VERSION,
         credential="file",
         **trust,  # type: ignore[arg-type]
     )

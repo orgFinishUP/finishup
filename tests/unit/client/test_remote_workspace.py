@@ -26,7 +26,7 @@ from finishup.client.remote_workspace import (
     handler_for_workspace,
 )
 from finishup.client.server_folders import OutsideReads
-from finishup.client.targets import ServerTarget, TargetError
+from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget, TargetError
 from finishup.client.workspace_agent import WorkspaceAgentHandler
 from finishup.client.workspace_claim import workspace_claim
 from finishup.domain.values import JsonObject
@@ -44,7 +44,7 @@ _RECORD = ServerTarget(
     base_url="https://api.test",
     claim_salt=base64.b64encode(_SALT).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 
 
@@ -286,7 +286,7 @@ _SSH_RECORD = ServerTarget(
     remote_launcher="/opt/finishup/bin/finishup",
     claim_salt=base64.b64encode(_SALT).decode("ascii"),
     authorized_at="2026-11-05T00:00:00.000Z",
-    disclosure_version=1,
+    disclosure_version=DISCLOSURE_VERSION,
 )
 
 
