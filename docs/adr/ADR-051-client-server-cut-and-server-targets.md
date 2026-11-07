@@ -462,18 +462,26 @@ answers bounded `workspace_call`s on a connection that declared it.
   (receipt-document 1.4.0), whose line says how many); so a listed-mode input costs
   only that input, never the whole check-time change, and is never passed over in silence. A
   kept copy (#1118) whose folder the owner no longer lists is not sent, as a copy whose root the
-  owner no longer admits is not: the current read that compares it names it `unlisted` too. Nor
-  is it offered to the reviewer's `read_file` (its `s` root): when a review is prepared, the
-  server asks the agent once, reading no bytes, which kept copies its owner no longer lists, and
-  offers only the rest; an agent that cannot say gets no `s` root at all, so no copy is offered
-  on the server's word alone (a review already prepared may still send what it read).
-  Listed mode refuses or skips only what exists (same amendment): a path the read reaches that
-  does not exist reads as nothing, as it does locally, and is never counted, so a stray path in a
-  task statement costs nothing. Whether a path exists is answered only for one the local
+  owner no longer admits is not: the current read that compares it names it `unlisted` too,
+  whatever its file is now (review of #1313). The server holds the copy, so neither whether the
+  file still exists nor whether a local read would still read it (deleted, hard-linked, opened to
+  other accounts or replaced by a link since) decides it: in `listed` mode
+  `snapshot_outside_inputs` names `unlisted` every value at or beneath a named root that no
+  listed folder admits, looking at nothing on the client, so the answer tells the server no more
+  than `listed` does, beside the mode. Such a copy is counted among those kept back, since
+  listing its folder again, or `local` mode, sends it. Nor is it offered to the reviewer's
+  `read_file` (its `s` root): when a review is prepared, the server asks the agent once, reading
+  no bytes, which kept copies its owner no longer lists, and offers only the rest; an agent that
+  cannot say gets no `s` root at all, so no copy is offered on the server's word alone (a review
+  already prepared may still send what it read).
+  Listed mode refuses or skips only what exists (same amendment), kept copies aside (above): a
+  path the read reaches that does not exist reads as nothing, as it does locally, and is never
+  counted, so a stray path in a task statement costs nothing. Whether a path exists is answered only for one the local
   outside-input candidate rule would look at (no hidden component, not credential-named, in no
   system or protected directory), so the server learns no more than `lstat_candidates` already
   tells it. What exists counts only where a local read would read it (review of #1313): a task
-  input left unread is reported `unlisted` only when the local read's own trusted metadata walk
+  input left unread (never a kept copy, above) is reported `unlisted` only when the local read's
+  own trusted metadata walk
   (`task_input_read.outside_inputs_readable`: its home-private, hidden and credential-named
   refusals, its directory and file trust tests, a single link, an owner's, writable by no other
   account) would read a file for it, and a declared test is `root_not_admitted` only when the

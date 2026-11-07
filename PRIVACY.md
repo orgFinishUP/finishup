@@ -344,8 +344,9 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   read the files a task names there in either mode, even where the server's own privacy policy
   admits no folder for task inputs; that policy still decides what may be sent on for AI-powered
   review. The list stays on this computer and is never sent to the
-  server; removing a folder applies from the server's next read, though a review the server has
-  already prepared may still send what it read there.
+  server; removing a folder applies from the server's next read, to the copies of files there
+  that FinishUP kept when a task started too, though a review the server has already prepared may
+  still send what it read there.
 - **The server's policy governs AI-powered review.** Whether anything is sent on to an AI-powered
   review provider is decided by the server's own privacy policy, repository permissions, and
   never-send fence, which apply minimization, redaction, and scanning there before any external

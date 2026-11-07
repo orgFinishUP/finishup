@@ -508,11 +508,13 @@ def test_outside_reads_never_enter_the_workspace_or_finishup_directories(
         WorkspaceOperation.READ_OUTSIDE_INPUTS,
         ReadOutsideInputsArguments((root,), values, limit=4),
     ) == OutsideInputsRead(())
+    # Nor is a copy of either sendable: no snapshot keeps one, and should a server hold one, the
+    # agent names it unlisted, since no listed folder admits a path there (ADR-051 decision 5).
     assert _ok(
         handler,
         WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS,
         SnapshotOutsideInputsArguments((root,), values, limit=4, max_bytes=65_536, budget_ms=5_000),
-    ) == OutsideSnapshotsRead(())
+    ) == OutsideSnapshotsRead((), (0, 1))
     # A reviewer read beneath that admitted root is refused the same way.
     assert (
         _ok(
@@ -938,7 +940,10 @@ def test_a_task_input_the_owner_did_not_list_is_left_unread_and_named(
     assert [(row.path, row.text) for row in _ok(handler, *snapshot).reads] == [
         (f"{shared}/spec.md", b"SPEC_MARKER\n")
     ]
-    assert _ok(handler, *snapshot).unlisted == ()
+    # A kept copy is another matter: the server holds it, so its answer names every value beneath
+    # a named root that no listed folder admits, whether or not anything is there now; never one
+    # beneath no named root.
+    assert _ok(handler, *snapshot).unlisted == (1, 2)
     # A root of a shape no owner could admit still refuses the whole call.
     assert _refused(
         handler,
@@ -1062,10 +1067,12 @@ def test_listed_mode_counts_only_what_a_local_read_would_read(
     assert [item.path for item in local.inputs] == [values[4]]
     listed = _handler(repository, protected)
     assert _ok(listed, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).unlisted == (4,)
+    # A kept copy's answer is never narrowed by what is there now: the server holds the copy.
     snapshot = SnapshotOutsideInputsArguments(
         roots, values, limit=5, max_bytes=65_536, budget_ms=5_000
     )
-    assert _ok(listed, WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS, snapshot).unlisted == (4,)
+    copies = _ok(listed, WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS, snapshot)
+    assert copies.unlisted == tuple(range(len(values)))
     # Listing the folder reads exactly what the local read reads, and nothing is left counted.
     after = _ok(
         _handler(repository, protected, folders=(data,)),
@@ -1073,6 +1080,58 @@ def test_listed_mode_counts_only_what_a_local_read_would_read(
         arguments,
     )
     assert ([item.path for item in after.inputs], after.unlisted) == ([values[4]], ())
+
+
+def test_listed_mode_names_every_kept_copy_no_listed_folder_admits(
+    repository: Path, protected: Path, tmp_path: Path
+) -> None:
+    """A check asks ``snapshot_outside_inputs`` about the server's kept copies (ADR-051 decision
+    5). In ``listed`` mode its ``unlisted`` names every one beneath a named root that no listed
+    folder admits, whatever is there now (deleted, hard-linked, open to other accounts, a link,
+    never there, inside the claimed worktree, past the read's window), since the server would
+    send its copy, not the file; a listed folder still admits its copy, and ``local`` mode every
+    copy. Only the listing and the mode decide it, so the answer tells the server nothing more of
+    this machine than ``listed`` does."""
+
+    data = (tmp_path / "data").resolve()
+    (data / "kept").mkdir(parents=True, mode=0o700)
+    data.chmod(0o700)
+    (data / "plain.md").write_text("PLAIN\n", encoding="utf-8")
+    (data / "linked.md").write_text("LINKED\n", encoding="utf-8")
+    os.link(data / "linked.md", data / "twin.md")
+    (data / "open.md").write_text("OPEN\n", encoding="utf-8")
+    (data / "open.md").chmod(0o666)
+    (data / "target.md").write_text("TARGET\n", encoding="utf-8")
+    (data / "link.md").symlink_to(data / "target.md")
+    (data / "kept" / "still.md").write_text("STILL\n", encoding="utf-8")
+    roots = (os.fspath(data), os.fspath(repository.parent))
+    window = tuple(f"{data}/never-{index}.md" for index in range(16))
+    values = (
+        f"{data}/plain.md",
+        f"{data}/gone.md",
+        f"{data}/linked.md",
+        f"{data}/open.md",
+        f"{data}/link.md",
+        f"{repository}/README.md",
+        f"{data}/kept/still.md",
+        "/elsewhere/beneath/no/root.md",
+        *window,
+        f"{data}/past-the-window.md",
+    )
+    arguments = SnapshotOutsideInputsArguments(roots, values, limit=0, max_bytes=0, budget_ms=1_000)
+    beneath_a_root = tuple(index for index in range(len(values)) if index not in (6, 7))
+    answer = _ok(
+        _handler(repository, protected, folders=(data / "kept",)),
+        WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS,
+        arguments,
+    )
+    assert (answer.reads, answer.unlisted, answer.listed) == ((), beneath_a_root, (6,))
+    local = _ok(
+        _handler(repository, protected, mode="local", folders=(data / "kept",)),
+        WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS,
+        arguments,
+    )
+    assert (local.unlisted, local.listed) == ((), (6,))
 
 
 def test_listed_mode_refuses_a_declared_test_only_where_a_local_read_would_read_it(
