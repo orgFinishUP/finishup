@@ -710,6 +710,11 @@ answers bounded `workspace_call`s on a connection that declared it.
   file store at `<target root>/config/credential` where no platform store is usable.
 - `server login` reads the key from a masked prompt or, for automation, from a `--key-file`
   (owner-only, read once); `server logout` deletes it; `server remove` deletes it with the root.
+  The store the key is recorded in decides: a store it is not recorded in is only tidied, best
+  effort, so a locked platform store never blocks the logout of a key kept in a file, nor the
+  removal of an SSH target (which holds no key, so no store is asked). When the recorded platform
+  store cannot be used, `logout` refuses (`credential_store_unavailable`, the key stays) and
+  `remove` still removes the target and names the entry it left there, by target id.
 - `server login` checks the key with the server before storing it, alike for every approach
   (maintainer decision of 2026-11-07: the approaches and remote kinds behave the same; refusal is
   the last resort; say what happened, why, and the fix). A key the server refuses

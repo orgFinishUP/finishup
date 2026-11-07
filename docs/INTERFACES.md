@@ -4901,7 +4901,11 @@ or the owner switched servers inside it. `privacy decide-policy` stays `server_h
 **Credentials.** `finishup.client.credentials.CredentialSource` reads, stores and deletes one
 target's credential, so a later OAuth source can replace the API key. `KeyringOrFileCredential`
 uses the OS credential store (service `yoetz.server-credential.v1`, account = `target_id`) and,
-where none is usable, the owner-only file store at `<target root>/config/credential`. The
+where none is usable, the owner-only file store at `<target root>/config/credential`. `delete()`
+raises `credential_store_unavailable` only when the store the key is recorded in cannot be used;
+the other store is tidied best effort. `server remove` asks no store for an SSH target, and when
+the recorded platform store cannot be used it still removes the target and names, on stderr, the
+entry left there (service and target id). The
 credential never appears in argv, the environment, `target.json`, a registration, a log, hook
 output, an MCP frame or JSON output.
 
