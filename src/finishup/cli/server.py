@@ -1738,13 +1738,14 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
-    key_left = False
+    key_left = cleared = finished = False
     try:
         with registry_lock():
             # The selection goes first, so a new hook or command can no longer dial the target
             # while its connection is stopped (as ``use_target`` does).
             if selected == record.target_id or unreadable_selection:
                 clear_selection()
+                cleared = True
             if record.is_remote:
                 key_left = _remove_remote(record, root)
             else:
@@ -1759,11 +1760,16 @@ def server_remove(
                         err=True,
                     )
                     raise typer.Exit(_UNSAFE) from None
+        finished = True
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     except PathSafetyError as error:
         typer.echo(f"{error.reason_code}: the target folder is unsafe to remove", err=True)
         raise typer.Exit(_UNSAFE) from None
+    finally:
+        if cleared and not finished:
+            # A remove that did not finish keeps the switch it already made (SRV-2): say so.
+            _say_using_everyday()
     typer.echo(f"Removed server target {record.name} ({record.target_id}).")
     if key_left:
         from finishup.client.credentials import SERVER_CREDENTIAL_SERVICE
@@ -1774,9 +1780,13 @@ def server_remove(
             f"for {record.target_id} with your system's credential tool.",
             err=True,
         )
-    if selected == record.target_id or unreadable_selection:
-        typer.echo("Using this computer's everyday FinishUP server.")
-        _warn_open_sessions()
+    if cleared:
+        _say_using_everyday()
+
+
+def _say_using_everyday() -> None:
+    typer.echo("Using this computer's everyday FinishUP server.")
+    _warn_open_sessions()
 
 
 def _stop_for_remove(record: ServerTarget, root: Path) -> None:
@@ -1798,7 +1808,9 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
     deleted, and its connection stopped once more right before the folder goes (SRV-2): a process
     that still remembers the target, an MCP bridge, may have started it again meanwhile, and a
     folder is never deleted under a connection still serving it. A first stop that does not
-    finish changes nothing; a second one keeps the folder.
+    finish removes nothing (the caller says that a selection it cleared stays cleared). A second
+    one keeps the folder; a key already deleted stays deleted, the record says it holds none, and
+    the refusal says so.
     """
 
     from finishup.client.targets import remove_target_root
@@ -1808,15 +1820,31 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
     try:
         _stop_for_remove(record, root)
     except ServerCommandRefused:
+        key_deleted = record.credential is not None and not key_left
+        if key_deleted:
+            # ``server status`` must not report a key that is gone (the lock is held); a record
+            # that cannot be rewritten still gets the refusal that says the key went.
+            with contextlib.suppress(TargetError):
+                current = read_target(root)
+                if current is not None:
+                    write_target(root, replace(current, credential=None))
         raise ServerCommandRefused(
             "target_still_connected",
-            message=(
-                "the connection this client runs for that target started again and did not stop "
-                "in time, so its folder was kept; run the same command again"
-            ),
+            message=_STARTED_AGAIN_KEY_DELETED if key_deleted else _STARTED_AGAIN,
         ) from None
     remove_target_root(record)
     return key_left
+
+
+_STARTED_AGAIN: Final = (
+    "the connection this client runs for that target started again and did not stop in time, so "
+    "its folder was kept; run the same command again"
+)
+_STARTED_AGAIN_KEY_DELETED: Final = (
+    "the connection this client runs for that target started again and did not stop in time, so "
+    "its folder was kept, but its API key was already deleted; run the same command again, or "
+    "'finishup server login' to keep using that server"
+)
 
 
 def _delete_key_for_remove(record: ServerTarget, root: Path) -> bool:
