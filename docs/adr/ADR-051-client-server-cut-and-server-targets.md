@@ -859,8 +859,10 @@ answers bounded `workspace_call`s on a connection that declared it.
   the calls it was answering, so a server job already under way (the AI-powered review loop,
   observation verification) gets no more file text from here (a read already running in a worker
   thread finishes on this computer, but its answer is not sent), and its delivery of what the
-  hooks captured stops (what is left stays in this client's outbox). Then an SSH target's master
-  exits through its control socket. Every surface that switches says so by generated id and kind.
+  hooks captured stops (what is left stays in this client's outbox; it makes no last delivery, so
+  nothing reaches the server once this computer last reported zero-network). Then an SSH target's
+  master exits through its control socket. The choice's `1` switches before the change is made.
+  Every surface that switches says so by generated id and kind.
   When the agent still holds its lock after the wait, the selection is still cleared, and the
   command says so on stderr with `finishup server disconnect` as the way to finish it; that
   command itself then refuses with `service_unavailable` (phase `agent_stop`) rather than saying
