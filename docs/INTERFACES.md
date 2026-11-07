@@ -4675,9 +4675,9 @@ lock once it still holds no record (`remove_leftover_root`; otherwise `target_un
 `use`, `login` and `logout` read a target's record again under the registry lock after their
 slow step (the typed name, the key prompt and check) and change only their own field
 (authorization or `credential`); a target removed meanwhile is `target_unknown` (for `login`,
-after deleting the key it just stored) and its folder is never recreated. `server add` for any remote kind
-asks the outside-read mode on the trusted console inside its typed confirmation, after the
-disclosure and before the typed name: the question `client.server_folders.OUTSIDE_READ_QUESTION`
+after deleting the key it just stored) and its folder is never recreated. `server add` for any
+remote kind asks the outside-read mode on the trusted console inside its typed confirmation, after
+the disclosure and before the typed name: the question `client.server_folders.OUTSIDE_READ_QUESTION`
 with one line per mode (`OUTSIDE_READ_MODE_LINES`), answered `local` or `listed`; Enter alone or
 another word asks again, up to three answers, and then, or at end of input or an interrupt,
 nothing is added (`outside_reads_not_chosen`). `--outside-reads local|listed` answers it up
@@ -4778,12 +4778,12 @@ from the everyday installation's effective machine-scope policy, in a fresh `con
 enters `selection_override(None)` again itself.
 `server add|use` refuse `zero_network_in_force` from it (the terminal interface's `/server`
 "Use NAME" reads it in a worker thread and the typed confirmation on its loop thread with Python's
-default Ctrl-C handler, `cli.server.confirm_use_on_this_thread`, so an interrupt cancels it); when it is `unreadable` a marker that says
-zero-network refuses `zero_network_in_force` with the fixed sentence naming `reported_at`, and
-anything else refuses `network_policy_unreadable` (while a remote target is selected its text
-names `server connect local`, and `server use local` before `service unlock`, since `service
-start|unlock` are refused there). `find_zero_network_selection()` reads the
-selection file afresh (`read_selection_on_disk()`, never the memo) and returns a
+default Ctrl-C handler, `cli.server.confirm_use_on_this_thread`, so an interrupt cancels it);
+when it is `unreadable` a marker that says zero-network refuses `zero_network_in_force` with the
+fixed sentence naming `reported_at`, and anything else refuses `network_policy_unreadable` (while a
+remote target is selected its text names `server connect local`, and `server use local` before
+`service unlock`, since `service start|unlock` are refused there). `find_zero_network_selection()`
+reads the selection file afresh (`read_selection_on_disk()`, never the memo) and returns a
 `ZeroNetworkSelection(reason, target_id, kind, detail, policy_read, last_reported_at)` under
 `zero_network` (`policy_read="live"`), or under `unreadable` when the marker says zero-network
 (`last_reported`), never under an isolation variable or pin, with the closed `reason`
@@ -5261,11 +5261,11 @@ the connection's `workspace_call` frames. `connect_service`, `connect_service_on
 `workspace_binding_conflict`. `ServiceClient.workspace_binding` and `ServiceClient.workspace_handle`
 expose the hello-result's answer. A client with an agent runs at most four workspace calls at once
 in daemon worker threads (each in a copy of the connection's `contextvars` context, so a
-`selection_override` that opened it holds there) and writes each reply under its write lock, answering busy, deadline,
-reply-too-large and internal-error cases with closed reasons; a client without one still treats a
-`workspace_call` as `frame_invalid`. Closing the connection never waits for a running call: its
-daemon worker finishes or ends with the process, so a short-lived CLI exits after its command (an
-approved check such a worker started stays in its own process group).
+`selection_override` that opened it holds there) and writes each reply under its write lock,
+answering busy, deadline, reply-too-large and internal-error cases with closed reasons; a client
+without one still treats a `workspace_call` as `frame_invalid`. Closing the connection never waits
+for a running call: its daemon worker finishes or ends with the process, so a short-lived CLI exits
+after its command (an approved check such a worker started stays in its own process group).
 
 - `finishup.client.workspace_claim`: `workspace_claim(locator, salt)` (awaitable) and
   `workspace_claim_for_root(root, salt, worktree)` compute the claim with its worktree digest
