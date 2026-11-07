@@ -150,13 +150,75 @@ async def test_live_calls_wait_less_than_background_work() -> None:
         live = asyncio.create_task(
             hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=1.0)
         )
-    # Started just after the background call, the live call has already given up waiting.
-    with pytest.raises(WorkspaceAgentUnavailable) as caught:
-        await asyncio.wait_for(live, 1.0)
+        # Started just after the background call, the live call has already given up waiting.
+        with pytest.raises(WorkspaceAgentUnavailable) as caught:
+            await asyncio.wait_for(live, 1.0)
     assert caught.value.reason == "no_agent"
     assert not background.done()  # still inside the longer background wait
     await _register(hub, lambda call: _ok(call, _BASE))
     assert await background == _BASE
+
+
+async def _left_running(
+    hub: WorkspaceAgentHub, entered: str, channel: WorkspaceAgentChannel | None = None
+) -> tuple[asyncio.Task[object], dict[str, object]]:
+    """A live call that starts work and returns while the work goes on (a detached review).
+
+    ``entered`` says whether the work entered its own handler scope while the call was still
+    live, or only after it returned. The task is returned once the call has returned.
+    """
+
+    begun, returned = asyncio.Event(), asyncio.Event()
+    seen: dict[str, object] = {}
+
+    async def detached() -> object:
+        if entered == "after_return":
+            await returned.wait()
+        with workspace_call_deadline():  # the detached operation's own handler scope
+            begun.set()
+            await returned.wait()
+            seen["live"] = in_live_call()
+            return await hub.call(
+                _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=1.0
+            )
+
+    with live_call_scope(channel):
+        task = asyncio.create_task(detached())
+        if entered == "while_live":
+            await begun.wait()
+            assert in_live_call()
+    returned.set()  # the call returned: its caller stopped waiting, the work goes on
+    return task, seen
+
+
+@pytest.mark.parametrize("entered", ("while_live", "after_return"))
+async def test_work_a_live_call_left_running_waits_as_background_work(entered: str) -> None:
+    """ADR-051: the detached review its caller stopped waiting for waits 30 s for an agent, not
+    the live call's 5 s."""
+
+    hub = WorkspaceAgentHub(inline_wait_seconds=0.01, background_wait_seconds=5.0)
+    task, seen = await _left_running(hub, entered)
+    # Well past the live call's agent wait, the work is still waiting for an agent.
+    done, _pending = await asyncio.wait({task}, timeout=0.5)
+    assert not done
+    await _register(hub, lambda call: _ok(call, _BASE))
+    assert await asyncio.wait_for(task, _DEADLINE_SECONDS) == _BASE
+    assert seen == {"live": False}
+
+
+@pytest.mark.parametrize("entered", ("while_live", "after_return"))
+async def test_work_a_live_call_left_running_no_longer_prefers_its_connection(
+    entered: str,
+) -> None:
+    hub = _hub()
+    own: list[WorkspaceCall] = []
+    newer: list[WorkspaceCall] = []
+    channel = await _register(hub, lambda call: _ok(call, _BASE), sent=own)
+    await _register(hub, lambda call: _ok(call, _BASE), sent=newer)
+    task, _seen = await _left_running(hub, entered, channel)
+    assert await asyncio.wait_for(task, _DEADLINE_SECONDS) == _BASE
+    # Background work has no serving connection: the newest agent for the worktree answers.
+    assert (len(own), len(newer)) == (0, 1)
 
 
 @pytest.mark.parametrize(

@@ -5169,8 +5169,11 @@ a worker thread, never from the hub's own loop. `has_agent(handle)`, `bind_loop(
   `BACKGROUND_AGENT_WAIT_SECONDS = 30.0` for background work (the detached review, verification,
   sweeps, recovered jobs). The daemon marks each dispatched call with
   `live_call_scope(channel=None)` (`in_live_call()` reads it), naming the agent the serving
-  connection itself offered: a live call for that channel's handle goes to it first. Each call is
-  then bounded by the catalog's call deadline.
+  connection itself offered: a live call for that channel's handle goes to it first. The mark
+  holds only while the call is live: work the call left running once it returned (the detached
+  review whose caller stopped waiting or left, a timer it set) is background work from then on,
+  with the longer wait and no preferred agent, even inside a handler scope it entered while the
+  call was live. Each call is then bounded by the catalog's call deadline.
 - **The control call bounds its workspace calls.** The daemon runs each ready handler inside
   `workspace_call_deadline(deadline_at=None)` (the handler's own deadline on the loop clock, or
   none). A workspace call made there never waits past that deadline and is not sent when no time
