@@ -736,10 +736,11 @@ class OutsideInputsRead:
     ``listed``.
 
     ``unlisted`` are the indices, ascending, of the call's ``values`` the agent left unread
-    because they name an existing file or folder beneath a named root that this client's owner
-    has not listed for the server (``listed`` mode, ADR-051 decision 5). Every other value is
-    read as a local service reads it; a value that names nothing is not reported, as a local read
-    finds nothing there. Indices only: the answer never names a path the server did not send.
+    because they name an existing file or folder beneath a named root, one a local read would read
+    a file for, that this client's owner has not listed for the server (``listed`` mode, ADR-051
+    decision 5). Every other value is read as a local service reads it; a value that names
+    nothing, or only what a local read would not read, is not reported, as a local read finds
+    nothing there. Indices only: the answer never names a path the server did not send.
 
     ``listed`` are the indices, ascending, of the call's ``values`` that lie at or beneath a
     folder this client's owner listed for the server (``finishup server folders add``), in either
