@@ -5392,8 +5392,9 @@ without a handle is closed and raised as the server's state: `vault_locked` (ret
 service's own retryable lock reasons), or `service_unavailable` with phase
 `remote_service_not_running` (starting or stopping) or `remote_incompatible` (ready but unkeyed);
 the daemon's claim resolver re-opens a soft lock before keying. A client with an agent runs at most
-four workspace calls at once in daemon worker threads and writes each reply under its write lock,
-answering busy, deadline,
+four workspace calls at once in daemon worker threads (each in a copy of the connection's
+`contextvars` context, so a `selection_override` that opened it holds there) and writes each reply
+under its write lock, answering busy, deadline,
 reply-too-large and internal-error cases with closed reasons; a client without one still treats a
 `workspace_call` as `frame_invalid`. Closing the connection never waits for a running call: its
 daemon worker finishes or ends with the process, so a short-lived CLI exits after its command (an
