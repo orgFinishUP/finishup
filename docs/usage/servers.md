@@ -238,10 +238,13 @@ finishup server disconnect devbox
 ```
 
 FinishUP connects on demand, so you rarely need these. `connect` gets the connection to a server
-ready now and keeps it ready while you work; `disconnect` closes what `connect` opened. Neither
-stops the FinishUP service on the server. Choosing another server with `finishup server use`
-closes the connection to a server on another machine, a port or the web that you leave, in the
-same way.
+ready now and keeps it ready while you work; `disconnect` closes what `connect` opened. For a
+server on another machine, a port or the web, neither stops the FinishUP service on that server.
+For a server on this computer (`local`, a named local server, or no name while this computer's
+own server is in use), `connect` starts its FinishUP service and `disconnect` stops it, as
+`finishup service stop` does, including any check or review it was still running; it starts
+again on demand. Choosing another server with `finishup server use` closes the connection to a
+server on another machine, a port or the web that you leave, in the same way.
 
 ## Remove a server
 
