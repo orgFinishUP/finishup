@@ -761,13 +761,27 @@ answers bounded `workspace_call`s on a connection that declared it.
   `target_root_unsafe`, `target_record_invalid`) and `finishup server use local` as the way back,
   never as "no server". While this computer's policy cannot be read,
   nothing claims the zero-network state either way, so the displays show the item only while this
-  computer's service is running and unlocked, the one source of that policy. **Honest limits:**
-  while the owner keeps the target, and after switching until open agent sessions restart (a running
-  MCP bridge keeps the target it started with), traffic to it continues; and usually nothing on this
-  computer uses its own service while a remote target is selected, so once that service relocks or
-  stops when idle the displays can no longer tell the state and say nothing, although work still
-  goes to the target. Agents cannot change the policy or the selection, so no MCP tool surfaces or
-  answers the choice.
+  computer's service is running and unlocked, the one source of that policy.
+
+  **Switching stops the traffic it names.** The choice's `1`, `finishup server use local` and the
+  terminal interface's `/server` "Use local" all run `cli.server.use_target`, which clears the
+  selection and then stops what this client runs for the remote target it left, through that
+  target's runtime exactly as `server disconnect` does, never by pattern (`use` of another target
+  does the same for the one it leaves). With the edge relay that is the target's connector: it
+  makes its last bounded delivery of what the hooks already captured for that server (at most
+  2 seconds; what is left stays in this client's outbox), closes its background workspace agents,
+  so a server job already under way (the AI-powered review loop, observation verification) can no
+  longer read files here, and exits before the command returns. Every surface that switches says
+  so by generated id and kind. When the stop does not finish within its wait the selection is
+  still cleared, and the command says so on stderr with `finishup server disconnect` as the way to
+  finish it. **Honest limits:** while the owner keeps the target, and after switching until open
+  agent sessions restart (a running MCP bridge keeps the target it started with, and its next call
+  starts that target's connector again), traffic to it continues; a selection that cannot be read
+  names no target, so switching away from it stops nothing (`finishup server disconnect NAME`
+  stops a target's connection); and usually nothing on this computer uses its own service while a
+  remote target is selected, so once that service relocks or stops when idle the displays can no
+  longer tell the state and say nothing, although work still goes to the target. Agents cannot
+  change the policy or the selection, so no MCP tool surfaces or answers the choice.
 - **Which server's policy a command changes is said before and after** (maintainer principle "be
   clear on what happened", 2026-11-06). While a remote target is selected, `privacy tighten`,
   `privacy propose` and the privacy step of `setup run` (the trusted questionnaire, which the
@@ -912,14 +926,166 @@ the rows were captured there. The server holds none of it and must not borrow it
 
 ## Topology (approach-specific)
 
-<!-- APPROACH-TOPOLOGY -->
+### Approach A — edge relay: a connector per target, a gateway per HTTPS server
+
+Agent-facing processes do not change. Every hook, MCP bridge, CLI and terminal process keeps
+dialling `<root>/run/control.sock` with the same owner-only checks and peer-UID authentication. For
+a remote target root that endpoint is served by a vault-less **connector** on the client machine;
+the server's service still never opens a network socket.
+
+```
+SSH (owner-equivalent)
+  client host                                                    server host (same owner)
+  hook/MCP/CLI/TUI ─AF_UNIX─► <troot>/run/control.sock
+                              finishup connector (no vault) ─AF_UNIX─► <troot>/run/upstream.sock
+                                (ssh -M -S <troot>/run/m -L upstream.sock:<remote endpoint>)
+                              ════ one warm SSH connection, one channel per client connection ═══►
+                                                               sshd child (owner) ─AF_UNIX─► control.sock ─► service
+
+HTTPS and local_port
+  hook/MCP/CLI/TUI ─AF_UNIX─► <troot>/run/control.sock
+                              finishup connector (holds the API key)
+                              ════ HTTPS binding v1: sessions, calls, long-polls ════►
+                                                               finishup service gateway (same UID; key, scope)
+                                                                 └─AF_UNIX─► control.sock ─► service
+
+Both kinds: workspace_call frames flow server → client and workspace_reply frames client → server
+through the same relay; human-control and secret channels never leave the server host.
+```
+
+- **Connector** (`finishup.client.connector`; `finishup connector run --root <troot>`, hidden,
+  `client_only`). `service.client` starts it on demand for a remote root instead of
+  `service run`, and `finishup server connect` starts it explicitly; it never supersedes anything.
+  A client replaces a running connector (by its stamped pid) only when an older release of this
+  client started it; a newer one is kept, since it serves the upgraded clients and also relays a
+  process that predates the upgrade. It takes the singleton flock `<troot>/state/connector.lock`, stamped with its pid, release and
+  schema-manifest digest; binds `run/control.sock` through the existing Unix-socket listener,
+  clearing a stale endpoint only while it holds that lock; runs with a scrubbed environment (no
+  FinishUP variable and nothing secret-shaped; `SSH_AUTH_SOCK` is kept so OpenSSH can use the
+  owner's agent, and `DBUS_SESSION_BUS_ADDRESS` so an HTTPS target's key stored in a Linux
+  desktop's Secret Service can be read); refuses any hello that names a `workspace_locator`; and exits after 15 idle
+  minutes. It writes `<troot>/state/connector-status.json` (`yoetz.connector-status/1`:
+  `generation`, `phase` of `starting|ready|unavailable|stopped`, a closed `reason`, a
+  `correlation_id`, `pid`, `started_at`). A client whose connection the connector accepted and
+  closed reads that status and raises `service_unavailable` with the remote phase as `phase` (the
+  connector records a phase before it closes any connection it could not relay). A connection
+  accepted but not yet answered is waited for, never named; when the wait runs out, only a phase
+  recorded during it names the outage, and otherwise it is `remote_unreachable`. The
+  MCP availability latch keys on the status generation, which moves on every change of phase or
+  reason, so a repaired connection clears it.
+- **SSH.** One OpenSSH master per target with the fixed, secret-free argv `-M -S <troot>/run/m -N
+  -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o
+  StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o
+  ServerAliveCountMax=3 -p <port> -L <troot>/run/upstream.sock:<remote endpoint> <[user@]host>`.
+  Each local connection gets its own channel and an unparsed byte pump; only the first frame (the
+  hello) is read, to refuse a locator and to note a claim. When sshd cannot reach the server's
+  endpoint on a client's connection (an idle-stopped service), the connector runs the server's
+  own `<remote launcher> service start` once over the master, pinned to the remote root, and
+  retries; the connector's own background agents never start it, so a service the owner stopped
+  stays stopped until a client connects. `server add
+  ssh://…` records the endpoint and an absolute launcher from one interactive `ssh … finishup
+  service endpoint --json`, in which OpenSSH itself asks the owner to confirm a new host key. The
+  socket-path bound counts OpenSSH's 17-byte temporary suffix on the master path.
+- **HTTPS and `local_port`.** Each local connection is one gateway session of the HTTPS binding
+  v1 (see `INTERFACES.md`). A call is never posted twice: after an ambiguous failure the connector
+  only polls its result. Polls, cancels and workspace replies, which are safe to repeat, are retried
+  after a transient failure (up to three in a row), so one network blip does not end a relayed
+  connection and every call on it. When the hello declared a workspace agent, server frames arrive through
+  the `GET …/frames` long-poll and replies go out with `POST …/frames`. TLS uses the target's CA
+  file, or its `sha256:` pin of the leaf certificate, checked right after the handshake and before
+  any request byte. Only the connector reads the API key, and it rereads it after a refusal so a
+  key rotated with `server login` takes effect without a restart.
+- **Gateway** (`finishup.gateway`; `finishup service gateway run --listen H:P (--tls-cert F
+  --tls-key F | --behind-proxy)` and `service gateway key create|list|revoke`, all `server_host`).
+  A same-user process with no vault, storage or policy authority: it may import SHARED modules and
+  `service.client` only, and `cli/gateway.py` is the one client module allowed to launch it. Keys
+  are `fuk_<12 hex id>_<43 base64url secret>`, shown once on the trusted console or written to a
+  new owner-only file, and kept only as a salted `sha256` in `<state>/gateway/keys.json`
+  (`yoetz.gateway-keys/1`), compared in constant time; expiry and rotation are supported, and a
+  revoked key fails its next request and its sessions close. Each session holds one control
+  connection to the daemon (started on demand through `service.client.ensure_service_running()`,
+  no handshake of its own) and forwards the client's hello byte for byte. It refuses `Origin`
+  headers and locator hellos, enforces the key's scope (decision 9) by answering an out-of-scope
+  call with a synthesized `method_forbidden` control-result that is never forwarded, keeps results
+  per `(sid, rpc_id)` until fetched and readable for 60 seconds after (8 MiB per session), expires
+  a session after 120 seconds idle (an agent session also once no frames long-poll began for 40
+  seconds, so a client that died without `DELETE` stops being the agent workspace calls go to),
+  closes a session whose client left while its hello was held (a slow on-demand service start),
+  holds at most 64 per key, and stops with `gateway_stale` when
+  the daemon answers with another release's manifest. `--behind-proxy` serves plain HTTP on a
+  loopback address only. There is no access log; audit lines carry the key id, route, method,
+  status, closed reason and correlation id only, and the audit is bounded (one rotation at 8 MiB;
+  unauthenticated refusals written once per reason per minute, with a count of the rest). v1 has one principal (`owner`): claims pass
+  unchanged, so the owner's SSH and HTTPS clients reach the same tasks; per-principal claim
+  namespaces wait for multi-key hosting.
+- **Binding at the connect seam.** `service.client` binds every connection to a remote root:
+  `connect_service` and `connect_service_on_demand` turn the caller's locator into the target's
+  claim (`binding_for_active_root`), never send the path, mark the connection's transport
+  `connector`, and start the connector when none answers (the plain connect too: it is
+  client-owned and vault-less). Processes whose calls run workspace work while they are live
+  pass `serve_workspace=True` and answer the server's workspace calls on their own connection:
+  the CLI (`build_service_client`, which the menu and the terminal interface also use) and the
+  MCP bridge. Hooks stay claim-only, so their observation ingest is attested and their `start`
+  sends the handle. The claimed locator is first normalized to its worktree's top level by the
+  hooks' own rule (`canonical_workspace_locator`), so a bridge started in a subfolder and a hook
+  in the same worktree claim it alike and reach one handle. A workspace the shared root rule
+  cannot resolve is not claimed, and a remote
+  connection with no claim refuses an absolute `workspace_ref` instead of sending it. A target the
+  owner confirmed under an older disclosure is refused before any dial, with or without a
+  workspace to claim, as the retryable `service_unavailable` with phase
+  `target_reauthorization_required` (a record that can no longer be read: `target_root_is_remote`);
+  no connector is started and nothing is sent until `finishup server use NAME` renews it.
+- **Workspace agent location.** Per connection, the client process's own `ServiceClient` answers
+  through the relay. For work that outlives the call, the connector keeps one long-lived agent
+  connection per workspace whose claim it relayed, for 15 minutes after that workspace's last hello
+  or until the connector stops (`server disconnect`, a `server use` that leaves the target, or its
+  idle exit) (`open_background_agent(root, claim, dial)`); each linked worktree of one repository is its own
+  workspace here, with its own lease and agent, although the worktrees share the repository's claim
+  digest. It learns which local workspace a claim stands for from the root's owner-only
+  claimed-workspace index (`<troot>/state/claimed-workspaces/<64 hex>-<64 hex>.json`, named by the
+  claim's repository and worktree digests, `yoetz.claimed-workspace/1`), which the connecting
+  process writes and which never leaves the machine; it derives the claim again from the recorded
+  workspace with the target's salt and serves it only when the two match. The agent connection runs
+  the real `WorkspaceAgentHandler`, is relayed by the connector itself over a socket pair (so it
+  neither keeps the connector from idling out nor renews its own lease), and reconnects whenever the
+  service ends it. Over the same connection the connector delivers what the client's hooks captured
+  for that workspace (the observation outbox and spool, `ClientObservationDrain`, each row attested
+  by the client's own store) every 30 seconds and once more as it stops; hooks still drain once per
+  pass. Several connections may serve one worktree's handle (a CLI command, the MCP bridge, the
+  connector): a live call goes first to the agent its own connection offered, otherwise to the
+  newest, and a workspace an agent opened for observation verification and another agent does not
+  know (`handle_unknown`) is opened again on the answering agent and the call retried once. Every
+  answer comes from the task's own worktree; a linked worktree's change capture is refused
+  `unsafe_root` by the client's own adapter (its `.git` is a file), exactly as a service on that
+  machine refuses it.
+- **Remote remedies on every surface.** A remote target's failure is named by its closed phase
+  and its ADR-030 directive on the CLI, the menu, setup's next steps, the MCP bridge, the hook
+  contexts and the terminal interface: every `service_unavailable` from a remote root carries a
+  remote phase (the connector's recorded one, or `remote_unreachable` when it recorded none,
+  including a connection lost mid-session), and a locked vault on the remote server is
+  `remote_vault_unlock_required`. None of them names a local `service run` or `service unlock`,
+  a host or a target name; a local root keeps its exact text.
+- **Reverse states.** `server connect` / `server disconnect` (the stamped pid only, then `ssh -O
+  exit` for a master that outlived it; never by pattern), the same stop when `server use` leaves
+  the target (decision 8), and the 15-minute idle exit;
+  `service gateway key create` / `key revoke`; `service gateway run` / Ctrl-C or the supervisor.
+  `server status` and `server test` show the connector's state; `key list` shows the keys.
+- **Modules.** `finishup.client.connector` (relay, leases, drain), `connector_status`,
+  `connector_runtime`, `connector_agent` (the background agent), `claimed_workspaces` (the index),
+  `ssh_upstream`, `https_upstream`; `finishup.gateway` and `finishup.protocol.rest_binding`;
+  `finishup.cli.remote_remedy` (one place for every surface's remote remedy).
+- **Why this shape.** The credential and the warm connection live in one process per target, so a
+  short-lived hook pays a local Unix connect plus the round trips, never a TLS or SSH handshake,
+  and `httpx` never enters the hook import path. The cost is one supervised client process per
+  target and, for HTTPS, one gateway process on the server.
+
 
 ## Reverse states
 
 | Way in | Way out | Way to see it |
 |---|---|---|
 | `server add NAME …` | `server remove NAME [--select-local]` (disconnects, deletes the credential, disposes of the root; refuses the selected target unless `--select-local`) | `server list` |
-| `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue) | `server status` (names the deciding source) |
+| `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue; a remote target it leaves is stopped as `server disconnect` stops it) | `server status` (names the deciding source) |
 | `server login NAME` | `server logout NAME` | `server status` (credential present or absent, never the value) |
 | `server add NAME …` for a remote kind records the outside-read mode the owner answered (or `--outside-reads`; an official endpoint is `local` unrecorded) | `server folders mode NAME local` or `listed` changes it; `server remove NAME` removes it with the target | `server add` output, `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server folders mode NAME local` (trusted console and typed name whenever it records `local`, an official endpoint's included; without the console an official endpoint's `local` is left unrecorded) | `server folders mode NAME listed` (applies from the workspace agent's next read; a read already in progress may finish) | `server folders list NAME`, `server status [--json]`, `/server` status |

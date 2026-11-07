@@ -4728,7 +4728,14 @@ running async library under `anyio.run`. `surface_after_policy_change_async(inte
 after every committed policy change and returns `clear|switched|kept|warned`: only the read above
 runs in a worker thread; on the trusted console, read on the loop's thread with
 `signal.default_int_handler` installed for the read, `1` runs `use_target("local")` and anything
-else (Enter, end of input, Ctrl-C) keeps the target; otherwise one stderr line `<reason>: <facts>
+else (Enter, end of input, Ctrl-C) keeps the target. `cli.server.use_target(name, *, authorize=None)
+-> TargetSwitch` (`record`, the target now selected or `None`; `left`, the remote target the
+selection named before when the switch moved away from it; `left_open`; `left_lines()`) stops
+`left` through `runtime_for(left.kind).stop(target_root(left.target_id))` after the selection
+changed, as `server disconnect` does; `server use`, the choice and the terminal interface's
+`use_server` (`tui.models.ServerSwitch`: `indicator`, `left_lines`, `left_open`) print its lines,
+and a stop that did not finish goes to stderr (UNPROVEN in the terminal interface) with `finishup
+server disconnect` while the switch stands; otherwise one stderr line `<reason>: <facts>
 … finishup server use local …`. `machine_readable_answer(enabled)` (a context variable;
 `machine_readable_requested()` reads it) suppresses the choice for a `--json` command whose
 policy change happens further down (`privacy credential-heuristic|conversations|input-roots`).
@@ -5404,6 +5411,101 @@ claim-bound `observation_ingest`; `operator` adds `project`, `review`, `import_c
 `backup_*`, `restore_*`, `migrate_*`, `integration_*`, `observation_pause|resume|revoke` and the
 human-control and secret channels are never reachable over HTTPS; an out-of-scope call returns the
 existing `method_forbidden`.
+
+`finishup.protocol.rest_binding` (SHARED) holds the binding's constants, `KEY_SCOPES` and
+`method_allowed(scope, method, *, claim_bound)`, `parse_api_key`, and the `RestErrorContract`
+(`service/rest-error-1.0.0`) and `ServerInfoContract` (`service/server-info-1.0.0`) models.
+`fixtures/service/rest-error.case.json`, `rest-server-info.case.json` and
+`rest-method-forbidden.case.json` lock a transport error body, a `server-info` document and the
+exact bytes of the gateway's synthesized `method_forbidden` control-result (built from the
+session's `service_instance_id` and `service_generation`, never forwarded).
+
+**Edge relay (approach A).** These names exist only in the edge-relay pull request.
+
+- `finishup connector run --root <troot>` (hidden, `client_only`; `finishup.client.connector`):
+  the vault-less relay that binds a remote target root's `run/control.sock`. Exit 0 when stopped
+  or when another connector already serves the root, 2 for a root that is not a remote target's
+  own (or that an isolation variable or pin names differently), 20 when the endpoint could not be
+  bound. It refuses a hello carrying `workspace_locator`. For each claim a client hello carried it
+  opens `open_background_agent(root: Path, claim: WorkspaceClaim, dial: Dial) ->
+  BackgroundAgent | None` (a `BackgroundAgent` has `alive`, `drain()` and `aclose()`; `Dial` is
+  `Callable[[], Awaitable[AuthenticatedUnixStream]]`, a connection the connector relays over a
+  socket pair without passing its endpoint, which counts as no client activity and renews no
+  lease), kept for `AGENT_LEASE_SECONDS` (900) after that workspace's last client hello, or
+  until the connector stops (`server disconnect`, a `server use` that leaves the target, the idle
+  exit). Every
+  `DRAIN_INTERVAL_SECONDS` (30), and once more as it stops before closing the agents, it calls
+  each live agent's `drain()`.
+- `finishup.client.connector_agent`: `ConnectorAgent(binding, drain, dial)` holds one claim-bound
+  connection offering the real `WorkspaceAgentHandler` and reconnects (0.5 s, doubling to 30 s)
+  whenever the service ends it; `drain()` runs `ClientObservationDrain.drain` over it and never
+  raises. `open_connector_agent(root, claim, dial)` reads the claimed-workspace index, derives
+  the claim again from the recorded workspace with `binding_for_active_root(...,
+  serve_workspace=True)` and returns None unless it matches.
+- `<troot>/state/claimed-workspaces/<64 hex of the claim digest>-<64 hex of its worktree
+  digest>.json` (`yoetz.claimed-workspace/1`; owner-only, `finishup.client.claimed_workspaces`;
+  one record per claimed worktree, since linked worktrees share the claim digest):
+  `{"identity_kind", "schema", "workspace"}` with the workspace locator path the claim was
+  computed from. `record_claimed_workspace(root, claim, workspace) -> bool` (best effort,
+  idempotent) and `claimed_workspace(root, claim) -> WorkspaceLocator | None`. It never leaves the
+  client machine.
+- `<troot>/state/connector.lock`: the connector's singleton flock, stamped with `pid`, `version`
+  and `schema_manifest_digest`; `<troot>/state/connector-status.json`
+  (`yoetz.connector-status/1`): `schema`, `generation` (moves on every change of phase or reason
+  and across processes), `phase` (`starting|ready|unavailable|stopped`), `reason` (a remote
+  connection phase when `unavailable`; `idle_timeout|stop_requested|connector_failed` when
+  `stopped`), `correlation_id`, `pid`, `started_at`. Both are owner-only and hold no host, name or
+  path. `finishup.client.connector_status` reads and writes them and owns `spawn_connector(root)`
+  and `stop_connector(root)` (the stamped pid only).
+- `<troot>/run/m` and `<troot>/run/upstream.sock`: the OpenSSH master's control socket and its
+  stream-local forward (`finishup.client.ssh_upstream`; argv fixed by `master_argv`).
+- `finishup.client.connector_runtime.ConnectorTargetRuntime`: the `TargetRuntime` registered for
+  `ssh`, `https` and `local_port`.
+- `service.client`: for a remote root `connect_service(..., serve_workspace: bool = False)` and
+  `connect_service_on_demand(..., serve_workspace: bool = False)` turn the locator into the
+  target's claim (`binding_for_active_root`, over the locator normalized to its worktree's top
+  level by `canonical_workspace_locator`), record it in the claimed-workspace index, send no
+  `workspace_locator`, set the connection's `transport` to `connector`, and start the connector
+  (never `service run` or a supersede) when none answers; with `serve_workspace` the connection
+  also offers the workspace agent (the CLI's `build_service_client` and the MCP bridge pass it,
+  hooks do not). A local root ignores `serve_workspace`. A target confirmed under an older
+  disclosure is refused before any dial, with or without a locator (`service_unavailable`, phase
+  `target_reauthorization_required`; an unreadable record: `target_root_is_remote`), and no
+  connector is started. Every `service_unavailable` raised for a
+  remote root, including on a connection lost mid-session, names a remote phase: the connector
+  status's, or `remote_unreachable` when it recorded none. A release mismatch is
+  `remote_incompatible`, and `service_holder_identity()` reports the live connector with
+  `instance_id` `connector-<generation>`. `connect_service_stream(stream, client_kind, *,
+  workspace_binding, transport, timeout_seconds=5.0)` handshakes a claim-bound connection over a
+  stream a relay already holds; `ServiceClient.closed` and `ServiceClient.wait_closed()` let a
+  holder reconnect. `ensure_service_running()` returns a raw control stream to this root's
+  service, starting it on demand, for the gateway.
+- `client.workspace_ref.start_request_for_connection`: a connection whose `transport` is not
+  `unix` never sends an absolute `workspace_ref`, claim-bound or not (`WorkspaceRefNotPortable`).
+- `client.targets.active_target_is_remote() -> bool` (never raises) and
+  `finishup.cli.remote_remedy` (`remote_failure(error)`, `remote_remedy_line(error)`,
+  `remote_unreachable_directive()`, `remote_locked_directive()`): the remote remedy every client
+  surface names. A locked vault on a selected remote server resolves the CLI-local reason
+  `remote_vault_locked` to the directive `remote_vault_unlock_required`; the MCP bridge sends it as
+  `safe_details.continuation` beside `VAULT_LOCKED`. The hook SessionStart contexts carry the
+  remote phase and its token (`StatusOutcome.phase`, `unavailable_context(phase)`,
+  `locked_context()`).
+- `adapters.control.unix_socket.connect_owner_only_endpoint(path)`: the fixed endpoints' fences
+  (owner, mode 0700 directory, mode 0600 socket, one link, peer UID, unchanged inode) for an
+  explicit socket path.
+- `finishup service gateway run --listen HOST:PORT (--tls-cert F --tls-key F | --behind-proxy)`
+  and `finishup service gateway key create --label L --scope agent|operator [--expires-in-days N]
+  [--rotate KEY_ID] [--output-file F] | list [--json] | revoke KEY_ID` (`server_host`;
+  `finishup.gateway`). `run` exits 21 (`gateway_stale`) when the daemon answers with another
+  manifest. `<state>/gateway/keys.json` (`yoetz.gateway-keys/1`) holds `key_id`, `label`, `scope`,
+  `principal` (`owner`), `created_at`, `expires_at`, `revoked_at`, `last_used_at`, `salt` and
+  `digest` (`sha256(salt ‖ secret)`); `gateway/keys.lock` serializes writers. Audit lines go to
+  `<log dir>/gateway-audit.jsonl` with `event` (`gateway_request`), `correlation_id`, `route`,
+  `key_id`, `method`, `status` and `reason` only; every response carries
+  `FinishUP-Correlation-Id`. The file is renamed to `gateway-audit.jsonl.1` (replacing the previous
+  one) once it reaches 8 MiB. A refusal of a request no key authenticated is written at most once
+  per reason per minute; the next window first writes `event` `gateway_refusals_suppressed` with
+  that `reason` and the `count` not written.
 
 ### Several-agent setup batches (issue #1119)
 

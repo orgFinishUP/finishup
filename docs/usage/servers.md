@@ -107,9 +107,18 @@ Choose 1 or 2 (Enter keeps the server):
 
 Pressing Enter or Ctrl-C, or any answer but 1, keeps the server. Choosing 1 is `finishup server
 use local`. Without a terminal to ask in (a script, or a command asked for JSON), FinishUP
-switches nothing and prints the same facts with that command. Either way, restart open agent
-sessions after switching: they keep the server they started with until then. Choosing the server
-again needs the setting turned off first.
+switches nothing and prints the same facts with that command.
+
+Switching, whichever way you do it, also closes this computer's connection to that server, as
+`finishup server disconnect` does. Work the server had already started for you, such as a review
+still running, can then no longer read your files. As the connection closes it sends that server,
+for at most 2 seconds, what your agents' hooks had already recorded for it; anything left stays on
+this computer. If the connection does not close in time, FinishUP still switches and tells you to
+run `finishup server disconnect` with that server's name.
+
+Either way, restart open agent sessions after switching: they keep the server they started with
+until then, and their next request opens the connection to it again. Choosing the server again
+needs the setting turned off first.
 
 Until you switch, `finishup setup status --next`, `finishup server status` and `finishup server
 list`, the setup summary and the terminal interface's header and `/server` keep saying so, as
@@ -120,7 +129,8 @@ setting is on and say nothing about it, even though your work still goes to the 
 `finishup server status` always shows which server is chosen; `finishup server status --json`
 gives the same notice as its `zero_network_selection` member (null when there is nothing to say).
 If the saved server choice cannot be read, FinishUP says that instead of guessing, and `finishup
-server use local` clears it.
+server use local` clears it. It cannot tell then which server's connection to close: run
+`finishup server disconnect NAME` for a server on another machine you were using.
 
 ## Sign in to a web server
 
@@ -187,7 +197,9 @@ finishup server disconnect devbox
 
 FinishUP connects on demand, so you rarely need these. `connect` gets the connection to a server
 ready now and keeps it ready while you work; `disconnect` closes what `connect` opened. Neither
-stops the FinishUP service on the server.
+stops the FinishUP service on the server. Choosing another server with `finishup server use`
+closes the connection to a server on another machine, a port or the web that you leave, in the
+same way.
 
 ## Remove a server
 
@@ -404,10 +416,14 @@ elsewhere on this computer, and its size and dates, but never its contents.
 Use a server you trust with your project, choose local mode only for a server you trust as you
 trust FinishUP on this computer, and otherwise list only folders you would let it see.
 
-It runs inside your FinishUP clients while they are connected to the server, and keeps running
-after a call returns, because some work — a longer review, an approved check — happens later. If
-nothing on your computer answers in time, the receipt names exactly what could not be read; a check
-never passes because a read was missing.
+It runs inside your FinishUP clients while they are connected to the server: the FinishUP tools in
+your agent, the CLI and the terminal interface answer for the project they are working in. Some
+work happens after a call returns — a longer review, or an approved check after a hook saw a
+command — so the connection helper (below) also keeps a workspace agent for each project folder you
+used with that server, for 15 minutes after that folder was last used or until you disconnect
+from that server or switch away from it, and delivers what your agent's hooks recorded there. If
+nothing on your computer answers in time, the receipt names exactly what could not be read; a
+check never passes because a read was missing.
 
 ## Preparing the server
 
@@ -442,7 +458,60 @@ never passes because a read was missing.
   unless lingering is on for your account (`loginctl enable-linger`), or FinishUP runs in its own
   folder on the server. `finishup service endpoint --json`, run on the server, reports both.
 
-<!-- APPROACH-TOPOLOGY -->
+## How your computer reaches the server
+
+For a server on another machine, FinishUP runs a small **connection helper** on your computer, one
+per server. Your agent's hooks, the FinishUP tools in your agent, the CLI and the terminal
+interface all talk to that helper exactly as they talk to FinishUP on your own computer. The
+helper starts by itself when it is first needed, keeps the connection to the server open so each
+call is quick, and stops after 15 minutes without use. `finishup server connect NAME` starts it
+now and `finishup server disconnect NAME` stops it, and so does switching away from that server
+with `finishup server use`; `finishup server status NAME` shows whether it is connected and, if
+not, why.
+
+**SSH servers.** The helper uses your own OpenSSH setup: your keys, your SSH agent, your
+`~/.ssh/config` and your `known_hosts`. FinishUP never stores an SSH key and never asks for a
+password. It keeps one SSH connection open and sends each request over it. When you add the
+server, FinishUP asks the server once, over SSH, where its FinishUP service listens and which
+`finishup` it runs; if your computer has not seen that server's host key before, SSH asks you to
+confirm it then. If the server's FinishUP service has stopped while idle, the helper starts it
+again for you.
+
+**Web (HTTPS) servers.** On the server, its operator runs FinishUP's web gateway and gives you an
+API key:
+
+```text
+finishup service gateway key create --label my-laptop --scope agent --output-file ~/my-laptop.key
+finishup service gateway run --listen 0.0.0.0:8443 --tls-cert server.pem --tls-key server-key.pem
+```
+
+The key is shown only once (or written only to that new file, readable by its owner). If it
+cannot be shown or written, FinishUP revokes it at once, because nobody holds it. If that revoke
+fails too, the error names the key and the exact `finishup service gateway key revoke` command to
+run, and the key stays active until you run it. Copy the key to your computer as a file only you
+can read, then:
+
+```text
+finishup server add work https://finishup.example.com:8443 --ca-file ~/work-ca.pem
+finishup server login work --key-file ~/work.key
+finishup server use work
+```
+
+`server login` checks the key with the server before it stores it. Only the connection helper
+reads the key afterwards; your agent and its tools never see it.
+
+- **Key scopes.** An `agent` key allows what your agent's tools and hooks need: the six FinishUP
+  operations and the service status. An `operator` key also allows project and review commands,
+  privacy reads and tightening, and locking the service. Stopping the service, backup, restore,
+  migration and integration changes are never possible over the web; run them on the server.
+- **Other key commands.** `finishup service gateway key list` shows each key's id, label, scope,
+  whether it is active, expired or revoked, and when it was last used, never the key itself. `finishup service gateway key revoke KEY_ID`
+  stops a key at once, including connections already open with it. To replace a key, create the
+  new one with `--rotate KEY_ID`, log your computers in with it, then revoke the old one.
+- **Without your own certificate.** Behind a web server or proxy that handles TLS, run the gateway
+  with `--behind-proxy --listen 127.0.0.1:PORT`; it then accepts plain connections from that
+  machine only.
+
 
 ## Things that run on the server
 
