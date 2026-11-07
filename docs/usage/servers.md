@@ -133,11 +133,12 @@ Switching, whichever way you do it, also closes this computer's connection to th
 requests for your files, and closes the SSH connection to an SSH server. Work the server had
 already started for you, such as a review still running, then gets no more of your files, and
 the agent stops sending that server what your agents' hooks recorded; anything not yet sent stays
-on this computer. Nothing more is sent as it stops, so once this computer has reported the
-zero-network setting nothing reaches that server at all. If the workspace agent does not stop within 10 seconds, FinishUP still switches
-and tells you to run `finishup server disconnect` with that server's name. After switching,
-restart open agent sessions: they keep the server they started with until then. Choosing the
-server again needs the setting turned off first.
+on this computer. As it stops, the agent makes no last delivery: it only tells that server it is
+ending, and once this computer has reported the zero-network setting it sends nothing at all. If
+the workspace agent does not stop within 10 seconds, FinishUP still switches and tells you to run
+`finishup server disconnect` with that server's name. After switching, restart open agent
+sessions: they keep the server they started with until then. Choosing the server again needs the
+setting turned off first.
 
 Anything still pointed at a server elsewhere while this computer forbids all network use (an
 agent session or hook started before the change, or a server you kept with an earlier release) is
