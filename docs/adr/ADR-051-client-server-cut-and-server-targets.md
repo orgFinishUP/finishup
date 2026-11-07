@@ -558,9 +558,12 @@ answers bounded `workspace_call`s on a connection that declared it.
   the observation verification steps and the post-run hash — move to a worker thread at their call
   sites, with no other behaviour change. A composition built without the hub fails a claim-bound
   read as unavailable (`hub_unavailable`), never as a local read. A reviewer's agent reads and
-  its ignored-path probes wait no longer than the read's own stop leaves (the reviewer's per-read
-  budget, never the final judgment's reserve), and a listing's probes go in batches, none sent
-  once that stop has passed, so a remote review ends `deadline` where a local one would. An approved check
+  its ignored-path probes give the agent's answer no more time than the read's own stop leaves
+  (within the reviewer's per-read budget), and a listing's probes go in batches, none sent once
+  that stop has passed. The wait for an agent connection keeps its own bound (5 s live, 30 s
+  background), so such a read can end past its stop; one answered after its stop is discarded
+  and ends the review `deadline`, where a local one would, and one that finds no agent in that
+  wait ends it `workspace_agent_unavailable`. An approved check
   run by the agent ends within its call's deadline less a reply reserve; the transport caps a
   call at 300 s, so on a remote target an approval longer than about 285 s is cut there and
   records `timeout` rather than losing its result.
