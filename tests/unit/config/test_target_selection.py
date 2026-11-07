@@ -227,6 +227,55 @@ def test_selection_override_resolves_one_target_and_restores(home: Path) -> None
     assert active_root() == root
 
 
+def test_an_override_holds_for_its_own_context_only(home: Path) -> None:
+    """SRV-7: the terminal interface probes targets from worker threads. A block in one thread is
+    never seen by another, and blocks that end out of order never leave the process resolving
+    another block's root; a worker started with ``asyncio.to_thread`` sees its caller's."""
+
+    import asyncio
+    import threading
+
+    first, first_root = _local_target("first")
+    _second, second_root = _local_target("second")
+    _select(first)
+    assert active_root() == first_root
+
+    a_in, b_in, a_out = threading.Event(), threading.Event(), threading.Event()
+    seen: dict[str, Path | None] = {}
+
+    def block_a() -> None:
+        with selection_override(second_root):
+            a_in.set()
+            assert b_in.wait(5)
+            seen["a"] = active_root()
+        a_out.set()
+
+    def block_b() -> None:
+        assert a_in.wait(5)
+        with selection_override(None):
+            b_in.set()
+            assert a_out.wait(5)  # A ends first: the blocks end out of order
+            seen["b"] = active_root()
+
+    threads = [threading.Thread(target=block_a), threading.Thread(target=block_b)]
+    for thread in threads:
+        thread.start()
+    assert a_in.wait(5)
+    seen["main"] = active_root()  # while A's block is open in its own thread
+    for thread in threads:
+        thread.join(5)
+
+    assert seen == {"main": first_root, "a": second_root, "b": None}
+    assert active_root() == first_root
+
+    async def in_worker() -> Path | None:
+        return await asyncio.to_thread(active_root)
+
+    with selection_override(second_root):
+        assert asyncio.run(in_worker()) == second_root
+    assert active_root() == first_root
+
+
 def test_the_ambient_installation_dirs_name_both_names_whatever_the_root(home: Path) -> None:
     """The workspace agent's fence: the everyday installation's directories, as ``finishup``
     and as the legacy ``yoetz``, are named whichever root this process uses."""

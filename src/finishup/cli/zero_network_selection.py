@@ -321,7 +321,8 @@ def everyday_network_state() -> NetworkState:
     runs in a fresh ``contextvars`` context: ``asyncio.to_thread`` copies the caller's context
     into the worker, and under ``anyio.run`` (every CLI command) that context names the running
     async library, so a nested ``anyio.run`` would refuse with "Already running asyncio in this
-    thread". The everyday policy read needs nothing from the caller's context.
+    thread". The everyday policy read needs nothing else from the caller's context, and enters
+    the everyday installation's ``selection_override(None)`` again inside it.
     """
 
     import contextvars
@@ -334,7 +335,7 @@ def everyday_network_state() -> NetworkState:
     from finishup.ports.control import ControlClientKind, ControlError
     from finishup.service.client import connect_service
 
-    async def effective(request: JsonObject) -> bool | None:
+    async def read(request: JsonObject) -> bool | None:
         try:
             with anyio.fail_after(_POLICY_READ_SECONDS):
                 client = await connect_service(ControlClientKind.CLI, workspace_locator=None)
@@ -351,6 +352,11 @@ def everyday_network_state() -> NetworkState:
         if not isinstance(policy, Mapping):
             return None
         return cast(Mapping[str, object], policy).get("network_egress_permitted") is True
+
+    async def effective(request: JsonObject) -> bool | None:
+        # The fresh context it runs in starts without the caller's ``selection_override``.
+        with selection_override(None):
+            return await read(request)
 
     remember = not _explicit_source()
     with selection_override(None):
