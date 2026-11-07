@@ -5205,7 +5205,10 @@ confinement rules:
     then does not send) that lie beneath none of those values, as the count
     `CheckChangeCapture.outside_inputs_not_listed` (written only when not zero), and discloses
     `outside_reads_not_listed` (below); a task-start snapshot simply keeps no copy of an unlisted
-    value.
+    value. The reviewer's kept-copy root (`s{n}`) follows the same answer: when a review is
+    prepared, `ready_composition._copies_still_listed` asks `snapshot_outside_inputs` with
+    `limit` 0 (no bytes read) and offers only the copies it does not name `unlisted`; an agent
+    that cannot answer leaves the root out.
   Outside reads never enter the claimed workspace through an outside root and never enter a
   protected directory, whatever the server lists as excluded; an `lstat` candidate inside either
   is reported as not found. An exclusion naming a directory this user cannot examine does not
