@@ -469,3 +469,64 @@ async def test_every_page_of_a_paged_receipt_adds_only_the_producing_service(
         }
     else:
         assert members == []
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_no_page_of_a_paged_json_receipt_says_where_its_evidence_was_read(host: str) -> None:
+    """PRIVACY.md ("Receipts say so") and the servers guide promise the workspace-evidence and
+    observation lines only where they appear: a JSON receipt has no workspace-evidence section of
+    its own, so on every host each page of one delivered in pages names only the service, even
+    with hook-observed evidence, and the structured result never carries either line."""
+
+    wire = _receipt_result_wire()
+    document = cast(dict[str, JsonValue], wire["document"])
+    sections = cast(list[dict[str, JsonValue]], document["sections"])
+    sections[0] = {**sections[0], "body": "Plain receipt prose. " * 700}
+    coverage = cast(dict[str, JsonValue], wire["coverage"])
+    channels = cast(list[JsonValue], coverage["publication_channels"])
+    observed: dict[str, JsonValue] = {
+        **coverage,
+        "publication_channels": [*channels, "hook_observed"],
+    }
+    wire["coverage"] = observed
+    document["coverage"] = observed
+    ReceiptResultModel.model_validate(wire)
+    assert mcp_delivery_bytes(wire) > HOST_RESULT_BUDGET_BYTES
+    # Unpaged, the claim-bound text says both, as the guide states for Claude Code and Cursor.
+    whole = _text(
+        bridge.result_from_public_model(
+            ReceiptResultModel.model_validate(wire),
+            host_profile=cast(bridge.McpHostProfile, host),
+            attribution=_ATTRIBUTION,
+        )
+    )
+    assert CLIENT_ATTESTED_WORKSPACE_LINE in whole
+    assert CLIENT_ATTESTED_OBSERVATION_LINE in whole
+    pages: list[dict[str, JsonValue]] = []
+    position = 0
+    while True:
+        page = page_result(
+            wire,
+            method="receipt",
+            selector={"request_id": wire["request_id"]},
+            writer_id=cast(str, _status_arguments()["writer_id"]),
+            sink="agent_context",
+            position=position,
+        )
+        pages.append(page)
+        if page["next_cursor"] is None:
+            break
+        position = decode_handle(cast(str, page["next_cursor"])).position
+    assert len(pages) > 1
+    for page in pages:
+        delivered = bridge.result_from_public_model(
+            ReceiptResultModel.model_validate(page),
+            host_profile=cast(bridge.McpHostProfile, host),
+            attribution=_ATTRIBUTION,
+        )
+        text = _text(delivered)
+        structured = canonical_encode(cast(JsonValue, delivered.structuredContent)).decode()
+        assert text.endswith("\n" + _REACHED)
+        for line in (CLIENT_ATTESTED_WORKSPACE_LINE, CLIENT_ATTESTED_OBSERVATION_LINE):
+            assert line not in text
+            assert line not in structured

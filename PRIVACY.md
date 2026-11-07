@@ -376,12 +376,18 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   the server they started with. FinishUP remembers what this computer last reported, so the
   setup, server status and terminal views can say so even while this computer's FinishUP service
   is stopped or locked.
-- **Receipts say so.** A receipt from such a server, as FinishUP shows it to you or your agent,
-  states that workspace evidence was read on your machine by the FinishUP workspace agent and
-  attested over the connection, and, when hook observations contributed, that the server did not
-  verify the observation consent they came with. When the server cannot read how the task's
-  session was opened, the receipt says instead that it cannot tell where the evidence was read.
-  Raw JSON output carries only that second statement, as its `workspace_provenance` member.
+- **Receipts say so, with two exceptions for agents.** A text or markdown receipt from such a
+  server states, in its own workspace-evidence section, that workspace evidence was read on your
+  machine by the FinishUP workspace agent and attested over the connection, and, when hook
+  observations contributed, that the server did not verify the observation consent they came
+  with; that section reaches you and your agent on every host. A JSON receipt has no such section.
+  The `finishup` command and the terminal interface add the same lines when they show one, and so
+  does the text a Claude Code or Cursor agent reads, but two kinds of agent do not see them: a
+  Codex agent outside Codex's code mode (Codex hands it only the structured result), and any
+  agent that receives a long JSON receipt in pages. When the server cannot read how the task's
+  session was opened, every receipt, JSON included, says instead that it cannot tell where the
+  evidence was read; raw JSON output carries only that statement, as its `workspace_provenance`
+  member.
 
 ## How to inspect or report a privacy problem
 
