@@ -1123,13 +1123,15 @@ the rows were captured there. The server holds none of it and must not borrow it
   outbox drained, `server remove`, a client that is gone), the mirrored consent, trusted policy
   digest, session bindings and mappings stay in `<state dir>/observation-claims/` on the server,
   and the server's own revocation for that claim does not run. No FinishUP command lists or clears
-  claim stores yet, on either machine; deleting FinishUP's folders on the server removes them. They
-  authorize nothing on their own: every claim-bound row carries a fresh attestation that is
-  mirrored before it is ingested (a revoked or paused consent then refuses it as locally), and an
-  approved check runs only when the client's own trust admits it (`check_not_approved`
-  otherwise). An operator surface (server-host scope, through the service: list each claim's
+  claim stores yet, on either machine; only deleting the server's whole FinishUP state removes
+  them, and that destroys its vault, ledgers and every task, so it is no way to clear one claim
+  and the servers guide does not offer it. They authorize nothing on their own: every
+  claim-bound row carries a fresh attestation that is mirrored before it is ingested (a revoked
+  or paused consent then refuses it as locally), and an approved check runs only when the
+  client's own trust admits it (`check_not_approved` otherwise). An operator surface (server-host scope, through the service: list each claim's
   consent state, clear one) and a revoke sent on `server remove` while connected are the
-  follow-up; both need a control method of their own.
+  follow-up; both need a control method of their own. Follow-up owner: issue #903, the remote
+  service request this ADR scopes, until a dedicated issue is filed.
 
 ## Topology (approach-specific)
 
