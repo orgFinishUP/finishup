@@ -87,6 +87,9 @@ _CLIENT_TARGETS: Final = {
     # The zero-network guard and marker (ADR-051 decision 8) act only for a process whose
     # resolved root is this computer's everyday installation, not a selected server's.
     ("cli/zero_network_selection.py", "_on_everyday_root", "active_root"): 1,
+    # The MCP bridge's background work for a remote root (direct dial) records that root, the
+    # target whose SSH master it asks to exit once this computer is zero-network (decision 8).
+    ("client/agent_session.py", "start_remote_background_work", "active_root"): 1,
 }
 
 
