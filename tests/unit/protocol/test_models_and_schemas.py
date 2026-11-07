@@ -3513,12 +3513,12 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_854
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_855
     )  # ADR-051 decision 5 +146 (check-recorded 1.7.0 and receipt-document 1.4.0 repeat their
     # predecessors' refs); ADR-051 +2 (rest-error and server-info, one each); decision 5 +2 (server-target-status
     # outside_reads and its listed folder); decision 8 +3 (server-target-status
     # zero_network_selection, its target id and its detail token) +1 (its last_reported_at
-    # time, 2026-11-07); D4 +48 (receipt-result 1.5.0
+    # time, 2026-11-07) +1 (the probe's last_reported_at time, 2026-11-07); D4 +48 (receipt-result 1.5.0
     # repeats 1.4.0)
     # ADR-051 +239 (the control 2.10.0 envelopes carry 2.9.0's refs) +24 (isolation-report 1.1.0
     # repeats 1.0.0's refs, server-target-status adds its own); #1239 +8 status task_lifecycle (status-result 1.4.0 +4, inherited +4 by 1.5.0), +5 quiet period
