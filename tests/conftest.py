@@ -168,6 +168,24 @@ def _no_real_server_selection_read(  # pyright: ignore[reportUnusedFunction]
     # it puts ``_read_after_change`` back with its own stand-in for the service.
     monkeypatch.setattr(zero_network_module, "_after_change_state", lambda: "unreadable")
 
+    # The same for each repository's own policy (2026-11-07, round 4): after a change, and for the
+    # owner's 'server' commands, a repository is read again only through a test's own stand-in.
+    def _no_repository_read(_worktree: str) -> str:
+        return "unreadable"
+
+    monkeypatch.setattr(zero_network_module, "_repository_reader", _no_repository_read)
+    try:
+        import finishup.client.everyday_repository as everyday_repository_module
+    except ImportError:
+        return
+
+    async def _no_live_read(*_args: object, **_kwargs: object) -> object:
+        return everyday_repository_module.EverydayReads("unreadable", "unreadable")
+
+    # A session start asks this computer's FinishUP about the session's repository only through a
+    # test's own stand-in for the service.
+    monkeypatch.setattr(everyday_repository_module, "_live_read", _no_live_read)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_everyday_policy_marker(  # pyright: ignore[reportUnusedFunction]

@@ -359,7 +359,7 @@ def _questionnaire(
         printed.append("<proposed>")
         return None if proposal is None else PendingProposal(proposal, _EXPIRES)
 
-    async def decide(proposal_id: str) -> object:
+    async def decide(proposal_id: str, **_kwargs: object) -> object:
         decided.append(proposal_id)
         return SimpleNamespace(status="committed")
 

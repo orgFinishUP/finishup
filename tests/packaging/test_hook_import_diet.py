@@ -114,6 +114,24 @@ def test_client_targets_module_is_hook_safe() -> None:
     assert not offenders, f"finishup.client.targets eagerly imported {offenders}"
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "finishup.client.everyday_policy",
+        "finishup.client.repository_hold",
+        "finishup.client.everyday_repository",
+    ],
+)
+def test_the_repository_hold_modules_are_hook_safe(module: str) -> None:
+    """ADR-051 decision 8 (2026-11-07, round 4): a SessionStart hook reads and records what this
+    computer's FinishUP said about the session's repository; importing the modules costs no more
+    than the target records (the service client loads only when a read runs)."""
+
+    loaded = set(_modules(f"import {module}"))
+    offenders = sorted(loaded & set(_FORBIDDEN))
+    assert not offenders, f"{module} eagerly imported {offenders}"
+
+
 def test_finishup_application_package_import_is_lazy() -> None:
     eager = _modules("import finishup.application")
     assert "finishup.application.publish_work" not in eager, (

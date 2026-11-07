@@ -1431,6 +1431,11 @@ async def get_privacy_setup_snapshot(
         raw = await client.privacy_get_setup(JsonObject({"schema_version": "2.0.0"}))
     finally:
         await client.close()
+    # ADR-051 decision 8 (2026-11-07, round 4): on this computer's everyday root, remember what
+    # its FinishUP just said of this repository's own policy (every ceremony and its read-back).
+    from finishup.cli.zero_network_selection import remember_repository_setup
+
+    await remember_repository_setup(locator, raw)
     return _setup_snapshot_from_wire(raw)
 
 
@@ -1490,7 +1495,7 @@ async def _propose_pending(
     if result.get("outcome") == "decision_required" and pending is not None:
         return pending
     if result.get("outcome") == "tightening_applied":
-        await _after_policy_change()
+        await _after_policy_change(locator)
         return None
     raise ValueError("privacy_setup_proposal_invalid")
 
@@ -1516,12 +1521,14 @@ async def propose_privacy_candidate(
     )
 
 
-async def _decide(proposal_id: str) -> object:
+async def _decide(proposal_id: str, *, workspace_locator: Path | None = None) -> object:
     """Decide ``proposal_id`` in the trusted ceremony; remember this computer's policy after.
 
     An approval that would leave this computer zero-network while a server elsewhere is selected
     (selected after the proposal was made) is guarded in the ceremony itself (ADR-051 decision 8):
-    it raises ``ZeroNetworkChangeStopped`` when the owner cancels or it is refused.
+    it raises ``ZeroNetworkChangeStopped`` when the owner cancels or it is refused. After a
+    committed decision the repository at ``workspace_locator`` (the current folder when None),
+    whose proposal it was, is read again too.
     """
 
     from finishup.adapters.keys.os_keyring import AutoUnlockPassphraseStore
@@ -1539,7 +1546,7 @@ async def _decide(proposal_id: str) -> object:
     else:
         decision = await decide_policy_with_local_reauthentication(proposal_id, passphrase)
     if getattr(decision, "status", None) == "committed":
-        await _after_policy_change()
+        await _after_policy_change(workspace_locator)
     return decision
 
 
@@ -1562,12 +1569,13 @@ def _guard_zero_network(candidate: PrivacyPolicy, *, prompt: bool = True) -> Non
     )
 
 
-async def _after_policy_change() -> None:
-    """After a committed change: remember this computer's policy (ADR-051 decision 8)."""
+async def _after_policy_change(workspace_locator: Path | None = None) -> None:
+    """After a committed change: remember this computer's policy (ADR-051 decision 8), and the
+    policy of the repository at ``workspace_locator`` (the current folder when None)."""
 
     from finishup.cli.zero_network_selection import after_policy_change_async
 
-    await after_policy_change_async()
+    await after_policy_change_async(workspace_locator)
 
 
 def _confirmed_candidate(
@@ -1963,7 +1971,7 @@ async def _privacy_setup_questionnaire(
     from finishup.cli.zero_network_selection import ZeroNetworkChangeStopped
 
     try:
-        decision = await _decide(proposal_id)
+        decision = await _decide(proposal_id, workspace_locator=locator)
     except ZeroNetworkChangeStopped as stopped:
         # ADR-051 decision 8: a server elsewhere was selected after the proposal was made; the
         # owner cancelled, or was told why and the one fix. Nothing was approved.

@@ -840,6 +840,13 @@ async def provider_status_report(
                     effective = None
                 if isinstance(effective, Mapping):
                     plain = cast(Mapping[str, object], dict(effective))
+                    # ADR-051 decision 8 (2026-11-07, round 4): on this computer's everyday root,
+                    # remember what its FinishUP just said of this repository's own policy.
+                    from finishup.cli.zero_network_selection import remember_repository_setup
+
+                    await remember_repository_setup(
+                        Path.cwd() if workspace_locator is None else workspace_locator, plain
+                    )
                     raw_grant = plain.get("grant_state")
                     raw_migration = plain.get("migration_state")
                     if raw_grant in {"granted", "missing"}:

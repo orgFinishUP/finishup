@@ -407,3 +407,47 @@ async def test_a_local_target_or_none_is_never_held(home: Path, tmp_path: Path) 
         local, _local_root = targets.new_local_target("work")
     assert require_sendable(local, root) is None
     assert require_sendable(None, root) is None
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "finishup.client.everyday_policy",
+        "finishup.client.repository_hold",
+        "finishup.client.everyday_repository",
+    ],
+)
+def test_the_hold_modules_import_only_hook_safe_modules(module: str) -> None:
+    """A hook may import them: no CLI framework, wire models, service client or network client
+    loads until a read actually runs (the hook import diet, ``tests/packaging``)."""
+
+    import sys
+
+    src = Path(__file__).resolve().parents[3] / "src"
+    probe = (
+        f"import json, sys; sys.path.insert(0, {os.fspath(src)!r})\n"
+        f"import {module}\n"
+        "print(json.dumps(sorted(sys.modules)))\n"
+    )
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and source
+        [sys.executable, "-I", "-c", probe],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+    loaded = set(json.loads(completed.stdout))
+    forbidden = {
+        "pydantic",
+        "typer",
+        "anyio",
+        "httpx",
+        "keyring",
+        "finishup.protocol.models",
+        "finishup.service.client",
+        "finishup.cli.app",
+        "finishup.cli.render",
+        "finishup.client.connector",
+        "finishup.client.credentials",
+        "finishup.client.target_runtime",
+    }
+    assert not loaded & forbidden
