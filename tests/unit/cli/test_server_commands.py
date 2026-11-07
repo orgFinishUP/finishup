@@ -1511,10 +1511,52 @@ def test_a_locked_platform_store_never_blocks_removing_a_target_or_logging_out(
     assert not targets.target_root(kept.target_id).exists()
     assert left.stderr == (
         "Its API key stays in the platform credential store, which could not be used now (it may "
-        f"be locked): unlock it, then delete the entry '{SERVER_CREDENTIAL_SERVICE}' for "
-        f"{kept.target_id} with your system's credential tool.\n"
+        "be locked, or this session cannot reach it): unlock it, then delete the entry "
+        f"'{SERVER_CREDENTIAL_SERVICE}' for {kept.target_id} with your system's credential tool.\n"
     )
     assert "kept.example" not in left.output
+
+
+def test_a_key_in_a_platform_store_that_cannot_be_loaded_now_is_kept_and_named(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-4: a key recorded in the platform store, on a machine where no platform store can be
+    loaded now (a Linux desktop reached over SSH, with no D-Bus session), was skipped: ``logout``
+    said no key was stored and recorded none, and ``remove`` said nothing about the key it left.
+    Now ``logout`` refuses and keeps the record, and ``remove`` names the entry it left."""
+
+    keyring = _MemoryKeyring()
+    store: object = keyring
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: store)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
+    fu = targets.find_target("fu")
+    assert fu.credential == "keyring"
+    store = None  # no platform store can be loaded in this session
+
+    logout = _invoke("logout", "fu")
+    assert logout.exit_code == 20
+    assert logout.stdout == ""
+    assert logout.stderr == (
+        "credential_store_unavailable: the API key is in the platform credential store, which "
+        "could not be used now (it may be locked, or this session cannot reach it), so it was "
+        "kept; unlock it, then run the same command again\n"
+    )
+    assert targets.find_target("fu").credential == "keyring"
+    assert len(keyring.entries) == 1
+
+    removed = _invoke("remove", "fu")
+    assert removed.exit_code == 0, removed.output
+    assert not targets.target_root(fu.target_id).exists()
+    assert removed.stderr == (
+        "Its API key stays in the platform credential store, which could not be used now (it may "
+        "be locked, or this session cannot reach it): unlock it, then delete the entry "
+        f"'{SERVER_CREDENTIAL_SERVICE}' for {fu.target_id} with your system's credential tool.\n"
+    )
+    assert len(keyring.entries) == 1
 
 
 def test_a_shared_key_file_is_refused(

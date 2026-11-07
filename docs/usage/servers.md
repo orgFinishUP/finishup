@@ -181,9 +181,11 @@ finishup server logout team
 file only you can read. FinishUP keeps the key in your system's credential store, or in a file only
 you can read where no credential store is usable. It never puts the key in a command line, an
 environment variable, a settings file, a log, a message your agent can read, or JSON output.
-`logout` deletes it. The server's operator gives you the key; a key has a scope, and an `agent` key
-allows what your agents need while an `operator` key also allows management reads such as privacy
-status.
+`logout` deletes it. If your system's credential store holds the key but cannot be used right now
+(for example, it is locked, or this session cannot reach it), `logout` keeps the key, says so, and
+asks you to run it again once the store can be used. The server's operator gives you the key; a key
+has a scope, and an `agent` key allows what your agents need while an `operator` key also allows
+management reads such as privacy status.
 
 `login` checks the key with the server before keeping it. If the server refuses the key, or runs
 another FinishUP release, or its certificate is not the one you trusted, nothing is stored and
@@ -260,11 +262,11 @@ back to the default first. If the connection to that server does not close in ti
 the server and asks you to run it again. The switch back to the default stays, and `remove` says so.
 If the connection started again after the key was deleted, the key stays deleted, and the refusal
 says so: run `remove` again, or `finishup server login` to keep the server. If your system's
-credential store holds the server's API key but cannot be used right now (for example, it is
-locked), `remove` still removes the server and tells you which entry to delete there yourself.
-Removing a local server deletes its tasks and vault; removing a server on another machine leaves
-that server untouched. An agent session that was still using the removed server stops reaching
-FinishUP and says so until you restart it.
+credential store holds the server's API key but cannot be used right now (for example, it is locked,
+or this session cannot reach it), `remove` still removes the server and tells you which entry to
+delete there yourself. Removing a local server deletes its tasks and vault; removing a server on
+another machine leaves that server untouched. An agent session that was still using the removed
+server stops reaching FinishUP and says so until you restart it.
 
 If adding or removing a server was interrupted, `list` may name a leftover folder (`t_` and eight
 characters) that holds no server. FinishUP does not use it; `finishup server remove` with that

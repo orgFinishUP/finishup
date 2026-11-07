@@ -1751,8 +1751,9 @@ def server_remove(
 
         typer.echo(
             f"Its API key stays in the platform credential store, which could not be used now "
-            f"(it may be locked): unlock it, then delete the entry '{SERVER_CREDENTIAL_SERVICE}' "
-            f"for {record.target_id} with your system's credential tool.",
+            f"(it may be locked, or this session cannot reach it): unlock it, then delete the "
+            f"entry '{SERVER_CREDENTIAL_SERVICE}' for {record.target_id} with your system's "
+            f"credential tool.",
             err=True,
         )
     if cleared:
@@ -1970,7 +1971,8 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
             if current is not None:  # one removed meanwhile keeps no record to update
                 write_target(root, replace(current, credential=None))
     except CredentialError as error:
-        raise ServerCommandRefused(error.reason)
+        kept = error.reason == "credential_store_unavailable" and record.credential == "keyring"
+        raise ServerCommandRefused(error.reason, message=_KEY_KEPT if kept else None) from None
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     typer.echo(
@@ -1978,6 +1980,13 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
         if removed
         else f"No API key was stored for {record.target_id}."
     )
+
+
+_KEY_KEPT: Final = (
+    "the API key is in the platform credential store, which could not be used now (it may be "
+    "locked, or this session cannot reach it), so it was kept; unlock it, then run the same "
+    "command again"
+)
 
 
 def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> str:
