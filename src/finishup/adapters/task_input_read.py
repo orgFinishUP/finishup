@@ -64,8 +64,10 @@ __all__ = [
     "MAX_TASK_INPUT_READ_BYTES",
     "ReadDeadline",
     "clear_cut",
+    "declared_test_readable",
     "declared_test_top",
     "list_beneath",
+    "outside_inputs_readable",
     "outside_read_window",
     "read_declared_test",
     "read_text_beneath",
@@ -638,11 +640,60 @@ class _OutsideWalk:
         entry = _entry_beneath(opened[2], opened[1], self.trust)
         return entry is not None and (stat.S_ISREG(entry.st_mode) or self.trust.directory(entry))
 
+    def reads_something(self, value: str) -> bool:
+        """Whether the walk reads a file for ``value``, as ``_outside_files`` takes it; metadata
+        only, never content.
+
+        A file must pass the file trust test on a trusted way down; a directory (a root itself
+        included) must offer at least one such file among those the read lists for it.
+        """
+
+        opened = self.located_open(value)
+        if opened is None:
+            return False
+        root, relative, descriptor = opened
+        files = (
+            _listed_files(descriptor, relative, MAX_TASK_INPUT_FILES, self.trust)
+            if value.endswith("/")
+            or not relative
+            or _is_directory_beneath(descriptor, relative, self.trust)
+            else [relative]
+        )
+        for file in files:
+            if _folded_inside(posixpath.join(root, file.decode("utf-8")), self.folded):
+                continue
+            entry = _entry_beneath(descriptor, file, self.trust)
+            if entry is not None and self.trust.file(entry):
+                return True
+        return False
+
     def close(self) -> None:
         for descriptor in self._descriptors.values():
             if descriptor is not None:
                 os.close(descriptor)
         self._descriptors.clear()
+
+
+def outside_inputs_readable(
+    roots: tuple[str, ...], values: tuple[str, ...], *, excluded: tuple[str, ...] = ()
+) -> frozenset[int]:
+    """The indices of ``values`` for which ``read_outside_inputs`` with the same roots and
+    exclusions would read a file: the same trusted walk, its hidden, credential-named and
+    home-private refusals and its directory and file trust tests (owner, a single link, writable
+    by no other account), on metadata only, never content.
+
+    A workspace agent in ``listed`` mode (ADR-051 decision 5) reports a value it left unread only
+    where this answers yes, so it never counts what a local read would not read either, and
+    listing its folder then reads what was counted.
+    """
+
+    walk = _OutsideWalk.opened(roots, excluded)
+    if walk is None:
+        return frozenset()
+    try:
+        return frozenset(index for index, value in enumerate(values) if walk.reads_something(value))
+    finally:
+        walk.close()
 
 
 def outside_read_window(
@@ -849,20 +900,10 @@ def declared_test_top(location: str) -> tuple[str, str] | None:
     return top, rest
 
 
-def read_declared_test(
-    location: str, *, excluded: tuple[str, ...], expired: Callable[[], bool] = lambda: False
-) -> bytes | None:
-    """The bytes of one agent-declared test file (issue #1220), or ``None``; never raises.
-
-    ``location`` is the absolute, normalized path ``kernel.declared_checks`` admitted by shape.
-    The read is the outside read's walk with ``/`` plus the first component as its root: every
-    directory on the way and the file pass the same trust test, hidden and credential-named
-    components are refused, ``excluded`` (FinishUP's own directories) is never entered, and a
-    file that changes while it is read is not returned. A first component that is a link root
-    owns (``/tmp`` or ``/var`` on macOS) is replaced by its target first; no other link is
-    followed. Beneath the home directory its private trees and files are refused too. Only UTF-8
-    text of at most 1 MiB with no NUL byte is returned.
-    """
+def _declared_test_walk(location: str) -> tuple[str, str] | None:
+    """``(top, rest)`` that ``read_declared_test`` reads ``location`` beneath, or ``None`` when
+    its own fences refuse it: not absolute and normalized, in a system directory by spelling
+    (case-folded too) or identity, or in the home directory's private state."""
 
     if (
         not location.startswith("/")
@@ -885,6 +926,51 @@ def read_declared_test(
         or home_private_location(resolved)
     ):
         return None
+    return top, rest
+
+
+def declared_test_readable(location: str, *, excluded: tuple[str, ...]) -> bool:
+    """Whether ``read_declared_test`` with these arguments would open a file at ``location``: its
+    own fences and the trusted walk to a file that passes the file trust test, on metadata only,
+    never content. A file it opens may still not be text it returns (binary, empty, over 1 MiB).
+
+    A workspace agent in ``listed`` mode (ADR-051 decision 5) refuses a declared test it does
+    not admit only where this answers yes, and reads any other as nothing, as locally.
+    """
+
+    walked = _declared_test_walk(location)
+    if walked is None:
+        return False
+    opened = _reviewer_open(walked[0], walked[1], excluded)
+    if opened is None:
+        return False
+    descriptor, path, trust = opened
+    try:
+        entry = _entry_beneath(descriptor, path, trust)
+    finally:
+        os.close(descriptor)
+    return entry is not None and trust.file(entry)
+
+
+def read_declared_test(
+    location: str, *, excluded: tuple[str, ...], expired: Callable[[], bool] = lambda: False
+) -> bytes | None:
+    """The bytes of one agent-declared test file (issue #1220), or ``None``; never raises.
+
+    ``location`` is the absolute, normalized path ``kernel.declared_checks`` admitted by shape.
+    The read is the outside read's walk with ``/`` plus the first component as its root: every
+    directory on the way and the file pass the same trust test, hidden and credential-named
+    components are refused, ``excluded`` (FinishUP's own directories) is never entered, and a
+    file that changes while it is read is not returned. A first component that is a link root
+    owns (``/tmp`` or ``/var`` on macOS) is replaced by its target first; no other link is
+    followed. Beneath the home directory its private trees and files are refused too. Only UTF-8
+    text of at most 1 MiB with no NUL byte is returned.
+    """
+
+    walked = _declared_test_walk(location)
+    if walked is None:
+        return None
+    top, rest = walked
     try:
         read = read_text_beneath(top, rest, excluded=excluded, expired=expired)
     except ReadDeadline:

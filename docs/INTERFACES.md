@@ -5075,8 +5075,11 @@ confinement rules:
     the claimed worktree nor at
     or beneath an admitted folder is left unread, and its index joins the answer's `unlisted`
     when it names something that exists and passes the outside-input candidate rule (no hidden
-    component, not credential-named, in no system or protected directory); one that names
-    nothing is not reported, as a local read finds nothing there. The rest is read: the call
+    component, not credential-named, in no system or protected directory) and the local read's
+    own trusted metadata walk would read a file for it (`task_input_read.
+    outside_inputs_readable`, no content read); one that names nothing, or only what the local
+    read would not read (a hard-linked file, one others may write, a home-private tree), is not
+    reported, as a local read finds nothing there. The rest is read: the call
     walks the named roots that are admitted or hold an admitted folder, and the listed folders,
     for the values it kept, and each input keeps the root it was read beneath
     (`TaskInputFile.root`); a named root with no value beneath it is left out unopened. The
@@ -5099,8 +5102,10 @@ confinement rules:
   it (amended 2026-11-07). In mode `listed` it reads a location strictly beneath the claimed root
   (handle-relative, or absolute under the root's spelling) that Git answers is not ignored (next
   item), or one at or beneath a listed folder; an existing location (one `lstat` finds that the
-  outside-input candidate rule would look at) that is neither is `root_not_admitted`, and one
-  that does not exist reads as `None`, as locally. Both comparisons are made on the location as
+  outside-input candidate rule would look at) that is neither is `root_not_admitted` when the
+  local read's fences and walk would open it (`task_input_read.declared_test_readable`, no
+  content read), and one that does not exist, or that the local read would not open, reads as
+  `None`, as locally. Both comparisons are made on the location as
   written and as the local read walks it (`task_input_read.declared_test_top`: a first component
   that is a root-owned link to a directory at most two levels deep, macOS `/tmp` or `/var`, is
   replaced by its target). One read outside the claimed root in mode `listed` also excludes the
