@@ -5158,7 +5158,12 @@ handshake (`register(*, handle, declaration, service_instance_id, service_genera
 worktree=None)`) and unregisters it on close (`unregister(channel)`), which fails its pending calls
 at once. A claim on a locked service binds no handle and no agent; the claim hello first re-opens
 a soft lock (idle, session lock, suspend) as a first request would, while a hard lock keys
-nothing. Every channel under one handle serves one worktree: `register` refuses a channel whose
+nothing. Such a connection is never served as an unbound one: `ServiceDaemon.dispatch(...,
+claim_unkeyed=True)` answers every method but `service_status`, `service_lock` and
+`service_stop` with `vault_locked` (retryable unless a hard lock holds), and the daemon ends the
+connection once a ready generation is published (one whose vault is ready by the end of its
+handshake ends at once), so its client, a background agent included, connects again and its
+hello gets a handle. Every channel under one handle serves one worktree: `register` refuses a channel whose
 `worktree` digest differs from a live channel's under the same handle (`ValueError("workspace_agent_worktree_conflict")`; the daemon
 records that token and closes the connection), and a call for a handle with no channel fails
 `no_agent` rather than reaching another worktree's agent. `async call(handle, operation, arguments, *,

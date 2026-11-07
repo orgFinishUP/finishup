@@ -261,7 +261,11 @@ resource ripple.
   `start`.) A claim-bound connection with no handle exists only because the server's vault was not
   ready at hello: it sends no start, whatever its `workspace_ref`, and no observation row (never a
   path) and answers the retryable `vault_locked`, so the client replaces the connection and the
-  first call after the unlock gets a handle.
+  first call after the unlock gets a handle. The server holds the same line: it never serves such
+  a connection as an unbound one, answering every call that needs the ready service
+  `vault_locked` (retryable unless a hard lock holds), and it ends the connection once a ready
+  generation is published, so a background agent, which sends no such call, connects again and
+  gets a handle.
 - **What stays identical.** Framing (6 MiB frames, 1 MiB ordinary), all 32 methods and their
   bodies, `rpc_id` multiplexing and cancel, the client-kind gate and the client's exact-set check,
   and idempotency by `(installation_id, request_id)`. The YZH1 human-control and YZS1 secret

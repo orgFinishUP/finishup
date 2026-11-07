@@ -491,6 +491,28 @@ def _remaining_deadline_ms(deadline_ms: int | None, deadline_at: float | None) -
     return max(0, int((deadline_at - asyncio.get_running_loop().time()) * 1_000))
 
 
+async def _read_until[T](reading: Awaitable[T], ended: asyncio.Event | None) -> T:
+    """What ``reading`` returns; ``TimeoutError`` (the connection ends) once ``ended`` is set.
+
+    ``reading`` is cancelled when ``ended`` comes first, or when the caller is cancelled.
+    """
+
+    if ended is None:
+        return await reading
+    read = asyncio.ensure_future(reading)
+    wake = asyncio.ensure_future(ended.wait())
+    try:
+        await asyncio.wait({read, wake}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        wake.cancel()
+        if not read.done():
+            read.cancel()
+        await asyncio.gather(read, wake, return_exceptions=True)
+    if read.cancelled():
+        raise TimeoutError
+    return read.result()
+
+
 async def _acquire_dispatch_gate(gate: asyncio.Lock, deadline_ms: int | None) -> None:
     """Acquire one dispatch gate with the caller's bounded wait, if any."""
 
@@ -1012,6 +1034,9 @@ class ServiceDaemon:
         # Set by each hook observation ingest; the sweeper coalesces a burst into one early pass.
         self._observation_ingest_wake = asyncio.Event()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
+        # One event per claim-bound connection whose claim its hello could not key (the vault was
+        # not ready): set once a ready generation is published, which ends that connection.
+        self._unkeyed_claims: set[asyncio.Event] = set()
 
     @property
     def composition(self) -> ServiceComposition:
@@ -1170,6 +1195,9 @@ class ServiceDaemon:
             self._state_reason = "none"
             self._auto_unlock_reason = "none"
             self._soft_reready_activation_failures = 0
+            for unkeyed in tuple(self._unkeyed_claims):
+                # Each such connection ends, so its client connects again and gets a handle.
+                unkeyed.set()
         except BaseException:
             if self._application is partial:
                 self._application = None
@@ -1303,9 +1331,16 @@ class ServiceDaemon:
         *,
         projection_context: ClientProjectionContext | None = None,
         repository_privacy_context: RepositoryPrivacyContext | None = None,
+        claim_unkeyed: bool = False,
         _defer_stop: bool = False,
     ) -> ControlResult:
-        """Validate, admit, execute, project, and correlate one ordinary call."""
+        """Validate, admit, execute, project, and correlate one ordinary call.
+
+        ``claim_unkeyed`` marks a claim-bound connection whose claim its hello could not key
+        (ADR-051): it names no workspace, so no call that needs the ready service is served on it
+        as if it were unbound; each is answered ``vault_locked`` and its client replaces the
+        connection.
+        """
 
         try:
             try:
@@ -1337,6 +1372,16 @@ class ServiceDaemon:
                 body = self.status()
             elif request.method is ControlMethod.SERVICE_STOP:
                 body = ServiceStopResult()
+            elif claim_unkeyed:
+                # Never served unbound: no claim rule would apply, and a task call would be fenced
+                # with a remedy that is wrong for a claim. A fresh connection gets a handle once
+                # the vault is ready; until a hard lock is lifted, no retry helps.
+                raise ControlError(
+                    "vault_locked",
+                    retryable=self._composition.vault.ready
+                    or self._state_reason in _SOFT_LOCK_AUTO_READY_REASONS
+                    or self._state_reason == "none",
+                )
             else:
                 body = await self._dispatch_ready(
                     projection_context, request, repository_privacy_context
@@ -2221,6 +2266,7 @@ class ServiceDaemon:
         writes = _FrameWrites()
         hub = self._composition.workspace_hub
         channel: WorkspaceAgentChannel | None = None
+        unkeyed: asyncio.Event | None = None
         try:
             try:
                 async with asyncio.timeout(_CONTROL_HANDSHAKE_DEADLINE_SECONDS):
@@ -2287,12 +2333,24 @@ class ServiceDaemon:
                     )
                     return
             agent = channel
+            if session.workspace_binding == "client_claim" and session.workspace_handle is None:
+                # ADR-051: the hello could not key this claim (the vault was not ready). Once a
+                # ready generation is published the connection ends, so its client, a background
+                # agent above all, which sends no call to be answered ``vault_locked``, connects
+                # again and gets a handle. One that became ready meanwhile ends at once.
+                unkeyed = asyncio.Event()
+                self._unkeyed_claims.add(unkeyed)
+                if self._composition.vault.ready:
+                    unkeyed.set()
             while not self._stop_event.is_set():
                 try:
-                    frame = await self._read_control_frame_idle_aware(
-                        stream,
-                        calls,
-                        agent_busy=None if agent is None else (lambda: agent.pending_count > 0),
+                    frame = await _read_until(
+                        self._read_control_frame_idle_aware(
+                            stream,
+                            calls,
+                            agent_busy=None if agent is None else (lambda: agent.pending_count > 0),
+                        ),
+                        unkeyed,
                     )
                 except TimeoutError:
                     return
@@ -2331,6 +2389,8 @@ class ServiceDaemon:
         except Exception:
             return
         finally:
+            if unkeyed is not None:
+                self._unkeyed_claims.discard(unkeyed)
             if channel is not None:
                 # Pending workspace calls fail now, typed, instead of waiting out their deadline.
                 await hub.unregister(channel)
@@ -2452,6 +2512,8 @@ class ServiceDaemon:
                     session.client_kind,
                     request,
                     projection_context=projection_context,
+                    claim_unkeyed=session.workspace_binding == "client_claim"
+                    and session.workspace_handle is None,
                     _defer_stop=True,
                 )
             else:
