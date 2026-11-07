@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from builders.console_ctrl_c import CtrlCAtPrompt
+from builders.console_ctrl_c import AnswerAtPrompt, CtrlCAtPrompt
 from finishup.cli import trusted_console
 from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
@@ -226,15 +226,22 @@ def test_posix_completed_read_under_asyncio_runner_restores_its_sigint_handler(
     master, slave = os.openpty()
     adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
     adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
-    os.write(master, b"approve\n")
 
     async def ceremony() -> tuple[bytearray, object, object]:
         runner_handler = signal.getsignal(signal.SIGINT)
-        line = adapter.read_line("Decision: ", 32, hidden=hidden)
+        try:
+            line = adapter.read_line("Decision: ", 32, hidden=hidden)
+        finally:
+            answer.ended.set()
         return line, runner_handler, signal.getsignal(signal.SIGINT)
 
     try:
-        line, runner_handler, handler_after_read = asyncio.run(ceremony())
+        # Typed once the prompt is up, as a person would; the helper keeps reading the master
+        # side, which macOS needs before the hidden read's TCSADRAIN can return.
+        with AnswerAtPrompt(
+            master, b"Decision: ", b"approve\n", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as answer:
+            line, runner_handler, handler_after_read = asyncio.run(ceremony())
     finally:
         os.close(slave)
         os.close(master)
