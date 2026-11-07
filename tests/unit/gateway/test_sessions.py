@@ -136,3 +136,44 @@ def test_a_daemon_that_never_answers_the_hello_gives_the_place_back() -> None:
             assert bytes(received) == len(payload).to_bytes(4, "big") + payload
 
     asyncio.run(exercise())
+
+
+def test_a_frame_taken_as_its_poll_was_abandoned_goes_to_the_next_poll() -> None:
+    """A frame can arrive in the same instant the poll's client is found gone: it is kept, first
+    in line, for the next poll instead of being answered to nobody."""
+
+    async def exercise() -> None:
+        daemon = ScriptedDaemon()
+        served: list[asyncio.Task[None]] = []
+
+        async def connect_upstream() -> ControlStream:
+            client, server = memory_pair()
+            served.append(asyncio.create_task(daemon.serve(server)))
+            return client
+
+        registry = SessionRegistry(connect_upstream)
+        hello, payload = _hello()
+        opened = await registry.open(
+            key_id="k_one",
+            scope="agent",
+            hello=hello,
+            hello_payload=payload,
+            manifest_digest=load_schema_catalog().manifest_digest,
+        )
+        session = opened.session
+        assert session is not None
+        session.agent = True
+        left: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        polling = asyncio.create_task(session.next_frame(5.0, client_left=left))
+        await asyncio.sleep(0)  # the poll waits on the queue
+        await session._frames.put(b"first")  # pyright: ignore[reportPrivateUsage]
+        await session._frames.put(b"second")  # pyright: ignore[reportPrivateUsage]
+        left.set_result(None)
+        async with asyncio.timeout(5):
+            assert await polling is None
+            assert await session.next_frame(0.0) == b"first"
+            assert await session.next_frame(0.0) == b"second"
+        await registry.close_all()
+        await asyncio.gather(*served, return_exceptions=True)
+
+    asyncio.run(exercise())
