@@ -4671,7 +4671,9 @@ NAME FOLDER|--all|mode NAME local|listed` (`cli/server.py`). A registry folder t
 `targets.list_targets()` skips it (a record that cannot be read still fails closed),
 `leftover_target_ids()` names it, `server list` prints one line per leftover with the command
 that deletes it, and `server remove ID` (an id is never a name) deletes it under the registry
-lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`).
+lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`). A
+`server remove NAME` whose folder deletion fails part way refuses `target_partly_removed` (after
+recording that a key it deleted is gone), naming the same command or the leftover's id.
 `use`, `login` and `logout` read a target's record again under the registry lock after their
 slow step (the typed name, the key prompt and check) and change only their own field
 (authorization or `credential`); a target removed meanwhile is `target_unknown` (for `login`,

@@ -274,7 +274,8 @@ delete there yourself. Removing a local server deletes its tasks and vault; remo
 another machine leaves that server untouched. An agent session that was still using the removed
 server stops reaching FinishUP and says so until you restart it.
 
-If adding or removing a server was interrupted, `list` may name a leftover folder (`t_` and eight
+If adding or removing a server was interrupted, or something changed a server's folder while
+`remove` deleted it (`remove` then says so), `list` may name a leftover folder (`t_` and eight
 characters) that holds no server. FinishUP does not use it; `finishup server remove` with that
 name deletes it.
 
