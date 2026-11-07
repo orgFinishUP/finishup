@@ -48,6 +48,7 @@ from finishup.client.everyday_policy import (
     everyday_scope,
     forget_repository_reports,
     read_marker,
+    read_repository_reports,
     record_reported_policy,
     record_repository_report,
     remove_marker,
@@ -74,6 +75,7 @@ __all__ = [
     "remember_repository_setup",
     "report_needs_refresh",
     "repository_key_for",
+    "session_start_hold_phase",
 ]
 
 type MachineState = Literal["zero_network", "network_permitted", "no_policy", "unreadable"]
@@ -445,3 +447,53 @@ def refresh_at_session_start(
     except Exception:  # noqa: BLE001 - a session start never fails on this read
         return False
     return result is True
+
+
+async def _hold_phase(worktree: str, budget_seconds: float) -> str | None:
+    from finishup.client.repository_hold import decide
+    from finishup.client.targets import active_target_record, target_root
+
+    reports = read_repository_reports()
+    if isinstance(reports, str) or not any(report.no_network for report in reports):
+        # Nothing this computer reported is held: no Git read is needed to know it.
+        return None
+    try:
+        async with asyncio.timeout(budget_seconds):
+            key = await repository_key_for(worktree)
+    except TimeoutError:
+        return None
+    record = active_target_record()
+    if key is None or record is None or not record.is_remote:
+        return None
+    return decide(target_root(record.target_id), record.target_id, key).phase
+
+
+def session_start_hold_phase(
+    worktree: str | None,
+    *,
+    budget_seconds: float,
+    run_async: Callable[[Callable[[], Awaitable[object]]], object] | None = None,
+) -> str | None:
+    """At a session start with no observation consent: whether the session's repository is held
+    from the selected server elsewhere, or kept on this computer; the phase, or None.
+
+    Record-only, like the connection seam's own decision (``repository_hold.decide``): no service
+    is asked. Only while a server elsewhere is selected and this computer reported a repository
+    that allows no network use; then the repository's one Git read, bounded by
+    ``budget_seconds`` (``HOOK_READ_SECONDS`` at most), in a fresh ``contextvars`` context on its
+    own event loop (``run_async``, ``asyncio.run`` by default). Never raises.
+    """
+
+    import contextvars
+
+    def run(make: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(cast("Coroutine[object, object, object]", make()))
+
+    if worktree is None or budget_seconds <= 0 or _root_kind() != "remote":
+        return None
+    budget = min(HOOK_READ_SECONDS, budget_seconds)
+    try:
+        phase = contextvars.Context().run(run_async or run, lambda: _hold_phase(worktree, budget))
+    except Exception:  # noqa: BLE001 - a session start never fails on this read
+        return None
+    return phase if isinstance(phase, str) else None

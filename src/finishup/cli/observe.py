@@ -1847,6 +1847,13 @@ async def _drain_observation_async(
                     startup_line = spawned_startup_failure_line(error)
                     if startup_line is not None:
                         typer.echo(startup_line, err=True)
+                    # A remote phase (ADR-051), a repository held from the selected server
+                    # elsewhere or kept on this computer included, is named as every CLI command
+                    # names it; the summary, its JSON and exit 20 are unchanged.
+                    from finishup.cli.remote_remedy import remote_failure_lines
+
+                    for line in remote_failure_lines(error) or ():
+                        typer.echo(line, err=True)
                     tally.note_reason(
                         ObservationGapCode.SERVICE_UNAVAILABLE.value, len(deliverable)
                     )

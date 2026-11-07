@@ -180,10 +180,18 @@ _REMOTE_LOCKED_CONTEXT: Final = (
 
 
 def unavailable_context(phase: str | None) -> str:
-    """The SessionStart text for an unavailable service; a remote phase is named with its token."""
+    """The SessionStart text for an unavailable service; a remote phase is named with its token.
+
+    A repository held from the selected server elsewhere, or kept on this computer (ADR-051
+    decision 8), is named with the same text on every host, in its mapped-session form.
+    """
 
     if phase not in REMOTE_CONNECTION_PHASES:
         return _UNAVAILABLE_CONTEXT
+    if phase in {"repository_egress_held", "repository_egress_kept"}:
+        from finishup.client.repository_hold import hook_context
+
+        return hook_context(phase, "mapped")
     return (
         f"The selected FinishUP server is unavailable for this mapped session ({phase}); no "
         "live receipt can be promised." + render_hook_recovery_suffix(phase)
@@ -1648,6 +1656,30 @@ async def _read_status(
 # diagnostic for free; that is the single emitter. See docs/runbooks/codex-integration.md.
 
 
+def _refresh_repository_report(
+    locator: str | None, payload: Mapping[str, JsonValue], *, deadline: float
+) -> None:
+    """The observe pass's own session-start report refresh, for a resume or compact re-ground.
+
+    Canonicalized as the observe pass names the worktree; bounded by what is left of ``deadline``
+    (half a second at most). Never raises.
+    """
+
+    if locator is None:
+        return
+    with contextlib.suppress(Exception):
+        from finishup.adapters.workspace_binding import canonical_workspace_locator
+        from finishup.cli import observe_hooks
+
+        observe_hooks._refresh_repository_report(  # pyright: ignore[reportPrivateUsage]
+            "SessionStart",
+            payload,
+            canonical_workspace_locator(locator),
+            skip_service=False,
+            deadline=deadline,
+        )
+
+
 def handle_session_start(
     *,
     stdin_bytes: bytes | None = None,
@@ -1809,6 +1841,10 @@ def handle_session_start(
                 return 0
 
             selection = resolve_session_workspace(workspace, payload)
+            # ADR-051 decision 8: before the status read connects, this computer's FinishUP is
+            # asked about the session's repository when its report is missing or stale, so a
+            # repository just found to allow no network use is held in this very pass.
+            _refresh_repository_report(selection.locator, payload, deadline=entered + 2.1)
 
             async def _run() -> StatusOutcome:
                 return await _read_status(

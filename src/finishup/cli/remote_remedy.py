@@ -21,6 +21,7 @@ from finishup.protocol.recovery import (
 
 __all__ = [
     "remote_failure",
+    "remote_failure_lines",
     "remote_locked_directive",
     "remote_remedy_line",
     "remote_summary",
@@ -101,3 +102,25 @@ def remote_remedy_line(error: BaseException) -> str | None:
         return None
     reason, directive = named
     return f"{reason}: {directive.directive}"
+
+
+def remote_failure_lines(error: BaseException) -> tuple[str, ...] | None:
+    """The CLI's stderr lines for a remote phase, or None for any other failure.
+
+    ``service_unavailable: <phase>: <summary>``, then the phase's directive lines: the one shape
+    every CLI command (``cli.bootstrap``) and ``observe drain`` print, for every remote kind.
+    """
+
+    if not (
+        isinstance(error, ControlError)
+        and error.reason == "service_unavailable"
+        and error.phase in REMOTE_CONNECTION_PHASES
+    ):
+        return None
+    from finishup.cli.render import render_recovery_directive_lines
+
+    lines = [f"service_unavailable: {error.phase}: {remote_summary(error.phase)}"]
+    directive = directive_for(REASON_CODE_CONTINUATIONS[error.phase])
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive))
+    return tuple(lines)

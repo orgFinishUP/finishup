@@ -237,7 +237,10 @@ def test_hooks_name_the_remote_phase_and_its_token(remote: Path) -> None:
         context = unavailable_context(phase)
         assert f"({phase})" in context
         assert context.endswith(f" Continuation: {REASON_CODE_CONTINUATIONS[phase]}.")
-        assert len(context.encode("ascii")) <= 512
+        # A held or kept repository (ADR-051 decision 8) tells the agent what to ask the user and
+        # what never to run, within the session-start advice bound; every other phase is a line.
+        bound = 1_200 if phase in {"repository_egress_held", "repository_egress_kept"} else 512
+        assert len(context.encode("ascii")) <= bound
         _clean(context)
     attach = _attachment_recovery_context("service_unavailable")
     assert "selected FinishUP server" in attach and "service startup" not in attach

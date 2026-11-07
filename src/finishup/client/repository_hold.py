@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CONTINUATION",
     "HELD",
+    "HOLD_PHASES",
     "HOLD_RECHECK_SECONDS",
     "KEPT",
     "KEPT_CONTINUATION",
@@ -90,6 +91,7 @@ __all__ = [
     "HoldCause",
     "HoldDecision",
     "HoldState",
+    "HookVariant",
     "RepositoryChoice",
     "RepositoryRecordError",
     "SendHold",
@@ -98,6 +100,7 @@ __all__ = [
     "clear_overrides",
     "decide",
     "held_worktrees",
+    "hook_context",
     "overrides_path",
     "read_overrides",
     "remove_override",
@@ -119,6 +122,76 @@ KEPT_SUMMARY: Final = (
     "this repository's work is kept on this computer, as its owner chose, so nothing from it was "
     "sent to the selected FinishUP server"
 )
+HOLD_PHASES: Final = frozenset({HELD, KEPT})
+
+# The session-start text every host shows for a held or kept repository (ADR-051 decision 8):
+# Codex, Claude Code and Cursor receive it byte-identical, for every remote kind alike. One shape
+# for both phases, as for every remote phase: what FinishUP did, naming the phase; what that
+# means for this session (``HookVariant``); what to do; then the continuation token. Fixed text:
+# no path, name, host or URL.
+type HookVariant = Literal["attach", "unconsented", "mapped"]
+_HOOK_LEADS: Final[dict[str, str]] = {
+    HELD: (
+        "FinishUP held this repository's work (repository_egress_held): its privacy policy on "
+        "this computer allows no network use and the selected FinishUP server is elsewhere"
+    ),
+    KEPT: (
+        "FinishUP kept this repository's work on this computer (repository_egress_kept), as the "
+        "user chose for the selected FinishUP server elsewhere"
+    ),
+}
+# What the hold means for this session: an attach that was refused (observations are captured
+# and wait in this computer's outbox), a session without observation consent (nothing is
+# captured), or a session already mapped to a task on that server.
+_HOOK_CONSEQUENCES: Final[dict[HookVariant, str]] = {
+    "attach": (
+        "so nothing from this repository was sent and no task was started; hook observations "
+        "wait on this computer."
+    ),
+    "unconsented": "so nothing from this repository is sent to it.",
+    "mapped": (
+        "so this mapped session's task is not updated there and nothing more from this "
+        "repository is sent; no live receipt can be promised."
+    ),
+}
+_HOOK_RETRY: Final[dict[HookVariant, str]] = {
+    "attach": "Then call start again.",
+    "unconsented": "Then call start.",
+    "mapped": "Then retry the same request.",
+}
+
+
+def hook_context(phase: str, variant: HookVariant) -> str:
+    """The session-start text for a held or kept repository; the same on every host.
+
+    ``variant`` names the session's state: ``attach`` (the hook's own start was refused),
+    ``unconsented`` (no observation consent: nothing is captured) or ``mapped`` (a task on that
+    server already serves the session). Raises ``ValueError`` for any other phase.
+    """
+
+    if phase not in HOLD_PHASES:
+        raise ValueError("hold_phase_invalid")
+    head = f"{_HOOK_LEADS[phase]}, {_HOOK_CONSEQUENCES[variant]}"
+    if phase == HELD:
+        return (
+            f"{head} Ask the user once in this conversation whether to send this repository's "
+            "work to that server anyway; that server's own privacy policy would then decide any "
+            "AI-powered review of it. Only if they agree, they run 'finishup server repositories "
+            "add' in their own terminal from this repository's folder (tell them which) and type "
+            f"the server's name there; you cannot run it. {_HOOK_RETRY[variant]} If they decline, "
+            "run 'finishup server repositories keep' from this repository's folder so FinishUP "
+            "does not ask again, and continue without FinishUP for this repository. Never run "
+            "'add', switch servers or change a privacy policy for the user. Continuation: "
+            f"{CONTINUATION}."
+        )
+    return (
+        f"{head} Continue without FinishUP for this repository and do not ask the user about "
+        "sending it again. Only the user changes this, with 'finishup server repositories add' "
+        "in their own terminal; never run it, switch servers or change a privacy policy for "
+        f"them. Continuation: {KEPT_CONTINUATION}."
+    )
+
+
 OVERRIDES_SCHEMA: Final = "yoetz.server-repositories/1"
 OVERRIDES_FILE_NAME: Final = "repositories.json"
 MAX_ALLOWED_REPOSITORIES: Final = 64

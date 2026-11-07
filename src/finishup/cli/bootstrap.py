@@ -524,14 +524,12 @@ def control_failure(
         # its directive, never a local-service remedy. No host or name is in either. A connection
         # lost mid-call may already have delivered the call, so this line never says that
         # nothing was recorded; the directive says how to repeat the request safely.
-        from finishup.cli.remote_remedy import remote_summary
-        from finishup.cli.render import recovery_directive_json, render_recovery_directive_lines
+        from finishup.cli.remote_remedy import remote_failure_lines
+        from finishup.cli.render import recovery_directive_json
         from finishup.protocol.recovery import continuation_for_reason, directive_for
 
         remote_directive = directive_for(continuation_for_reason(error.phase))
-        lines = [f"service_unavailable: {error.phase}: {remote_summary(error.phase)}"]
-        if remote_directive is not None:
-            lines.extend(render_recovery_directive_lines(remote_directive))
+        lines = remote_failure_lines(error) or ()
         stderr_writer(_with_correlation("\n".join(lines), error))
         if json_output:
             payload = {
