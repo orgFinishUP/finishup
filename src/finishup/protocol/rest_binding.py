@@ -37,6 +37,8 @@ __all__ = [
     "REST_ERROR_SCHEMA_VERSION",
     "REST_ERROR_STATUS",
     "SERVER_INFO_SCHEMA_VERSION",
+    "SERVICE_START_HEADER",
+    "SERVICE_START_NEVER",
     "SESSION_ID_PATTERN",
     "SESSION_IDLE_SECONDS",
     "KeyScope",
@@ -50,6 +52,11 @@ __all__ = [
 BINDING_VERSION: Final = "1.0"
 BINDING_HEADER: Final = "FinishUP-Binding"
 CORRELATION_HEADER: Final = "FinishUP-Correlation-Id"
+# ``POST /v1/sessions`` with this header set to ``never`` reaches a running service only: the
+# gateway never starts a stopped one for it (a client's background agent; ADR-051, approach A).
+# Without the header the gateway starts an idle-stopped service, as any local client would.
+SERVICE_START_HEADER: Final = "FinishUP-Service-Start"
+SERVICE_START_NEVER: Final = "never"
 # A long-poll never holds a request past this, so a 60-second proxy timeout never cuts one.
 MAX_WAIT_MS: Final = 25_000
 SESSION_IDLE_SECONDS: Final = 120.0

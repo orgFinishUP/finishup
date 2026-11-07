@@ -309,12 +309,16 @@ class SessionRegistry:
         self,
         connect_upstream: UpstreamConnector,
         *,
+        reach_upstream: UpstreamConnector | None = None,
         idle_seconds: float = SESSION_IDLE_SECONDS,
         per_key: int = MAX_SESSIONS_PER_KEY,
         agent_poll_grace_seconds: float = AGENT_POLL_GRACE_SECONDS,
         hello_result_seconds: float = HELLO_RESULT_SECONDS,
     ) -> None:
         self._connect = connect_upstream
+        # For a session whose client asked that no service be started: reaches a running one
+        # only. ``None`` when ``connect_upstream`` itself never starts one.
+        self._reach = reach_upstream if reach_upstream is not None else connect_upstream
         self._idle = idle_seconds
         self._per_key = per_key
         self._agent_grace = agent_poll_grace_seconds
@@ -341,8 +345,12 @@ class SessionRegistry:
         hello: ControlFrame,
         hello_payload: bytes,
         manifest_digest: str,
+        start_service: bool = True,
     ) -> OpenedSession:
         """Forward the hello on a fresh upstream; register the session when it was admitted.
+
+        With ``start_service`` false the upstream is reached only when the service already runs
+        (a client's background agent, which must never start a service the owner stopped).
 
         ``201`` with the daemon's hello-result for an admitted session; ``409`` with the daemon's
         own hello-result when it answered a manifest mismatch (it then closes the connection).
@@ -361,6 +369,7 @@ class SessionRegistry:
                 hello=hello,
                 hello_payload=hello_payload,
                 manifest_digest=manifest_digest,
+                start_service=start_service,
             )
         finally:
             remaining = self._opening[key_id] - 1
@@ -377,8 +386,9 @@ class SessionRegistry:
         hello: ControlFrame,
         hello_payload: bytes,
         manifest_digest: str,
+        start_service: bool,
     ) -> OpenedSession:
-        upstream = await self._connect()
+        upstream = await (self._connect if start_service else self._reach)()
         try:
             async with asyncio.timeout(self._hello_result):
                 await upstream.send_all(struct.pack(">I", len(hello_payload)) + hello_payload)

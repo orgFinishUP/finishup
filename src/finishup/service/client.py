@@ -2521,7 +2521,7 @@ def _manifest_digest_for_client() -> str:
 
 
 async def ensure_service_running(
-    *, timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS
+    *, timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS, start: bool = True
 ) -> AuthenticatedUnixStream:
     """A raw control stream to this root's service, starting the service when none answers.
 
@@ -2529,7 +2529,9 @@ async def ensure_service_running(
     hello, so this performs no handshake. The endpoint, its owner-only checks and the peer-UID
     authentication are exactly ``connect_control``'s; a service is spawned only when no live
     stamped holder keeps the singleton, and a holder is never superseded here. A remote target
-    root has no service to start (``service_unavailable``).
+    root has no service to start (``service_unavailable``). With ``start=False`` (a session whose
+    client asked the gateway never to start one) a service that is not running is
+    ``service_unavailable`` and nothing is spawned.
     """
 
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
@@ -2541,7 +2543,7 @@ async def ensure_service_running(
         error = _transport_error(exc)
         if error.reason != "service_unavailable":
             raise error from exc
-    if _remote_target_root() is not None:
+    if not start or _remote_target_root() is not None:
         raise ControlError("service_unavailable", retryable=True)
     holder = service_holder_identity()
     if holder is None or _singleton_holder_lock_is_held() is not True:
