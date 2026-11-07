@@ -519,9 +519,11 @@ class WorkspaceAgentHandler:
         *,
         excluded: tuple[str, ...],
         space_cut: frozenset[str] = frozenset(),
+        copies: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
-        """The roots a task-input read walks, the values it reads, the indices it left unread,
-        and the indices of the values a listed folder covers.
+        """The roots a task-input read walks, the values it reads, the indices it left unread
+        (or, for ``copies``, those whose kept copies the server may not send), and the indices of
+        the values a listed folder covers.
 
         Each named root must have the shape an owner may admit, or the whole call is
         ``root_not_admitted``. In both modes a folder the owner listed for this server admits the
@@ -545,9 +547,17 @@ class WorkspaceAgentHandler:
         that exists (``_exists_visibly``) and that a local read would read
         (``outside_inputs_readable``), so the server can say so and keep the rest of what it
         asked for. A value that names nothing, or only what a local read would not read, is not
-        reported: a local read would find nothing there either. A named root beneath which the task names nothing is never opened and is
-        left out; one that holds a listed folder is walked only to the values beneath that
-        folder, so beneath the server's own roots the record narrows them and never widens them.
+        reported: a local read would find nothing there either. A named root beneath which the
+        task names nothing is never opened and is left out; one that holds a listed folder is
+        walked only to the values beneath that folder, so beneath the server's own roots the
+        record narrows them and never widens them.
+
+        For ``copies`` (``snapshot_outside_inputs``, whose values at a check or a review are the
+        paths of the server's kept copies) ``unlisted`` is instead ``_copies_unlisted``: in
+        ``listed`` mode every value at or beneath a named root that no listed folder admits,
+        whatever lies there now. The server's copy is what it would send, so a file since
+        deleted, linked again, opened to other accounts or replaced by a link never makes its
+        copy sendable.
         """
 
         if any(not admitted_input_root_valid(root) for root in roots):
@@ -577,14 +587,8 @@ class WorkspaceAgentHandler:
                 or folder_covers(path, folders)
             ):
                 kept.append(value)
-            elif self._exists_visibly(path):
+            elif not copies and self._exists_visibly(path):
                 unread.append(index)
-        # Only what a local read would read there is counted as kept back: the rest reads as
-        # nothing in both modes, and no folder the owner lists would let it be read.
-        readable = outside_inputs_readable(
-            tuple(roots), tuple(values[index] for index in unread), excluded=excluded
-        )
-        unlisted = [index for position, index in enumerate(unread) if position in readable]
         walked = tuple(
             root
             for root in every
@@ -592,6 +596,14 @@ class WorkspaceAgentHandler:
             or folder_covers(root, folders)
             or any(folder_covers(folder, (root,)) for folder in folders)
         )
+        if copies:
+            return walked, tuple(kept), _copies_unlisted(roots, values, listed), listed
+        # Only what a local read would read there is counted as kept back: the rest reads as
+        # nothing in both modes, and no folder the owner lists would let it be read.
+        readable = outside_inputs_readable(
+            tuple(roots), tuple(values[index] for index in unread), excluded=excluded
+        )
+        unlisted = [index for position, index in enumerate(unread) if position in readable]
         return walked, tuple(kept), tuple(unlisted), listed
 
     def _listed_input(self, value: str, folders: Sequence[str]) -> bool:
@@ -813,8 +825,10 @@ class WorkspaceAgentHandler:
         self, arguments: SnapshotOutsideInputsArguments, call: _Call
     ) -> object:
         excluded = self._excluded(arguments.excluded, call, outside=True)
+        # ``unlisted`` names the values whose kept copies the server may not send (``copies``),
+        # never narrowed by what is there now (ADR-051 decision 5).
         roots, values, unlisted, listed = self._input_scope(
-            arguments.roots, arguments.values, excluded=excluded
+            arguments.roots, arguments.values, excluded=excluded, copies=True
         )
         reads = snapshot_outside_inputs(
             roots,
@@ -1159,6 +1173,30 @@ def _outside_candidate(path: str) -> bool:
         return False
     ancestors = ("/" + "/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
     return any(admitted_input_root_valid(ancestor) for ancestor in ancestors)
+
+
+def _copies_unlisted(
+    roots: Sequence[str], values: Sequence[str], listed: Sequence[int]
+) -> tuple[int, ...]:
+    """In ``listed`` mode, the indices of ``values`` whose kept copies a server may not send.
+
+    Every value at or beneath a named root that no listed folder admits (not in ``listed``),
+    whatever lies at it now, and past the local read's window too (ADR-051 decision 5): the
+    server holds the copy, so whether the file still exists, or would still be read, never lets
+    it be sent. Nothing on this machine is looked at, so the answer tells the server no more than
+    ``listed`` does, beside the mode; it never tells a path inside the claimed worktree from one
+    no folder covers.
+    """
+
+    admitted = frozenset(listed)
+    return tuple(
+        index
+        for index, value in enumerate(values)
+        if index not in admitted
+        and value.startswith("/")
+        and "\x00" not in value
+        and any(folder_covers(posixpath.normpath(value), (root,)) for root in roots)
+    )
 
 
 def _unavailable(reason: str) -> str:
