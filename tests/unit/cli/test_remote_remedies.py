@@ -396,3 +396,71 @@ def test_a_readable_named_local_record_keeps_the_local_path(home: Path) -> None:
     assert client_module._remote_target() is None  # pyright: ignore[reportPrivateUsage]
     assert remote_root_selected() is False
     require_server_host("setup vault")
+
+
+# --- this computer's zero-network record (ADR-051 decision 8) -----------------------------------
+#
+# This computer refused to connect, so no surface may say the server failed to serve: the CLI,
+# the menu and setup (the shared summary), the terminal interface's connect failure and the hook
+# contexts say that this computer makes no network connections and nothing was sent, with the
+# directive that names 'finishup server use local' (the same words as approach A's surfaces).
+
+_ZERO = "zero_network_remote_selected"
+_ZERO_WORDS = (
+    "this computer's FinishUP is set to make no network connections, so nothing was sent to the "
+    "selected FinishUP server"
+)
+
+
+def test_the_zero_network_phase_has_its_own_summary(home: Path) -> None:
+    from finishup.client.remote_remedy import ZERO_NETWORK_SUMMARY, remote_summary
+
+    del home
+    assert ZERO_NETWORK_SUMMARY == _ZERO_WORDS
+    assert remote_summary(_ZERO) == _ZERO_WORDS
+    assert remote_summary("remote_unreachable") != _ZERO_WORDS
+    remedy = remote_remedy(_phase_error(_ZERO))
+    assert remedy is not None and remedy.summary == _ZERO_WORDS
+    assert remedy.directive is directive_for("zero_network_local_server_required")
+
+
+def test_the_cli_says_this_computer_refused_and_names_the_fix(home: Path) -> None:
+    del home
+    text, _ = _cli(_phase_error(_ZERO))
+    assert text.startswith(f"service_unavailable: {_ZERO}: {_ZERO_WORDS}")
+    assert "could not serve" not in text
+    assert "'finishup server use local'" in text
+    _assert_remote_words(text)
+
+
+def test_the_terminal_interface_says_this_computer_refused(home: Path) -> None:
+    del home
+    failure = tui_runtime._connect_failure(_phase_error(_ZERO))  # pyright: ignore[reportPrivateUsage]
+    assert (failure.reason, failure.message) == (_ZERO, _ZERO_WORDS)
+    assert any("'finishup server use local'" in detail for detail in failure.details)
+
+
+def test_the_hook_contexts_say_this_computer_refused(home: Path) -> None:
+    from finishup.cli import observe_hooks
+
+    del home
+    outcome = hooks_module.StatusOutcome(
+        "unavailable",
+        remote_reason=hooks_module._remote_reason(_phase_error(_ZERO)),  # pyright: ignore[reportPrivateUsage]
+    )
+    context = hooks_module.unavailable_context(outcome)
+    assert context.startswith("This computer's FinishUP is set to make no network connections")
+    assert "nothing was sent" in context and "could not serve" not in context
+    assert context.endswith(" Continuation: zero_network_local_server_required.")
+    assert len(context.encode()) <= 512
+    attached = _auto_attach(_phase_error(_ZERO))
+    attach = observe_hooks._attachment_recovery_context(  # pyright: ignore[reportPrivateUsage]
+        attached.reason, remote_phase=attached.remote_phase
+    )
+    assert attach.startswith(
+        f"FinishUP attachment pending: {_ZERO}. This computer's FinishUP is set to make no "
+        "network connections, so nothing was sent"
+    )
+    assert "could not serve" not in attach
+    assert attach.endswith(" Continuation: zero_network_local_server_required. ")
+    _assert_remote_words(context + attach)

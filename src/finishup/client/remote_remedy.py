@@ -9,6 +9,9 @@ and the terminal interface — asks this module instead, so they all say the sam
 * a failed connection names its remote phase (``remote_unreachable``, ``remote_auth_failed``,
   ``remote_identity_changed``, ``remote_service_not_running``, ``remote_incompatible``) with that
   phase's ADR-030 directive from ``protocol.recovery`` (the text lives there, once);
+* a connection this computer refused because it last reported a zero-network policy
+  (``zero_network_remote_selected``, ADR-051 decision 8) says so (``remote_summary``): the server
+  did not fail to serve it, nothing was sent;
 * a locked vault on the server is the server owner's to unlock, on the server host.
 
 Nothing here names a host, a user, a target name or a path: closed tokens and fixed words only.
@@ -26,10 +29,12 @@ if TYPE_CHECKING:
 __all__ = [
     "REMOTE_LOCKED_SUMMARY",
     "REMOTE_UNAVAILABLE_SUMMARY",
+    "ZERO_NETWORK_SUMMARY",
     "RemoteRemedy",
     "remote_connection_phase",
     "remote_remedy",
     "remote_root_selected",
+    "remote_summary",
 ]
 
 # Fixed words only (no host, user, name or path).
@@ -41,6 +46,22 @@ REMOTE_LOCKED_SUMMARY: Final = (
     "the selected FinishUP server's vault is locked, so nothing was recorded; its owner unlocks "
     "it on the server host, then this request can be repeated"
 )
+# This computer refusing to connect while it is zero-network (ADR-051 decision 8) is not the
+# server failing to serve: the same words on every approach's surfaces.
+ZERO_NETWORK_SUMMARY: Final = (
+    "this computer's FinishUP is set to make no network connections, so nothing was sent to the "
+    "selected FinishUP server"
+)
+
+
+def remote_summary(phase: str | None) -> str:
+    """The fixed summary a surface shows for a remote phase (the CLI, the terminal, the hooks)."""
+
+    return (
+        ZERO_NETWORK_SUMMARY
+        if phase == "zero_network_remote_selected"
+        else (REMOTE_UNAVAILABLE_SUMMARY)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +136,4 @@ def remote_remedy(error: object, *, remote: bool | None = None) -> RemoteRemedy 
         if error.reason == "vault_locked":
             return RemoteRemedy("vault_locked", REMOTE_LOCKED_SUMMARY, None)
         phase = "remote_unreachable"
-    return RemoteRemedy(
-        phase, REMOTE_UNAVAILABLE_SUMMARY, directive_for(continuation_for_reason(phase))
-    )
+    return RemoteRemedy(phase, remote_summary(phase), directive_for(continuation_for_reason(phase)))

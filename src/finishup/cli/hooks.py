@@ -176,6 +176,12 @@ _REMOTE_LOCKED_CONTEXT: Final = (
     "The selected FinishUP server's vault is locked for this mapped session; no live receipt "
     "can be promised. Its owner unlocks it on the server host."
 )
+# ADR-051 decision 8: this computer refused to connect; the server did not fail to serve.
+_ZERO_NETWORK_CONTEXT: Final = (
+    "This computer's FinishUP is set to make no network connections, so nothing was sent to the "
+    "selected FinishUP server for this mapped session; no live receipt can be promised. Never "
+    "fall back to another server or a local service."
+)
 
 
 def unavailable_context(outcome: StatusOutcome) -> str:
@@ -183,7 +189,12 @@ def unavailable_context(outcome: StatusOutcome) -> str:
 
     if outcome.remote_reason is None:
         return _UNAVAILABLE_CONTEXT
-    return _REMOTE_UNAVAILABLE_CONTEXT + render_hook_recovery_suffix(outcome.remote_reason)
+    lead = (
+        _ZERO_NETWORK_CONTEXT
+        if outcome.remote_reason == "zero_network_remote_selected"
+        else _REMOTE_UNAVAILABLE_CONTEXT
+    )
+    return lead + render_hook_recovery_suffix(outcome.remote_reason)
 
 
 def locked_context(outcome: StatusOutcome) -> str:

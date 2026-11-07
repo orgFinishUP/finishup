@@ -632,10 +632,16 @@ def _attachment_recovery_context(reason: str, *, remote_phase: str | None = None
         # advice applies; the closed phase and its continuation say what to do instead.
         from finishup.cli.render import render_hook_recovery_suffix
 
+        why = (
+            # ADR-051 decision 8: this computer refused to connect, so nothing was sent.
+            "This computer's FinishUP is set to make no network connections, so nothing was sent "
+            "to the selected FinishUP server and no task is mapped"
+            if remote_phase == "zero_network_remote_selected"
+            else "The selected FinishUP server could not serve the attachment, so no task is mapped"
+        )
         return (
-            f"FinishUP attachment pending: {remote_phase}. The selected FinishUP server could not "
-            "serve the attachment, so no task is mapped; never fall back to another server or a "
-            "local service." + render_hook_recovery_suffix(remote_phase) + " "
+            f"FinishUP attachment pending: {remote_phase}. {why}; never fall back to another "
+            "server or a local service." + render_hook_recovery_suffix(remote_phase) + " "
         )
     if reason == "service_incompatible":
         return (

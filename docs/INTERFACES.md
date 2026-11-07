@@ -5638,8 +5638,12 @@ connect exactly as before.
 `targets.active_root_may_be_remote()`: an unreadable record counts as remote, as at the seam),
 `remote_connection_phase(error) -> str | None`, and
 `remote_remedy(error, *, remote=None) -> RemoteRemedy | None` (`reason`: a remote phase, or
-`vault_locked`; `summary`: fixed words; `directive`: the phase's `RecoveryDirective`, none for a
-locked server vault). The CLI's `control_failure` (stderr and JSON `phase` plus `recovery`), the
+`vault_locked`; `summary`: fixed words, `remote_summary(phase)`, which for
+`zero_network_remote_selected` is `ZERO_NETWORK_SUMMARY`, "this computer's FinishUP is set to make
+no network connections, so nothing was sent to the selected FinishUP server", the same words as
+approach A's; `directive`: the phase's `RecoveryDirective`, none for a locked server vault). The
+hook contexts (`unavailable_context`, `observe_hooks._attachment_recovery_context`) lead with the
+same words for that phase. The CLI's `control_failure` (stderr and JSON `phase` plus `recovery`), the
 menu, setup's next steps, the MCP bridge (`safe_details.reason_code` is the phase, so its
 continuation attaches), the hook contexts (`cli.hooks.unavailable_context`, `locked_context`,
 `StatusOutcome.remote_reason`) and the terminal interface use it; a local root's output is
