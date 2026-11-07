@@ -5269,10 +5269,12 @@ FinishUP workspace agent on the client machine gave no usable answer to the serv
 workspace (it was not connected, did not answer in time, or failed), so the server could not see
 the change. On the client machine, the computer that holds the project, `finishup server status
 NAME` shows the connection and `finishup server connect NAME` makes it again; checking again then
-can help." A reviewer read the agent refused reads as nothing. One whose time ran out on the
-client (the agent's `read_deadline`, or the client's own `deadline_exceeded`) raises
-`ReadDeadline`, as a slow local read does, so the review ends `deadline`; a declared test then
-reads as not visible, as the local declared-test read has it. A reviewer whose file read finds
+can help." A reviewer read the agent refused reads as nothing. One whose time ran out, on the
+client (the agent's `read_deadline`, or the client's own `deadline_exceeded`) or while the hub
+waited for its answer (the hub's own `deadline_exceeded`: an agent whose worker has no timer of
+its own, or a link slower than the reply grace), raises `ReadDeadline`, as a slow local read does,
+so the review ends `deadline` on every transport; a declared test then reads as not visible, as
+the local declared-test read has it. A reviewer whose file read finds
 the agent gone, busy or failed, or whose answer was too large to carry, ends
 `workspace_agent_unavailable` (`application.reviewer_loop.WORKSPACE_AGENT_UNAVAILABLE_ENDING`),
 which becomes an unavailable semantic result with failure class `transport`, never a judgment:

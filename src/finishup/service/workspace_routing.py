@@ -127,8 +127,16 @@ _AGENT_READ_DEADLINES: Final = frozenset({"read_deadline", "deadline_exceeded"})
 
 
 def _reviewer_read_deadline(exc: WorkspaceAgentUnavailable) -> bool:
-    """Whether the agent answered a reviewer read with its read's stop (``ReadDeadline``)."""
+    """Whether a reviewer read ran out of its time (``ReadDeadline``), wherever it was cut.
 
+    The agent may say so itself, or the hub may stop waiting for an answer that did not come
+    within the time the read was given (``deadline_exceeded``): an agent whose worker has no
+    timer of its own answers only once its Git or file read returns, and a slow link delivers
+    even a timely answer late. Either way the read's stop has passed, as for a slow local read.
+    """
+
+    if exc.reason == "deadline_exceeded":
+        return True
     return exc.reason == "agent_unavailable" and exc.agent_reason in _AGENT_READ_DEADLINES
 
 
@@ -375,8 +383,9 @@ class ClientWorkspaceReads:
     Roots and locations are absolute paths the task's content or the owner's policy named, or
     the task's handle standing for the claimed root; the agent resolves and confines them. A
     reviewer read the agent refused reads as nothing, exactly as a local read that found
-    nothing. One that ran out of its time on the client raises ``ReadDeadline``, as a slow local
-    read does, so the review ends ``deadline``. Any other unanswered read (no agent, a busy or
+    nothing. One that ran out of its time, on the client or while this service waited for the
+    client's answer, raises ``ReadDeadline``, as a slow local read does, so the review ends
+    ``deadline`` whatever the transport. Any other unanswered read (no agent, a busy or
     failed one, an answer too large to carry) raises ``WorkspaceAgentUnavailable``, and the
     review ends with that recorded reason: what the agent never read is never shown as absent.
     """
