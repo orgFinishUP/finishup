@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import threading
@@ -9,7 +10,6 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
-import anyio
 import pytest
 
 from builders.console_ctrl_c import CtrlCAtPrompt
@@ -138,7 +138,8 @@ _READ_DEADLINE_SECONDS = 10.0
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
 @pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
 def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool) -> None:
-    """Issue #1326: the CLI reads under ``anyio.run``, whose first Ctrl-C only cancels a task.
+    """Issue #1326: the CLI reads under ``anyio.run`` (``asyncio.Runner``), whose first Ctrl-C
+    only cancels a task.
 
     That handler returns, so PEP 475 retried the blocking read and it took the next line typed.
     """
@@ -165,11 +166,11 @@ def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool
                 finally:
                     ctrl_c.ended.set()
                 handler_after_read = signal.getsignal(signal.SIGINT)
-                await anyio.sleep(0)
+                await asyncio.sleep(0)
                 return outcome, runner_handler, handler_after_read
 
             try:
-                outcome, runner_handler, handler_after_read = anyio.run(ceremony)
+                outcome, runner_handler, handler_after_read = asyncio.run(ceremony())
             except KeyboardInterrupt:
                 pytest.fail(
                     "Ctrl-C did not cancel the console read; the asyncio runner took it later "
@@ -233,7 +234,7 @@ def test_posix_completed_read_under_asyncio_runner_restores_its_sigint_handler(
         return line, runner_handler, signal.getsignal(signal.SIGINT)
 
     try:
-        line, runner_handler, handler_after_read = anyio.run(ceremony)
+        line, runner_handler, handler_after_read = asyncio.run(ceremony())
     finally:
         os.close(slave)
         os.close(master)
