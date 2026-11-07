@@ -944,7 +944,7 @@ def run_workspace_agent(root: Path) -> int:
     except (OSError, PathSafetyError):
         _record("workspace_agent_start", "agent_lock_unsafe")
         return 20
-    held = exited_idle = False
+    held = exited_idle = stop_asked = False
     try:
         # A probe holds the lock shared for a moment; another agent holds it for good.
         deadline = time.monotonic() + _LOCK_RETRY_SECONDS
@@ -978,6 +978,9 @@ def run_workspace_agent(root: Path) -> int:
         try:
             return asyncio.run(main())
         finally:
+            # A stop asked while the idle exit ran (``server use`` leaving the target, ``server
+            # disconnect``) is a deliberate stop: it keeps the successor from starting.
+            stop_asked = _stop_requested(root)
             _clear_stop_request(root)
     finally:
         if held:
@@ -985,7 +988,7 @@ def run_workspace_agent(root: Path) -> int:
             with contextlib.suppress(OSError):
                 os.ftruncate(descriptor, 0)
         os.close(descriptor)
-        if exited_idle:
+        if exited_idle and not stop_asked:
             _start_successor_if_noted(root)
 
 
@@ -996,10 +999,12 @@ def _start_successor_if_noted(root: Path) -> None:
     A client process that noted its workspace in between found the lock still held and started
     nothing, so the server's calls for its work would find no agent until the next client came.
     Any live note now was written after that scan: its successor starts here. Only the idle exit
-    has a successor; a deliberate stop (``stop_agent``, a signal, zero-network, a removed target)
-    stays a stop.
+    has a successor; a deliberate stop (``stop_agent``, also one asked while the idle exit ran, a
+    signal, zero-network, a removed target) stays a stop.
     """
 
+    if zero_network_reported():
+        return
     live, _idle = _noted_workspaces(root, now=time.time())
     if live and ensure_agent(root):
         _record("workspace_agent_exit", "successor_started")

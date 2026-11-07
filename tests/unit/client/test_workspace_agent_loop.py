@@ -718,7 +718,7 @@ async def test_an_answer_past_the_calls_deadline_is_deadline_exceeded_at_once(
         handler.release.set()
 
 
-@pytest.mark.parametrize("ending", ["idle", "stop_requested"])
+@pytest.mark.parametrize("ending", ["idle", "stop_requested", "idle_then_stop_requested"])
 def test_a_workspace_noted_while_the_agent_ends_idle_gets_a_successor(
     remote: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, ending: str
 ) -> None:
@@ -744,7 +744,10 @@ def test_a_workspace_noted_while_the_agent_ends_idle_gets_a_successor(
         async def run(self) -> int:
             # A client notes its workspace while this agent is ending.
             note_workspace(root, _WORKSPACE)
-            self.exited_idle = ending == "idle"
+            self.exited_idle = ending != "stop_requested"
+            if ending == "idle_then_stop_requested":
+                # ``server use`` leaves the target while the idle exit runs: a deliberate stop.
+                (root / "state" / AGENT_STOP_NAME).touch(mode=0o600)
             return 0
 
     def ensure(at_root: Path) -> bool:

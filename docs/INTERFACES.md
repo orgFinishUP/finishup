@@ -5804,7 +5804,8 @@ holder (the agent, its deliveries, the MCP bridge) keeps running meanwhile. An i
 only once `transport_alive` answers false; once its lock is released after that idle exit, a
 workspace noted since (by a client that found the lock still held while the agent ended, and so
 started nothing) starts its successor (`ensure_agent`). Only the idle exit has a successor: a
-stop request, a signal, zero-network or a removed target stays a stop.
+stop request (one asked while the idle exit ran included), a signal, zero-network or a removed
+target stays a stop.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is
