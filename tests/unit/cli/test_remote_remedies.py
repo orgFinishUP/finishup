@@ -131,6 +131,9 @@ def test_the_cli_never_says_nothing_was_recorded_for_a_remote_phase(
         "this computer's FinishUP is set to make no network connections, so nothing was sent to "
         "the selected FinishUP server"
         if phase == "zero_network_remote_selected"
+        # The server answered and refused the key: it was reached.
+        else "the selected FinishUP server answered and refused this client's key"
+        if phase == "remote_auth_failed"
         else "the selected FinishUP server could not serve this connection"
     )
     assert first == f"service_unavailable: {phase}: {summary}"
@@ -284,3 +287,66 @@ def test_the_menu_names_an_unreachable_remote_server(
     directive = RECOVERY_DIRECTIVES[REASON_CODE_CONTINUATIONS["remote_unreachable"]]
     assert summary == f"not reachable — remote_unreachable: {directive.directive}"
     _clean(summary)
+
+
+def test_a_refused_key_reads_as_an_answer_on_every_surface(
+    remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-6: a server that answered and refused the key is never "could not be reached".
+
+    The CLI headline and its Next line, the menu, MCP, the SessionStart hook (attach and mapped
+    status) and the terminal interface each say it answered and refused this client's key.
+    """
+
+    import asyncio
+
+    from finishup.cli import menu
+    from finishup.cli.bootstrap import control_failure
+    from finishup.cli.hooks import unavailable_context
+    from finishup.cli.observe_hooks import (
+        _attachment_recovery_context,  # pyright: ignore[reportPrivateUsage]
+    )
+    from finishup.mcp import server as bridge
+    from finishup.tui.runtime import _connect_failure  # pyright: ignore[reportPrivateUsage]
+
+    phase = "remote_auth_failed"
+    error = ControlError("service_unavailable", retryable=True, phase=phase)
+    directive = RECOVERY_DIRECTIVES[REASON_CODE_CONTINUATIONS[phase]]
+    lines: list[str] = []
+    control_failure(error, json_output=False, stderr_writer=lines.append)
+    cli_text = "\n".join(lines)
+    assert cli_text.splitlines()[0] == (
+        f"service_unavailable: {phase}: the selected FinishUP server answered and refused this "
+        "client's key"
+    )
+    assert directive.directive in cli_text
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr("finishup.cli.app.build_service_client", refuse)
+    summary = asyncio.run(menu._service_summary())  # pyright: ignore[reportPrivateUsage]
+    assert summary == f"answered, key refused — {phase}: {directive.directive}"
+
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        error, "req_00000000-0000-4000-8000-000000000001", "start"
+    )
+    public = cast(dict[str, object], cast(dict[str, object], result.structuredContent)["error"])
+    mcp_text = cast(str, public["message"])
+    assert "refused this client's credentials" in mcp_text
+
+    attach = _attachment_recovery_context("service_unavailable", phase)
+    assert "answered and refused this client's key" in attach
+    assert f"Continuation: {REASON_CODE_CONTINUATIONS[phase]}." in attach
+    mapped = unavailable_context(phase)
+    assert "answered and refused this client's key" in mapped
+
+    failure = _connect_failure(error)
+    assert failure.message == "the selected FinishUP server answered and refused this client's key"
+
+    for text in (cli_text, summary, mcp_text, attach, mapped, failure.message):
+        lowered = text.lower()
+        assert "could not be reached" not in lowered, text
+        assert "not reachable" not in lowered, text
+        assert "did not answer" not in lowered, text
+        _clean(text)

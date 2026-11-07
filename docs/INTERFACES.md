@@ -5585,7 +5585,13 @@ The remote connection phases ride as `phase` on a retryable `service_unavailable
 `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running`,
 `remote_incompatible` (whose text names both releases), and the client's own refusals
 `target_reauthorization_required`, `target_root_is_remote` and `zero_network_remote_selected`. A client that catches that `TargetError` from the binding
-helpers raises it as this phase, so every surface renders its directive. The check-time change gains the
+helpers raises it as this phase, so every surface renders its directive. `remote_auth_failed` is
+a server that answered and refused this client's key, so no surface calls it unreachable or
+unanswered: the CLI headline and the terminal interface say "the selected FinishUP server
+answered and refused this client's key" (`cli.remote_remedy.remote_summary`), the menu "answered,
+key refused", `server status` and `server test` "State: answered, key refused" with the fix for
+the target's kind, and the SessionStart hook's attach and status contexts the same words beside
+the phase and its continuation (`AutoAttachOutcome.phase`). The check-time change gains the
 unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`, so
 `check_time_change_unavailable_workspace_agent_unavailable` and
 `check_time_change_unavailable_workspace_agent_refused` join

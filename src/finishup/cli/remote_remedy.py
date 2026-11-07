@@ -19,6 +19,7 @@ from finishup.protocol.recovery import (
 )
 
 __all__ = [
+    "remote_availability",
     "remote_failure",
     "remote_locked_directive",
     "remote_remedy_line",
@@ -33,12 +34,29 @@ _ZERO_NETWORK_SUMMARY = (
     "selected FinishUP server"
 )
 _REMOTE_SUMMARY = "the selected FinishUP server could not serve this connection"
+# The server answered and refused this client's credentials: it was reached, so no surface says
+# it could not be reached or did not answer.
+_AUTH_SUMMARY = "the selected FinishUP server answered and refused this client's key"
 
 
 def remote_summary(phase: str | None) -> str:
     """The fixed summary a surface shows for a remote phase (the CLI line, the terminal)."""
 
-    return _ZERO_NETWORK_SUMMARY if phase == "zero_network_remote_selected" else _REMOTE_SUMMARY
+    if phase == "zero_network_remote_selected":
+        return _ZERO_NETWORK_SUMMARY
+    if phase == "remote_auth_failed":
+        return _AUTH_SUMMARY
+    return _REMOTE_SUMMARY
+
+
+def remote_availability(phase: str | None) -> str:
+    """The menu's short state of the selected server for a remote phase.
+
+    A server that answered and refused the key was reached; every other phase is not reachable
+    from here now (``zero_network_remote_selected``: this computer sent nothing).
+    """
+
+    return "answered, key refused" if phase == "remote_auth_failed" else "not reachable"
 
 
 def _directive(token: str | None) -> RecoveryDirective:

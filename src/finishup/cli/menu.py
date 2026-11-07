@@ -206,11 +206,11 @@ async def _service_summary() -> str:
         finally:
             await client.close()
     except ControlError as error:
-        from finishup.cli.remote_remedy import remote_remedy_line
+        from finishup.cli.remote_remedy import remote_availability, remote_remedy_line
 
         remote = remote_remedy_line(error)
         if remote is not None:
-            return f"not reachable — {remote}"
+            return f"{remote_availability(error.phase)} — {remote}"
         return "not reachable — start it with 'finishup service run'"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
