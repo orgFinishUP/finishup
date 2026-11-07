@@ -4896,7 +4896,9 @@ from the everyday installation's effective machine-scope policy, in a fresh `con
 (`asyncio.to_thread` copies a context naming the running async library under `anyio.run`).
 `server add|use` refuse `zero_network_in_force` from it; when it is `unreadable` a marker that says
 zero-network refuses `zero_network_in_force` with the fixed sentence naming `reported_at`, and
-anything else refuses `network_policy_unreadable`. `find_zero_network_selection()` reads the
+anything else refuses `network_policy_unreadable` (while a remote target is selected its text
+names `server connect local`, and `server use local` before `service unlock`, since `service
+start|unlock` are refused there). `find_zero_network_selection()` reads the
 selection file afresh (`read_selection_on_disk()`, never the memo) and returns a
 `ZeroNetworkSelection(reason, target_id, kind, detail, policy_read, last_reported_at)` under
 `zero_network` (`policy_read="live"`), or under `unreadable` when the marker says zero-network

@@ -1075,8 +1075,48 @@ def test_an_unreadable_everyday_policy_refuses_the_hop(
     result = _invoke("add", "lab", "ssh://owner@lab.example")
     assert result.exit_code == 20
     assert result.stderr.startswith("network_policy_unreadable:")
+    assert "'finishup service start'" in result.stderr  # nothing elsewhere is selected
     assert "lab.example" not in result.stderr
     assert targets.list_targets() == ()
+
+
+def test_an_unreadable_policy_names_a_way_that_works_while_a_server_elsewhere_is_selected(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-3: with a server elsewhere selected, 'service start' and 'service unlock' are refused
+    (requires_server_host), so the refusal names 'server connect local', which starts this
+    computer's FinishUP from that state, and the way to unlock it."""
+
+    from finishup.ports.control import ControlError
+
+    _everyday_installation(home)
+    _serve_policy(monkeypatch, ControlError("service_unavailable", retryable=True))
+    with targets.registry_lock():
+        alpha, _root = targets.new_remote_target("alpha", "https", base_url="https://a.example")
+        targets.new_remote_target("beta", "https", base_url="https://b.example")
+    targets.write_selection(alpha)
+
+    result = _invoke("use", "beta")
+
+    assert result.exit_code == 20
+    assert result.stderr == (
+        "network_policy_unreadable: this computer's FinishUP has its own privacy policy, which "
+        "could not be read (its service is stopped, locked, or did not answer), so a server on "
+        "another machine is refused; start it with 'finishup server connect local' and retry, "
+        "or, if its vault is locked, run 'finishup server use local', then 'finishup service "
+        "unlock', then choose the server again\n"
+    )
+    assert targets.read_selected_target_id() == alpha.target_id
+    started: list[Path | None] = []
+
+    def ensure_ready(_self: object, root: Path | None) -> None:
+        started.append(root)
+
+    monkeypatch.setattr(
+        "finishup.client.target_runtime.LocalTargetRuntime.ensure_ready", ensure_ready
+    )
+    assert _invoke("connect", "local").exit_code == 0  # runs while alpha is selected
+    assert started == [None]
 
 
 def test_a_computer_never_set_up_has_no_policy_of_its_own(
