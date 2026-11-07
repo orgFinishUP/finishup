@@ -192,17 +192,31 @@ async def _left_running(
 
 
 @pytest.mark.parametrize("entered", ("while_live", "after_return"))
-async def test_work_a_live_call_left_running_waits_as_background_work(entered: str) -> None:
+async def test_work_a_live_call_left_running_waits_as_background_work(
+    entered: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """ADR-051: the detached review its caller stopped waiting for waits 30 s for an agent, not
     the live call's 5 s."""
 
     hub = WorkspaceAgentHub(inline_wait_seconds=0.01, background_wait_seconds=5.0)
-    task, seen = await _left_running(hub, entered)
-    # Well past the live call's agent wait, the work is still waiting for an agent.
-    done, _pending = await asyncio.wait({task}, timeout=0.5)
-    assert not done
+    waits: list[float] = []
+    choose = WorkspaceAgentHub._channel_for  # pyright: ignore[reportPrivateUsage]
+
+    async def recording(
+        self: WorkspaceAgentHub,
+        handle: str,
+        operation: WorkspaceOperation,
+        wait_seconds: float,
+        preferred: WorkspaceAgentChannel | None = None,
+    ) -> WorkspaceAgentChannel:
+        waits.append(wait_seconds)  # the agent wait the call chose
+        return await choose(self, handle, operation, wait_seconds, preferred)
+
+    monkeypatch.setattr(WorkspaceAgentHub, "_channel_for", recording)
     await _register(hub, lambda call: _ok(call, _BASE))
+    task, seen = await _left_running(hub, entered)
     assert await asyncio.wait_for(task, _DEADLINE_SECONDS) == _BASE
+    assert waits == [5.0]  # the background bound, never the live call's
     assert seen == {"live": False}
 
 
