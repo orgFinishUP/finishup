@@ -819,6 +819,67 @@ async def test_a_session_asking_never_to_start_the_service_reaches_a_running_one
 
 
 @pytest.mark.anyio
+async def test_the_gateway_command_never_starts_a_stopped_service_for_a_background_agent(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``finishup service gateway run`` composes the gateway the owner actually runs: with no
+    service running, a session sent with ``FinishUP-Service-Start: never`` is
+    ``service_unavailable`` and nothing is started, while a client's own session asks for the
+    service to be started, exactly as a local client would."""
+
+    from finishup.config.paths import state_dir
+    from finishup.gateway import serve
+    from finishup.gateway.keys import GATEWAY_DIR_NAME
+    from finishup.service import client as service_client
+
+    _agent, key = create_key(state_dir() / GATEWAY_DIR_NAME, label="agent", scope="agent")
+    started: list[str] = []
+
+    def start_service() -> None:
+        started.append("started")
+        raise OSError("not started in this test")
+
+    monkeypatch.setattr(service_client, "_spawn_service_process", start_service)
+    composed: dict[str, object] = {}
+
+    class _Composed:
+        """Stands in for the uvicorn server: keeps what ``run_gateway`` composed, serves nothing."""
+
+        def __init__(self, config: object, state: GatewayApp) -> None:
+            composed["app"] = getattr(config, "app", None)
+            composed["state"] = state
+
+        def run(self) -> None:
+            composed["ran"] = True
+
+    monkeypatch.setattr(serve, "gateway_server", _Composed)
+    assert (
+        serve.run_gateway(listen="127.0.0.1:8443", tls_cert=None, tls_key=None, behind_proxy=True)
+        == 0
+    )
+    assert composed.get("ran") is True
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=cast(Any, composed["app"])), base_url=_BASE
+    )
+    headers = {"Authorization": f"Bearer {key}", "FinishUP-Binding": "1.0"}
+    try:
+        never = await client.post(
+            "/v1/sessions",
+            content=_hello(agent=True),
+            headers={**headers, "FinishUP-Service-Start": "never"},
+        )
+        assert never.status_code == 503 and _reason(never) == "service_unavailable"
+        assert started == []
+        # A client's own connection is demand: the gateway asks for the service to be started.
+        demand = await client.post("/v1/sessions", content=_hello(), headers=headers)
+        assert demand.status_code == 503 and _reason(demand) == "service_unavailable"
+        assert started == ["started"]
+    finally:
+        await client.aclose()
+        await cast(GatewayApp, composed["state"]).sessions.close_all()
+
+
+@pytest.mark.anyio
 async def test_a_frames_poll_whose_client_left_never_takes_the_next_frame(
     gateway: _Gateway,
 ) -> None:
