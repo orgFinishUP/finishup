@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import cast
 
@@ -441,30 +441,65 @@ def test_a_remote_connection_claims_its_workspace_and_records_it_for_the_connect
     assert recorded == workspace
 
 
-def test_a_client_that_dials_while_the_connector_stops_starts_its_successor(
+class _EndingConnector:
+    """A connector that is ending: its endpoint is closed, it still holds ``root``'s lock.
+
+    ``end`` waits until a client that dialled it has looked for the holder (and so found the lock
+    held), then records why the connector stopped and releases the lock, in the connector's own
+    order. ``looks_after_release`` counts the holder checks made once the lock was free.
+    """
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finishup import __version__
+        from finishup.client import connector_status
+        from finishup.protocol.schemas import schema_manifest_digest
+
+        self.root = root
+        self.lock = ConnectorLock(root)
+        self.lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+        self.looked = asyncio.Event()
+        self.released = False
+        self.looks_after_release = 0
+        real = connector_status.connector_holder
+
+        def holder(target: Path) -> connector_status.ConnectorStamp | None:
+            found = real(target)
+            if self.released:
+                self.looks_after_release += 1
+            self.looked.set()
+            return found
+
+        monkeypatch.setattr(connector_status, "connector_holder", holder)
+
+    async def end(self, reason: str, *, before_release: Callable[[], None] | None = None) -> None:
+        from finishup.client.connector_status import read_connector_status
+
+        await self.looked.wait()
+        if before_release is not None:
+            before_release()
+        previous = read_connector_status(self.root)
+        write_connector_status(
+            self.root, new_status(previous, "stopped", reason, started_at=now_stamp())
+        )
+        self.lock.release()
+        self.released = True
+
+
+def test_a_client_that_dials_while_the_connector_idles_out_starts_its_successor(
     remote: Path, monkeypatch: pytest.MonkeyPatch, no_local_service: None
 ) -> None:
     """The connector closes its endpoint first and releases its lock only once its agents, its
-    relays and its SSH master have closed (a second or two at its idle exit or a stop). A client
-    that dialled in between found the lock held and started nothing; it starts the successor as
-    soon as the lock is released, within its own wait."""
+    relays and its SSH master have closed (a second or two at its idle exit). A client that
+    dialled in between found the lock held and started nothing; once the connector records its
+    idle exit and releases the lock, the client starts the successor within its own wait."""
 
-    from finishup import __version__
-    from finishup.protocol.schemas import schema_manifest_digest
-
-    lock = ConnectorLock(remote)
-    lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+    ending = _EndingConnector(remote, monkeypatch)
     spawned: list[Path] = []
     daemon = ScriptedDaemon()
 
     async def exercise() -> None:
         tasks = _fake_connector(monkeypatch, daemon.serve, spawned)
-
-        async def finish_stopping() -> None:
-            await asyncio.sleep(0.5)  # the stopping connector still closes what it relayed
-            lock.release()
-
-        stopping = asyncio.create_task(finish_stopping())
+        stopping = asyncio.create_task(ending.end("idle_timeout"))
         try:
             client = await service_client.connect_service_on_demand(
                 ControlClientKind.CLI, timeout_seconds=5.0
@@ -477,8 +512,48 @@ def test_a_client_that_dials_while_the_connector_stops_starts_its_successor(
     try:
         asyncio.run(exercise())
     finally:
-        lock.release()
+        ending.lock.release()
     assert spawned == [remote] and daemon.connections == 1
+
+
+@pytest.mark.parametrize("reason", ["stop_requested", "zero_network_remote_selected"])
+def test_a_client_that_dials_while_the_connector_is_stopped_on_purpose_starts_nothing(
+    remote: Path, monkeypatch: pytest.MonkeyPatch, no_local_service: None, reason: str
+) -> None:
+    """A deliberate stop stays a stop. ``server use local`` (or ``disconnect``, ``remove``,
+    ``login``, ``logout``) clears or keeps the selection and then stops the connector; a client
+    that resolved the remote root before that and is still waiting for the endpoint starts no
+    connector for the root that was left, so nothing answers that server for this computer's
+    files. The next client resolves the selection afresh."""
+
+    ending = _EndingConnector(remote, monkeypatch)
+    spawned: list[Path] = []
+    daemon = ScriptedDaemon()
+
+    def leave() -> None:
+        with targets.registry_lock():
+            targets.clear_selection()
+
+    async def exercise() -> None:
+        tasks = _fake_connector(monkeypatch, daemon.serve, spawned)
+        stopping = asyncio.create_task(ending.end(reason, before_release=leave))
+        try:
+            with pytest.raises(ControlError) as refused:
+                await service_client.connect_service_on_demand(
+                    ControlClientKind.CLI, timeout_seconds=1.0
+                )
+        finally:
+            await stopping
+            _stop(tasks)
+        assert refused.value.reason == "service_unavailable"
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        ending.lock.release()
+    # The client kept looking after the lock was released, and still started nothing.
+    assert ending.looks_after_release > 0
+    assert spawned == [] and daemon.connections == 0
 
 
 def test_an_outage_the_connector_never_named_is_remote_unreachable(

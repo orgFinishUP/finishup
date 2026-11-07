@@ -2623,9 +2623,20 @@ async def _connect_remote_attempts(
 
     from finishup.client.connector_status import (
         connector_holder,
+        read_connector_status,
         spawn_connector,
         stop_connector,
     )
+
+    def idle_exit_finished() -> bool:
+        # The connector writes why it stopped before it releases the root's lock. Only its idle
+        # exit has a successor here; a deliberate stop (``server use``, ``disconnect``,
+        # ``remove``, ``login``, ``logout``, a zero-network policy) stays a stop, and the next
+        # client resolves the selection afresh.
+        if connector_holder(root) is not None:
+            return False
+        status = read_connector_status(root)
+        return status is not None and (status.phase, status.reason) == ("stopped", "idle_timeout")
 
     async def attempt() -> ServiceClient:
         remaining = deadline - time.monotonic()
@@ -2672,9 +2683,9 @@ async def _connect_remote_attempts(
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        if not spawned and connector_holder(root) is None:
-            # The connector that held the root was stopping (its idle exit, a stop): it closes
-            # its endpoint first and releases its lock once its relays have closed. Start its
+        if not spawned and idle_exit_finished():
+            # The connector that held the root was ending at its idle exit: it closes its
+            # endpoint first and releases its lock once its relays have closed. Start its
             # successor now instead of waiting on an endpoint nothing will serve again.
             try:
                 spawn_connector(root)
