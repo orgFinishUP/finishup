@@ -1657,6 +1657,34 @@ def test_a_stale_disclosure_is_refused_by_connect_and_renewed_by_use(
     assert authorized == [("lab", "ssh"), ("lab", "ssh")]
 
 
+def test_server_test_of_a_stale_disclosure_says_nothing_was_sent_and_the_fix(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe asks the shared connection check first, so a target confirmed under an older
+    disclosure is sent nothing. ``server test`` names that refusal and its fix, never "the target
+    did not answer"; ``server status`` stays usable and shows it."""
+
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    (record,) = targets.list_targets()
+    monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION + 1)
+
+    async def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("nothing is sent to a target the shared check refuses")
+
+    monkeypatch.setattr("finishup.client.rest_client.connect_rest_service", never)
+
+    result = _invoke("test", "fu")
+
+    assert result.exit_code == 2, result.output
+    assert result.stderr.startswith("target_reauthorization_required: ")
+    assert f"nothing was sent to server target {record.target_id}" in result.stderr
+    assert "'finishup server use NAME'" in result.stderr
+    assert "did not answer" not in result.output
+    assert "fu.example" not in result.stderr
+    probe = cast(dict[str, JsonValue], _status_json("fu")["probe"])
+    assert (probe["outcome"], probe["reason"]) == ("unavailable", "target_reauthorization_required")
+
+
 # -- registrations and upgrade with a selection ---------------------------------------------
 
 

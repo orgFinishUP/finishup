@@ -1590,10 +1590,11 @@ def server_test(
     document = build_status_document(name, zero_network=lambda: None)
     _emit(status_lines(document))
     probe = cast(dict[str, JsonValue], document["probe"])
-    if probe["outcome"] == "not_probed":
-        # Nothing was sent (ADR-051 decision 8): say why and the one command that fixes it.
-        refusal = zero_network_connection_refusal(record)
-        raise refusal if refusal is not None else ServerCommandRefused(str(probe["reason"]))
+    if probe["outcome"] == "not_probed" or probe["reason"] in _SHARED_CHECK_REFUSALS:
+        # The shared connection check refused, so nothing was sent and the target was never
+        # asked (ADR-051 decision 8): say why and the one command that fixes it, never that the
+        # target did not answer.
+        raise _probe_refusal(record, str(probe["reason"]))
     if probe["outcome"] not in {"ready", "reachable"}:
         typer.echo("The target did not answer a status call.", err=True)
         raise typer.Exit(_UNAVAILABLE)
@@ -1605,6 +1606,31 @@ def server_test(
         )
     else:
         typer.echo("Within the hook budgets (0.65 s startup gate, 1.0 s hook connect).")
+
+
+# The shared connection check's refusals (``targets.require_current_authorization``): a probe
+# that names one sent nothing.
+_SHARED_CHECK_REFUSALS: Final = frozenset(
+    {"zero_network_remote_selected", "zero_network_in_force", "target_reauthorization_required"}
+)
+
+
+def _probe_refusal(record: ServerTarget | None, reason: str) -> ServerCommandRefused:
+    """Why a probe sent nothing to ``record``, with the one command that fixes it."""
+
+    refusal = zero_network_connection_refusal(record)
+    if refusal is not None:
+        return refusal
+    if reason == "target_reauthorization_required" and record is not None:
+        return ServerCommandRefused(
+            reason,
+            message=(
+                f"nothing was sent to server target {record.target_id}: it was authorized under "
+                "an older disclosure of what leaves this computer; run 'finishup server use NAME' "
+                "in your own terminal to read the current one and confirm it"
+            ),
+        )
+    return ServerCommandRefused(reason)
 
 
 @server_app.command("remove")

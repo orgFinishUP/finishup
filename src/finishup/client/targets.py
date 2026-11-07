@@ -844,8 +844,10 @@ def require_current_authorization(record: ServerTarget | None) -> None:
       (``reauthorized``).
 
     ``None`` and a local record pass. Every path that opens a connection to a remote target calls
-    this; the display and reverse paths (``server status``, ``list``, ``test``, ``remove``,
-    ``logout``) do not, so the owner can still see and remove a stale target.
+    this, the probes of ``server status`` and ``server test`` and the terminal's ``/server``
+    included; those display paths, and the reverse paths (``list``, ``remove``, ``logout``), stay
+    usable: a probe it refuses sends nothing and reports the refusal with its fix, so the owner
+    can still see, fix and remove a stale target.
     """
 
     if record is None or not record.is_remote:

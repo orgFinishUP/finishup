@@ -767,7 +767,9 @@ answers bounded `workspace_call`s on a connection that declared it.
   `targets.require_current_authorization` enforces it at every hop decision
   (`is_remote_active_root`, `binding_for_active_root`, `server connect`), with or without a
   workspace, and refuses with `target_reauthorization_required`; `server status`, `list`, `test`,
-  `remove` and `logout` stay usable so the owner can see and remove a stale target.
+  `remove` and `logout` stay usable so the owner can see and remove a stale target. Their probes
+  ask the same check, so they send nothing to it: `server status` shows the reason, and `server
+  test` refuses with it and its fix (`finishup server use NAME`), never "did not answer".
 - The disclosure says what leaves the machine: task statements, published work, evidence, check,
   respond and receipt traffic, the workspace claim (a keyed digest, not a path), observation rows,
   and the workspace evidence the server asks the workspace agent for — the task base and
