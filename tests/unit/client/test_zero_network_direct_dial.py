@@ -9,6 +9,8 @@ once that says zero-network it closes what it holds, delivers nothing more and n
 
 * every remote ``ServiceClient`` connection (the MCP bridge's, the agents', the terminal
   interface's): before every frame, and once a second while open;
+* the HTTPS binding stream below it (``https`` and ``local_port`` targets): before every request,
+  its own long-polls included, and its closing ``DELETE`` is never sent;
 * the connect seam (``service.client._control_transport``) and the transports below it;
 * the MCP bridge's background agent and its observation drain (``BridgeBackgroundWork``);
 * ``finishup server connect NAME --agent`` (``run_foreground_agent``);
@@ -28,9 +30,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 
 import finishup.client.everyday_policy as everyday_policy
+from builders.direct_dial import (
+    FakeBindingGateway,
+    StaticCredential,
+    https_target,
+    memory_pair,
+    service_status,
+)
 from builders.server_targets import ambient_home
 from finishup.adapters.control.unix_socket import AuthenticatedUnixStream
 from finishup.cli.zero_network_selection import (
@@ -42,6 +52,7 @@ from finishup.client.agent_session import (
     BridgeBackgroundWork,
     run_foreground_agent,
 )
+from finishup.client.https_binding import open_binding_stream
 from finishup.client.target_runtime import TargetRuntimeError
 from finishup.client.transports import (
     HttpsTransport,
@@ -54,12 +65,19 @@ from finishup.ports.control import (
     ControlClientKind,
     ControlError,
     ControlMethod,
+    ProjectionRenderMode,
     WorkspaceClaim,
     WorkspaceLocator,
 )
+from finishup.protocol.canonical import canonical_encode
 from finishup.service import client as service_client
 from finishup.service.client import ClientWorkspaceBinding
-from finishup.service.control_protocol import ControlSession
+from finishup.service.control_protocol import (
+    ControlSession,
+    ControlStream,
+    read_control_frame,
+    server_handshake,
+)
 
 _AT = datetime(2026, 11, 7, 9, 30, tzinfo=UTC)
 _PHASE = "zero_network_remote_selected"
@@ -205,6 +223,148 @@ def test_a_local_connection_never_reads_the_record() -> None:
 
     # This computer's own service is never a server elsewhere: its frames go out as before.
     assert asyncio.run(exercise()) != []
+
+
+# --- the HTTPS binding below a remote connection: no request, and no closing DELETE ------------
+
+_SID = "S" * 43
+
+
+class _AgentGateway(httpx.AsyncBaseTransport):
+    """A gateway stand-in: it opens one agent session and holds its first frames long-poll.
+
+    It records every request it receives. The first ``GET …/frames`` waits for ``release`` and
+    answers ``204`` (no frame yet); later ones stay unanswered, as a quiet server's would.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str]] = []
+        self.polling = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path))
+        if request.method == "POST":
+            location = f"/base/v1/sessions/{_SID}"
+            return httpx.Response(201, headers={"Location": location}, content=b"{}")
+        if request.method == "GET":
+            if not self.polling.is_set():
+                self.polling.set()
+                await self.release.wait()
+                return httpx.Response(204)
+            await asyncio.Event().wait()
+        return httpx.Response(204)
+
+
+@pytest.mark.parametrize("zero_network", [True, False])
+def test_the_binding_starts_no_request_and_deletes_nothing_once_zero_network(
+    zero_network: bool,
+) -> None:
+    """An agent session's own frames long-poll reads the record before each request: once it
+    says zero-network the stream ends naming why, and closing it sends no ``DELETE`` (the
+    gateway forgets a session whose polls stopped). Otherwise the close deletes the session."""
+
+    gateway = _AgentGateway()
+
+    async def exercise() -> tuple[list[tuple[str, str]], str | None]:
+        stream = await open_binding_stream(
+            https_target(), StaticCredential(), http_transport=gateway
+        )
+        # The stream reads only these two keys of a hello: a nonce, and that it declares an agent.
+        hello = canonical_encode({"connection_nonce": "9a" * 32, "workspace_agent": {}})
+        await stream.send_all(len(hello).to_bytes(4, "big") + hello)
+        assert await stream.receive(4 + len(b"{}")) == b"\x00\x00\x00\x02{}"
+        await gateway.polling.wait()  # its frames long-poll is on the wire
+        if zero_network:
+            _zero_network()
+        sent = len(gateway.requests)
+        if zero_network:
+            gateway.release.set()
+            # The long-poll answered; the next one is refused before it starts, ending the stream.
+            assert await asyncio.wait_for(stream.receive(), timeout=5.0) == b""
+        phase = await stream.failure_phase()
+        await stream.aclose()
+        return gateway.requests[sent:], phase
+
+    after, phase = asyncio.run(exercise())
+    if zero_network:
+        assert after == []
+        assert phase == _PHASE
+    else:
+        assert after == [("DELETE", f"/base/v1/sessions/{_SID}")]
+
+
+class _HoldFirstResultPoll(httpx.AsyncBaseTransport):
+    """Records every request, and holds the first ``GET …/results/…`` until ``release``."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self.inner = inner
+        self.requests: list[tuple[str, str]] = []
+        self.polling = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path))
+        if request.method == "GET" and "/results/" in request.url.path:
+            if not self.polling.is_set():
+                self.polling.set()
+                await self.release.wait()
+        return await self.inner.handle_async_request(request)
+
+
+async def _quiet_server(stream: ControlStream) -> None:
+    """A service that completes the handshake and then never answers a call."""
+
+    await server_handshake(stream, stream.peer_identity, service_status())
+    while True:
+        try:
+            await read_control_frame(stream, eof_reason="session_closed")
+        except Exception:
+            return
+
+
+def test_a_held_https_call_polls_no_more_and_deletes_nothing_once_zero_network() -> None:
+    """A call whose result is long-polled: once the record says zero-network, no further poll and
+    no closing ``DELETE`` reaches the server, and the call fails naming the refusal."""
+
+    async def upstream() -> ControlStream:
+        gateway_end, server_end = memory_pair()
+        asyncio.get_running_loop().create_task(_quiet_server(server_end))
+        return gateway_end
+
+    gateway = FakeBindingGateway(upstream)
+    wire = _HoldFirstResultPoll(httpx.ASGITransport(app=gateway))
+
+    async def exercise() -> tuple[list[tuple[str, str]], ControlError]:
+        transport = HttpsTransport(
+            https_target(), Path("/nonexistent"), credential=StaticCredential(), http_transport=wire
+        )
+        connect = service_client._connect_service_attempt  # pyright: ignore[reportPrivateUsage]
+        client = await connect(
+            ControlClientKind.CLI,
+            workspace_locator=None,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            timeout_seconds=5.0,
+            transport=transport,
+        )
+        call = asyncio.create_task(client.service_status())
+        await wire.polling.wait()  # the call was posted, and its result is being polled
+        _zero_network()
+        sent = len(wire.requests)
+        wire.release.set()
+        await asyncio.wait_for(client.wait_closed(), timeout=_CLOSE_BOUND_SECONDS + 1.0)
+        with pytest.raises(ControlError) as refused:
+            await call
+        return wire.requests[sent:], refused.value
+
+    after, refused = asyncio.run(exercise())
+    assert after == []
+    assert (refused.reason, refused.phase, refused.retryable) == (
+        "service_unavailable",
+        _PHASE,
+        True,
+    )
 
 
 # --- the connect seam and the transports below it -----------------------------------------------

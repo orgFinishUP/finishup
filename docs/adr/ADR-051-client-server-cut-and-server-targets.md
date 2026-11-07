@@ -1112,7 +1112,8 @@ HTTPS and LOCALHOST PORT
   out of the gateway's 120 s idle expiry; the gateway closes an agent session in which no such
   long-poll began for 40 s, so a client process that died without its `DELETE` stops being the
   agent the daemon routes workspace calls to, and a closing agent connection sends its `DELETE`
-  before it stops polling and waits up to 1.5 s for it. A session idle past 90 s is checked
+  before it stops polling and waits up to 1.5 s for it, never once this computer reported
+  zero-network (decision 8). A session idle past 90 s is checked
   before a call, so an expired session fails the write and the caller's reconnect-once replays
   the same `request_id`. On the server the gateway counts sessions still being opened against a
   key's 64-session bound, names a scope refusal in its audit line, bounds its audit (one rotation
@@ -1185,7 +1186,10 @@ HTTPS and LOCALHOST PORT
   `ServiceClient` (the MCP bridge's own connection, the terminal interface's, an agent's), the
   bridge's background work (`BridgeBackgroundWork`: before every connection and every delivery of
   captured rows, and every second while it waits) and `finishup server connect NAME --agent`
-  (`run_foreground_agent`). Once the record says zero-network a connection is closed within about
+  (`run_foreground_agent`). Below an HTTPS or localhost-port connection the binding stream reads
+  it before every request it starts, its own frames and results long-polls included, and skips
+  the closing `DELETE` (the gateway forgets a session once its polls stop). Once the record says
+  zero-network a connection is closed within about
   a second (a request under way in that second may still finish), its pending calls and later
   ones fail with `zero_network_remote_selected`, no workspace reply and no captured row is sent
   (no last delivery), the background work holds nothing until the record says otherwise, and the

@@ -20,6 +20,11 @@ the binding the server's gateway speaks (``docs/INTERFACES.md``, *HTTPS binding 
 * close → ``DELETE /v1/sessions/{sid}``, sent before the long-polls are cancelled (best effort;
   the gateway also expires idle sessions, and an agent session whose frames long-poll stopped).
 
+Nothing is sent once this computer last reported a zero-network privacy policy (ADR-051 decision
+8; ``client.everyday_policy``, a file read): every request reads that record first, so a
+long-poll, a result poll, a cancel or a reply refused there ends the stream in
+``zero_network_remote_selected`` instead of starting, and the closing ``DELETE`` is skipped.
+
 The gateway expires a session after 120 idle seconds. Before a call on a session idle for longer
 than ``SESSION_IDLE_CHECK_SECONDS``, the stream asks whether it still exists (``GET …/frames`` with
 no wait); if it expired, the write fails, so ``ServiceClient`` reports a retryable
@@ -58,7 +63,7 @@ import httpx
 
 from finishup.client.credentials import CredentialError, CredentialSource
 from finishup.client.targets import ServerTarget
-from finishup.client.transports import RemotePeerIdentity, TransportError
+from finishup.client.transports import RemotePeerIdentity, TransportError, refuse_zero_network
 from finishup.protocol.canonical import JsonValue, strict_json_parse
 from finishup.protocol.ids import IdKind, validate_id
 from finishup.service.control_protocol import MAX_CONTROL_FRAME_BYTES
@@ -314,6 +319,16 @@ async def _request(
         raise TransportError(phase_for_http_error(error)) from None
 
 
+def _may_send() -> bool:
+    """Whether a request may still be sent: never once this computer reported zero-network."""
+
+    try:
+        refuse_zero_network()
+    except TransportError:
+        return False
+    return True
+
+
 def _session_id(location: str | None) -> str | None:
     if location is None:
         return None
@@ -523,6 +538,9 @@ class BindingControlStream:
         wait_ms: int | None = None,
         trace: _Trace | None = None,
     ) -> tuple[int, httpx.Headers, bytes]:
+        # Read before every request, a background long-poll's included: once this computer
+        # reported zero-network nothing more starts, and the stream ends naming why.
+        refuse_zero_network()
         answer = await _request(
             self._client, method, path, content=content, wait_ms=wait_ms, trace=trace
         )
@@ -632,9 +650,11 @@ class BindingControlStream:
         self._closed = True
         self._end(None)
         try:
-            if self._session is not None:
+            if self._session is not None and _may_send():
                 # First, while the long-polls still run: the gateway ends the session, and with it
-                # the daemon's agent registration for it, before this process goes away.
+                # the daemon's agent registration for it, before this process goes away. Never
+                # once this computer reported zero-network: the gateway forgets the session on
+                # its own once its polls stop.
                 with contextlib.suppress(Exception):
                     async with asyncio.timeout(_DELETE_SECONDS):
                         await self._client.delete(self._session)
