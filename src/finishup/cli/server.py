@@ -1726,13 +1726,14 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
-    key_left = False
+    key_left = cleared = finished = False
     try:
         with registry_lock():
             # The selection goes first, so a new hook or command can no longer dial the target
             # while its connection is stopped (as ``use_target`` does).
             if selected == record.target_id or unreadable_selection:
                 clear_selection()
+                cleared = True
             if record.is_remote:
                 key_left = _remove_remote(record, root)
             else:
@@ -1747,11 +1748,16 @@ def server_remove(
                         err=True,
                     )
                     raise typer.Exit(_UNSAFE) from None
+        finished = True
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     except PathSafetyError as error:
         typer.echo(f"{error.reason_code}: the target folder is unsafe to remove", err=True)
         raise typer.Exit(_UNSAFE) from None
+    finally:
+        if cleared and not finished:
+            # A remove that did not finish keeps the switch it already made (SRV-2): say so.
+            _say_using_everyday()
     typer.echo(f"Removed server target {record.name} ({record.target_id}).")
     if key_left:
         from finishup.client.credentials import SERVER_CREDENTIAL_SERVICE
@@ -1762,9 +1768,13 @@ def server_remove(
             f"for {record.target_id} with your system's credential tool.",
             err=True,
         )
-    if selected == record.target_id or unreadable_selection:
-        typer.echo("Using this computer's everyday FinishUP server.")
-        _warn_open_sessions()
+    if cleared:
+        _say_using_everyday()
+
+
+def _say_using_everyday() -> None:
+    typer.echo("Using this computer's everyday FinishUP server.")
+    _warn_open_sessions()
 
 
 def _stop_for_remove(record: ServerTarget, root: Path) -> None:

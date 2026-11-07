@@ -1289,6 +1289,13 @@ def test_login_and_logout_with_an_owner_only_key_file(
     assert again.exit_code == 0 and "No API key was stored" in again.stdout
 
 
+_SWITCHED_BACK: Final = (
+    "Using this computer's everyday FinishUP server.\n"
+    "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP MCP "
+    "bridge keeps the server it started with.\n"
+)
+
+
 @pytest.mark.parametrize("second_stop", ["stops", "stuck"])
 def test_remove_clears_the_selection_first_and_stops_again_right_before_the_folder_goes(
     home: Path,
@@ -1326,6 +1333,7 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
     assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
     assert _invoke("use", "fu").exit_code == 0
     (record,) = targets.list_targets()
+    assert record.credential == "keyring"
     root = targets.target_root(record.target_id)
 
     result = _invoke("remove", "fu", "--select-local")
@@ -1334,6 +1342,34 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
     assert targets.read_selected_target_id() is None
     assert result.exit_code == 0, result.output
     assert not root.exists() and targets.list_targets() == ()
+    assert result.stdout == f"Removed server target fu ({record.target_id}).\n{_SWITCHED_BACK}"
+
+
+def test_a_remove_that_does_not_finish_says_it_switched_back(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-2: ``remove --select-local`` clears the selection first. When it then does not finish
+    (here the folder is refused as unsafe), the switch to this computer's server stays, and the
+    refusal comes with the usual lines that say so."""
+
+    class _Runtime:
+        def stop(self, _target: Path | None) -> None:
+            return None
+
+    def unsafe(_record: targets.ServerTarget) -> None:
+        raise targets.TargetError("target_root_unsafe")
+
+    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Runtime())
+    monkeypatch.setattr(targets, "remove_target_root", unsafe)
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    assert _invoke("use", "fu").exit_code == 0
+
+    result = _invoke("remove", "fu", "--select-local")
+
+    assert result.exit_code != 0 and result.stderr.startswith("target_root_unsafe:")
+    assert result.stdout == _SWITCHED_BACK
+    assert targets.read_selected_target_id() is None
+    assert [target.name for target in targets.list_targets()] == ["fu"]
 
 
 def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
