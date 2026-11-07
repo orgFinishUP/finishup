@@ -60,7 +60,6 @@ from finishup.client.targets import (
     ServerTarget,
     TargetError,
     TargetKind,
-    active_target_is_remote,
     active_target_record,
     clear_selection,
     find_target,
@@ -490,9 +489,11 @@ def _zero_network_in_force() -> bool:
             )
         # While a server elsewhere is selected, 'service start' and 'service unlock' are refused
         # here (requires_server_host): name the way that works from this state (SRV-3).
+        from finishup.client.remote_remedy import remote_root_selected
+
         raise ServerCommandRefused(
             "network_policy_unreadable",
-            message=_POLICY_UNREADABLE_WHILE_REMOTE if active_target_is_remote() else None,
+            message=_POLICY_UNREADABLE_WHILE_REMOTE if remote_root_selected() else None,
         )
     return state == "zero_network"
 
