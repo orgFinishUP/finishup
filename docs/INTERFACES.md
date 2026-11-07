@@ -5672,7 +5672,9 @@ the unchanged coordinator over it with `client_workspace_handle` set. The handle
 worktree, so linked worktrees of one repository never share consent, revocation, content fence or
 approved-check trust here either. A route whose task was not opened under
 the same claim, and a claim-bound row without an attestation, are refused `consent_missing` before
-any write. A route naming a session its task has since replaced is judged by the task's current
+any write. Claim stores persist with no operator surface yet: nothing lists or clears them, and a
+client that stops sending rows leaves the last mirrored consent and trust in place, inert because
+every row is mirrored from its own attestation first (ADR-051 decision 12, Limits). A route naming a session its task has since replaced is judged by the task's current
 route (`StartCatalog.session_binding`), and the coordinator then follows `session_superseded` to
 the successor as it does locally; an attestation on a connection without a claim is `frame_invalid`. Text and markdown
 receipts of a claim-bound task with hook-observed evidence add `CLIENT_ATTESTED_OBSERVATION_LINE`
