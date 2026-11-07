@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Final
 
 _SRC: Final = Path(__file__).resolve().parents[3] / "src" / "finishup"
-_RESOLVERS: Final = frozenset({"isolated_root", "active_root", "_expected_isolated_root"})
+_RESOLVERS: Final = frozenset(
+    {"isolated_root", "active_root", "_expected_isolated_root", "installation_state_dir"}
+)
 
 # (module path relative to src/finishup, enclosing scope, resolver) -> number of calls.
 _FOLLOWS_SELECTION: Final = {
@@ -77,6 +79,9 @@ _STAYS_EXPLICIT: Final = {
     ("adapters/integrations/codex_launcher.py", "installed_launcher", "isolated_root"): 1,
     # ``upgrade`` refuses only an explicitly isolated runtime, never a selection.
     ("adapters/package_upgrade.py", "execute_package_upgrade", "isolated_root"): 1,
+    # The host-configuration lock and membership record stay with the installation, as the
+    # registrations they guard do (SRV-5).
+    ("adapters/integrations/host_projects.py", "lock_path_for", "installation_state_dir"): 1,
 }
 # New client code that reads the active root to describe or guard the selected target.
 _CLIENT_TARGETS: Final = {
@@ -139,10 +144,11 @@ def test_the_audit_covers_the_design_table() -> None:
     ``_expected_isolated_root`` helper, which resolves through ``isolated_root_environment``, so
     the explicit side has 14 calls here. The edge relay (approach A) adds one of each: the
     client's remote-root check follows the selection, and the connector's own-root check stays
-    explicit."""
+    explicit. The host-configuration lock's installation state directory stays explicit too
+    (SRV-5)."""
 
     assert len(_FOLLOWS_SELECTION) == 5 + 1
-    assert len(_STAYS_EXPLICIT) == 14 + 1
+    assert len(_STAYS_EXPLICIT) == 14 + 1 + 1
 
 
 def test_registration_and_upgrade_sites_never_follow_the_selection() -> None:
@@ -152,6 +158,7 @@ def test_registration_and_upgrade_sites_never_follow_the_selection() -> None:
         "adapters/integrations/cursor_integration.py",
         "adapters/integrations/codex_mcp.py",
         "adapters/integrations/codex_launcher.py",
+        "adapters/integrations/host_projects.py",
         "adapters/package_upgrade.py",
         "cli/cursor_project_mcp.py",
         "cli/host_connection.py",
