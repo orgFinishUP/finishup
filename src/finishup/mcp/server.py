@@ -1959,6 +1959,14 @@ _REMOTE_NOT_SENT_MESSAGES: Final[Mapping[str, str]] = MappingProxyType(
             "continuation for this phase. Never fall back to another server or a local service, "
             "and never run local service lifecycle commands for this."
         ),
+        # ADR-051 decision 8: this computer refused to connect; the server did not fail.
+        "zero_network_remote_selected": (
+            "This computer's FinishUP is set to make no network connections, so nothing was sent "
+            "to the selected FinishUP server. Follow the continuation for this phase: the owner "
+            "runs 'finishup server use local', then the session is restarted. Never fall back to "
+            "another server or a local service, and never change the privacy policy or the server "
+            "selection for the owner."
+        ),
     }
 )
 _REMOTE_DRAINING_MESSAGE: Final = (

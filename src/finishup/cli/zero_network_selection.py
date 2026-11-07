@@ -365,7 +365,24 @@ def everyday_network_state() -> NetworkState:
         return "unreadable"
     if remember:
         record_reported_policy(zero_network=not permitted)
+        if not permitted:
+            _close_held_connections()
     return "network_permitted" if permitted else "zero_network"
+
+
+def _close_held_connections() -> tuple[str, ...]:
+    """Close what this client still holds open to servers elsewhere; the target ids closed.
+
+    Called once this computer's everyday FinishUP has reported a zero-network policy (ADR-051
+    decision 8). In the direct-dial topology every connection is its own process's and reads the
+    same record once a second, but an OpenSSH master persists for 15 idle minutes and cannot read
+    it: each SSH target's master is asked to exit by its control path, never found by pattern.
+    Never raises; the test suite replaces it so no test reaches a real registry.
+    """
+
+    from finishup.client.direct_runtime import close_ssh_masters
+
+    return close_ssh_masters()
 
 
 def remember_reported_policy(response: Mapping[str, object]) -> bool:
@@ -393,7 +410,10 @@ def remember_reported_policy(response: Mapping[str, object]) -> bool:
         return False
     from finishup.client.everyday_policy import record_reported_policy
 
-    return record_reported_policy(zero_network=not permitted)
+    written = record_reported_policy(zero_network=not permitted)
+    if written and not permitted:
+        _close_held_connections()
+    return written
 
 
 def read_selection_on_disk() -> ServerTarget | str | None:

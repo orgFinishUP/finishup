@@ -828,7 +828,8 @@ answers bounded `workspace_call`s on a connection that declared it.
     before every connection it opens or relays and at least once a second while it runs, and on
     finding the marker it closes what it holds, sends nothing more (no last delivery of captured
     observations), and names `zero_network_remote_selected`. Each approach names its own such
-    processes in its topology below.
+    processes in its topology below (approach B: every remote connection a client process holds,
+    the MCP bridge's background work, `server connect NAME --agent`, and the SSH master).
 
   **Where the choice can arise.** While a remote target is selected, a fresh process does not
   set this computer's policy: every `server_host` privacy command (the privacy ceremonies,
@@ -1128,6 +1129,29 @@ HTTPS and LOCALHOST PORT
   - *Limit.* Hook rows delivered more than 15 minutes after the bridge's last activity are
     verified only if an agent is connected then (a CLI command, a foreground agent); otherwise the
     verification waits the hub's 30 s and is recorded unavailable, never a pass.
+- **Zero-network (decision 8).** No relay runs here, so every connection to a remote target is
+  held by a client process itself, and each reads what this computer last reported
+  (`client.everyday_policy`) before it is opened (`service.client._control_transport` through
+  `targets.require_current_authorization`, and again in `SshTransport.connect`,
+  `HttpsTransport.connect` and the remote service start). The long-lived holders read it again
+  before every frame they send and at least once a second while they hold it: every remote
+  `ServiceClient` (the MCP bridge's own connection, the terminal interface's, an agent's), the
+  bridge's background work (`BridgeBackgroundWork`: before every connection and every delivery of
+  captured rows, and every second while it waits) and `finishup server connect NAME --agent`
+  (`run_foreground_agent`). Once the record says zero-network a connection is closed within about
+  a second (a request under way in that second may still finish), its pending calls and later
+  ones fail with `zero_network_remote_selected`, no workspace reply and no captured row is sent
+  (no last delivery), the background work holds nothing until the record says otherwise, and the
+  foreground agent ends naming the refusal and the fix for the server it served. An OpenSSH
+  master cannot read the record and would keep its connection for 15 idle minutes, so
+  `server connect` starts none then (`SshTargetRuntime.ensure_ready` refuses), and it is asked
+  to exit by its control path (`ssh -O exit`, `direct_runtime.close_ssh_masters`) by the bridge's
+  background work and the foreground agent for their own target, and for every SSH target by the
+  command that records a zero-network report here. **Honest limit:** a master started by a
+  process that passed its check in the same instant the record was written, while no bridge or
+  foreground agent runs, keeps its idle connection until it exits after 15 idle minutes or the
+  next zero-network report here; nothing is sent over it, since every stream reads the record
+  first.
 - **Credential.** Each client process that dials an HTTPS target reads the key from its
   `CredentialSource`: the ADR-008 amendment of this approach, disclosed in ADR-008. The read runs
   in a daemon thread bounded at 3 s, so a keyring waiting on an unlock or permission prompt never

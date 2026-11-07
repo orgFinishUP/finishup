@@ -10,8 +10,9 @@ and the terminal interface) asks this module instead, so they all say the same t
   ``remote_identity_changed``, ``remote_service_not_running``, ``remote_incompatible``) with that
   phase's ADR-030 directive from ``protocol.recovery`` (the text lives there, once);
 * a connection never opened names why nothing was sent: a target confirmed under an older
-  disclosure (``target_reauthorization_required``), or a local service asked for in a remote
-  target's root (``target_root_is_remote``);
+  disclosure (``target_reauthorization_required``), a local service asked for in a remote
+  target's root (``target_root_is_remote``), or this computer last reporting a zero-network
+  privacy policy (``zero_network_remote_selected``, ADR-051 decision 8);
 * a workspace this computer's Git cannot resolve was never sent (the client claims the workspace
   itself before it dials, ``handshake`` / ``handshake_git_version``);
 * a locked vault on the server is the server owner's to unlock, on the server host;
@@ -77,6 +78,12 @@ REMOTE_NOT_SENT_SUMMARIES: Final[Mapping[str, str]] = MappingProxyType(
         "target_root_is_remote": (
             "the selected FinishUP target is a server on another machine, so this computer has no "
             "FinishUP service of its own for it, and nothing was started"
+        ),
+        # This computer refused to connect while it is zero-network (ADR-051 decision 8): the
+        # server did not fail. The same words as the edge relay's and the native API's.
+        "zero_network_remote_selected": (
+            "this computer's FinishUP is set to make no network connections, so nothing was sent "
+            "to the selected FinishUP server"
         ),
     }
 )

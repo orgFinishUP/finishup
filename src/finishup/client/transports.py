@@ -60,6 +60,7 @@ __all__ = [
     "TransportKind",
     "UnixTransport",
     "classify_ssh_failure",
+    "refuse_zero_network",
     "ssh_control_argv",
     "ssh_destination",
     "ssh_environment",
@@ -123,6 +124,21 @@ class TransportError(Exception):
             raise ValueError("transport_phase_invalid")
         self.phase = phase
         super().__init__(phase)
+
+
+def refuse_zero_network() -> None:
+    """Raise ``TransportError("zero_network_remote_selected")`` while this computer is zero-network.
+
+    ADR-051 decision 8: nothing is dialled to a server elsewhere, and no SSH master is started,
+    while this computer last reported a zero-network privacy policy (``client.everyday_policy``,
+    a file read). The connect seam already refuses through ``targets.require_current_authorization``;
+    every remote dial reads the record again here, so no path around that seam reaches the network.
+    """
+
+    from finishup.client.everyday_policy import last_reported_zero_network
+
+    if last_reported_zero_network() is not None:
+        raise TransportError("zero_network_remote_selected")
 
 
 class RemotePeerIdentity:
@@ -515,6 +531,7 @@ class SshTransport:
         return ssh_stdio_argv(self._target, self._root, program=self._program)
 
     async def connect(self) -> SshControlStream:
+        refuse_zero_network()
         return await SshControlStream.open(self.argv())
 
 
@@ -555,6 +572,7 @@ async def start_remote_service(transport: ControlTransport, seconds: float) -> b
         return False
     if seconds <= 0:
         return False
+    refuse_zero_network()
     argv = ssh_remote_command_argv(
         transport.target,
         transport.root,
@@ -616,6 +634,7 @@ class HttpsTransport:
     async def connect(self) -> ControlStream:
         from finishup.client.https_binding import open_binding_stream
 
+        refuse_zero_network()
         return await open_binding_stream(
             self._target, self.credential_source(), http_transport=self._http_transport
         )

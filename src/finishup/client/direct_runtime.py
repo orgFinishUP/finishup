@@ -18,6 +18,13 @@ through the recorded launcher (or one found at a fixed list of install paths, ne
 ``finishup`` on the remote ``PATH``). It returns the remote control endpoint to record and checks
 that the server runs this client's schema manifest.
 
+While this computer last reported a zero-network privacy policy (ADR-051 decision 8,
+``client.everyday_policy``) ``ensure_ready`` starts nothing and sends nothing
+(``zero_network_remote_selected``), and ``close_ssh_masters`` asks every SSH master this client
+holds to exit: an OpenSSH master cannot read that record itself, so the client processes that
+find it close the masters for it (the MCP bridge's background work and ``finishup server connect
+NAME --agent`` every second while they run, and the command that records it).
+
 Every failure is a ``TargetRuntimeError`` with closed tokens; OpenSSH's own diagnostics are
 classified and dropped, never shown.
 """
@@ -46,6 +53,7 @@ __all__ = [
     "HttpsTargetRuntime",
     "SshEndpoint",
     "SshTargetRuntime",
+    "close_ssh_masters",
     "discover_ssh_endpoint",
 ]
 
@@ -84,6 +92,15 @@ def _remote_record(root: Path | None, kinds: frozenset[str]) -> tuple[ServerTarg
     if record is None or record.kind not in kinds:
         raise TargetRuntimeError("target_record_invalid")
     return record, root
+
+
+def _refuse_zero_network() -> None:
+    """Start or send nothing while this computer last reported zero-network (ADR-051 decision 8)."""
+
+    from finishup.client.everyday_policy import last_reported_zero_network
+
+    if last_reported_zero_network() is not None:
+        raise TargetRuntimeError("service_unavailable", phase="zero_network_remote_selected")
 
 
 def _run(runner: _Runner, argv: Sequence[str], seconds: float) -> tuple[int | None, bytes, bytes]:
@@ -137,6 +154,7 @@ class SshTargetRuntime:
 
     def ensure_ready(self, root: Path | None) -> None:
         record, target_root = _remote_record(root, frozenset({"ssh"}))
+        _refuse_zero_network()
         code, _stdout, stderr = _run(
             self._runner,
             ssh_master_argv(record, target_root, program=self._program),
@@ -175,6 +193,7 @@ class HttpsTargetRuntime:
         from finishup.client.https_binding import fetch_server_info
 
         record, target_root = _remote_record(root, frozenset({"https", "local_port"}))
+        _refuse_zero_network()
         try:
             secret = KeyringOrFileCredential(
                 record.target_id, target_root, recorded=record.credential
@@ -198,6 +217,54 @@ class HttpsTargetRuntime:
     def probe(self, root: Path | None) -> ProbeResult:
         _remote_record(root, frozenset({"https", "local_port"}))
         return probe_service(root)
+
+
+def close_ssh_masters(
+    roots: Sequence[Path] | None = None, *, runtime: SshTargetRuntime | None = None
+) -> tuple[str, ...]:
+    """Ask the OpenSSH master of each SSH target to exit; the generated ids of those asked.
+
+    ``roots`` names target roots (records of other kinds are skipped); ``None`` means every SSH
+    target in this computer's registry. Only a master this client started is asked, by its control
+    path (``ssh -O exit``), never found by pattern; one that is gone, or a record that cannot be
+    read, is skipped. Closing a master ends every stream any process of this client multiplexed
+    through it. Never raises: this is how a client that found this computer zero-network closes
+    what it holds (ADR-051 decision 8), and a failure to close leaves the connection check to
+    refuse every new stream.
+    """
+
+    import os
+
+    from finishup.client.targets import servers_dir
+    from finishup.config.paths import PathSafetyError
+
+    stopper = runtime if runtime is not None else SshTargetRuntime()
+    if roots is None:
+        # Each target root on its own: one damaged root never keeps the others' masters open.
+        try:
+            chosen = tuple(
+                Path(entry.path)
+                for entry in os.scandir(servers_dir())
+                if entry.name.startswith("t_") and entry.is_dir(follow_symlinks=False)
+            )
+        except (OSError, PathSafetyError):
+            return ()
+    else:
+        chosen = tuple(roots)
+    closed: list[str] = []
+    for root in chosen:
+        try:
+            record = read_target(root)
+        except (TargetError, OSError, PathSafetyError):
+            continue
+        if record is None or record.kind != "ssh" or not (root / "run" / "m").exists():
+            continue
+        try:
+            stopper.stop(root)
+        except TargetRuntimeError:
+            continue
+        closed.append(record.target_id)
+    return tuple(closed)
 
 
 def _ensure_service(root: Path) -> None:

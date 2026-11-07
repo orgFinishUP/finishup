@@ -4783,6 +4783,29 @@ dials its own stream.
   (work, task) | None` starts it for a remote root only; the bridge keeps it in its client slot
   (`_ClientSlot.remote_background`). The drain probe is
   `client.observation_outbox.capture_pending(workspace, *, state=None) -> bool` (read-only).
+- Zero-network (ADR-051 decision 8). `ServiceClient` on a remote transport (`ssh`, `https`)
+  reads `last_reported_zero_network()` before every frame it sends (a call, a cancel, a
+  `workspace_reply`) and every `_ZERO_NETWORK_CHECK_SECONDS` (1.0) while open; once it answers,
+  the connection fails with `service_unavailable`, phase `zero_network_remote_selected`, and
+  later calls name the same phase. `transports.refuse_zero_network()` raises
+  `TransportError("zero_network_remote_selected")` in `SshTransport.connect`,
+  `HttpsTransport.connect` and `start_remote_service`. `BridgeBackgroundWork(..., root=None,
+  zero_network_check=1.0)` reads it in `run_pass`, before every dial (`_ensure_connection`) and
+  every delivery (`_drain_over`, which then returns `None`), and every tick while `run` waits;
+  then it releases its connection and the drain, records the reason once, asks `root`'s SSH
+  master to exit, and each pass returns `BackgroundPass(False, refused=
+  "zero_network_remote_selected")`. `run_foreground_agent(..., zero_network_check=1.0)` reads it
+  before every dial and every tick of a held connection, closes the connection and the target's
+  SSH master, and raises `AgentSessionError("service_unavailable", phase=
+  "zero_network_remote_selected")`; `server connect NAME --agent` prints "Closed the workspace
+  agent's connection to server target <id> (<kind>)." and the refusal for that target
+  (`zero_network_connection_refusal`). `SshTargetRuntime.ensure_ready` and
+  `HttpsTargetRuntime.ensure_ready` raise `TargetRuntimeError("service_unavailable", phase=
+  "zero_network_remote_selected")` before anything runs. `direct_runtime.close_ssh_masters(roots=
+  None, *, runtime=None) -> tuple[str, ...]` asks each SSH target's master that exists (every
+  SSH target for `None`) to exit by its control path and never raises; the zero-network check
+  (`everyday_network_state`, `remember_reported_policy`) runs it for every SSH target after it
+  records a zero-network report (`_close_held_connections`).
 - Hook drains (`cli.observe_hooks._drain_connector`) and `finishup observe drain`
   (`cli.observe._claim_bound_drain`) name the hook's workspace on a remote root, so the drain's
   connection is claim-bound and its rows go out attested.
@@ -4792,7 +4815,9 @@ dials its own stream.
   `REMOTE_LOCKED_SUMMARY`, `REMOTE_UNCLAIMABLE_SUMMARY`, `REMOTE_DRAINING_SUMMARY` (the server
   answered `service_draining`), and `REMOTE_NOT_SENT_SUMMARIES` (the phases raised before any
   dial, `target_reauthorization_required` and `target_root_is_remote`, say that nothing was sent
-  rather than that the server could not be reached): the remedy every surface names on a remote
+  rather than that the server could not be reached; `zero_network_remote_selected` says "this
+  computer's FinishUP is set to make no network connections, so nothing was sent to the selected
+  FinishUP server", the words of the other approaches): the remedy every surface names on a remote
   root (CLI `control_failure`, menu, setup next steps, the MCP bridge's
   `_remote_control_error_result`, the hooks' `unavailable_context`/`locked_context` and
   `StatusOutcome.remote_reason`, the terminal interface's `_connect_failure` and doctor remedies).

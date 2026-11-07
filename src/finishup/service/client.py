@@ -175,6 +175,11 @@ _STREAM_CLOSE_TIMEOUT_SECONDS: Final = 0.05
 # binding's ``DELETE``, bounded at 1 s; an ``ssh`` child's exit), so the server stops routing
 # workspace calls to it at once. Such a close gets room for that one round trip.
 _AGENT_STREAM_CLOSE_TIMEOUT_SECONDS: Final = 1.5
+# A remote connection reads what this computer last reported about network use (ADR-051 decision
+# 8) before every frame it sends and at least this often while it is open: once that says
+# zero-network it closes, so nothing more reaches a server elsewhere (approach B, direct dial).
+_ZERO_NETWORK_CHECK_SECONDS: Final = 1.0
+_ZERO_NETWORK_PHASE: Final = "zero_network_remote_selected"
 _WORKFLOW_METHODS: Final = frozenset(
     {
         ControlMethod.START,
@@ -1114,6 +1119,7 @@ class ServiceClient(ControlClientPort):
         "_stream",
         "_transport",
         "_write_lock",
+        "_zero_network_watch",
     )
 
     def __init__(
@@ -1154,6 +1160,47 @@ class ServiceClient(ControlClientPort):
         self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
         self._receiver = asyncio.create_task(self._receive_results())
+        # A connection to a server elsewhere closes within a second of this computer reporting a
+        # zero-network policy (ADR-051 decision 8); a local one never reads the record.
+        self._zero_network_watch: asyncio.Task[None] | None = (
+            None if transport == "unix" else asyncio.create_task(self._watch_zero_network())
+        )
+
+    def _zero_network_refusal(self) -> ControlError | None:
+        """The refusal while this remote connection may send nothing (ADR-051 decision 8).
+
+        This computer's zero-network policy and a server elsewhere are never in force together:
+        while what it last reported (``client.everyday_policy``, a file read) says zero-network,
+        a remote connection sends no frame, a workspace reply included. ``None`` on a local
+        connection, and while the record says otherwise or cannot be read.
+        """
+
+        if self._transport == "unix":
+            return None
+        from finishup.client.everyday_policy import last_reported_zero_network
+
+        if last_reported_zero_network() is None:
+            return None
+        return ControlError("service_unavailable", retryable=True, phase=_ZERO_NETWORK_PHASE)
+
+    async def _watch_zero_network(self) -> None:
+        """Close this remote connection once this computer last reported zero-network.
+
+        Read at least every ``_ZERO_NETWORK_CHECK_SECONDS`` while the connection is open, so a
+        connection held across the change (the MCP bridge's, a background or foreground workspace
+        agent, the terminal interface's) is closed within about a second: its pending calls fail
+        with ``zero_network_remote_selected``, its workspace calls stop, and nothing more is sent.
+        """
+
+        try:
+            while not self._closed:
+                await asyncio.sleep(_ZERO_NETWORK_CHECK_SECONDS)
+                refusal = self._zero_network_refusal()
+                if refusal is not None:
+                    await self._fail_connection(refusal)
+                    return
+        except asyncio.CancelledError:
+            return
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
@@ -1240,6 +1287,12 @@ class ServiceClient(ControlClientPort):
         validate_request(request)
         async with self._write_lock:
             self._ensure_live()
+            refusal = self._zero_network_refusal()
+            if refusal is not None:
+                # Read before every frame: nothing reaches a server elsewhere once this computer
+                # last reported zero-network, even on a connection opened before that.
+                await self._fail_connection(refusal)
+                raise refusal
             try:
                 await write_control_frame(self._stream, request)
             except LocalControlTransportError as exc:
@@ -1355,6 +1408,11 @@ class ServiceClient(ControlClientPort):
         async with self._write_lock:
             if self._closed:
                 return
+            refusal = self._zero_network_refusal()
+            if refusal is not None:
+                # No file content leaves this computer once it last reported zero-network.
+                await self._fail_connection(refusal)
+                return
             try:
                 await self._stream.send_all(encoded)
             except LocalControlTransportError as exc:
@@ -1448,6 +1506,9 @@ class ServiceClient(ControlClientPort):
                 if self._agent is not None
                 else _STREAM_CLOSE_TIMEOUT_SECONDS,
             )
+        watch = self._zero_network_watch
+        if watch is not None and watch is not asyncio.current_task():
+            watch.cancel()
         if not from_receiver and self._receiver is not asyncio.current_task():
             self._receiver.cancel()
             await asyncio.gather(self._receiver, return_exceptions=True)
@@ -2042,9 +2103,14 @@ def _control_transport() -> ControlTransport:
     Every local root (the everyday server, an explicit isolation root, a named local server)
     dials its owner-only endpoint through this module's ``connect_control``, exactly as before. A
     target record that cannot be read refuses before any dial, so a damaged remote root never
-    starts a local service in itself. Nothing is dialled for a remote target the owner confirmed
-    under an older disclosure: that is a retryable ``service_unavailable`` in the closed phase
-    ``target_reauthorization_required``, which ``finishup server use NAME`` clears.
+    starts a local service in itself. Nothing is dialled for a remote target while this computer
+    last reported a zero-network privacy policy (ADR-051 decision 8): a retryable
+    ``service_unavailable`` in the closed phase ``zero_network_remote_selected``, which
+    ``finishup server use local`` clears; nor for one the owner confirmed under an older
+    disclosure: phase ``target_reauthorization_required``, which ``finishup server use NAME``
+    clears. Both come from ``targets.require_current_authorization``, read before every dial; a
+    connection already open reads the same record before every frame and once a second
+    (``ServiceClient``).
     """
 
     from finishup.client.targets import TargetError, require_current_authorization
@@ -2533,7 +2599,7 @@ async def _connect_remote_on_demand(
     Any other remote failure is reported as it is.
     """
 
-    from finishup.client.transports import start_remote_service
+    from finishup.client.transports import TransportError, start_remote_service
 
     async def attempt() -> ServiceClient:
         remaining = deadline - time.monotonic()
@@ -2558,7 +2624,12 @@ async def _connect_remote_on_demand(
     except ControlError as exc:
         if exc.phase != "remote_service_not_running":
             raise
-        if not await start_remote_service(transport, deadline - time.monotonic()):
+        try:
+            started = await start_remote_service(transport, deadline - time.monotonic())
+        except TransportError as refused:
+            # This computer turned zero-network meanwhile: nothing more is sent (ADR-051).
+            raise ControlError("service_unavailable", retryable=True, phase=refused.phase) from None
+        if not started:
             raise
     try:
         return await attempt()

@@ -1685,7 +1685,6 @@ def _serve_foreground_agent(record: ServerTarget, root: Path) -> None:
     from finishup.cli.bootstrap import resolve_cli_workspace_locator
     from finishup.client.agent_session import AgentSessionError, run_foreground_agent
 
-    del record
     locator = resolve_cli_workspace_locator()
     if locator is None:
         raise ServerCommandRefused("workspace_agent_unavailable")
@@ -1699,6 +1698,16 @@ def _serve_foreground_agent(record: ServerTarget, root: Path) -> None:
         typer.echo("Stopped the workspace agent.")
         return
     except AgentSessionError as error:
+        if error.phase == "zero_network_remote_selected":
+            # This computer turned zero-network while the agent ran (ADR-051 decision 8): its
+            # connection, and the target's SSH master, were closed; nothing more is sent.
+            typer.echo(
+                f"Closed the workspace agent's connection to server target {record.target_id} "
+                f"({record.kind}).",
+                err=True,
+            )
+            refusal = zero_network_connection_refusal(record)
+            raise (refusal if refusal is not None else ServerCommandRefused(error.phase)) from None
         raise ServerCommandRefused(error.phase or error.reason) from None
 
 

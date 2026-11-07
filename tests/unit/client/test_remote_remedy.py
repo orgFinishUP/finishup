@@ -196,6 +196,8 @@ def test_a_lost_connection_never_claims_that_nothing_was_recorded(remote: None, 
     [
         ("target_reauthorization_required", "server_reauthorization_required"),
         ("target_root_is_remote", "remote_target_no_local_service"),
+        # ADR-051 decision 8: this computer refused to connect while it is zero-network.
+        ("zero_network_remote_selected", "zero_network_local_server_required"),
     ],
 )
 def test_a_connection_never_opened_says_nothing_was_sent(

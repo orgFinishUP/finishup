@@ -166,6 +166,9 @@ def _no_real_server_selection_read(  # pyright: ignore[reportUnusedFunction]
     # remembered (maintainer decision, 2026-11-07); a test reaches no real service for it unless
     # it puts ``_read_after_change`` back with its own stand-in for the service.
     monkeypatch.setattr(zero_network_module, "_after_change_state", lambda: "unreadable")
+    # Once this computer reports zero-network, the SSH masters of every target in the registry are
+    # asked to exit (ADR-051 decision 8); no test reaches a real registry's masters for it.
+    monkeypatch.setattr(zero_network_module, "_close_held_connections", lambda: ())
 
 
 @pytest.fixture(autouse=True)
