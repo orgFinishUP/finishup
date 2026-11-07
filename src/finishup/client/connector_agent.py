@@ -18,8 +18,9 @@ counts as client activity and never renews its own lease. Nothing here logs or r
 Before every connection attempt the agent asks the shared connection check
 (``targets.require_current_authorization`` for its target's record): while this computer last
 reported a zero-network policy (ADR-051 decision 8, maintainer decision of 2026-11-07), or once
-the target needs a fresh confirmation, it stops for good instead of connecting again, and it
-delivers nothing while that record says zero-network.
+the target needs a fresh confirmation or its record is gone or cannot be read (``server remove``),
+it stops for good instead of connecting again, and it delivers nothing while that record says
+zero-network.
 """
 
 from __future__ import annotations
@@ -119,11 +120,16 @@ class ConnectorAgent:
         """Whether anything may be sent to this agent's target now (the shared check).
 
         A file read only. While this computer last reported a zero-network policy, or once the
-        target's record needs a fresh confirmation or can no longer be read, nothing is.
+        target's record needs a fresh confirmation or can no longer be read, nothing is. A record
+        that is gone (``server remove`` deleted the target) can no longer be read either: the
+        agent never reconnects to a removed target.
         """
 
         try:
-            require_current_authorization(read_target(self._root))
+            record = read_target(self._root)
+            if record is None:
+                return False
+            require_current_authorization(record)
         except TargetError:
             return False
         return True

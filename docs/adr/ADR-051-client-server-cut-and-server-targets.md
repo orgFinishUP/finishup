@@ -1154,8 +1154,8 @@ through the same relay; human-control and secret channels never leave the server
   and stops at once: every relayed connection and background agent is closed, no last delivery
   is made, and its status ends `stopped`/`zero_network_remote_selected`. Each background agent
   also runs `require_current_authorization` on its target's record before every reconnect, and
-  stops for good on a refusal, and its `drain()` sends nothing while the marker says
-  zero-network.
+  stops for good on a refusal or once that record is gone (`server remove`), and its `drain()`
+  sends nothing while the marker says zero-network.
 - **Workspace agent location.** Per connection, the client process's own `ServiceClient` answers
   through the relay. For work that outlives the call, the connector keeps one long-lived agent
   connection per workspace whose claim it relayed, for 15 minutes after that workspace's last hello

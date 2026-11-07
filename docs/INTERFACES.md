@@ -5592,7 +5592,7 @@ session's `service_instance_id` and `service_generation`, never forwarded).
 - `finishup.client.connector_agent`: `ConnectorAgent(binding, drain, dial, *, root)` holds one
   claim-bound connection offering the real `WorkspaceAgentHandler` and reconnects (0.5 s,
   doubling to 30 s) whenever the service ends it, after `require_current_authorization(
-  read_target(root))` passes (a refusal ends it for good); `drain()` runs
+  read_target(root))` passes (a refusal, or a record that is gone, ends it for good); `drain()` runs
   `ClientObservationDrain.drain` over it, sends nothing while `last_reported_zero_network()`
   answers, and never raises. `open_connector_agent(root, claim, dial)` reads the
   claimed-workspace index, derives the claim again from the recorded workspace with

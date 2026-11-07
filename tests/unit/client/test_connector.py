@@ -539,6 +539,55 @@ def test_a_background_agent_reads_the_folders_of_its_own_target(home: Path, tmp_
         asyncio.run(exercise())
 
 
+def test_a_background_agent_never_reconnects_to_a_removed_target(
+    home: Path, tmp_path: Path
+) -> None:
+    """A-REMOVE-RACE: the agent's check passed once ``server remove`` had deleted the target's
+    record (``read_target`` answers ``None``, which ``require_current_authorization`` lets
+    through), so an agent that slipped through the last stop kept reconnecting to it. A record
+    that is gone stops it for good, as one that cannot be read does."""
+
+    import shutil
+
+    from finishup.client.claimed_workspaces import record_claimed_workspace
+    from finishup.client.connector import open_background_agent
+    from finishup.client.connector_agent import ConnectorAgent
+    from finishup.client.workspace_claim import workspace_claim
+
+    record, root = _ssh_target(home)
+    (tmp_path / "workspace").mkdir()
+    workspace = WorkspaceLocator(os.fspath((tmp_path / "workspace").resolve(strict=True)))
+
+    async def exercise() -> int:
+        salt = base64.b64decode(record.claim_salt or "", validate=True)
+        claim = await workspace_claim(workspace, salt)
+        assert record_claimed_workspace(root, claim, workspace) is True
+        dials = 0
+
+        async def dial() -> AuthenticatedUnixStream:
+            nonlocal dials
+            dials += 1
+            # The server is unreachable while the target is removed under the agent.
+            shutil.rmtree(root)
+            raise OSError("unreachable")
+
+        agent = await open_background_agent(root, claim, dial)
+        assert isinstance(agent, ConnectorAgent)
+        try:
+            async with asyncio.timeout(5):
+                while agent.alive:
+                    await asyncio.sleep(0.01)
+            assert not agent.connected
+            return dials
+        finally:
+            await agent.aclose()
+
+    with selection_override(root):
+        dials = asyncio.run(exercise())
+    assert dials == 1  # never dialled again once the record was gone
+    assert not root.exists()
+
+
 # -- zero-network (ADR-051 decision 8, maintainer decision of 2026-11-07) ----------------------
 #
 # This computer's zero-network policy and a server elsewhere are never in force together. The
