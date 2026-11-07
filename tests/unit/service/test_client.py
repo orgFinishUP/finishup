@@ -445,6 +445,7 @@ async def test_the_gateways_raw_connect_starts_a_service_only_when_asked(
         return expected
 
     monkeypatch.setattr(client_module, "connect_control", connect)
+
     class _LocalRoot:
         target = None
 
