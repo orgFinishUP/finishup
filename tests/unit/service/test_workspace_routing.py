@@ -174,6 +174,63 @@ def test_an_agents_read_deadline_is_the_local_read_deadline() -> None:
         reads.list_beneath(_HANDLE, "", excluded=(), expired=lambda: False)
 
 
+def _reviewer_reads(error: Exception) -> ClientWorkspaceReads:
+    return ClientWorkspaceReads(cast(WorkspaceAgentHub, _Hub(error=error)), _HANDLE)
+
+
+@pytest.mark.parametrize("agent_reason", ("deadline_exceeded", "read_deadline"))
+def test_a_reviewer_read_the_client_ran_out_of_time_for_is_the_read_deadline(
+    agent_reason: str,
+) -> None:
+    """The client's read stopped at its time, as a slow local read does: the review ends
+    ``deadline``; a declared test reads as not visible, as the local declared-test read has it."""
+
+    reads = _reviewer_reads(WorkspaceAgentUnavailable("agent_unavailable", agent_reason))
+    with pytest.raises(ReadDeadline):
+        reads.list_beneath(_HANDLE, "tests", excluded=(), expired=lambda: False)
+    with pytest.raises(ReadDeadline):
+        reads.read_text_beneath(_HANDLE, "src/app.py", excluded=(), expired=lambda: False)
+    with pytest.raises(ReadDeadline):
+        reads.refused_paths(("a.py", "b.py"))
+    assert reads.read_declared_test(_HANDLE + "/tests/test_a.py", excluded=()) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        WorkspaceAgentUnavailable("agent_unavailable", "agent_busy"),
+        WorkspaceAgentUnavailable("agent_unavailable", "result_too_large"),
+        WorkspaceAgentUnavailable("agent_unavailable", "workspace_unavailable"),
+        WorkspaceAgentUnavailable("agent_unavailable", "handle_unknown"),
+        WorkspaceAgentUnavailable("agent_failed", "internal_error"),
+        WorkspaceAgentUnavailable("agent_busy"),
+        WorkspaceAgentUnavailable("deadline_exceeded"),
+    ),
+)
+def test_a_reviewer_read_the_agent_never_served_is_never_read_as_nothing(error: Exception) -> None:
+    """A busy, failed or silent agent, or an answer too large to carry, never reads as an empty
+    listing or an absent file: the review ends ``workspace_agent_unavailable`` (ADR-051)."""
+
+    reads = _reviewer_reads(error)
+    with pytest.raises(WorkspaceAgentUnavailable):
+        reads.list_beneath(_HANDLE, "tests", excluded=(), expired=lambda: False)
+    with pytest.raises(WorkspaceAgentUnavailable):
+        reads.read_text_beneath(_HANDLE, "src/app.py", excluded=(), expired=lambda: False)
+    with pytest.raises(WorkspaceAgentUnavailable):
+        reads.read_declared_test(_HANDLE + "/tests/test_a.py", excluded=())
+    with pytest.raises(WorkspaceAgentUnavailable):
+        reads.refused_paths(("a.py", "b.py"))
+
+
+@pytest.mark.parametrize("agent_reason", ("root_not_admitted", "workspace_not_claimed"))
+def test_every_reviewer_read_the_agent_refused_reads_as_nothing(agent_reason: str) -> None:
+    reads = _reviewer_reads(WorkspaceAgentUnavailable("agent_refused", agent_reason))
+    assert reads.list_beneath(_HANDLE, "tests", excluded=(), expired=lambda: False) is None
+    assert reads.read_text_beneath(_HANDLE, "a.py", excluded=(), expired=lambda: False) is None
+    assert reads.read_declared_test(_HANDLE + "/tests/test_a.py", excluded=()) is None
+    assert reads.refused_paths(("a.py",)) == frozenset({"a.py"})
+
+
 def test_a_reviewer_read_with_no_agent_raises_for_the_typed_ending() -> None:
     reads = ClientWorkspaceReads(
         cast(WorkspaceAgentHub, _Hub(error=WorkspaceAgentUnavailable("agent_disconnected"))),

@@ -118,6 +118,15 @@ _SNAPSHOT_GRACE_SECONDS: Final = 5.0
 _REVIEWER_READ_SECONDS: Final = LOCAL_READ_SECONDS + 1.0
 # Paths one ignored-path probe carries (the change capture's own requested-path bound).
 _PROBE_BATCH: Final = 64
+# The agent's answers that its read ran out of the time it was given: its own read stop, or the
+# client's bound on the call. Either is the read's stop, as a slow local read raises it.
+_AGENT_READ_DEADLINES: Final = frozenset({"read_deadline", "deadline_exceeded"})
+
+
+def _reviewer_read_deadline(exc: WorkspaceAgentUnavailable) -> bool:
+    """Whether the agent answered a reviewer read with its read's stop (``ReadDeadline``)."""
+
+    return exc.reason == "agent_unavailable" and exc.agent_reason in _AGENT_READ_DEADLINES
 
 
 def client_bound(workspace: object) -> bool:
@@ -345,9 +354,11 @@ class ClientWorkspaceReads:
 
     Roots and locations are absolute paths the task's content or the owner's policy named, or
     the task's handle standing for the claimed root; the agent resolves and confines them. A
-    reviewer read the agent could not answer raises ``WorkspaceAgentUnavailable`` (the review
-    ends with that recorded reason); one it answered as unavailable or refused reads as nothing,
-    exactly as a local read that found nothing.
+    reviewer read the agent refused reads as nothing, exactly as a local read that found
+    nothing. One that ran out of its time on the client raises ``ReadDeadline``, as a slow local
+    read does, so the review ends ``deadline``. Any other unanswered read (no agent, a busy or
+    failed one, an answer too large to carry) raises ``WorkspaceAgentUnavailable``, and the
+    review ends with that recorded reason: what the agent never read is never shown as absent.
     """
 
     __slots__ = ("_handle", "_hub")
@@ -367,20 +378,23 @@ class ClientWorkspaceReads:
         try:
             return _call(self._hub, self._handle, operation, arguments, seconds)
         except WorkspaceAgentUnavailable as exc:
-            if exc.agent_reason == "read_deadline":
+            if _reviewer_read_deadline(exc):
                 raise ReadDeadline("reviewer_read_deadline") from None
-            if exc.reason in {"agent_refused", "agent_unavailable"}:
+            if exc.refused:
                 return None
             raise
 
     def refused_paths(self, paths: tuple[str, ...]) -> frozenset[str]:
-        """The workspace-relative ``paths`` a reviewer may not read: Git-ignored, or unanswered.
+        """The workspace-relative ``paths`` a reviewer may not read: Git-ignored, or unanswerable.
 
         The reviewer's ignored-path rule for this workspace, asked of the agent in batches of
         ``probe_requested_paths`` within the reviewer's own read budget, rather than once per
-        listed entry. As the per-path rule: an empty path (the root) is never refused; a path
-        the agent could not answer for (refused, unavailable or any other fault) is refused; an
-        agent that is gone raises ``WorkspaceAgentUnavailable``, so the review ends on it.
+        listed entry. As the per-path rule: an empty path (the root) is never refused, and a path
+        Git cannot answer for (the agent refused the probe, or answered with one of change
+        capture's own reasons) is refused. A probe that ran out of its time raises
+        ``ReadDeadline``; an agent that is gone, busy or failed raises
+        ``WorkspaceAgentUnavailable``, so the review ends on it rather than on a listing that
+        silently left out every entry of the batch.
         """
 
         wanted = tuple(dict.fromkeys(path for path in paths if path))
@@ -399,8 +413,13 @@ class ClientWorkspaceReads:
                     ),
                 )
             except WorkspaceAgentUnavailable as exc:
-                if exc.reason in {"agent_refused", "agent_unavailable"}:
-                    refused.update(batch)  # the agent cannot say: refused, as locally
+                if _reviewer_read_deadline(exc):
+                    raise ReadDeadline("reviewer_read_deadline") from None
+                if exc.refused or (
+                    exc.reason == "agent_unavailable"
+                    and exc.agent_reason in CHANGE_CAPTURE_UNAVAILABLE_REASONS
+                ):
+                    refused.update(batch)  # Git cannot say: refused, as locally
                     continue
                 raise
             except Exception:  # noqa: BLE001 - an unanswerable ignore state refuses the read
@@ -452,13 +471,17 @@ class ClientWorkspaceReads:
         expired: Callable[[], bool] = lambda: False,
     ) -> bytes | None:
         del expired
-        return cast(
-            bytes | None,
-            self._read(
-                WorkspaceOperation.READ_DECLARED_TEST,
-                ReadDeclaredTestArguments(location, tuple(excluded)),
-            ),
-        )
+        try:
+            return cast(
+                bytes | None,
+                self._read(
+                    WorkspaceOperation.READ_DECLARED_TEST,
+                    ReadDeclaredTestArguments(location, tuple(excluded)),
+                ),
+            )
+        except ReadDeadline:
+            # As the local read: a declared test not read within its stop is not visible.
+            return None
 
     def declared_test(self, location: str, *, excluded: tuple[str, ...]) -> bytes | None:
         """``read_declared_test`` that lets the agent's refusal through.
