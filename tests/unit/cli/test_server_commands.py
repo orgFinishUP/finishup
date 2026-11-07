@@ -1402,7 +1402,10 @@ def test_a_remove_that_does_not_finish_says_it_switched_back(
     def unsafe(_record: targets.ServerTarget) -> None:
         raise targets.TargetError("target_root_unsafe")
 
-    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Runtime())
+    def runtime_for(_kind: str) -> _Runtime:
+        return _Runtime()
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     monkeypatch.setattr(targets, "remove_target_root", unsafe)
     assert _invoke("add", "fu", "https://fu.example").exit_code == 0
     assert _invoke("use", "fu").exit_code == 0
@@ -1757,7 +1760,10 @@ def test_a_stopped_remote_service_is_named_alike_for_every_kind(
         def ensure_ready(self, _root: Path | None) -> None:
             raise TargetRuntimeError("service_unavailable", phase="remote_service_not_running")
 
-    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Stopped())
+    def runtime_for(_kind: str) -> _Stopped:
+        return _Stopped()
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     assert _invoke("add", "lab", address).exit_code == 0
     result = _invoke("connect", "lab")
     assert result.exit_code != 0
