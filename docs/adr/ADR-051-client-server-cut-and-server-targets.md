@@ -327,6 +327,10 @@ answers bounded `workspace_call`s on a connection that declared it.
   - **`listed`**: the server reads outside the worktree only beneath folders the owner listed
     for that target, as described below; anything else is refused.
 
+  Either mode limits only what the server reads. The content chunks the client's hooks capture
+  reach every remote server unchanged, a `listed`-mode one too, even where they name or hold
+  files outside its listed folders (decision 12, maintainer decision of 2026-11-07).
+
   **The client's list admits task inputs, in both modes** (maintainer decision, 2026-11-07,
   closing open question 1 below). `finishup server folders add NAME FOLDER`, run on the client at
   the trusted console, also admits FOLDER as a task-input root for that server's claim-bound
@@ -1054,18 +1058,20 @@ the rows were captured there. The server holds none of it and must not borrow it
   own store and mapping when it sends the row (hook pass, `observe drain` and the background
   drain alike), and replaces any workspace-locator content with the connection's handle, so the
   workspace path itself never leaves the client.
-- **Captured content travels as a local service receives it** (proposed 2026-11-07 by the
-  observation review fix; maintainer acknowledgement pending, open question 3). Every other
-  content chunk (prompts, agent messages, tool inputs and outputs from Codex under observation
-  consent, and from Claude Code or Cursor under an enabled content profile) is sent unchanged, so
-  with a content profile on the server holds what a service on the client would: "local mode is as local" holds for observation too. Those chunks can name
-  absolute paths and hold the contents of files the agent read outside the project and outside
-  the target's listed folders; the outside-read mode (decision 5) limits what the server reads,
-  not what the client's hooks deliver. That is honest only because it is disclosed before
-  consent: the server disclosure (decision 6, disclosure 2) names it, and a target confirmed
-  under an older disclosure sends nothing until the owner confirms again. Withholding content
-  chunks on claim-bound connections is not proposed: the server would then hold less than a
-  local service for the same consent, and the owner already controls the content with the
+- **Captured content travels as a local service receives it** (maintainer decision of
+  2026-11-07, "Send to every server", closing open question 3). Every other content chunk
+  (prompts, agent messages, tool inputs and outputs from Codex under observation consent, and from
+  Claude Code or Cursor under an enabled content profile) is sent unchanged to every remote
+  server, whatever its outside-read mode, so with a content profile on the server holds what a
+  service on the client would: "local mode is as local" holds for observation too. Those chunks
+  can name absolute paths and hold the contents of files the agent read outside the project and
+  outside the target's listed folders, so a `listed`-mode server receives them too: its
+  outside-read mode (decision 5) limits only what the server reads, never what the client's hooks
+  deliver. That is honest only because it is disclosed before consent: the server disclosure
+  (decision 8, disclosure 2) names it, and a target confirmed under disclosure 1 sends nothing
+  until the owner confirms again. Withholding content chunks on claim-bound connections, for
+  every server or only for a `listed`-mode one, was not chosen: the server would then hold less
+  than a local service for the same consent, and the owner already controls the content with the
   client's own consent and content profiles.
 - **Accepted as `client_attested`, never verified.** The server cannot recompute a commitment made
   under the client's key, so on a claim-bound connection it accepts the envelope's session
@@ -1461,19 +1467,24 @@ decisions above; the maintainer chooses one. Its own topology section replaces t
    part, is only the fallback when that canonical copy cannot be encoded. A check result (the
    CLI's check output and the MCP check summary) still names the code without a number: its
    schema is unchanged.
-3. **Hook content on a remote server** (recorded 2026-11-07, observation review; **open**,
-   awaiting maintainer acknowledgement). Over a claim-bound connection the client's hooks send
-   the native content chunks they captured (prompts, agent messages, tool inputs and outputs,
-   which can name absolute paths and hold files the agent read outside the project and outside
-   listed folders) unchanged; only the workspace locator is replaced by the connection's handle.
-   The change proposes disclosing that rather than withholding the chunks (decision 12, "Captured
-   content travels as a local service receives it"): disclosure 2 names it before the owner
-   confirms a server, and a target confirmed under disclosure 1 sends nothing until the owner
-   confirms again. The alternative is to withhold content chunks on claim-bound connections until
-   the owner consents to content for that server. Still open within it: whether a `listed`-mode
-   server, whose owner chose to limit what it reads outside the project (decision 5), should
-   receive content that names or holds files outside its listed folders. Until the maintainer
-   answers, the code sends the chunks and the disclosure says so.
+3. **Hook content on a remote server** (recorded 2026-11-07, observation review; **closed
+   2026-11-07 by maintainer decision, "Send to every server"**). Over a claim-bound connection
+   the client's hooks send the native content chunks they captured (prompts, agent messages, tool
+   inputs and outputs, which can name absolute paths and hold files the agent read outside the
+   project and outside listed folders) unchanged; only the workspace locator is replaced by the
+   connection's handle. The alternatives were to withhold content chunks on claim-bound
+   connections until the owner consents to content for that server, or to withhold from a
+   `listed`-mode server, whose owner chose to limit what it reads outside the project
+   (decision 5), the content that names or holds files outside its listed folders. Decision: the
+   chunks are sent unchanged to every remote server, whatever its outside-read mode, and the
+   owner is told before confirming: disclosure 2 names them, and a target confirmed under
+   disclosure 1 sends nothing until the owner confirms again. A `listed`-mode server therefore
+   also receives content that can name or hold files outside its listed folders, because the
+   outside-read mode limits only what the server reads, not what the client's hooks deliver; the
+   owner keeps that content on the client with the client's own observation consent and content
+   profiles. Implemented as decision 12's "Captured content travels as a local service receives
+   it" paragraph and decision 8's disclosure; PRIVACY.md, the servers guide and INTERFACES say
+   the same.
 
 ## Founder questions answered by the maintainer (2026-11-05)
 
