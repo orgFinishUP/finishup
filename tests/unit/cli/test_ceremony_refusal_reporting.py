@@ -12,15 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-import select
-import signal
-import threading
-import time
 from pathlib import Path
 
 import pytest
 import typer
 
+from builders.console_ctrl_c import CtrlCAtPrompt
 from finishup.cli import privacy_control, trusted_console
 from finishup.cli.app import _trusted_call, _trusted_exception_failure, run_async
 from finishup.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
@@ -155,43 +152,26 @@ def test_ctrl_c_at_a_decision_prompt_cancels_the_session_and_exits_130(
     monkeypatch.setattr(privacy_control, "_verify_preview", verified_preview)
     monkeypatch.setattr(privacy_control, "_render_preview", render_nothing)
 
-    main_thread = threading.get_ident()
-    ceremony_ended = threading.Event()
-    late_line_typed = threading.Event()
-
-    def press_ctrl_c_at_the_prompt() -> None:
-        seen = b""
-        deadline = time.monotonic() + _DEADLINE_SECONDS
-        while _DECISION_PROMPT not in seen and time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], max(0.0, deadline - time.monotonic()))
-            if ready:
-                seen += os.read(master, 1024)
-        signal.pthread_kill(main_thread, signal.SIGINT)
-        # A swallowed Ctrl-C leaves the prompt waiting; type a line so the test cannot hang.
-        if not ceremony_ended.wait(_DEADLINE_SECONDS):
-            late_line_typed.set()
-            os.write(master, b"approve\n")
+    ctrl_c = CtrlCAtPrompt(master, _DECISION_PROMPT, deadline_seconds=_DEADLINE_SECONDS)
 
     async def decide() -> object:
         try:
             return await privacy_control.decide_policy("pending-1326")
         finally:
-            ceremony_ended.set()
+            ctrl_c.ended.set()
 
-    helper = threading.Thread(target=press_ctrl_c_at_the_prompt, daemon=True)
-    helper.start()
     try:
-        try:
-            code = run_async(lambda: _trusted_call(decide, False))
-        except KeyboardInterrupt:
-            pytest.fail("Ctrl-C did not cancel the prompt; the asyncio runner took it later")
-        helper.join(_DEADLINE_SECONDS)
+        with ctrl_c:
+            try:
+                code = run_async(lambda: _trusted_call(decide, False))
+            except KeyboardInterrupt:
+                pytest.fail("Ctrl-C did not cancel the prompt; the asyncio runner took it later")
     finally:
-        ceremony_ended.set()
         os.close(slave)
         os.close(master)
 
-    assert not late_line_typed.is_set(), "the prompt kept waiting after Ctrl-C"
+    assert ctrl_c.ctrl_c_sent.is_set(), "the decision prompt never appeared"
+    assert not ctrl_c.late_line_typed.is_set(), "the prompt kept waiting after Ctrl-C"
     assert code == exit_code_for("cancelled") == 130
     assert capsys.readouterr().err.strip() == "cancelled"
     assert session.cancels == 1

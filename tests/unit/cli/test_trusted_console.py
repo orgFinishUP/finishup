@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import select
 import signal
 import threading
-import time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -14,6 +12,7 @@ from unittest.mock import patch
 import anyio
 import pytest
 
+from builders.console_ctrl_c import CtrlCAtPrompt
 from finishup.cli import trusted_console
 from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
@@ -136,24 +135,6 @@ def test_posix_hidden_input_renders_live_masks_and_erases_on_backspace() -> None
 _READ_DEADLINE_SECONDS = 10.0
 
 
-def _wait_for_prompt(master: int, prompt: bytes) -> None:
-    """Block until the console under test has written ``prompt``, or the deadline passes.
-
-    It never raises: the caller still presses Ctrl-C and types a fallback line, so the read under
-    test always ends and its outcome is what the test asserts on.
-    """
-
-    seen = b""
-    deadline = time.monotonic() + _READ_DEADLINE_SECONDS
-    while prompt not in seen:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        ready, _, _ = select.select([master], [], [], remaining)
-        if ready:
-            seen += os.read(master, 1024)
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
 @pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
 def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool) -> None:
@@ -168,50 +149,39 @@ def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool
     adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
     adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
     attributes_before = termios.tcgetattr(slave)
-    main_thread = threading.get_ident()
-    read_ended = threading.Event()
-    late_line_typed = threading.Event()
-
-    def press_ctrl_c_at_the_prompt() -> None:
-        _wait_for_prompt(master, b"Decision: ")
-        signal.pthread_kill(main_thread, signal.SIGINT)
-        # A swallowed Ctrl-C leaves the read waiting; type a line so the test cannot hang.
-        if not read_ended.wait(_READ_DEADLINE_SECONDS):
-            late_line_typed.set()
-            os.write(master, b"approve\n")
-
-    async def ceremony() -> tuple[bytearray | TrustedConsoleError, object, object]:
-        runner_handler = signal.getsignal(signal.SIGINT)
-        try:
-            outcome: bytearray | TrustedConsoleError = adapter.read_line(
-                "Decision: ", 32, hidden=hidden
-            )
-        except TrustedConsoleError as exc:
-            outcome = exc
-        finally:
-            read_ended.set()
-        handler_after_read = signal.getsignal(signal.SIGINT)
-        await anyio.sleep(0)
-        return outcome, runner_handler, handler_after_read
-
-    helper = threading.Thread(target=press_ctrl_c_at_the_prompt, daemon=True)
-    helper.start()
     try:
-        try:
-            outcome, runner_handler, handler_after_read = anyio.run(ceremony)
-        except KeyboardInterrupt:
-            pytest.fail(
-                "Ctrl-C did not cancel the console read; the asyncio runner took it later "
-                f"(a later line was typed: {late_line_typed.is_set()})"
-            )
-        helper.join(_READ_DEADLINE_SECONDS)
+        with CtrlCAtPrompt(
+            master, b"Decision: ", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as ctrl_c:
+
+            async def ceremony() -> tuple[bytearray | TrustedConsoleError, object, object]:
+                runner_handler = signal.getsignal(signal.SIGINT)
+                try:
+                    outcome: bytearray | TrustedConsoleError = adapter.read_line(
+                        "Decision: ", 32, hidden=hidden
+                    )
+                except TrustedConsoleError as exc:
+                    outcome = exc
+                finally:
+                    ctrl_c.ended.set()
+                handler_after_read = signal.getsignal(signal.SIGINT)
+                await anyio.sleep(0)
+                return outcome, runner_handler, handler_after_read
+
+            try:
+                outcome, runner_handler, handler_after_read = anyio.run(ceremony)
+            except KeyboardInterrupt:
+                pytest.fail(
+                    "Ctrl-C did not cancel the console read; the asyncio runner took it later "
+                    f"(a later line was typed: {ctrl_c.late_line_typed.is_set()})"
+                )
         attributes_after = termios.tcgetattr(slave)
     finally:
-        read_ended.set()
         os.close(slave)
         os.close(master)
 
-    assert not late_line_typed.is_set(), "the read kept waiting after Ctrl-C"
+    assert ctrl_c.ctrl_c_sent.is_set(), "the prompt never appeared"
+    assert not ctrl_c.late_line_typed.is_set(), "the read kept waiting after Ctrl-C"
     assert isinstance(outcome, TrustedConsoleError)
     assert outcome.reason == "cancelled"
     # The read ran under the runner's own handler, and handed that handler back afterwards.
@@ -219,6 +189,32 @@ def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool
     assert handler_after_read is runner_handler
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     assert attributes_after == attributes_before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_ctrl_c_helper_sends_nothing_when_the_code_under_test_ends_before_its_prompt() -> None:
+    """An early failure must fail its own test, not raise ``KeyboardInterrupt`` in pytest."""
+
+    master, slave = os.openpty()
+    received: list[int] = []
+
+    def record(signum: int, _frame: object) -> None:
+        received.append(signum)
+
+    previous = signal.signal(signal.SIGINT, record)
+    try:
+        with CtrlCAtPrompt(
+            master, b"Decision: ", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as ctrl_c:
+            os.write(slave, b"refused before any prompt\n")
+            ctrl_c.ended.set()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        os.close(slave)
+        os.close(master)
+
+    assert not ctrl_c.ctrl_c_sent.is_set()
+    assert received == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
