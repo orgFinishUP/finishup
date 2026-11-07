@@ -1102,6 +1102,17 @@ the rows were captured there. The server holds none of it and must not borrow it
   resumes when that claim delivers its next row. The server's check barrier reconciles only its
   own store's capture handoffs, and a claim-bound `check` that asks to await observations reports
   that wait `unavailable`: the rows wait in the client's outbox, which the server cannot read.
+  A claim store outlives the rows that fed it: when the client stops sending (a revoke after its
+  outbox drained, `server remove`, a client that is gone), the mirrored consent, trusted policy
+  digest, session bindings and mappings stay in `<state dir>/observation-claims/` on the server,
+  and the server's own revocation for that claim does not run. No FinishUP command lists or clears
+  claim stores yet, on either machine; deleting FinishUP's folders on the server removes them. They
+  authorize nothing on their own: every claim-bound row carries a fresh attestation that is
+  mirrored before it is ingested (a revoked or paused consent then refuses it as locally), and an
+  approved check runs only when the client's own trust admits it (`check_not_approved`
+  otherwise). An operator surface (server-host scope, through the service: list each claim's
+  consent state, clear one) and a revoke sent on `server remove` while connected are the
+  follow-up; both need a control method of their own.
 
 ## Topology (approach-specific)
 
