@@ -1148,6 +1148,10 @@ the rows were captured there. The server holds none of it and must not borrow it
   resumes when that claim delivers its next row. The server's check barrier reconciles only its
   own store's capture handoffs, and a claim-bound `check` that asks to await observations reports
   that wait `unavailable`: the rows wait in the client's outbox, which the server cannot read.
+  The CLI renders that state on a claim-bound connection with its own fixed line
+  (`CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE`: the server cannot see observations still waiting on this
+  computer; run `finishup observe drain` in the project folder, then check again), never the
+  local "local outbox not readable" cause.
   A claim store outlives the rows that fed it: when the client stops sending (a revoke after its
   outbox drained, `server remove`, a client that is gone), the mirrored consent, trusted policy
   digest, session bindings and mappings stay in `<state dir>/observation-claims/` on the server,
