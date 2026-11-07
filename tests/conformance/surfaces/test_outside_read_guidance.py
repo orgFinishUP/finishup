@@ -44,5 +44,11 @@ def test_final_prose_names_each_owner_step_and_where_it_runs() -> None:
     )
     assert "`finishup server folders add NAME FOLDER` for a file outside the project" in final
     assert "`finishup server folders mode NAME local`" in final
-    assert "the only step for a test in the project that Git ignores" in final
+    # The same two ways out for a test in the project that Git ignores as every receipt surface
+    # and ADR-051 decision 5, both the owner's: never local mode alone.
+    assert (
+        "For a test in the project that Git ignores, only that mode or the owner no longer"
+        " ignoring the test helps; do not change what Git ignores yourself." in final
+    )
+    assert "the only step" not in final
     assert "on the computer that holds the project" in final
