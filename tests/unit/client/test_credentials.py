@@ -80,6 +80,34 @@ def test_a_missing_credential_is_a_closed_reason(root: Path) -> None:
     assert unavailable.value.reason == "credential_store_unavailable"
 
 
+class _LockedKeyring:
+    """A platform store that is present but cannot be used now (a locked keychain)."""
+
+    def get_password(self, _service: str, _username: str) -> str | None:
+        raise RuntimeError("locked")
+
+    def set_password(self, _service: str, _username: str, _password: str) -> None:
+        raise RuntimeError("locked")
+
+    def delete_password(self, _service: str, _username: str) -> None:
+        raise RuntimeError("locked")
+
+
+def test_a_store_the_key_is_not_recorded_in_never_blocks_its_delete(root: Path) -> None:
+    """SRV-4: a locked platform store blocked deleting a key kept in a file, and a target that
+    never held a key. Only the recorded store's failure keeps the key (and says so)."""
+
+    locked = _LockedKeyring()
+    in_file = KeyringOrFileCredential(_TARGET, root, recorded=None, platform=None)
+    assert in_file.store(_KEY) == "file"
+    assert KeyringOrFileCredential(_TARGET, root, recorded="file", platform=locked).delete()
+    assert not (root / "config" / "credential" / _TARGET).exists()
+    assert not KeyringOrFileCredential(_TARGET, root, recorded=None, platform=locked).delete()
+    with pytest.raises(CredentialError) as raised:
+        KeyringOrFileCredential(_TARGET, root, recorded="keyring", platform=locked).delete()
+    assert raised.value.reason == "credential_store_unavailable"
+
+
 @pytest.mark.parametrize("secret", ["", "short", "has space in it here", "x" * 513, "é" * 20])
 def test_secret_shape_is_checked_without_echo(secret: str) -> None:
     with pytest.raises(CredentialError) as raised:
