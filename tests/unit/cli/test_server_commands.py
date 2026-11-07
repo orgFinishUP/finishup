@@ -325,13 +325,23 @@ def test_status_of_the_everyday_server_and_a_named_one(home: Path, quiet_probe: 
 def test_remote_add_requires_the_trusted_console(
     home: Path, monkeypatch: pytest.MonkeyPatch, flag: tuple[str, ...]
 ) -> None:
-    """The add-time answer, given up front or not, never replaces the trusted console."""
+    """The add-time answer, given up front or not, never replaces the trusted console. Without
+    it the add stops there, before its SSH probe: no host key is asked about or refused."""
 
+    from finishup.client import direct_runtime
+
+    probed: list[dict[str, object]] = []
+
+    def discover(**arguments: object) -> None:
+        probed.append(arguments)
+
+    monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
     monkeypatch.setattr(server_cli, "_zero_network_in_force", lambda: False)
     _no_trusted_console(monkeypatch)
     result = _invoke("add", "lab", "ssh://owner@lab.example", *flag)
     assert result.exit_code == 2
     assert result.stderr.startswith("trusted_console_required:")
+    assert probed == []
     assert targets.list_targets() == ()
     assert "lab.example" not in result.stderr and "owner" not in result.stderr
 
@@ -1606,8 +1616,9 @@ def test_ssh_add_records_what_the_server_reports_after_authorization(
             "port": 2222,
             "remote_root": None,
             "remote_launcher": None,
-            # No owner's console under test: OpenSSH is not let ask.
-            "confirm_host_key": False,
+            # The add runs on the owner's console (its typed confirmation required it), so
+            # OpenSSH may ask there to confirm a host key this computer does not know yet.
+            "confirm_host_key": True,
         }
     ]
     (record,) = targets.list_targets()
@@ -1711,17 +1722,15 @@ def test_login_says_the_server_accepted_the_key(
     assert "not verified" not in result.stdout
 
 
-@pytest.mark.parametrize("console", [True, False])
-def test_ssh_add_lets_openssh_confirm_a_new_host_key_only_on_the_owners_console(
+def test_ssh_add_lets_openssh_confirm_a_new_host_key_on_the_owners_console(
     home: Path,
     authorized: list[tuple[str, str]],
     monkeypatch: pytest.MonkeyPatch,
-    console: bool,
 ) -> None:
-    """ADR-051, server add parity: on the trusted console the add's one probe lets OpenSSH ask,
-    there, to confirm a host key this computer does not know yet, as the edge relay's add does;
-    a first add no longer needs the owner to run ssh by hand. Without the console nothing is
-    asked."""
+    """ADR-051, server add parity: the add's one probe runs after the typed confirmation on the
+    trusted console and lets OpenSSH ask, there, to confirm a host key this computer does not
+    know yet, as the edge relay's add does; a first add no longer needs the owner to run ssh by
+    hand. (Without that console the add stopped earlier: see the trusted-console test above.)"""
 
     from finishup.client import direct_runtime
 
@@ -1732,29 +1741,23 @@ def test_ssh_add_lets_openssh_confirm_a_new_host_key_only_on_the_owners_console(
         return direct_runtime.SshEndpoint("/run/user/1000/control.sock", None, False)
 
     monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
-    monkeypatch.setattr(server_cli, "_trusted_console_present", lambda: console)
 
     result = _invoke("add", "lab", "ssh://owner@lab.example")
 
     assert result.exit_code == 0, result.output
-    assert asked == [console]
-    assert ("OpenSSH asks you to confirm it here" in result.stdout) is console
+    assert authorized == [("lab", "ssh")]
+    assert asked == [True]
+    assert "OpenSSH asks you to confirm it here" in result.stdout
 
 
-@pytest.mark.parametrize(
-    ("console", "fix"),
-    [
-        (True, "answer yes to OpenSSH's question once you have checked the fingerprint"),
-        (False, "run 'finishup server add' in your own terminal, or connect once with 'ssh'"),
-    ],
-)
 def test_ssh_add_refuses_a_host_key_that_was_not_confirmed_and_names_the_fix(
     home: Path,
     authorized: list[tuple[str, str]],
     monkeypatch: pytest.MonkeyPatch,
-    console: bool,
-    fix: str,
 ) -> None:
+    """A host key the owner declined, or did not confirm in time, adds nothing and names the
+    question to answer."""
+
     from finishup.client import direct_runtime
     from finishup.client.target_runtime import TargetRuntimeError
 
@@ -1762,14 +1765,16 @@ def test_ssh_add_refuses_a_host_key_that_was_not_confirmed_and_names_the_fix(
         raise TargetRuntimeError("remote_host_key_unconfirmed")
 
     monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", unconfirmed)
-    monkeypatch.setattr(server_cli, "_trusted_console_present", lambda: console)
 
     result = _invoke("add", "lab", "ssh://owner@lab.example")
 
     assert result.exit_code == 20, result.output
     assert result.stderr.startswith("remote_host_key_unconfirmed: ")
+    assert "declined or not answered" in result.stderr
     assert "nothing was added" in result.stderr
-    assert fix in result.stderr
+    assert "answer yes to OpenSSH's question once you have checked the fingerprint" in (
+        result.stderr
+    )
     assert "lab.example" not in result.stderr
     assert targets.list_targets() == ()
 

@@ -16,11 +16,13 @@
 target: the server's own ``finishup service endpoint --json`` through the recorded launcher (or
 one found at a fixed list of install paths, never a bare ``finishup`` on the remote ``PATH``). It
 returns the remote control endpoint to record and checks that the server runs this client's
-schema manifest. On the owner's trusted console it is the one interactive ``ssh`` of the
-topology: OpenSSH itself asks, on that terminal, to confirm a host key it does not know yet
+schema manifest. ``server add`` runs it only after the owner's typed confirmation on the trusted
+console, with ``confirm_host_key``: it is the one interactive ``ssh`` of the topology, where
+OpenSSH itself asks, on that terminal, to confirm a host key it does not know yet
 (``StrictHostKeyChecking=ask``), as approach A's ``server add`` does, and that confirmation is the
-pin every later ``BatchMode`` connection checks (``StrictHostKeyChecking=yes``). Without that
-console it never asks, and an unknown host key is ``remote_host_key_unconfirmed``.
+pin every later ``BatchMode`` connection checks (``StrictHostKeyChecking=yes``). Without
+``confirm_host_key`` it never asks. Either way a host key that was not confirmed is
+``remote_host_key_unconfirmed``.
 
 While this computer last reported a zero-network privacy policy (ADR-051 decision 8,
 ``client.everyday_policy``) ``ensure_ready`` starts nothing and sends nothing

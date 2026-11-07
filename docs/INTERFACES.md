@@ -4760,16 +4760,19 @@ dials its own stream.
   `$HOME/.local/bin/finishup`, `/opt/homebrew/bin/finishup`, `/usr/local/bin/finishup`,
   `/usr/bin/finishup`; with neither a launcher nor `--remote-root` it is refused
   (`remote_service_not_running`).
-- `server add ssh://…` runs `direct_runtime.discover_ssh_endpoint(..., confirm_host_key=)`:
-  with `cli.server._trusted_console_present()` (standard input and error on a terminal, and
-  `/dev/tty`) its probes are `ssh -o StrictHostKeyChecking=ask -o ControlMaster=no -o
-  PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T …` with a 180 s bound, so OpenSSH asks the owner there to confirm a host key `known_hosts` does not hold
-  yet; otherwise `-o BatchMode=yes -o StrictHostKeyChecking=yes` with a 30 s bound. An exit of 255
-  whose diagnostics say the key is not known or was not verified (and not "REMOTE HOST
-  IDENTIFICATION HAS CHANGED") raises `TargetRuntimeError("remote_host_key_unconfirmed")`, which
-  `server add` refuses as `remote_host_key_unconfirmed` (exit 20, nothing added) with the fix for
-  its case (answer yes once the fingerprint is checked; or run `server add` in your own terminal,
-  or `ssh` once yourself).
+- `server add ssh://…` runs `direct_runtime.discover_ssh_endpoint(..., confirm_host_key=True)`
+  after the owner's typed confirmation on the trusted foreground console (without that console
+  the add is refused as `trusted_console_required` before any `ssh` runs): its probes are `ssh -o
+  StrictHostKeyChecking=ask -o ControlMaster=no -o PasswordAuthentication=no -o
+  KbdInteractiveAuthentication=no -T …` with a 180 s bound, so OpenSSH asks the owner there to
+  confirm a host key `known_hosts` does not hold yet. With `confirm_host_key=False` (the
+  function's default; no command uses it) they are `-o BatchMode=yes -o
+  StrictHostKeyChecking=yes` with a 30 s bound. An exit of 255 whose diagnostics say the key is
+  not known or was not verified (and not "REMOTE HOST IDENTIFICATION HAS CHANGED") raises
+  `TargetRuntimeError("remote_host_key_unconfirmed")`, which `server add` refuses as
+  `remote_host_key_unconfirmed` (exit 20, nothing added): the owner declined OpenSSH's question
+  or did not answer it in time, and the fix is to add again and answer yes once the fingerprint
+  is checked.
 - `server login` checks the key with `GET /v1/server` before storing it; `remote_auth_failed`,
   `remote_identity_changed` and `remote_incompatible` store nothing and say why, that nothing was
   stored, and the fix (`_LOGIN_REFUSED`); any other phase stores it and prints "Stored the API key

@@ -733,10 +733,10 @@ answers bounded `workspace_call`s on a connection that declared it.
     later connection needs (approach A's probe leaves them to the owner's `ssh` configuration). The owner's answer is OpenSSH's own `known_hosts` entry, the
     pin every later connection checks with `StrictHostKeyChecking=yes`; a key that changed is
     never asked about (`remote_identity_changed`). The command says beforehand that OpenSSH may
-    ask and to compare the fingerprint with the server's own. Without that console nothing is
-    asked: an unknown key is refused (`remote_host_key_unconfirmed`), nothing is added, and the
-    message names the fix (run `server add` in your own terminal, or `ssh` once yourself); a
-    declined key is refused the same way, naming the question to answer.
+    ask and to compare the fingerprint with the server's own. A key the owner declines, or does
+    not confirm in time, is refused (`remote_host_key_unconfirmed`), nothing is added, and the
+    message names the question to answer. Without that console the add never gets this far: the
+    typed confirmation before it is refused as `trusted_console_required`, before any `ssh` runs.
   - *Login.* `server login` checks the key with the server before storing it. A key the server
     refuses (`remote_auth_failed`), a server whose identity does not match the recorded trust
     (`remote_identity_changed`, refused inside the TLS handshake before the key is sent) or that

@@ -272,7 +272,8 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     ),
     "remote_host_key_unconfirmed": (
         "the server's SSH host key was not confirmed on this computer, so nothing was added; run "
-        "'finishup server add' in your own terminal and confirm the key when OpenSSH asks",
+        "'finishup server add' again and answer yes when OpenSSH asks, once you have checked the "
+        "fingerprint with the server's own",
         _UNAVAILABLE,
     ),
     "remote_identity_changed": (
@@ -670,21 +671,21 @@ def _discover_ssh_endpoint(
 ) -> tuple[str, str | None]:
     """Ask the authorized server over SSH where its endpoint is: ``(endpoint, launcher)``.
 
-    On the owner's trusted console OpenSSH may ask, once, to confirm a host key this computer does
-    not know yet (``StrictHostKeyChecking=ask``, as approach A's ``server add`` does); that answer
-    is the pin every later connection checks. Without that console nothing is asked, and an
-    unknown host key is refused with the fix (ADR-051, server add and login parity).
+    ``server add`` has just required the owner's trusted foreground console for the typed
+    confirmation (``_authorize_remote``), and refused as ``trusted_console_required`` without it,
+    so this runs on the owner's terminal: OpenSSH may ask there, once, to confirm a host key this
+    computer does not know yet (``StrictHostKeyChecking=ask``, as approach A's ``server add``
+    does), and that answer is the pin every later connection checks. A key the owner declined or
+    did not answer in time is refused with the fix (ADR-051, server add and login parity).
     """
 
     from finishup.client import direct_runtime
 
-    console = _trusted_console_present()
-    if console:
-        typer.echo(
-            "Asking the server where its FinishUP service listens. If this computer does not know "
-            "its SSH host key yet, OpenSSH asks you to confirm it here: compare the fingerprint "
-            "with the server's own before you answer yes."
-        )
+    typer.echo(
+        "Asking the server where its FinishUP service listens. If this computer does not know "
+        "its SSH host key yet, OpenSSH asks you to confirm it here: compare the fingerprint "
+        "with the server's own before you answer yes."
+    )
     try:
         found = direct_runtime.discover_ssh_endpoint(
             user=user,
@@ -692,13 +693,12 @@ def _discover_ssh_endpoint(
             port=port,
             remote_root=remote_root,
             remote_launcher=remote_launcher,
-            confirm_host_key=console,
+            confirm_host_key=True,
         )
     except TargetRuntimeError as error:
         if error.reason == "remote_host_key_unconfirmed":
             raise ServerCommandRefused(
-                "remote_host_key_unconfirmed",
-                message=_HOST_KEY_DECLINED if console else _HOST_KEY_NO_CONSOLE,
+                "remote_host_key_unconfirmed", message=_HOST_KEY_DECLINED
             ) from None
         _runtime_failure(error)
     if found.session_bound:
@@ -710,14 +710,9 @@ def _discover_ssh_endpoint(
 
 
 _HOST_KEY_DECLINED: Final = (
-    "the server's SSH host key was not confirmed, so nothing was added; run 'finishup server add' "
-    "again and answer yes to OpenSSH's question once you have checked the fingerprint with the "
-    "server's own"
-)
-_HOST_KEY_NO_CONSOLE: Final = (
-    "this computer does not know the server's SSH host key yet, and there is no terminal of yours "
-    "here for OpenSSH to ask you to confirm it, so nothing was added; run 'finishup server add' in "
-    "your own terminal, or connect once with 'ssh' yourself, then add it again"
+    "the server's SSH host key was not confirmed (OpenSSH's question was declined or not "
+    "answered), so nothing was added; run 'finishup server add' again and answer yes to OpenSSH's "
+    "question once you have checked the fingerprint with the server's own"
 )
 
 
@@ -738,23 +733,6 @@ _LOGIN_REFUSED: Final[Mapping[str, str]] = {
         "again"
     ),
 }
-
-
-def _trusted_console_present() -> bool:
-    """Whether this command runs on the owner's terminal, where OpenSSH can ask its question.
-
-    ``server add`` of a remote kind has just required the owner's trusted foreground console for
-    the typed confirmation (``_confirm_on_trusted_console``), which fails closed without it; this
-    checks, without opening it again, that the probe that follows still has that terminal
-    (standard input and error on a terminal, and ``/dev/tty``), as OpenSSH needs to ask.
-    """
-
-    import os
-
-    try:
-        return os.isatty(0) and os.isatty(2) and os.path.exists("/dev/tty")
-    except OSError:
-        return False
 
 
 def _check_gateway(record: ServerTarget, secret: str) -> str | None:
