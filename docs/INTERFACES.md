@@ -4742,7 +4742,13 @@ remove NAME --all` and say it repairs a damaged record. The document's top-level
 (`local_port|ssh|https`) and `detail` (a closed token), all nullable but `reason`, and
 `policy_read` (`live|last_reported`) with `last_reported_at` (a `YYYY-MM-DDTHH:MM:SS.mmmZ` time,
 set exactly when `policy_read` is `last_reported`; the schema's `if`/`then`/`else` and the model's
-validator both enforce it; amended in place, 2026-11-07, as 1.0.0 is unreleased). It is the fact
+validator both enforce it; amended in place, 2026-11-07, as 1.0.0 is unreleased). The `probe`
+carries its own `last_reported_at`, set exactly when its `outcome` is `not_probed` (nothing was
+sent because this computer last reported zero-network: `reason` `zero_network_remote_selected`
+for the selected target, `zero_network_in_force` for any other): when this computer reported that
+policy, the time `server login`, `connect` and `test` name (`cli.server.zero_network_refusal`);
+the text and `/server` say "last reported, at <time>" beside the reason (enforced likewise, amended
+in place for the same reason). It is the fact
 (`ZeroNetworkSelection.fact()`) of the item
 `cli.zero_network_selection.find_zero_network_selection()` reports, filled by
 `cli.server._zero_network_selection`; null when that check reports nothing (no selection or a server

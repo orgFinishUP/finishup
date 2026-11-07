@@ -742,6 +742,38 @@ def test_server_test_and_status_probe_nothing_and_say_why_and_the_fix(
     assert document["probe"]["reason"] == token
 
 
+@pytest.mark.parametrize("selected", [True, False])
+def test_server_status_of_a_target_gives_the_time_this_computer_reported_zero_network(
+    home: Path, monkeypatch: pytest.MonkeyPatch, selected: bool
+) -> None:
+    """RE-4: like login, connect and test, status says when this computer reported its policy.
+
+    Text names the time beside the reason; ``--json`` carries it as ``probe.last_reported_at``,
+    for the server in use and for one that is not.
+    """
+
+    _remote("ssh", select=selected)
+    record_reported_policy(zero_network=True, now=_AT)
+    _policy(monkeypatch, "unreadable")
+    monkeypatch.setattr(server_cli, "_probe", _never)
+    token = "zero_network_remote_selected" if selected else "zero_network_in_force"
+
+    shown = server_cli.status_lines(server_cli.build_status_document(_NAME))
+
+    state = shown.index(f"State: not probed, nothing was sent ({token})")
+    assert shown[state + 1].startswith(
+        f"This computer's FinishUP last reported, at {_STAMP}, that it makes no network connections"
+    )
+    assert "(as it last reported)" not in "\n".join(shown)
+
+    status = _invoke("server", "status", _NAME, "--json")
+    assert status.exit_code == 0, status.output
+    document = json.loads(status.stdout)
+    validate_schema_instance("server-target-status", "1.0.0", document)
+    assert document["probe"]["outcome"] == "not_probed"
+    assert document["probe"]["last_reported_at"] == _STAMP
+
+
 def test_a_selection_that_cannot_be_read_keeps_server_use_local_as_the_fix(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

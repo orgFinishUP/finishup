@@ -921,6 +921,49 @@ def test_the_status_document_carries_the_zero_network_item_by_id_and_token_only(
         validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, absent))
 
 
+def test_a_probe_not_sent_carries_when_this_computer_reported_zero_network() -> None:
+    """RE-4: ``probe.last_reported_at`` is set exactly for ``not_probed``, in its fixed shape."""
+
+    from pydantic import ValidationError
+
+    from finishup.protocol.schemas import SchemaInstanceInvalid
+    from finishup.protocol.server_target_status import ServerTargetStatusContract
+
+    raw = (
+        Path(__file__).parents[3] / "fixtures/service/server-target-status.case.json"
+    ).read_bytes()
+    payload = cast(dict[str, JsonValue], json.loads(raw))
+    probe = cast(dict[str, JsonValue], payload["probe"])
+    assert probe["last_reported_at"] is None
+    not_sent: dict[str, JsonValue] = {
+        "outcome": "not_probed",
+        "reason": "zero_network_in_force",
+        "phase": None,
+        "service_version": None,
+        "service_instance_id": None,
+        "service_state": None,
+        "vault_mode": None,
+        "round_trip_p95_ms": None,
+        "samples": 0,
+        "last_reported_at": "2026-11-07T09:30:00.000Z",
+    }
+    document = {**payload, "probe": not_sent}
+    validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, document))
+    ServerTargetStatusContract.model_validate(document)
+    wrongs: tuple[dict[str, JsonValue], ...] = (
+        {**not_sent, "last_reported_at": None},
+        {**not_sent, "last_reported_at": "yesterday"},
+        {**probe, "last_reported_at": "2026-11-07T09:30:00.000Z"},
+        {k: v for k, v in probe.items() if k != "last_reported_at"},
+    )
+    for wrong in wrongs:
+        broken = {**payload, "probe": wrong}
+        with pytest.raises(SchemaInstanceInvalid):
+            validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, broken))
+        with pytest.raises(ValidationError):
+            ServerTargetStatusContract.model_validate(broken)
+
+
 _MACHINE_SCOPE: Final = {"schema_version": "1.0.0", "scope": {"kind": "machine"}}
 
 
