@@ -120,3 +120,22 @@ def test_disconnecting_a_server_on_this_computer_stops_its_service(
     servers = " ".join((usage / "servers.md").read_text(encoding="utf-8").split())
     assert "Neither stops the FinishUP service on the server." not in servers
     assert "`disconnect` stops it, as `finishup service stop` does" in servers
+
+
+def test_the_docs_name_the_api_key_entry_that_outlives_a_deleted_folder() -> None:
+    """SRV-10: an API key kept in the platform credential store lives outside the target's
+    folder, so deleting the folder (or FinishUP's folders) leaves it; the ADR and the uninstall
+    guidance name that entry and the commands that delete it."""
+
+    from finishup.client.credentials import SERVER_CREDENTIAL_SERVICE
+
+    docs = Path(__file__).parents[3] / "docs"
+    upgrading = " ".join((docs / "usage" / "upgrading.md").read_text(encoding="utf-8").split())
+    assert f"`{SERVER_CREDENTIAL_SERVICE}`" in upgrading
+    assert "`finishup server remove` and `finishup server logout` delete it" in upgrading
+    adr = " ".join(
+        (docs / "adr" / "ADR-051-client-server-cut-and-server-targets.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    assert "removes every client-side artifact of that target except an API key" in adr
