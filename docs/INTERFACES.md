@@ -4644,7 +4644,10 @@ kind except `local` is a remote kind.
 `selection_override(root)` resolves one root for the calling context only (a `contextvars`
 variable that `asyncio.to_thread` workers inherit), so a probe in one thread is never seen by
 another and never changes the process's memo; `select_root_for_process(root)` binds the whole
-process (`finishup connector run`). `isolated_root()` is
+process (`finishup connector run`). Every answer, remembered or overridden, still needs the
+root's `target.json`: once `server remove` deleted it (an MCP bridge started on that target), it
+fails closed with `isolation_root_invalid` as a fresh read would, so no path helper recreates the
+folder. `isolated_root()` is
 unchanged and keeps meaning "explicitly isolated". State, runtime, config, log, cache and bundle
 roots derive from `active_root()`; registrations, launch lines, the Codex RECORD proof and the
 upgrade guard stay on `isolated_root()`, and an AST test locks that classification of every call
@@ -4662,7 +4665,12 @@ server-host guard runs, so the service never reads a selection its spawner did n
 
 **Commands and the runtime seam.** `finishup server add|list|use|status [--json]|test|remove|
 login|logout|connect|disconnect` and `finishup server folders add NAME FOLDER|list NAME|remove
-NAME FOLDER|--all|mode NAME local|listed` (`cli/server.py`). `server add` for any remote kind
+NAME FOLDER|--all|mode NAME local|listed` (`cli/server.py`). A registry folder that holds no
+`target.json` at all is a leftover of an interrupted add or remove, not a target:
+`targets.list_targets()` skips it (a record that cannot be read still fails closed),
+`leftover_target_ids()` names it, `server list` prints one line per leftover with the command
+that deletes it, and `server remove ID` (an id is never a name) deletes it under the registry
+lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`). `server add` for any remote kind
 asks the outside-read mode on the trusted console inside its typed confirmation, after the
 disclosure and before the typed name: the question `client.server_folders.OUTSIDE_READ_QUESTION`
 with one line per mode (`OUTSIDE_READ_MODE_LINES`), answered `local` or `listed`; Enter alone or

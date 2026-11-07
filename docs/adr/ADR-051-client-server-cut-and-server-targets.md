@@ -145,7 +145,11 @@ typed outcomes when the client side cannot be reached.
   selected does not freeze it onto that target. `isolation_binding()` gains the value
   `selection`, carried by isolation report 1.1.0.
 - **Fail closed.** A selection that names a missing, malformed or unsafe root fails with
-  `isolation_root_invalid` and never falls back to the ambient service. `server use` refuses while
+  `isolation_root_invalid` and never falls back to the ambient service. So does a process's
+  remembered selection once its target was removed: every answer still needs the root's
+  `target.json`, so an MCP bridge started on a target removed since never reads its missing
+  folder as a local root, never starts a service there and never recreates the folder; it
+  refuses until its session restarts. `server use` refuses while
   the variable or a pin is in force (`selection_overridden`). `server status` always names the
   source that decided the root.
 - **Names.** A target name matches `[a-z0-9][a-z0-9-]{0,15}`; `local` is reserved. A name appears
@@ -1192,7 +1196,7 @@ through the same relay; human-control and secret channels never leave the server
 
 | Way in | Way out | Way to see it |
 |---|---|---|
-| `server add NAME …` | `server remove NAME [--select-local]` (disconnects, deletes the credential, disposes of the root; refuses the selected target unless `--select-local`) | `server list` |
+| `server add NAME …` | `server remove NAME [--select-local]` (disconnects, deletes the credential, disposes of the root; refuses the selected target unless `--select-local`); `server remove ID` deletes a leftover folder that an interrupted add or remove left without a record | `server list` (names each leftover by id) |
 | `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue; a remote target it leaves is stopped as `server disconnect` stops it) | `server status` (names the deciding source) |
 | `server login NAME` | `server logout NAME` | `server status` (credential present or absent, never the value) |
 | `server add NAME …` for a remote kind records the outside-read mode the owner answered (or `--outside-reads`; an official endpoint is `local` unrecorded) | `server folders mode NAME local` or `listed` changes it; `server remove NAME` removes it with the target | `server add` output, `server folders list NAME`, `server status [--json]`, `/server` status |

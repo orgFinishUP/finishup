@@ -555,6 +555,20 @@ def _read_selection(path: Path, probe: _PathProbe) -> str | None:
     return target_id
 
 
+def _require_target_record(root: Path | None) -> Path | None:
+    """``root`` while it still holds its ``target.json``; ``isolation_root_invalid`` otherwise."""
+
+    if root is None:
+        return None
+    try:
+        marker = (root / SERVER_TARGET_FILE_NAME).lstat()
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if not stat.S_ISREG(marker.st_mode):
+        raise PathSafetyError("isolation_root_invalid")
+    return root
+
+
 def _selected_root(probe: _PathProbe) -> Path | None:
     """Return the validated root the owner-only selection file names, memoized per process.
 
@@ -563,6 +577,11 @@ def _selected_root(probe: _PathProbe) -> Path | None:
     ``isolation_root_invalid`` (or the root's own path-safety reason); it never falls back to the
     everyday service silently. Ambiguous ambient naming reads no selection: every ambient path
     already fails closed with ``installation_root_ambiguous`` there.
+
+    The memo keeps a process on the target it started with (an MCP bridge never switches), never
+    on one removed since: every answer, remembered or overridden, still needs the root's record,
+    and once ``finishup server remove`` deleted it the answer fails closed exactly as a fresh read
+    would. No path helper therefore recreates a removed target's folder (SRV-1).
     """
 
     if probe.installation_naming == "ambiguous" or _selection_ignored:
@@ -572,21 +591,17 @@ def _selected_root(probe: _PathProbe) -> Path | None:
     key = str(path)
     override = _SELECTION_OVERRIDE.get()
     if override is not None and override[0] == key:
-        return override[1]
+        return _require_target_record(override[1])
     if key in _SELECTION_MEMO:
-        return _SELECTION_MEMO[key]
+        return _require_target_record(_SELECTION_MEMO[key])
     target_id = _read_selection(path, probe)
     root: Path | None = None
     if target_id is not None:
-        root = _validated_isolated_root(
-            str(Path(dirs.user_state_dir) / SERVERS_DIR_NAME / target_id), probe
+        root = _require_target_record(
+            _validated_isolated_root(
+                str(Path(dirs.user_state_dir) / SERVERS_DIR_NAME / target_id), probe
+            )
         )
-        try:
-            marker = (root / SERVER_TARGET_FILE_NAME).lstat()
-        except OSError as exc:
-            raise PathSafetyError("isolation_root_invalid") from exc
-        if not stat.S_ISREG(marker.st_mode):
-            raise PathSafetyError("isolation_root_invalid")
     _SELECTION_MEMO[key] = root
     return root
 
