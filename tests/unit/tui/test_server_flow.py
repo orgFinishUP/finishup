@@ -482,6 +482,9 @@ async def test_the_real_runtime_status_shows_what_a_remote_server_may_read_outsi
             add_folder(root, record.target_id, str(shared))
         runtime = FinishUpRuntime(cwd=home)
         lines = await runtime.server_status_lines("devbox")
+        # Not selected, so what chose the server in use is not said of it (RE-5).
+        assert lines[0] == f"Server: devbox ({record.target_id}, ssh); not the server in use"
+        assert (await runtime.server_status_lines("local"))[0].endswith("; chosen by: ambient")
         # No mode chosen: listed, and how to choose, as 'finishup server status' says.
         assert (
             "Outside your projects: reads only folders you list (mode listed, not chosen yet)"
