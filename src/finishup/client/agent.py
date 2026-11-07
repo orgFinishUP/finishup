@@ -30,7 +30,9 @@ long-lived, pull-based client of the server's network API, one per target root:
 * It stops for good, sending nothing more, once its target's record is gone or cannot be read
   (``server remove`` deleted the target while it ran): it never registers, delivers, ends a
   registration or brings an SSH master back for a removed target, so it never recreates the
-  target's folder either.
+  target's folder either. Ending a registration is a courtesy bounded at one second
+  (``_END_SECONDS``): the server ends one whose polls stop, so a stop never waits on a
+  black-holed network.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file
@@ -122,6 +124,9 @@ _LOCK_RETRY_SECONDS: Final = 1.0
 _LOCK_POLL_SECONDS: Final = 0.02
 # ``stop_agent`` waits this long for the agent to end its registrations and release its lock.
 _STOP_WAIT_SECONDS: Final = 10.0
+# Ending a registration is a courtesy (the server ends one whose polls stop): bounded, so a stop
+# never waits on a black-holed network for it.
+_END_SECONDS: Final = 1.0
 _COMPONENT: Final = "client.agent"
 
 
@@ -421,7 +426,8 @@ class _AgentApi:
 
     async def end(self, agent_id: str) -> None:
         with contextlib.suppress(Exception):
-            await self._http.request("DELETE", f"/v1/agents/{agent_id}", headers=self._headers)
+            async with asyncio.timeout(_END_SECONDS):
+                await self._http.request("DELETE", f"/v1/agents/{agent_id}", headers=self._headers)
 
 
 class _AgentRetry(Exception):

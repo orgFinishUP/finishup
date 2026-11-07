@@ -5784,8 +5784,10 @@ and no delivery is sent, the HTTP client closes, the transport closer runs, and
 record: once that is gone or cannot be read (`server remove` deleted the target under an agent a
 process that still remembered it started), it stops for good (`workspace_agent_exit`
 `target_removed`), sending nothing more, not even `DELETE /v1/agents/{id}`, and never restores
-the transport, which would recreate the removed folder. An idle agent exits only once
-`transport_alive` answers false.
+the transport, which would recreate the removed folder. Ending a registration
+(`DELETE /v1/agents/{id}`) is a courtesy bounded at one second (`_END_SECONDS`; the server ends
+one whose polls stop), so a stop never outlasts `stop_agent`'s wait on a black-holed network. An
+idle agent exits only once `transport_alive` answers false.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is

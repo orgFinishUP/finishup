@@ -572,3 +572,50 @@ async def test_an_agent_stops_for_good_once_its_target_is_removed(
     assert registrations == ["/v1/agents"]
     assert restored == []
     assert not root.exists()
+
+
+class _UnansweredDelete(httpx.AsyncBaseTransport):
+    """The API in process, except that a ``DELETE`` (ending a registration) is never answered."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+        self.deletes = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            self.deletes += 1
+            await asyncio.Event().wait()
+        return await self._inner.handle_async_request(request)
+
+
+@pytest.mark.anyio
+async def test_a_stop_never_waits_on_an_unanswered_registration_end(
+    remote: tuple[ServerTarget, Path],
+) -> None:
+    """A-STOP-DELETE: ending a registration is a courtesy (the server ends one whose polls stop).
+    On a black-holed network it was bounded only by the HTTP client's read timeout, so a stop
+    outlasted ``stop_agent``'s wait and ``server disconnect``/``remove`` reported the agent still
+    running. It is bounded at about a second."""
+
+    record, root = remote
+    keys = key_store(root.parent.parent)
+    _key, token = keys.create("laptop", "agent")
+    hub = FakeHub()
+    api = make_api(FakeService(), keys, hub=hub)
+    note_workspace(root, _WORKSPACE)
+    transport = _UnansweredDelete(httpx.ASGITransport(app=api.asgi("https")))  # type: ignore[arg-type]
+    http = httpx.AsyncClient(transport=transport, base_url="https://lab.example")
+    loop = _loop(root, record, http, token, workspace=claim("repo"), handler=_Handler())
+    running = asyncio.create_task(loop.run())
+    try:
+        async with asyncio.timeout(10):
+            while not hub.channels:
+                await asyncio.sleep(0.01)
+        started = asyncio.get_running_loop().time()
+        loop.stop()
+        assert await asyncio.wait_for(running, 5) == 0
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        await api.close()
+    assert transport.deletes == 1
+    assert elapsed < 3.0

@@ -1340,7 +1340,9 @@ SSH (owner-equivalent, no key)
   record is gone or cannot be read (`server remove` deleted it under an agent that a process
   still remembering the target started after remove's last stop) stops for good: it registers,
   delivers, ends nothing more with that server and never restores its transport, which would
-  recreate the removed folder.
+  recreate the removed folder. Ending a registration is a courtesy bounded at one second (the
+  server ends one whose polls stop), so a stop never outlasts the 10-second wait on a
+  black-holed network.
 - **The workspace agent under zero-network** (decision 8). `finishup agent run` refuses to start
   while the shared check refuses its target (exit 2, one stderr line: the reason, the fixed
   summary and its directive). While it runs it reads this computer's zero-network record before
