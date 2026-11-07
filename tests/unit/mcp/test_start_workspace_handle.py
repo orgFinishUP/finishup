@@ -148,3 +148,136 @@ async def test_without_a_handle_nothing_is_sent_and_the_locked_server_is_named(
     await bridge.dispatch_start(_start_body(), runtime)
     (sent,) = clients[-1].sent
     assert sent.workspace_ref == _HANDLE
+
+
+@pytest.mark.anyio
+async def test_a_locked_remote_vault_is_named_as_such_and_nothing_is_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A locked server binds no handle; the agent is told to have its vault unlocked there."""
+
+    import finishup.client.targets as targets
+
+    client = _Client("client_claim", None)
+    _wire(monkeypatch, tmp_path, client)
+    monkeypatch.setattr(targets, "active_target_is_remote", lambda: True)
+    result = await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
+    assert client.sent == []
+    assert getattr(result, "isError") is True
+    structured = cast(dict[str, object], getattr(result, "structuredContent"))
+    error = cast(dict[str, object], structured["error"])
+    assert error["code"] == "VAULT_LOCKED"
+    details = cast(dict[str, object], error["safe_details"])
+    assert details["continuation"] == "remote_vault_unlock_required"
+    assert "private-project" not in repr(result)
+
+
+def _unreadable_record() -> bool:
+    raise PermissionError(13, "target record unreadable")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("lookup", "remote"),
+    [(_unreadable_record, True), (lambda: False, False)],
+    ids=["record_unreadable", "local_root"],
+)
+async def test_a_target_lookup_that_fails_keeps_the_typed_locked_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lookup: Callable[[], bool],
+    remote: bool,
+) -> None:
+    """A target record read that fails (``OSError``) must not cost the agent its typed
+    ``VAULT_LOCKED``: it answers as a remote server would. A local root is unchanged."""
+
+    import finishup.client.targets as targets
+
+    client = _Client("client_claim", None)
+    _wire(monkeypatch, tmp_path, client)
+    monkeypatch.setattr(targets, "active_target_is_remote", lookup)
+    result = await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
+    assert client.sent == []
+    assert getattr(result, "isError") is True
+    structured = cast(dict[str, object], getattr(result, "structuredContent"))
+    error = cast(dict[str, object], structured["error"])
+    assert error["code"] == "VAULT_LOCKED"
+    details = cast(dict[str, object], error.get("safe_details") or {})
+    assert (details.get("continuation") == "remote_vault_unlock_required") is remote
+    assert "private-project" not in repr(result)
+
+
+class _CheckingClient:
+    """A claim-bound connection whose ``check`` the server answers, or refuses ``vault_locked``."""
+
+    def __init__(self, handle: str | None) -> None:
+        self.workspace_binding = "client_claim"
+        self.workspace_handle = handle
+        self.checks = 0
+        self.closed = False
+
+    async def connect(self) -> None:
+        return None
+
+    async def check(self, request: object, **_kwargs: object) -> object:
+        del request
+        self.checks += 1
+        if self.workspace_handle is None:
+            # The server's answer on a connection whose claim it could not key at hello.
+            raise ControlError("vault_locked", retryable=True)
+        raise ControlError("invalid_request")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.anyio
+async def test_a_task_call_on_a_connection_without_a_handle_replaces_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-051: the server answers every task call on a claim-bound connection with no handle
+    ``vault_locked``; the bridge discards that connection, and the next call's fresh hello gets a
+    handle, instead of every later call failing on the same connection."""
+
+    import finishup.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    clients = [_CheckingClient(None), _CheckingClient(_HANDLE)]
+    connected: list[_CheckingClient] = []
+
+    async def on_demand(_kind: object, **_kwargs: object) -> object:
+        connected.append(clients[len(connected)])
+        return connected[-1]
+
+    monkeypatch.setattr(
+        bridge,
+        "connect_service_on_demand",
+        cast(Callable[[object], Awaitable[object]], on_demand),
+    )
+    body: dict[str, JsonValue] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _REQUEST,
+        "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
+        "client": {
+            "kind": "cooperative_agent",
+            "version": "0.1.0",
+            "integration": "cooperative_mcp",
+        },
+        "session_id": "ses_00000000-0000-4000-8000-000000000052",
+        "writer_id": "wri_00000000-0000-4000-8000-000000000053",
+        "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+        "mode": "deterministic_only",
+    }
+    runtime = bridge.build_bridge_runtime()
+    try:
+        first = await bridge.dispatch_check(body, runtime)
+        error = cast(dict[str, object], cast(dict[str, object], first.structuredContent)["error"])
+        assert error["code"] == "VAULT_LOCKED"
+        assert error["retryable"] is True
+        assert clients[0].closed  # the connection with no handle is not kept
+        await bridge.dispatch_check(body, runtime)
+    finally:
+        await bridge.close_bridge_runtime(runtime)
+    assert connected == clients
+    assert (clients[0].checks, clients[1].checks) == (1, 1)
