@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
+import time
 from typing import Any, cast
 
 import pytest
@@ -178,14 +180,21 @@ def _reviewer_reads(error: Exception) -> ClientWorkspaceReads:
     return ClientWorkspaceReads(cast(WorkspaceAgentHub, _Hub(error=error)), _HANDLE)
 
 
-@pytest.mark.parametrize("agent_reason", ("deadline_exceeded", "read_deadline"))
-def test_a_reviewer_read_the_client_ran_out_of_time_for_is_the_read_deadline(
-    agent_reason: str,
-) -> None:
-    """The client's read stopped at its time, as a slow local read does: the review ends
-    ``deadline``; a declared test reads as not visible, as the local declared-test read has it."""
+@pytest.mark.parametrize(
+    "error",
+    (
+        WorkspaceAgentUnavailable("agent_unavailable", "deadline_exceeded"),
+        WorkspaceAgentUnavailable("agent_unavailable", "read_deadline"),
+        # The hub stopped waiting for an answer that did not come in the read's time.
+        WorkspaceAgentUnavailable("deadline_exceeded"),
+    ),
+)
+def test_a_reviewer_read_that_ran_out_of_time_is_the_read_deadline(error: Exception) -> None:
+    """The read stopped at its time, on the client or while the hub waited for its answer, as a
+    slow local read does: the review ends ``deadline``; a declared test reads as not visible, as
+    the local declared-test read has it."""
 
-    reads = _reviewer_reads(WorkspaceAgentUnavailable("agent_unavailable", agent_reason))
+    reads = _reviewer_reads(error)
     with pytest.raises(ReadDeadline):
         reads.list_beneath(_HANDLE, "tests", excluded=(), expired=lambda: False)
     with pytest.raises(ReadDeadline):
@@ -204,11 +213,12 @@ def test_a_reviewer_read_the_client_ran_out_of_time_for_is_the_read_deadline(
         WorkspaceAgentUnavailable("agent_unavailable", "handle_unknown"),
         WorkspaceAgentUnavailable("agent_failed", "internal_error"),
         WorkspaceAgentUnavailable("agent_busy"),
-        WorkspaceAgentUnavailable("deadline_exceeded"),
+        WorkspaceAgentUnavailable("agent_disconnected"),
+        WorkspaceAgentUnavailable("call_cancelled"),
     ),
 )
 def test_a_reviewer_read_the_agent_never_served_is_never_read_as_nothing(error: Exception) -> None:
-    """A busy, failed or silent agent, or an answer too large to carry, never reads as an empty
+    """A busy, failed or departed agent, or an answer too large to carry, never reads as an empty
     listing or an absent file: the review ends ``workspace_agent_unavailable`` (ADR-051)."""
 
     reads = _reviewer_reads(error)
@@ -340,6 +350,67 @@ def test_a_listings_probe_batches_stop_at_the_reads_stop() -> None:
         reads.refused_paths(tuple(f"src/f{index}.py" for index in range(100)), stop)
     assert len(hub.calls) == 1
     assert hub.calls[0][3] == pytest.approx(3.0)
+
+
+@pytest.mark.anyio
+async def test_a_reviewer_read_the_hub_stopped_waiting_for_ends_at_the_reads_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent whose worker has no timer of its own (a read stuck in Git), or whose answer
+    crosses a slow link, answers after the read's stop and the hub's reply grace. The hub stops
+    waiting, and the read ends at its stop, ``deadline``, as a slow local read does, whatever
+    the transport: never ``workspace_agent_unavailable`` for an agent that is connected."""
+
+    from finishup.application.reviewer_loop import ReadStop
+    from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall
+    from finishup.ports.workspace_agent import WORKSPACE_OPERATION_NAMES
+    from finishup.service import workspace_hub
+
+    monkeypatch.setattr(workspace_hub, "_REPLY_GRACE_SECONDS", 0.05)
+    hub = WorkspaceAgentHub(inline_wait_seconds=1.0, background_wait_seconds=1.0)
+    hub.bind_loop()
+    sent: list[WorkspaceCall] = []
+
+    async def writer(call: WorkspaceCall) -> None:
+        sent.append(call)  # taken; its worker has not answered when the hub stops waiting
+
+    await hub.register(
+        handle=_HANDLE,
+        declaration=WorkspaceAgentDeclaration(
+            tuple(sorted(WORKSPACE_OPERATION_NAMES, key=str.encode)), 6_291_456
+        ),
+        service_instance_id="svc_00000000-0000-4000-8000-000000000051",
+        service_generation="7",
+        writer=writer,
+        worktree=None,
+    )
+    reads = ClientWorkspaceReads(hub, _HANDLE)
+
+    def stop() -> ReadStop:
+        return ReadStop(time.monotonic, time.monotonic() + 0.2)
+
+    with pytest.raises(ReadDeadline):
+        await asyncio.to_thread(reads.list_beneath, _HANDLE, "", excluded=(), expired=stop())
+    with pytest.raises(ReadDeadline):
+        await asyncio.to_thread(
+            reads.read_text_beneath, _HANDLE, "a.py", excluded=(), expired=stop()
+        )
+    with pytest.raises(ReadDeadline):
+        await asyncio.to_thread(reads.refused_paths, ("a.py", "b.py"), stop())
+    # As the local declared-test read: not read within its stop, the test is not visible.
+    location = _HANDLE + "/tests/test_a.py"
+    assert (
+        await asyncio.to_thread(reads.read_declared_test, location, excluded=(), expired=stop())
+        is None
+    )
+    # Every read reached the agent: the hub, not a read sent past its stop, ended each one.
+    assert [call.operation for call in sent] == [
+        "list_beneath",
+        "read_text_beneath",
+        "probe_requested_paths",
+        "read_declared_test",
+    ]
+    assert all(call.deadline_ms <= 200 for call in sent)
 
 
 def test_a_listings_ignored_paths_are_probed_in_batches() -> None:
