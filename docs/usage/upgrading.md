@@ -45,7 +45,10 @@ Unused old runtime copies are cleaned up automatically when a new process starts
 cleanup, `finishup upgrade --prune-runtimes` removes only copies no process is using. It does not stop
 sessions or remove settings, task data or credentials. Before uninstalling FinishUP, close its host
 sessions, stop its service through the supported lifecycle, and run this cleanup so unused release
-copies do not remain after the package manager removes the launcher. Uninstalling the package keeps
+copies do not remain after the package manager removes the launcher. If you added servers with
+`finishup server add`, run `finishup server disconnect NAME` for each one too (or `finishup server
+remove NAME`, which also deletes its stored API key); otherwise a connection to a server keeps
+running until it has been idle for a while. Uninstalling the package keeps
 your data; see [Where your data lives](#where-your-data-lives).
 
 Run `finishup upgrade` again with the same host target options to continue with host refresh. Do not
@@ -212,7 +215,9 @@ The Linux paths assume the default `XDG_*` locations. An installation started wi
 `FINISHUP_ISOLATED_ROOT` (or `YOETZ_ISOLATED_ROOT`) keeps everything under that root instead. If you
 chose system secure storage, the operating system keyring also holds entries under the service names
 `yoetz.vault-root.v1` and `yoetz.auto-unlock.v1`; both the old and the new name use these same
-entries.
+entries. An API key you stored with `finishup server login` is kept there too, under
+`yoetz.server-credential.v1` with the server's `t_` id as the account; `finishup server remove` and
+`finishup server logout` delete it, and deleting the folders does not.
 
 Deleting these folders permanently deletes your FinishUP tasks, receipts and vault, and nothing in
 FinishUP can recover them afterwards. Back them up first if you may want them again.
