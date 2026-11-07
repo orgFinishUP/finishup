@@ -376,8 +376,12 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   the server they started with. FinishUP remembers what this computer last reported, so the
   setup, server status and terminal views can say so even while this computer's FinishUP service
   is stopped or locked.
-- **Receipts say so.** A receipt from such a server states that workspace evidence was read on your
-  machine by the FinishUP workspace agent and attested over the connection.
+- **Receipts say so.** A receipt from such a server, as FinishUP shows it to you or your agent,
+  states that workspace evidence was read on your machine by the FinishUP workspace agent and
+  attested over the connection, and, when hook observations contributed, that the server did not
+  verify the observation consent they came with. When the server cannot read how the task's
+  session was opened, the receipt says instead that it cannot tell where the evidence was read.
+  Raw JSON output carries only that second statement, as its `workspace_provenance` member.
 
 ## How to inspect or report a privacy problem
 

@@ -609,7 +609,8 @@ give, the content you allow, the checks you approve and the observations waiting
 all live here, and `finishup observe …` changes them here whichever server you use. Each
 observation this computer delivers carries those settings with it; the server accepts them as
 your computer's own statement and does not check them itself. Receipts of such a task say so in
-one more line. With a server elsewhere, `finishup observe drain` delivers one project's waiting
+one more line, wherever FinishUP shows you or your agent the receipt (JSON output, as above,
+carries no such line). With a server elsewhere, `finishup observe drain` delivers one project's waiting
 observations at a time: the one you name with `--workspace`, or the folder you run it in.
 
 A server keeps the observation settings your last delivery carried. A pause, resume or revoke here
