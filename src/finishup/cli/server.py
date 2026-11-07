@@ -85,6 +85,7 @@ from finishup.protocol.canonical import JsonValue, canonical_encode
 if TYPE_CHECKING:
     from finishup.cli.trusted_console import TrustedForegroundConsole
     from finishup.cli.zero_network_selection import ZeroNetworkSelection
+    from finishup.client.repository_hold import HoldDecision, RepositoryChoice
     from finishup.client.server_folders import FolderRecord, OutsideReadMode
 
 __all__ = [
@@ -303,6 +304,36 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "with the absolute path of the server's finishup",
         _USAGE,
     ),
+    # 'server repositories' (ADR-051 decision 8, 2026-11-07, round 4): fixed text, never a path.
+    "repositories_not_applicable": (
+        "name or select a server on another machine, a port or the web: a server on this "
+        "computer applies this computer's own privacy policy to each repository, so nothing is "
+        "held for it",
+        _USAGE,
+    ),
+    "repository_invalid": (
+        "give a folder inside a project FinishUP can name: not /, and one Git or this computer "
+        "can resolve",
+        _USAGE,
+    ),
+    "repository_limit": (
+        "FinishUP already keeps the most repository choices it allows for that server (64); "
+        "remove one first with 'finishup server repositories remove'",
+        _USAGE,
+    ),
+    "repositories_record_invalid": (
+        "the record of which repositories that server receives anyway or keeps here is damaged, "
+        "so it receives none of them (each is held); repair it on this computer with 'finishup "
+        "server repositories remove NAME --all', then run this command again",
+        _UNSAFE,
+    ),
+    "repositories_record_unsafe": (
+        "the record of which repositories that server receives anyway or keeps here is not "
+        "owner-only or is a link, so it receives none of them (each is held); repair it on this "
+        "computer with 'finishup server repositories remove NAME --all', then run this command "
+        "again",
+        _UNSAFE,
+    ),
 }
 
 DISCLOSURE_LINES: Final = (
@@ -321,6 +352,8 @@ DISCLOSURE_LINES: Final = (
     "of files it read, even outside your project or the folders you list for that server.",
     "That server keeps them as FinishUP on this computer would.",
     "Your project folder is named by a keyed label, not its path.",
+    "A project whose privacy policy on this computer allows no network use is held: nothing from it",
+    "is sent until you allow it with 'finishup server repositories add'.",
     "That server's own privacy policy decides whether anything goes on to an AI-powered",
     "review provider.",
     "This is your decision on this terminal, not a vault re-authentication. Undo it with",
@@ -1037,6 +1070,7 @@ def server_add(
     typer.echo(f"Added server target {record.name} ({record.target_id}, {record.kind}).")
     if record.is_remote:
         _emit(_added_mode_lines(record, recorded=recorded))
+        _say_repository_hold(record)
     if kind == "local":
         _emit(
             (
@@ -1391,6 +1425,8 @@ def server_use(
         typer.echo(f"Using server target {record.name} ({record.target_id}, {record.kind}).")
     for line in switch.left_lines():
         typer.echo(line, err=switch.left_open)
+    if record is not None and record.is_remote:
+        _say_repository_hold(record)
     _warn_open_sessions()
 
 
@@ -1471,6 +1507,8 @@ def build_status_document(
     *,
     now: Callable[[], datetime] | None = None,
     zero_network: Callable[[], ZeroNetworkSelection | None] | None = None,
+    repository_here: bool = True,
+    workspace: str | None = None,
 ) -> dict[str, JsonValue]:
     """The ``server-target-status`` 1.0.0 document for ``name`` (or this process's root).
 
@@ -1478,6 +1516,12 @@ def build_status_document(
     found it (``server status`` the item it printed, the terminal interface the one ``/server``
     showed) or will not show it (``server test``); by default the document asks
     ``find_zero_network_selection`` itself, which may ask this computer's service.
+
+    For a remote target ``target.repositories`` says which repositories it holds, keeps here or
+    receives anyway (ADR-051 decision 8, 2026-11-07, round 4), from this client's records. With
+    ``repository_here`` it also says what is true of the repository of ``workspace`` (the current
+    folder when None), after asking this computer's FinishUP about it when it can answer; not
+    while the zero-network item is shown (that refusal governs) or outside any repository.
     """
 
     source = _source()
@@ -1516,6 +1560,14 @@ def build_status_document(
             "mode_source": found.source,
             "folders": list(found.folders),
         }
+    zero_network_item = _zero_network_selection(zero_network)
+    repositories: JsonValue = None
+    if record is not None and record.is_remote:
+        repositories = _repositories_document(
+            record,
+            here=repository_here and zero_network_item is None,
+            workspace=workspace,
+        )
     target: dict[str, JsonValue] = {
         "target_id": None if record is None else record.target_id,
         "name": "local" if everyday else (None if record is None else record.name),
@@ -1524,6 +1576,7 @@ def build_status_document(
         "credential": credential,
         "authorization": authorization,
         "outside_reads": outside_reads,
+        "repositories": repositories,
     }
     stamp = (now or (lambda: datetime.now(UTC)))()
     document: dict[str, JsonValue] = {
@@ -1536,13 +1589,60 @@ def build_status_document(
         "probe": (
             _probe_document(result, failure) if refused is None else _not_probed(refused.reason)
         ),
-        "zero_network_selection": _zero_network_selection(zero_network),
+        "zero_network_selection": zero_network_item,
         "observed_at": format_rfc3339_ms(stamp),
     }
     from finishup.protocol.server_target_status import ServerTargetStatusContract
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _repositories_document(
+    record: ServerTarget, *, here: bool, workspace: str | None
+) -> dict[str, JsonValue]:
+    """``target.repositories`` of a remote target (owner display: paths and fixed-shape times)."""
+
+    from finishup.client.everyday_policy import worktree_storable
+
+    here_value: JsonValue = None
+    if here:
+        try:
+            found = repository_here(workspace)
+        except ServerCommandRefused:
+            found = None
+        if found is not None:
+            live = _live_state(found)
+            decision = _decision_here(record, found, live)
+            policy_read = None if decision.state == "not_reported" else decision.policy_read
+            here_value = {
+                "state": decision.state,
+                "cause": decision.cause,
+                "policy_read": policy_read,
+                "reported_at": decision.reported_at if policy_read == "last_reported" else None,
+            }
+    groups = repository_groups(record)
+
+    def path(value: str | None) -> JsonValue:
+        return value if value is not None and worktree_storable(value) else None
+
+    return {
+        "reports": groups.reports,
+        "record": groups.record,
+        "held": [
+            {"worktree": path(worktree), "reported_at": reported_at, "cause": cause}
+            for worktree, reported_at, cause in groups.held
+        ],
+        "kept": [
+            {"worktree": choice.worktree, "kept_at": choice.decided_at, "state": state}
+            for choice, state in groups.kept()
+        ],
+        "allowed": [
+            {"worktree": choice.worktree, "allowed_at": choice.decided_at, "state": state}
+            for choice, state in groups.allowed()
+        ],
+        "here": here_value,
+    }
 
 
 def _zero_network_selection(
@@ -1620,9 +1720,92 @@ def status_lines(document: dict[str, JsonValue]) -> tuple[str, ...]:
             f"Round trip p95: {probe['round_trip_p95_ms']} ms over {probe['samples']} status calls"
         )
     lines.extend(outside_read_lines(target))
+    lines.extend(repository_lines(target))
     if document["selection_overridden"]:
         lines.append("The server selection is not used here: an isolation root decides it.")
     return tuple(lines)
+
+
+def repository_lines(target: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Owner-display lines of a status document's remote target: how many repositories it holds,
+    keeps here and receives anyway, and what is true of this folder's repository. Empty for a
+    target that is not remote."""
+
+    repositories = target.get("repositories")
+    if not isinstance(repositories, dict):
+        return ()
+    name = str(target.get("name") or "NAME")
+    held = cast(list[JsonValue], repositories.get("held"))
+    kept = [
+        item
+        for item in cast(list[JsonValue], repositories.get("kept"))
+        if isinstance(item, dict) and item.get("state") == "applies"
+    ]
+    allowed = [
+        item
+        for item in cast(list[JsonValue], repositories.get("allowed"))
+        if isinstance(item, dict) and item.get("state") == "applies"
+    ]
+    lines = [
+        f"Repositories: {len(held)} held, {len(kept)} kept on this computer, {len(allowed)} sent "
+        f"anyway as you allowed ('finishup server repositories list {name}' shows them)."
+    ]
+    if repositories.get("reports") == "unreadable":
+        lines.append(_DAMAGED_REPORTS_LINE)
+    if repositories.get("record") == "unreadable":
+        lines.append(
+            "The record of repositories it receives anyway or keeps here is damaged or not "
+            "private to you, so it receives none of them: every repository whose policy here "
+            "allows no network use is held for it. Repair it on this computer with 'finishup "
+            f"server repositories remove {name} --all'."
+        )
+    here = repositories.get("here")
+    if isinstance(here, dict):
+        line = _here_line(here, name)
+        if line is not None:
+            lines.append(line)
+    return tuple(lines)
+
+
+def _here_line(here: Mapping[str, JsonValue], name: str) -> str | None:
+    state = here.get("state")
+    reported = (
+        f", as this computer last reported at {here.get('reported_at')}"
+        if here.get("policy_read") == "last_reported"
+        else ""
+    )
+    if state == "held" and here.get("cause") == "grant_changed":
+        return (
+            "This folder's repository: held again — its privacy policy here changed after you "
+            f"chose for it{reported}; 'finishup server repositories add {name}' here sends it "
+            f"anyway, and 'finishup server repositories keep {name}' keeps it here."
+        )
+    if state == "held":
+        return (
+            "This folder's repository: held — its privacy policy on this computer allows no "
+            f"network use{reported}, so nothing from it is sent to this server. To send it anyway: "
+            f"'finishup server repositories add {name}' here; to keep it here without being "
+            f"asked again: 'finishup server repositories keep {name}'."
+        )
+    if state == "kept":
+        return (
+            "This folder's repository: kept on this computer — its privacy policy here allows no "
+            f"network use{reported}, and you chose to keep its work here, so nothing from it is "
+            "sent to this server and FinishUP does not ask again. 'finishup server repositories "
+            f"add {name}' here sends it anyway."
+        )
+    if state == "sent_anyway":
+        return (
+            "This folder's repository: sent anyway — its privacy policy on this computer allows "
+            f"no network use{reported}, and you allowed this server to receive its work. "
+            f"'finishup server repositories remove {name}' here holds it again."
+        )
+    if state == "not_reported":
+        return (
+            "This folder's repository: not held — this computer's FinishUP has not reported its "
+            "privacy policy and cannot be asked now."
+        )
+    return None
 
 
 def _mode_origin(source: str) -> str:
@@ -1715,8 +1898,8 @@ def server_test(
 
     record, _root, _everyday = _resolve(name)
     # These lines never show the zero-network item (``status`` and ``list`` do), so this
-    # computer's service is not asked for its policy.
-    document = build_status_document(name, zero_network=lambda: None)
+    # computer's service is not asked for its policy, nor for this folder's repository.
+    document = build_status_document(name, zero_network=lambda: None, repository_here=False)
     _emit(status_lines(document))
     probe = cast(dict[str, JsonValue], document["probe"])
     if probe["outcome"] == "not_probed":
@@ -2204,14 +2387,19 @@ def _confirm_local_mode_on_trusted_console(record: ServerTarget) -> None:
     _confirm_notice(record, _LOCAL_MODE_NOTICE)
 
 
-def _confirm_notice(record: ServerTarget, notice: tuple[str, ...], *, folder: str = "") -> None:
+def _confirm_notice(
+    record: ServerTarget, notice: tuple[str, ...], *, folder: str = "", state: str = ""
+) -> None:
     from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
     try:
         with TrustedForegroundConsole() as console:
             for line in notice:
                 console.write(
-                    line.format(name=record.name, target_id=record.target_id, folder=folder) + "\n"
+                    line.format(
+                        name=record.name, target_id=record.target_id, folder=folder, state=state
+                    )
+                    + "\n"
                 )
             console.read_choice(
                 "Type the target name to allow it (anything else cancels): ",
@@ -2490,4 +2678,650 @@ def server_folders_mode(
         f"{who} now reads outside your projects only beneath folders you list (mode listed), "
         f"from its next read (a read already under way may still finish): {listed} so far. "
         f"'finishup server folders list {record.name}' shows them."
+    )
+
+
+# --- a repository whose privacy policy here allows no network use (ADR-051 decision 8) --------
+#
+# Maintainer decision of 2026-11-07, round 4. While a server elsewhere is selected, a repository
+# whose own policy on this computer allows no network use is held from it until the owner
+# decides: 'add' sends it anyway (the trusted console, a disclosure and the typed target name),
+# 'keep' keeps it here without asking again (it only tightens, so an agent may run it), 'remove'
+# undoes either. 'list' and 'status' show them. The records are this client's own
+# (``client.everyday_policy``, ``client.repository_hold``) and never sent to the server.
+
+repositories_app = typer.Typer(
+    help=(
+        "Choose whether a server on another machine, a port or the web receives a repository "
+        "whose privacy policy on this computer allows no network use."
+    ),
+    no_args_is_help=True,
+)
+server_app.add_typer(repositories_app, name="repositories")
+
+_NAME_ARGUMENT = Annotated[
+    str | None,
+    typer.Argument(help="A server on another machine, a port or the web (default: the selected)."),
+]
+_REPOSITORY_OPTION = Annotated[
+    str | None,
+    typer.Option(
+        "--repository", metavar="FOLDER", help="A folder of the repository (default: this one)."
+    ),
+]
+# Shown in place of a worktree whose path is too long to keep.
+_LONG_PATH: Final = "a folder whose path is too long to show"
+
+_REPOSITORY_NOTICE: Final = (
+    "Send this repository's work to server target {name} ({target_id}) anyway:",
+    "  {folder}",
+    "",
+    "{state}",
+    "While that server is selected, FinishUP sends nothing from this repository to it: its",
+    "starts, checks and observations wait on this computer. If you allow it, that server",
+    "receives this repository's work as it receives your other projects' work, as the",
+    "disclosure you confirmed for it describes: task statements, published work, evidence,",
+    "check, respond and receipt traffic, what the FinishUP workspace agent here reads for it",
+    "(the change being checked, bounded file excerpts for review, declared task inputs and",
+    "results of checks you approved), and the hook observations captured for it, including",
+    "those captured here while it was held (without the content captured while it was held).",
+    "That server's own privacy policy, not this repository's policy on this computer, then",
+    "decides whether any of it goes on to an AI-powered review provider.",
+    "Every linked worktree of this repository is included. This repository's privacy policy",
+    "on this computer is not changed; if it changes, FinishUP holds the work again until you",
+    "allow it again. The hold covers what FinishUP itself reads and claims for this",
+    "repository, not what an agent in another folder reads and its hooks capture.",
+    "This is your decision on this terminal, not a vault re-authentication.",
+    "Undo it with 'finishup server repositories remove {name}' in this repository.",
+    "",
+)
+_NOT_REPORTED_FOOTER: Final = (
+    "A repository this computer's FinishUP has not reported is not held; it reports one "
+    "whenever that repository's privacy policy is read or changed here, or a session starts in "
+    "it while this computer's FinishUP runs."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryHere:
+    """One repository on this computer: the top of the worktree named, and its report key."""
+
+    worktree: str
+    key: str
+
+
+def _repository_target(name: str | None) -> ServerTarget:
+    """The remote target ``name`` names, or the selected one; refused for anything else."""
+
+    if name is not None:
+        record = _target_or_fail(name)
+    else:
+        from finishup.cli.zero_network_selection import read_selection_on_disk
+
+        selected = read_selection_on_disk()
+        if isinstance(selected, str):
+            raise ServerCommandRefused(selected if selected in _REMEDIES else "selection_invalid")
+        if selected is None:
+            raise ServerCommandRefused("repositories_not_applicable")
+        record = selected
+    if not record.is_remote:
+        raise ServerCommandRefused("repositories_not_applicable")
+    return record
+
+
+def repository_here(folder: str | None = None) -> RepositoryHere:
+    """The repository of ``folder`` (the current folder when None), or ``repository_invalid``."""
+
+    import asyncio
+    import contextvars
+    import os
+
+    from finishup.adapters.workspace_binding import canonical_workspace_locator
+    from finishup.client.everyday_policy import worktree_storable
+    from finishup.client.everyday_repository import repository_key_for
+
+    try:
+        worktree = canonical_workspace_locator(os.getcwd() if folder is None else folder)
+    except (OSError, ValueError):
+        worktree = None
+    if worktree is None or not worktree_storable(worktree):
+        raise ServerCommandRefused("repository_invalid")
+    key = contextvars.Context().run(asyncio.run, repository_key_for(worktree))
+    if key is None:
+        raise ServerCommandRefused("repository_invalid")
+    return RepositoryHere(worktree, key)
+
+
+def _live_state(here: RepositoryHere) -> str:
+    """Ask this computer's FinishUP about ``here`` now (records what it says); never raises."""
+
+    from finishup.cli.zero_network_selection import live_repository_state
+
+    return live_repository_state(here.worktree)
+
+
+def _choices_of(record: ServerTarget) -> tuple[RepositoryChoice, ...]:
+    from finishup.client.repository_hold import RepositoryRecordError, read_overrides
+
+    try:
+        return read_overrides(target_root(record.target_id), record.target_id)
+    except RepositoryRecordError as error:
+        raise ServerCommandRefused(error.reason) from None
+
+
+def _state_line(decision: HoldDecision) -> str:
+    if decision.policy_read == "live":
+        return (
+            "Its privacy policy on this computer allows no network use (this computer's "
+            "FinishUP said so now)."
+        )
+    return (
+        "Its privacy policy on this computer allows no network use (this computer's FinishUP "
+        f"last reported this at {decision.reported_at}; it cannot be asked now)."
+    )
+
+
+def _decision_here(record: ServerTarget, here: RepositoryHere, live: str) -> HoldDecision:
+    from finishup.client.repository_hold import decide
+
+    found = decide(target_root(record.target_id), record.target_id, here.key)
+    if live in {"no_network", "network_permitted"}:
+        return replace(found, policy_read="live")
+    return found
+
+
+def _confirm_repository_on_trusted_console(record: ServerTarget, worktree: str, state: str) -> None:
+    """Show what allowing the repository at ``worktree`` sends; require the typed target name."""
+
+    _confirm_notice(record, _REPOSITORY_NOTICE, folder=worktree, state=state)
+
+
+def allow_repository(record: ServerTarget, here: RepositoryHere) -> bool:
+    """``server repositories add``'s core: ask on the trusted console, then record the allow.
+
+    The terminal interface runs the same core with the terminal handed over. Prints what
+    happened; returns whether an allow was recorded. Refusals raise ``ServerCommandRefused``.
+    """
+
+    from finishup.client.everyday_policy import repository_report
+    from finishup.client.repository_hold import (
+        MAX_ALLOWED_REPOSITORIES,
+        RepositoryRecordError,
+        add_override,
+    )
+
+    who = f"{record.name} ({record.target_id})"
+    live = _live_state(here)
+    if live == "no_policy":
+        typer.echo(
+            "This computer's FinishUP was never set up, so it has no privacy policy for this "
+            "repository and nothing of it is held; nothing was recorded."
+        )
+        return False
+    decision = _decision_here(record, here, live)
+    if decision.state == "not_reported":
+        typer.echo(
+            "This computer's FinishUP has not reported this repository's privacy policy and "
+            "cannot be asked now (it is stopped or locked), so nothing of it is held for "
+            f"{who}; nothing was recorded."
+        )
+        return False
+    if decision.state == "not_held":
+        typer.echo(
+            "This repository's privacy policy on this computer allows network use, so "
+            f"{who} already receives its work; nothing was recorded."
+        )
+        return False
+    if decision.state == "sent_anyway":
+        typer.echo(
+            f"{who} already receives this repository's work (you allowed it at "
+            f"{decision.decided_at})."
+        )
+        return False
+    choices = _choices_of(record)
+    if here.key not in {item.key for item in choices} and len(choices) >= MAX_ALLOWED_REPOSITORIES:
+        raise ServerCommandRefused("repository_limit")
+    state = _state_line(decision)
+    if decision.cause == "grant_changed":
+        state += (
+            "\nYou chose for it before, but its privacy policy here changed since, so FinishUP "
+            "asks again."
+        )
+    elif decision.state == "kept":
+        state += "\nYou chose to keep it on this computer before; allowing it replaces that choice."
+    _confirm_repository_on_trusted_console(record, here.worktree, state)
+    try:
+        with registry_lock():
+            # Read again under the lock: the confirmation may have taken minutes.
+            report = repository_report(here.key)
+            if report is None or not report.no_network or report.no_network_since is None:
+                typer.echo(
+                    "This repository's privacy policy on this computer no longer allows no "
+                    f"network use, so {who} receives its work; nothing was recorded."
+                )
+                return False
+            add_override(
+                target_root(record.target_id),
+                record.target_id,
+                here.key,
+                here.worktree,
+                report.no_network_since,
+            )
+    except RepositoryRecordError as error:
+        raise ServerCommandRefused(error.reason) from None
+    typer.echo(
+        f"{who} now receives this repository's work although its privacy policy on this "
+        f"computer allows no network use: {here.worktree}. Your agent can repeat its last "
+        "FinishUP request now; new hooks and commands send it, and the observations captured "
+        "here while it was held are sent too. Undo it with 'finishup server repositories remove "
+        f"{record.name}' in this repository."
+    )
+    return True
+
+
+def keep_repository(record: ServerTarget, here: RepositoryHere, *, named: bool) -> bool:
+    """``server repositories keep``'s core: record that this repository stays on this computer.
+
+    It only tightens, so no console is needed and an agent may run it. Lines name the server by
+    its generated id and kind, and the commands by the name only when the caller typed it
+    (``named``). Returns whether a choice was recorded.
+    """
+
+    from finishup.client.everyday_policy import repository_report
+    from finishup.client.repository_hold import (
+        MAX_ALLOWED_REPOSITORIES,
+        RepositoryRecordError,
+        add_kept,
+    )
+
+    server = f"Server {record.target_id} ({record.kind})"
+    suffix = f" {record.name}" if named else ""
+    live = _live_state(here)
+    decision = _decision_here(record, here, live)
+    if decision.state in {"not_reported", "not_held"} or live == "no_policy":
+        typer.echo(
+            f"{server} holds nothing of this repository: its privacy policy on this computer "
+            "allows network use, or this computer's FinishUP has not reported it, so there is "
+            "nothing to keep; nothing was recorded."
+        )
+        return False
+    if decision.state == "kept":
+        typer.echo(
+            f"This repository's work is already kept on this computer for {server}, as chosen "
+            f"at {decision.decided_at}; FinishUP does not ask about it again."
+        )
+        return False
+    choices = _choices_of(record)
+    if here.key not in {item.key for item in choices} and len(choices) >= MAX_ALLOWED_REPOSITORIES:
+        raise ServerCommandRefused("repository_limit")
+    try:
+        with registry_lock():
+            report = repository_report(here.key)
+            if report is None or not report.no_network or report.no_network_since is None:
+                typer.echo(
+                    f"{server} holds nothing of this repository now: its privacy policy on this "
+                    "computer allows network use; nothing was recorded."
+                )
+                return False
+            add_kept(
+                target_root(record.target_id),
+                record.target_id,
+                here.key,
+                here.worktree,
+                report.no_network_since,
+            )
+    except RepositoryRecordError as error:
+        raise ServerCommandRefused(error.reason) from None
+    typer.echo(
+        f"This repository's work is kept on this computer for {server}: while its privacy "
+        "policy here allows no network use, nothing FinishUP reads or claims for it is sent "
+        "there, and FinishUP does not ask about it again. What an agent in another folder reads "
+        "and its hooks capture is not covered. 'finishup server repositories add"
+        f"{suffix}' in this repository sends it anyway (you confirm it in your own terminal); "
+        f"'finishup server repositories remove{suffix}' asks again."
+    )
+    if decision.state == "sent_anyway":
+        typer.echo(
+            "It was sent anyway until now: new connections from it are held from now on, and "
+            "open ones close within about a second (a request under way may still finish). What "
+            "that server already received stays there."
+        )
+    return True
+
+
+def _say_repository_hold(record: ServerTarget) -> None:
+    """After choosing or adding remote ``record``: whether this folder's repository is held or
+    kept for it, else how many repositories are held for it (ADR-051 decision 8). Best effort:
+    it asks this computer's FinishUP about this folder when it can answer, and never fails the
+    command."""
+
+    try:
+        here: RepositoryHere | None = repository_here()
+    except ServerCommandRefused:
+        here = None
+    if here is not None:
+        decision = _decision_here(record, here, _live_state(here))
+        if decision.state == "held":
+            typer.echo(
+                "This repository's privacy policy on this computer allows no network use, so "
+                f"FinishUP holds its work for {record.name}: nothing from it is sent. To send it "
+                f"anyway, run 'finishup server repositories add {record.name}' here; to keep it "
+                f"here without being asked again, 'finishup server repositories keep "
+                f"{record.name}'."
+            )
+            return
+        if decision.state == "kept":
+            typer.echo(
+                f"This repository's work is kept on this computer for {record.name}, as you "
+                f"chose; 'finishup server repositories add {record.name}' here sends it anyway."
+            )
+            return
+    held = len(repository_groups(record).held)
+    if held:
+        noun = (
+            "repository whose privacy policy on this computer allows no network use is"
+            if (held == 1)
+            else "repositories whose privacy policy on this computer allows no network use are"
+        )
+        typer.echo(
+            f"{held} {noun} held for {record.name}; 'finishup server repositories list "
+            f"{record.name}' shows them."
+        )
+
+
+@repositories_app.command("add")
+@_cli
+def server_repositories_add(
+    name: _NAME_ARGUMENT = None, repository: _REPOSITORY_OPTION = None
+) -> None:
+    """Send this repository's work to a server anyway (you confirm it here)."""
+
+    _require_selection_in_force()
+    record = _repository_target(name)
+    refused = zero_network_connection_refusal(record)
+    if refused is not None:
+        raise refused
+    allow_repository(record, repository_here(repository))
+
+
+@repositories_app.command("keep")
+@_cli
+def server_repositories_keep(
+    name: _NAME_ARGUMENT = None, repository: _REPOSITORY_OPTION = None
+) -> None:
+    """Keep this repository's work on this computer for a server, without being asked again."""
+
+    _require_no_explicit_source()
+    record = _repository_target(name)
+    keep_repository(record, repository_here(repository), named=name is not None)
+
+
+def _gone(worktrees: tuple[str, ...]) -> bool:
+    """Whether every recorded worktree of an entry is gone (none is a folder any more)."""
+
+    import os
+
+    return bool(worktrees) and not any(os.path.isdir(path) for path in worktrees)
+
+
+def _forget_gone_reports() -> None:
+    """Forget report entries whose recorded worktrees are all gone (moved or deleted)."""
+
+    from finishup.client.everyday_policy import forget_repository_reports, read_repository_reports
+
+    reading = read_repository_reports()
+    if isinstance(reading, str):
+        return
+    gone = [report.key for report in reading if _gone(report.worktrees)]
+    if gone:
+        forget_repository_reports(gone)
+
+
+def _shown(path: str | None) -> str:
+    import os
+
+    if path is None:
+        return _LONG_PATH
+    return path if os.path.isdir(path) else f"{path}  — folder not found"
+
+
+def repository_groups(record: ServerTarget) -> RepositoryGroups:
+    """What one remote target holds, keeps and receives anyway, from this computer's records."""
+
+    from finishup.client.everyday_policy import read_repository_reports
+    from finishup.client.repository_hold import RepositoryRecordError, decide, read_overrides
+
+    root = target_root(record.target_id)
+    reading = read_repository_reports()
+    reports = () if isinstance(reading, str) else reading
+    try:
+        choices: tuple[RepositoryChoice, ...] | None = read_overrides(root, record.target_id)
+    except RepositoryRecordError:
+        choices = None
+    held: list[tuple[str | None, str, str]] = []
+    by_key = {report.key: report for report in reports}
+    for report in sorted(reports, key=lambda item: item.reported_at, reverse=True):
+        decision = decide(root, record.target_id, report.key)
+        if decision.state == "held":
+            worktree = report.worktrees[0] if report.worktrees else None
+            held.append((worktree, report.reported_at, cast(str, decision.cause)))
+    chosen: list[tuple[RepositoryChoice, str]] = []
+    for choice in choices or ():
+        report = by_key.get(choice.key)
+        if report is None:
+            state = "not_reported"
+        elif not report.no_network:
+            state = "not_needed"
+        elif report.no_network_since != choice.no_network_since:
+            state = "grant_changed"
+        else:
+            state = decide(root, record.target_id, choice.key).state
+            state = "applies" if state in {"kept", "sent_anyway"} else "grant_changed"
+        chosen.append((choice, state))
+    return RepositoryGroups(
+        reports="unreadable" if reading == "unreadable" else "readable",
+        record="unreadable" if choices is None else "readable",
+        held=tuple(held),
+        chosen=tuple(chosen),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryGroups:
+    """One target's repositories: ``held`` (worktree or None, reported at, cause) from reports,
+    ``chosen`` (the owner's choice, and whether it applies) from the target's record."""
+
+    reports: Literal["readable", "unreadable"]
+    record: Literal["readable", "unreadable"]
+    held: tuple[tuple[str | None, str, str], ...]
+    chosen: tuple[tuple[RepositoryChoice, str], ...]
+
+    def kept(self) -> tuple[tuple[RepositoryChoice, str], ...]:
+        return tuple(item for item in self.chosen if item[0].choice == "keep")
+
+    def allowed(self) -> tuple[tuple[RepositoryChoice, str], ...]:
+        return tuple(item for item in self.chosen if item[0].choice == "send")
+
+
+def _damaged_record_line(record: ServerTarget) -> str:
+    return (
+        f"The record of repositories {record.name} ({record.target_id}) receives anyway or keeps "
+        "here is damaged or not private to you, so it receives none of them: every repository "
+        "whose policy here allows no network use is held for it. Repair it on this computer with "
+        f"'finishup server repositories remove {record.name} --all'."
+    )
+
+
+_DAMAGED_REPORTS_LINE: Final = (
+    "This computer's record of what its FinishUP reported about repositories cannot be read, so "
+    "FinishUP holds no repository from it now; it is written again the next time this "
+    "computer's FinishUP reports one."
+)
+
+
+def repository_list_lines(record: ServerTarget) -> tuple[str, ...]:
+    """The owner display of one remote target's held, kept and allowed repositories."""
+
+    groups = repository_groups(record)
+    who = f"{record.name} ({record.target_id})"
+    lines: list[str] = []
+    if groups.record == "unreadable":
+        lines.append(_damaged_record_line(record))
+    applying = [item for item in groups.chosen if item[1] == "applies"]
+    earlier = [item for item in groups.chosen if item[1] in {"not_needed", "not_reported"}]
+    if not groups.held and not applying and not earlier:
+        if groups.record == "readable":
+            lines.append(
+                f"{who} holds nothing: this computer's FinishUP has reported no repository whose "
+                "privacy policy allows no network use, and you chose none."
+            )
+        return tuple(lines)
+    lines.append(f"{who}, {_kind_label(record.kind)}:")
+    if groups.held:
+        lines.append("  Held (privacy policy here allows no network use):")
+        for worktree, reported_at, cause in groups.held:
+            changed = (
+                "  — its policy changed after you chose for it" if cause == "grant_changed" else ""
+            )
+            lines.append(f"    {_shown(worktree)}  (reported {reported_at}){changed}")
+    kept = [item for item in applying if item[0].choice == "keep"]
+    if kept:
+        lines.append("  Kept on this computer, as you chose:")
+        lines.extend(f"    {_shown(c.worktree)}  (kept {c.decided_at})" for c, _state in kept)
+    sent = [item for item in applying if item[0].choice == "send"]
+    if sent:
+        lines.append("  Sent anyway, as you allowed:")
+        lines.extend(f"    {_shown(c.worktree)}  (allowed {c.decided_at})" for c, _state in sent)
+    if earlier:
+        lines.append("  Chosen earlier, not needed now (its policy here allows network use):")
+        lines.extend(f"    {_shown(c.worktree)}" for c, _state in earlier)
+    lines.append(
+        f"To send a held repository anyway: 'finishup server repositories add {record.name} "
+        f"--repository FOLDER'. To keep one here without being asked again: 'finishup server "
+        f"repositories keep {record.name} --repository FOLDER'. To undo either: 'finishup server "
+        f"repositories remove {record.name} --repository FOLDER' or '--all'."
+    )
+    return tuple(lines)
+
+
+@repositories_app.command("list")
+@_cli
+def server_repositories_list(name: _NAME_ARGUMENT = None) -> None:
+    """Show which repositories each server elsewhere holds, keeps here, or receives anyway."""
+
+    from finishup.client.everyday_policy import read_repository_reports
+
+    _require_no_explicit_source()
+    if name is not None:
+        records = (_repository_target(name),)
+    else:
+        records = tuple(record for record in list_targets() if record.is_remote)
+    # This folder's repository is read again first, when this computer's FinishUP can answer.
+    with contextlib.suppress(ServerCommandRefused):
+        _live_state(repository_here())
+    _forget_gone_reports()
+    if read_repository_reports() == "unreadable":
+        typer.echo(_DAMAGED_REPORTS_LINE)
+    if not records:
+        typer.echo("No server on another machine, a port or the web was added.")
+    for record in records:
+        _emit(repository_list_lines(record))
+    typer.echo(_NOT_REPORTED_FOOTER)
+
+
+@repositories_app.command("remove")
+@_cli
+def server_repositories_remove(
+    name: _NAME_ARGUMENT = None,
+    repository: _REPOSITORY_OPTION = None,
+    all_repositories: Annotated[
+        bool,
+        typer.Option("--all", help="Undo every choice (also repairs a damaged record)."),
+    ] = False,
+) -> None:
+    """Undo a choice for a repository: held again, and FinishUP asks again."""
+
+    import os
+    import posixpath
+
+    from finishup.cli.zero_network_selection import OPEN_SESSIONS_LINE
+    from finishup.client.everyday_policy import forget_repository_reports, read_repository_reports
+    from finishup.client.repository_hold import (
+        RepositoryRecordError,
+        clear_overrides,
+        remove_override,
+    )
+
+    _require_no_explicit_source()
+    if all_repositories and repository is not None:
+        raise ServerCommandRefused("usage", message="give at most one of --repository or --all")
+    record = _repository_target(name)
+    root = target_root(record.target_id)
+    who = f"{record.name} ({record.target_id})"
+    if all_repositories:
+        try:
+            with registry_lock():
+                outcome = clear_overrides(root, record.target_id)
+        except RepositoryRecordError as error:
+            raise ServerCommandRefused(error.reason) from None
+        if outcome == "absent":
+            typer.echo(f"{who} had no repository choice recorded; nothing changed.")
+        elif outcome == "repaired":
+            typer.echo(
+                "The damaged record was replaced by an empty one: every repository whose policy "
+                f"here allows no network use is held for {who}."
+            )
+        else:
+            typer.echo(
+                f"{who} no longer receives or keeps any repository by your choice: every "
+                "repository whose policy here allows no network use is held for it, new "
+                "connections from them are held from now on, and open ones close within about "
+                "a second (a request under way may still finish). What that server already "
+                "received stays there; FinishUP asks again."
+            )
+            typer.echo(OPEN_SESSIONS_LINE)
+        return
+    try:
+        here: RepositoryHere | None = repository_here(repository)
+    except ServerCommandRefused:
+        here = None
+    folder = os.getcwd() if repository is None else repository
+    text = posixpath.normpath(os.path.abspath(folder))
+    try:
+        with registry_lock():
+            removed = remove_override(
+                root,
+                record.target_id,
+                key=None if here is None else here.key,
+                worktree=text,
+            )
+    except RepositoryRecordError as error:
+        raise ServerCommandRefused(error.reason) from None
+    if here is None:
+        # A moved or deleted repository: forget what was reported of it too.
+        reading = read_repository_reports()
+        if not isinstance(reading, str):
+            stale = [
+                report.key
+                for report in reading
+                if text in report.worktrees and _gone(report.worktrees)
+            ]
+            if stale:
+                forget_repository_reports(stale)
+    if not removed:
+        typer.echo(f"{who} had no choice recorded for this repository; nothing changed.")
+        return
+    if any(item.choice == "send" for item in removed):
+        typer.echo(
+            f"{who} no longer receives this repository's work while its privacy policy on this "
+            "computer allows no network use: new connections from it are held from now on, and "
+            "open ones close within about a second (a request under way may still finish). What "
+            "that server already received stays there."
+        )
+        typer.echo(OPEN_SESSIONS_LINE)
+        return
+    typer.echo(
+        f"This repository is no longer kept on this computer by your choice for {who}: while "
+        "its privacy policy here allows no network use it stays held, and FinishUP asks again "
+        "whether to send it."
     )

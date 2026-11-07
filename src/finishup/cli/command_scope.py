@@ -126,6 +126,9 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         # The folders outside a project a remote target's server may read: this client's own
         # record, never sent to that server (ADR-051 decision 5).
         "server folders": "client_only",
+        # Which held repositories a remote target's server receives anyway, or keeps here: this
+        # client's own record, never sent to that server (ADR-051 decision 8).
+        "server repositories": "client_only",
         "setup disconnect": "client_only",
     }
 )
