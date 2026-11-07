@@ -1557,7 +1557,11 @@ later process to the default service.
   trust, mappings and the outbox live in the selected target's client-side root, and
   `finishup observe ...` administers them here. Each row a remote target receives carries the
   client attestation (ADR-051 decision 12); the server accepts it as `client_attested`, and
-  receipts with hook-observed evidence carry one more fixed line.
+  receipts with hook-observed evidence carry one more fixed line. Host decision for content:
+  Codex hook content is the profileless arm of observation consent, so with consent alone its
+  prompt, message and tool output chunks (and the command input of a test, build, lint or
+  typecheck run) reach the server unchanged, as a local service receives them. The server
+  disclosure (disclosure 2) names this before the owner types the name.
 - **Receipt provenance.** When the server cannot read the task's opening record, a receipt is
   still made and never refused for it (ADR-051, decision D4): instead of the `client_attested`
   line it ends with the fixed provenance-unknown section (what happened, why it matters, and
