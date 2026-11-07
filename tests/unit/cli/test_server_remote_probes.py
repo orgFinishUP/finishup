@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -31,6 +32,8 @@ from finishup.protocol.canonical import JsonValue
 from finishup.protocol.schemas import schema_manifest_digest
 
 _RUNNER = CliRunner()
+# The real typed confirmation, kept before any fixture replaces it.
+_REAL_CONFIRMATION = server_cli._confirm_on_trusted_console  # pyright: ignore[reportPrivateUsage]
 
 
 def _confirmed(_name: str, _kind: str, **_question: object) -> None:
@@ -94,7 +97,15 @@ def test_an_ssh_add_records_the_servers_own_endpoint(home: Path, fake_ssh: Path)
     assert record.remote_launcher == str(launcher)
     (probe,) = fake_ssh.read_text(encoding="utf-8").splitlines()
     assert "StrictHostKeyChecking=ask" in probe and "BatchMode" not in probe
+    # The host key is the only question: no password or keyboard-interactive login (RE-11).
+    for option in (
+        "ControlMaster=no",
+        "PasswordAuthentication=no",
+        "KbdInteractiveAuthentication=no",
+    ):
+        assert f"-o {option}" in probe
     assert probe.endswith(f"{launcher} service endpoint --json")
+    assert "OpenSSH asks you to confirm it here" in result.stdout
 
 
 def test_without_a_launcher_the_servers_reported_absolute_launcher_is_kept(
@@ -173,3 +184,91 @@ def test_login_stores_a_key_only_after_the_gateway_accepted_it(
     assert accepted.exit_code == 0, accepted.output
     assert targets.list_targets()[0].credential == "file"
     assert key not in accepted.output
+
+
+def _failing_ssh(home: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> Path:
+    """An ``ssh`` that fails as OpenSSH does (exit 255) with ``stderr``, logging its argv."""
+
+    bin_dir = home / "failing-bin"
+    bin_dir.mkdir(mode=0o700)
+    log = home / "failing-ssh.log"
+    script = bin_dir / "ssh"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"sys.stderr.write({stderr!r})\n"
+        "sys.exit(255)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return log
+
+
+_DECLINED = "Host key verification failed.\r\n"
+_UNKNOWN = (
+    "No ED25519 host key is known for lab.example and you have requested strict checking.\r\n"
+    "Host key verification failed.\r\n"
+)
+_CHANGED = (
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+    "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+    "Host key verification failed.\r\n"
+)
+_REFUSED = "owner@lab.example: Permission denied (publickey).\r\n"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    [
+        (_DECLINED, "remote_host_key_unconfirmed"),
+        (_UNKNOWN, "remote_host_key_unconfirmed"),
+        (_CHANGED, "remote_identity_changed"),
+        (_REFUSED, "remote_auth_failed"),
+    ],
+    ids=["declined", "unknown", "changed", "login_refused"],
+)
+def test_an_ssh_add_whose_probe_failed_names_why_and_adds_nothing(
+    home: Path, monkeypatch: pytest.MonkeyPatch, stderr: str, reason: str
+) -> None:
+    """RE-11 (parity with approaches B and C): a declined or unanswered unknown host key is
+    ``remote_host_key_unconfirmed`` with the fix; a changed key stays ``remote_identity_changed``
+    and was never asked about; a refused login is ``remote_auth_failed``. Nothing is added."""
+
+    log = _failing_ssh(home, monkeypatch, stderr)
+    result = _invoke(
+        "add", "lab", "ssh://owner@lab.example", "--remote-launcher", "/opt/fu/bin/finishup"
+    )
+    assert result.exit_code == 20, result.output
+    assert result.stderr.startswith(f"{reason}: ")
+    if reason == "remote_host_key_unconfirmed":
+        assert "nothing was added" in result.stderr
+        assert "answer yes to OpenSSH's question" in result.stderr
+        assert "fingerprint" in result.stderr
+    assert "lab.example" not in result.stderr and "owner" not in result.stderr
+    assert targets.list_targets() == ()
+    (probe,) = log.read_text(encoding="utf-8").splitlines()
+    assert "StrictHostKeyChecking=ask" in probe and "BatchMode" not in probe
+
+
+def test_an_ssh_add_without_the_owners_terminal_runs_no_ssh(
+    home: Path, monkeypatch: pytest.MonkeyPatch, fake_ssh: Path
+) -> None:
+    """Without the trusted console the add stops at the typed confirmation, before any ``ssh``:
+    the host-key question is only ever asked on the owner's own terminal."""
+
+    from finishup.cli import trusted_console
+
+    def refused(_self: object) -> object:
+        raise trusted_console.TrustedConsoleError("trusted_console_required")
+
+    # The real confirmation, with a console that refuses whatever terminal runs the tests.
+    monkeypatch.setattr(server_cli, "_confirm_on_trusted_console", _REAL_CONFIRMATION)
+    monkeypatch.setattr(trusted_console.TrustedForegroundConsole, "__enter__", refused)
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+    assert result.exit_code == 2, result.output
+    assert result.stderr.startswith("trusted_console_required:")
+    assert not fake_ssh.exists()
+    assert targets.list_targets() == ()

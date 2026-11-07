@@ -5730,6 +5730,22 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   terminal interface.
 - `<troot>/run/m` and `<troot>/run/upstream.sock`: the OpenSSH master's control socket and its
   stream-local forward (`finishup.client.ssh_upstream`; argv fixed by `master_argv`).
+- `server add ssh://…` (`cli.server._probe_ssh_endpoint`) runs after the owner's typed
+  confirmation on the trusted foreground console (without that console the add is refused as
+  `trusted_console_required` before any `ssh` runs) and says beforehand that OpenSSH may ask to
+  confirm a host key and to compare the fingerprint with the server's own. Its one probe is
+  `ssh_upstream.probe_argv`: `ssh -o StrictHostKeyChecking=ask -o ControlMaster=no -o
+  PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T -p <port> <[user@]host>
+  '<launcher> service endpoint --json'` with a 180 s bound and no `BatchMode`, so OpenSSH asks the
+  owner there to confirm a host key `known_hosts` does not hold yet, and the host key is the only
+  question. An exit of 255 whose diagnostics say the key is not known or was not verified (and not
+  "REMOTE HOST IDENTIFICATION HAS CHANGED"; `ssh_upstream.host_key_unconfirmed`) is refused as
+  `remote_host_key_unconfirmed` (exit 20, nothing added): the owner declined OpenSSH's question or
+  did not answer it, and the fix is to add again and answer yes once the fingerprint is checked. A
+  changed key is never asked about and stays `remote_identity_changed`; a refused login is
+  `remote_auth_failed` (`classify_ssh_failure`); any other failure is `remote_unreachable`.
+  Approach A's connector specifics are unchanged: every later connection is the `BatchMode`
+  master with `StrictHostKeyChecking=yes`.
 - `finishup.client.connector_runtime.ConnectorTargetRuntime`: the `TargetRuntime` registered for
   `ssh`, `https` and `local_port`.
 - `service.client`: for a remote root `connect_service(..., serve_workspace: bool = False)` and

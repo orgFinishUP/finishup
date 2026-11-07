@@ -39,6 +39,7 @@ __all__ = [
     "classify_ssh_failure",
     "control_argv",
     "destination",
+    "host_key_unconfirmed",
     "master_argv",
     "probe_argv",
     "remote_argv",
@@ -236,7 +237,10 @@ def probe_argv(
 ) -> tuple[str, ...]:
     """The one interactive probe of ``server add``: OpenSSH itself asks to confirm a new host key.
 
-    No master, no forward; the owner answers OpenSSH's own prompt on the trusted terminal.
+    No master, no forward, no ``BatchMode``; the owner answers OpenSSH's own prompt on the trusted
+    terminal (``StrictHostKeyChecking=ask``). Password and keyboard-interactive login stay off, so
+    the host key is the only question and the add proves the key authentication every later
+    ``BatchMode`` connection needs (ADR-051 decision 7, add parity across approaches).
     """
 
     target = host if user is None else f"{user}@{host}"
@@ -246,6 +250,10 @@ def probe_argv(
         "StrictHostKeyChecking=ask",
         "-o",
         "ControlMaster=no",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
         "-T",
         "-p",
         str(port),
@@ -276,6 +284,19 @@ def remove_owned_socket(path: Path) -> None:
     if _owned_socket(path) is not None:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
+
+
+def host_key_unconfirmed(stderr_tail: bytes) -> bool:
+    """Whether OpenSSH refused a host key it does not know, as opposed to one that changed.
+
+    Strict checking says "No … host key is known for …"; a question the owner declined or did not
+    answer says only "Host key verification failed". A changed key says "REMOTE HOST
+    IDENTIFICATION HAS CHANGED", is never asked about, and stays ``remote_identity_changed``.
+    """
+
+    if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr_tail:
+        return False
+    return b"host key is known" in stderr_tail or b"Host key verification failed" in stderr_tail
 
 
 def classify_ssh_failure(stderr_tail: bytes) -> str:

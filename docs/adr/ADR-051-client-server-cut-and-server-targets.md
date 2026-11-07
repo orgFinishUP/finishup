@@ -791,7 +791,24 @@ answers bounded `workspace_call`s on a connection that declared it.
 - The credential never appears in argv, the environment, `target.json`, a host registration, a
   log, hook output, an MCP frame or JSON output.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks
-  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`.
+  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, except
+  for the one probe of `server add` below.
+- *SSH add*, alike for every approach (the same maintainer decision of 2026-11-07). After the
+  owner's typed confirmation on the trusted console, `server add ssh://…` asks the server where
+  its service listens over one `ssh` that lets OpenSSH ask, on that same terminal, to confirm a
+  host key this computer does not know yet (`StrictHostKeyChecking=ask`, no master, no
+  `BatchMode`), so a first add never fails until the owner has run `ssh` by hand. Password and
+  keyboard-interactive login stay off for that probe, so the host key is the only question and
+  the add proves the key authentication every later connection needs. The owner's answer is
+  OpenSSH's own `known_hosts` entry, the pin every later connection checks with
+  `StrictHostKeyChecking=yes`; a key that changed is never asked about
+  (`remote_identity_changed`). The command says beforehand that OpenSSH may ask and to compare
+  the fingerprint with the server's own. A key the owner declines, or does not confirm, is
+  refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the question
+  to answer. Without that console the add never gets this far: the typed confirmation before it
+  is refused as `trusted_console_required`, before any `ssh` runs. Approach A: the probe runs the
+  server's own `finishup service endpoint --json` and records the endpoint and an absolute
+  launcher from it; every later connection is the connector's `BatchMode` master.
 - Which client process reads the credential is part of each approach's topology. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.
@@ -1203,7 +1220,9 @@ through the same relay; human-control and secret channels never leave the server
   retries; the connector's own background agents never start it, so a service the owner stopped
   stays stopped until a client connects. `server add
   ssh://…` records the endpoint and an absolute launcher from one interactive `ssh … finishup
-  service endpoint --json`, in which OpenSSH itself asks the owner to confirm a new host key. The
+  service endpoint --json`, in which OpenSSH itself asks the owner to confirm a new host key
+  (decision 7: password and keyboard-interactive login off; a declined or unanswered key is
+  `remote_host_key_unconfirmed`, a changed one `remote_identity_changed`). The
   socket-path bound counts OpenSSH's 17-byte temporary suffix on the master path.
 - **HTTPS and `local_port`.** Each local connection is one gateway session of the HTTPS binding
   v1 (see `INTERFACES.md`). A call is never posted twice: after an ambiguous failure the connector
