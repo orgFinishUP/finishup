@@ -9,7 +9,8 @@ trusted console; refusals name a target by its id or not at all, with a closed r
   after the owner types the target name on the trusted console to accept the versioned
   disclosure. ``remove`` is the reverse.
 * ``use NAME|local`` writes or removes the owner-only selection; remote targets need the same
-  typed confirmation. ``use local`` is the reverse.
+  typed confirmation. ``use local`` is the reverse. A switch away from a remote target also stops
+  what this client runs for it, as ``disconnect`` does (``TargetSwitch``).
 * ``login``/``logout`` store or delete an HTTPS target's API key (platform store or owner-only
   file); ``connect``/``disconnect`` make the target usable or stop what this client runs for it;
   ``connect --agent`` then stays in the foreground as this directory's workspace agent.
@@ -62,6 +63,7 @@ from finishup.client.targets import (
     normalize_https_url,
     parse_ssh_url,
     read_selected_target_id,
+    read_target,
     reauthorized,
     registry_lock,
     require_current_authorization,
@@ -85,6 +87,7 @@ __all__ = [
     "ROOT_UNUSABLE_MESSAGE",
     "ServerCommandRefused",
     "TargetRow",
+    "TargetSwitch",
     "build_status_document",
     "refusal_message",
     "render_target_rows",
@@ -1065,13 +1068,95 @@ def server_list() -> None:
     _emit(render_target_rows(rows, source))
 
 
-def use_target(
-    name: str, *, authorize: Callable[[str, str], None] | None = None
-) -> ServerTarget | None:
-    """Select ``name`` (``None`` back means this computer's everyday server).
+@dataclass(frozen=True, slots=True)
+class TargetSwitch:
+    """What ``use_target`` changed: the server now selected, and the remote one it left.
+
+    ``record`` is the target now selected (``None``: this computer's everyday server). ``left``
+    is the remote target the selection named before, when the switch moved away from it. What
+    this client runs for that target was stopped as ``server disconnect`` stops it (its runtime,
+    never a process pattern): in direct dial an SSH target's shared OpenSSH master, which ends
+    every connection any process of this client made through it; an HTTPS or localhost-port
+    target has nothing on this computer to stop. ``left_open`` says the stop did not finish
+    (ADR-051 decision 8: the way out of a remote selection under zero-network stops its traffic).
+    """
+
+    record: ServerTarget | None
+    left: ServerTarget | None = None
+    left_open: bool = False
+
+    def left_lines(self) -> tuple[str, ...]:
+        """What became of the left server's connection, by generated id and closed kind only."""
+
+        if self.left is None:
+            return ()
+        server = f"{self.left.target_id} ({self.left.kind})"
+        if self.left_open:
+            return (
+                f"The connection to the server {server} did not close in time, so it may still "
+                "answer that server's requests for your files. Run 'finishup server disconnect' "
+                "with that server's name ('finishup server list' shows it).",
+            )
+        closed = (
+            f"Closed this computer's connection to the server {server}: its shared SSH "
+            "connection, and every FinishUP connection made through it, ended."
+            if self.left.kind == "ssh"
+            else f"This computer keeps no connection of its own to the server {server}: each "
+            "FinishUP process connected to it by itself, and new ones no longer do."
+        )
+        return (
+            closed,
+            "Open agent sessions and a running 'finishup server connect --agent' keep that "
+            "server and connect to it again until you restart or stop them.",
+        )
+
+
+def _selected_remote() -> ServerTarget | None:
+    """The remote target the selection file names now; ``None`` for none, local or unreadable.
+
+    Read under the registry lock by the switch that replaces it. A selection or record that
+    cannot be read names no target this could stop, and never keeps the switch from happening.
+    """
+
+    try:
+        target_id = read_selected_target_id()
+        if target_id is None:
+            return None
+        record = read_target(target_root(target_id))
+    except (TargetError, PathSafetyError):
+        return None
+    return record if record is not None and record.is_remote else None
+
+
+def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> TargetSwitch:
+    """Stop what this client runs for ``previous`` when the selection moved away from it.
+
+    After the selection changed, so a new hook or command no longer reaches it. Only that
+    target's runtime stops it (``runtime_for(kind).stop(root)``), exactly as ``server
+    disconnect`` does: in direct dial an SSH target's master exits by its control path (``ssh -O
+    exit``); nothing is found or signalled by a pid or a process pattern.
+    """
+
+    import subprocess
+
+    if previous is None or (record is not None and record.target_id == previous.target_id):
+        return TargetSwitch(record)
+    try:
+        runtime_for(previous.kind).stop(target_root(previous.target_id))
+    except TargetRuntimeError as error:
+        # No runtime for that kind: this client runs nothing for it.
+        return TargetSwitch(record, previous, left_open=error.phase != "runtime_unavailable")
+    except (TargetError, PathSafetyError, OSError, subprocess.SubprocessError):
+        return TargetSwitch(record, previous, left_open=True)
+    return TargetSwitch(record, previous)
+
+
+def use_target(name: str, *, authorize: Callable[[str, str], None] | None = None) -> TargetSwitch:
+    """Select ``name`` (``record`` ``None`` back means this computer's everyday server).
 
     A remote target needs the typed confirmation on the trusted console every time
-    (``authorize`` defaults to it), which also refreshes its recorded authorization.
+    (``authorize`` defaults to it), which also refreshes its recorded authorization. A switch
+    away from a remote target stops what this client runs for it (``TargetSwitch.left``).
     """
 
     if name == "local":
@@ -1080,10 +1165,11 @@ def use_target(
         _require_no_explicit_source()
         try:
             with registry_lock():
+                previous = _selected_remote()
                 clear_selection()
         except TargetError as error:
             raise ServerCommandRefused(error.reason) from None
-        return None
+        return _leave(None, previous)
     _require_selection_in_force()
     record = _target_or_fail(name)
     if record.is_remote:
@@ -1091,12 +1177,13 @@ def use_target(
         record = reauthorized(record)
     try:
         with registry_lock():
+            previous = _selected_remote()
             if record.is_remote:
                 write_target(target_root(record.target_id), record)
             write_selection(record)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
-    return record
+    return _leave(record, previous)
 
 
 @server_app.command("use")
@@ -1106,11 +1193,14 @@ def server_use(
 ) -> None:
     """Select the server new client processes use ('local' returns to this computer's)."""
 
-    record = use_target(name)
+    switch = use_target(name)
+    record = switch.record
     if record is None:
         typer.echo("Using this computer's everyday FinishUP server.")
     else:
         typer.echo(f"Using server target {record.name} ({record.target_id}, {record.kind}).")
+    for line in switch.left_lines():
+        typer.echo(line, err=switch.left_open)
     _warn_open_sessions()
 
 

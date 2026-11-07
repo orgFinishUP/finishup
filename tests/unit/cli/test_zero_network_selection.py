@@ -786,12 +786,23 @@ def test_choosing_1_switches_to_the_everyday_server_then_the_change_goes_ahead(
     console: type[_Console],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from finishup.client.direct_runtime import SshTargetRuntime
+
     record = _stale_process_with_a_remote_selected(monkeypatch)
     console.answer = b"1"
+    stops: list[Path | None] = []
+
+    def stop(_self: object, target: Path | None) -> None:
+        stops.append(target)
+
+    monkeypatch.setattr(SshTargetRuntime, "stop", stop)
 
     assert _guard() == "switched"
 
     assert targets.read_selected_target_id() is None
+    # Switching stops the traffic it names: what this client ran for that server (direct dial:
+    # the target's shared SSH master, and every connection made through it) stopped.
+    assert stops == [targets.target_root(record.target_id)]
     shown = _shown(console)
     assert f"the selected FinishUP server {record.target_id} (ssh)" in shown
     assert "make no network connections" in shown
@@ -802,6 +813,7 @@ def test_choosing_1_switches_to_the_everyday_server_then_the_change_goes_ahead(
     assert _NAME not in shown.replace(record.target_id, "")
     out = capsys.readouterr().out
     assert "Using this computer's everyday FinishUP server." in out
+    assert f"Closed this computer's connection to the server {record.target_id} (ssh)" in out
     assert "Restart open agent sessions" in out
 
 
@@ -821,8 +833,14 @@ def test_choosing_2_cancels_the_change_and_keeps_the_server(
     console: type[_Console],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from finishup.client.direct_runtime import SshTargetRuntime
+
+    def never(_self: object, _target: Path | None) -> None:
+        raise AssertionError("keeping the server stops nothing")
+
     record = _stale_process_with_a_remote_selected(monkeypatch)
     console.answer = b"2"
+    monkeypatch.setattr(SshTargetRuntime, "stop", never)
 
     with pytest.raises(zero_network.ZeroNetworkChangeStopped) as stopped:
         _guard()
@@ -1656,6 +1674,10 @@ def test_a_process_on_this_computers_server_with_a_remote_selected_meanwhile(
         )
         assert targets.read_selected_target_id() is None
         assert "Using this computer's everyday FinishUP server." in result.stdout
+        # The real stop of what this client ran for it (no SSH master was running here).
+        assert (
+            f"Closed this computer's connection to the server {record.target_id} (ssh)"
+        ) in result.stdout
         # The change was made on this computer: its policy is read again and remembered.
         assert policy_reads == [_MACHINE_SCOPE]
         assert cast(ReportedPolicy, read_marker()).zero_network is True

@@ -4909,7 +4909,11 @@ switch moved away from it; `left_open`; `left_lines()`) stops `left` through
 disconnect` does. `server use`, the choice `1` and the terminal interface's `use_server`
 (`tui.models.ServerSwitch`: `indicator`, `left_lines`, `left_open`) print its lines, and a stop
 that did not finish goes to stderr (UNPROVEN in the terminal interface) with `finishup server
-disconnect` while the switch stands.
+disconnect` while the switch stands. In direct dial `left_lines()` says, for an SSH target, that
+its shared SSH connection and every FinishUP connection made through it ended (the master exited
+by `ssh -O exit`), for an HTTPS or localhost-port target that this computer keeps no connection of
+its own to it, and in both cases that open agent sessions and a running `finishup server connect
+--agent` keep that server and connect to it again until restarted or stopped.
 
 *The connection check.* `targets.require_current_authorization(record)` refuses a remote record
 with `TargetError("zero_network_remote_selected")` while `last_reported_zero_network()` answers,

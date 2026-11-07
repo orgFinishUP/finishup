@@ -487,15 +487,20 @@ process to the default service.
   hooks and SessionStart context and the MCP tool error name `zero_network_remote_selected` with its
   continuation (`zero_network_local_server_required`: ask the owner to run `finishup server use
   local`, then restart the session). The check reads the owner-only marker of this computer's last
-  reported policy, never the service, so it costs no round trip within the hook budgets. After
-  switching, restart open Claude Code sessions: the running MCP bridge keeps the remote target until
-  then (and is refused), while hooks follow at once. `setup status --next`, `server status` and the
-  terminal interface show the state, live or "last reported". While a remote target is selected,
-  fresh server-host privacy commands are refused (`requires_server_host`) and `privacy
-  tighten|propose` reach the target, so the choice comes only from a FinishUP process already on
-  this computer's server (an open terminal interface or menu, or a privacy step or setup under way).
-  Host decision: supported, same code path; no MCP tool or hook carries or answers the choice,
-  because agents cannot change the policy or the selection.
+  reported policy, never the service, so it costs no round trip within the hook budgets. Switching
+  (the choice, `finishup server use local` or the terminal interface's "Use local") also stops this
+  computer's shared SSH connection to an SSH target as `finishup server disconnect` does, ending
+  every FinishUP connection made through it (direct dial keeps no connection of its own to an HTTPS
+  or localhost-port target). After switching, restart open Claude Code sessions and stop a running
+  `finishup server connect NAME --agent`: until then they keep the remote target and connect to it
+  again (under zero-network they are refused and close what they hold within about a second), while
+  hooks follow at once. `setup status --next`, `server status` and the terminal interface show the
+  state, live or "last reported". While a remote target is selected, fresh server-host privacy
+  commands are refused (`requires_server_host`) and `privacy tighten|propose` reach the target, so
+  the choice comes only from a FinishUP process already on this computer's server (an open terminal
+  interface or menu, or a privacy step or setup under way). Host decision: supported, same code
+  path; no MCP tool or hook carries or answers the choice, because agents cannot change the policy
+  or the selection.
 - **Whose privacy policy a command changes** (ADR-051 decision 8). With a remote target selected,
   `privacy tighten|propose` and the privacy step of `setup run` (also from the menu or the terminal
   interface's first run) change the target's policy and name it, by id and kind, before anything

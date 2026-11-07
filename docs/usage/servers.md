@@ -113,7 +113,17 @@ Without your terminal to ask in (a script, a command asked for JSON, or a change
 relays), FinishUP refuses the change before making it and says why, with
 `zero_network_remote_selected`: run `finishup server use local`, then make the change again.
 
-After switching, restart open agent sessions: they keep the server they started with until then.
+Switching, whichever way you do it, also closes this computer's SSH connection to that server, as
+`finishup server disconnect` does, and with it every FinishUP connection made through it. Work the
+server had already started for you, such as a review still running, can then no longer read your
+files through those connections. Nothing your agents' hooks recorded is sent on the way out. A
+server on the web or on a port has no connection of its own on this computer to close, and
+FinishUP says so. If the connection does not close in time, FinishUP still switches and tells you
+to run `finishup server disconnect` with that server's name.
+
+After switching, restart open agent sessions, and stop a running `finishup server connect NAME
+--agent`: until then they keep the server they started with and connect to it again (under the
+zero-network setting they connect to nothing and close what they hold within about a second).
 Choosing the server again needs the setting turned off first.
 
 Anything still pointed at a server elsewhere while this computer forbids all network use (an
@@ -153,6 +163,8 @@ all network use" instead. `finishup server status --json` gives the same notice 
 `zero_network_selection` member: `policy_read` is `live` or `last_reported`, with
 `last_reported_at` for the latter (null when there is nothing to say). If the saved server choice
 cannot be read, FinishUP says that instead of guessing, and `finishup server use local` clears it.
+It cannot tell then which server's connection to close: run `finishup server disconnect NAME` for
+a server on another machine you were using.
 
 If that file cannot be read (it was damaged, or its permissions changed), FinishUP treats it as no
 record: nothing claims the setting from it, and the next report replaces it. Deleting FinishUP's

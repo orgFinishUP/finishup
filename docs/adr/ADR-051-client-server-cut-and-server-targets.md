@@ -852,6 +852,27 @@ answers bounded `workspace_call`s on a connection that declared it.
   `target_root_unsafe`, `target_record_invalid`) and `finishup server use local` as the way back,
   never as "no server".
 
+  **Switching stops the traffic it names.** The choice's `1`, `finishup server use local` and the
+  terminal interface's `/server` "Use local" all run `cli.server.use_target`, which clears the
+  selection and then stops what this client runs for the remote target it left, through that
+  target's runtime exactly as `server disconnect` does, never by pattern (`use` of another target
+  does the same for the one it leaves). In direct dial no FinishUP process of its own runs for a
+  target; for an SSH target the switch asks the target's shared OpenSSH master to exit (`ssh -O
+  exit` on its control path), which ends every connection any process of this client made through
+  it, the MCP bridge's workspace agent and a running `finishup server connect NAME --agent`
+  included, so a server job already under way (the AI-powered review loop, observation
+  verification) can no longer read files here through them. An HTTPS or localhost-port target
+  has nothing on this computer to stop, and the switch says so. No captured rows are delivered on
+  the way out. Every surface that switches says so by generated id and kind. When the stop does
+  not finish within its wait the selection is still cleared, and the command says so on stderr
+  with `finishup server disconnect` as the way to finish it. A selection that cannot be read names
+  no target, so switching away from it stops nothing (`finishup server disconnect NAME` stops a
+  target's connection). **Honest limit (approach B):** open agent sessions and a running
+  `finishup server connect NAME --agent` keep the target they started with and connect to it
+  again (over SSH, through a new master) until they are restarted or stopped, and every surface
+  that switches says so; under zero-network they connect nothing and close what they hold within
+  about a second (the last line of defence above).
+
   **Honest limits:** everything acts on the marker, which a change made here writes when the
   change is read back (if that read fails, at this computer's next report), so connections already
   open to a remote target are closed within about a second of it (a request under way in that
@@ -1046,8 +1067,8 @@ HTTPS and LOCALHOST PORT
   found at a fixed list of install paths (never a bare `finishup` on the remote `PATH`), records
   the endpoint and refuses another release. A stopped remote service is started once through the
   recorded launcher (`<launcher> service start`, pinned to `--remote-root`) inside the caller's
-  on-demand budget. `server connect` starts the master (`ssh -fN`); `server disconnect` exits it
-  by its control path (`ssh -O exit`).
+  on-demand budget. `server connect` starts the master (`ssh -fN`); `server disconnect`, and a
+  `server use` that leaves the target (decision 8), exit it by its control path (`ssh -O exit`).
 - **HTTPS and localhost ports.** `finishup.client.https_binding` speaks HTTPS binding v1 to the
   real gateway, `finishup service gateway`, which this pull request carries from approach A with
   the same code on both branches (the gateway, its key store and `key create|list|revoke`, the
@@ -1181,7 +1202,7 @@ HTTPS and LOCALHOST PORT
 | Way in | Way out | Way to see it |
 |---|---|---|
 | `server add NAME …` | `server remove NAME [--select-local]` (disconnects, deletes the credential, disposes of the root; refuses the selected target unless `--select-local`) | `server list` |
-| `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue) | `server status` (names the deciding source) |
+| `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue; a remote target it leaves is stopped as `server disconnect` stops it) | `server status` (names the deciding source) |
 | `server login NAME` | `server logout NAME` | `server status` (credential present or absent, never the value) |
 | `server add NAME …` for a remote kind records the outside-read mode the owner answered (or `--outside-reads`; an official endpoint is `local` unrecorded) | `server folders mode NAME local` or `listed` changes it; `server remove NAME` removes it with the target | `server add` output, `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server folders mode NAME local` (trusted console and typed name whenever it records `local`, an official endpoint's included; without the console an official endpoint's `local` is left unrecorded) | `server folders mode NAME listed` (applies from the workspace agent's next read; a read already in progress may finish) | `server folders list NAME`, `server status [--json]`, `/server` status |

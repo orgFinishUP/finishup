@@ -1102,6 +1102,105 @@ def test_login_and_logout_with_an_owner_only_key_file(
     assert again.exit_code == 0 and "No API key was stored" in again.stdout
 
 
+def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    quiet_probe: None,
+    offline_remote: list[tuple[str, Path | None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-051 decision 8: the way out of a remote selection stops its traffic. ``use local``,
+    or ``use`` of another target, stops the left target's runtime as ``server disconnect`` does
+    (direct dial: an SSH target's shared master; an HTTPS target holds nothing here); choosing
+    the same target again, or leaving a server on this computer, stops nothing.
+    """
+
+    local_stops: list[Path | None] = []
+
+    def stop_local(_self: object, target: Path | None) -> None:
+        local_stops.append(target)
+
+    monkeypatch.setattr(LocalTargetRuntime, "stop", stop_local)
+    for arguments in (
+        ("add", "lab", "ssh://owner@lab.example"),
+        ("add", "fu", "https://fu.example"),
+        ("add", "work", "--local"),
+    ):
+        assert _invoke(*arguments).exit_code == 0
+    lab, fu = targets.find_target("lab"), targets.find_target("fu")
+    lab_root, fu_root = targets.target_root(lab.target_id), targets.target_root(fu.target_id)
+
+    def stops() -> list[Path | None]:
+        return [root for action, root in offline_remote if action == "stop"]
+
+    assert _invoke("use", "lab").exit_code == 0
+    assert _invoke("use", "lab").exit_code == 0
+    assert stops() == []
+
+    back = _invoke("use", "local")
+    assert back.exit_code == 0, back.output
+    assert stops() == [lab_root]
+    assert targets.read_selected_target_id() is None
+    assert (
+        f"Closed this computer's connection to the server {lab.target_id} (ssh): its shared SSH "
+        "connection, and every FinishUP connection made through it, ended."
+    ) in back.stdout
+    # Direct dial's honest limit: the processes that resolved that server before the switch.
+    assert (
+        "Open agent sessions and a running 'finishup server connect --agent' keep that server "
+        "and connect to it again until you restart or stop them."
+    ) in back.stdout
+    assert "Restart open agent sessions" in back.stdout
+    assert back.stderr == ""
+    assert "lab.example" not in back.output and "owner" not in back.output
+
+    assert _invoke("use", "fu").exit_code == 0
+    left_https = _invoke("use", "work")
+    assert left_https.exit_code == 0
+    assert stops() == [lab_root, fu_root]
+    assert (
+        f"This computer keeps no connection of its own to the server {fu.target_id} (https)"
+    ) in left_https.stdout
+    plain = _invoke("use", "local")
+    assert plain.exit_code == 0
+    assert stops() == [lab_root, fu_root]
+    assert local_stops == []
+    assert "connection to the server" not in plain.output
+
+
+def test_a_switch_whose_left_connection_did_not_stop_still_switches_and_says_how_to_finish(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The way back always switches; a connection that did not stop in time is said on stderr
+    with the command that stops it, by the target's generated id, never its name or address."""
+
+    from finishup.client import target_runtime
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    class _Stuck:
+        def stop(self, _target: Path | None) -> None:
+            raise TargetRuntimeError("service_unavailable", phase="remote_unreachable")
+
+    assert _invoke("add", "lab", "ssh://owner@lab.example").exit_code == 0
+    assert _invoke("use", "lab").exit_code == 0
+    (record,) = targets.list_targets()
+    loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+    loaders["ssh"] = lambda: cast(TargetRuntime, _Stuck())
+    monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
+
+    back = _invoke("use", "local")
+
+    assert back.exit_code == 0, back.output
+    assert targets.read_selected_target_id() is None
+    assert "Using this computer's everyday FinishUP server." in back.stdout
+    assert back.stderr == (
+        f"The connection to the server {record.target_id} (ssh) did not close in time, so it may "
+        "still answer that server's requests for your files. Run 'finishup server disconnect' "
+        "with that server's name ('finishup server list' shows it).\n"
+    )
+    assert "lab.example" not in back.output
+
+
 def test_login_prefers_the_platform_store(
     home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:

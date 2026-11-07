@@ -24,9 +24,12 @@ the web (``ssh``, ``https``, ``local_port``).
   ``zero_network_selection_unreadable``) and the one remedy, ``finishup server use local``, then
   the change again. The choice is read on the calling thread, never in a worker that Ctrl-C
   cannot reach.
-* **Switching** (the choice ``1``, or ``finishup server use local``) changes the selection that
-  new hooks and agent sessions use (``cli.server.use_target``). Open agent sessions, until
-  restarted, still reach the server it left.
+* **Switching** (the choice ``1``, or ``finishup server use local``) also stops what this client
+  runs for the server it leaves, as ``finishup server disconnect`` does
+  (``cli.server.use_target``): in direct dial, an SSH target's shared master, which ends every
+  connection made through it. Open agent sessions and a running ``finishup server connect
+  --agent``, until restarted or stopped, still reach it (and connect nothing once this computer
+  is zero-network).
 * **The last line of defence** is the connection check (``targets.require_current_authorization``):
   a process whose selection predates the change is refused before anything is sent, with the same
   token, on every surface.
@@ -657,7 +660,7 @@ def _switch_to_local() -> bool:
     from finishup.client.targets import TargetError
 
     try:
-        use_target("local")
+        switch = use_target("local")
     except ServerCommandRefused as error:
         typer.echo(f"{error.reason}: {refusal_message(error)}", err=True)
         return False
@@ -665,6 +668,10 @@ def _switch_to_local() -> bool:
         typer.echo(f"{error.reason}: the server selection was not changed", err=True)
         return False
     typer.echo("Using this computer's everyday FinishUP server.")
+    # The switch also stopped what this client ran for the server (direct dial: an SSH target's
+    # shared master); say so, or how to finish it.
+    for line in switch.left_lines():
+        typer.echo(line, err=switch.left_open)
     typer.echo(OPEN_SESSIONS_LINE)
     return True
 
