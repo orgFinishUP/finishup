@@ -210,6 +210,13 @@ def unavailable_context(outcome: StatusOutcome) -> str:
         return remote_refusal_context(outcome.remote_reason).rstrip()
     if outcome.remote_reason is None:
         return _UNAVAILABLE_CONTEXT
+    if outcome.remote_reason == "remote_auth_failed":
+        # The server was reached: it answered and refused the key.
+        return (
+            "The selected FinishUP server answered and refused this client's key for this mapped "
+            f"session ({outcome.remote_reason}); no live receipt can be promised."
+            + render_hook_recovery_suffix(outcome.remote_reason)
+        )
     return _REMOTE_UNAVAILABLE_CONTEXT + render_hook_recovery_suffix(outcome.remote_reason)
 
 

@@ -507,3 +507,69 @@ def test_a_remote_roots_own_remedies_name_the_zero_network_fix() -> None:
     assert remove_marker()
     remedy = remote_remedy(closed)
     assert remedy is not None and remedy.reason == "remote_unreachable"
+
+
+@pytest.mark.usefixtures("remote_root")
+def test_a_refused_key_reads_as_an_answer_on_every_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RE-6: a server that answered and refused the key is never "could not be reached".
+
+    The CLI headline and its directive, the menu, MCP, the SessionStart hook (attach and mapped
+    status) and the terminal interface each say it answered and refused this client's key.
+    """
+
+    import asyncio
+
+    from finishup.cli import observe_hooks
+
+    phase = "remote_auth_failed"
+    token = "remote_credential_repair"
+    directive = directive_for(token)
+    assert directive is not None
+    error = _phase_error(phase)
+    answered = "the selected FinishUP server answered and refused this client's key"
+
+    cli_text, _ = _cli(error)
+    assert cli_text.splitlines()[0] == f"service_unavailable: {phase}: {answered}"
+    assert directive.directive in cli_text
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr("finishup.cli.app.build_service_client", refuse)
+    summary = asyncio.run(menu_module._service_summary())  # pyright: ignore[reportPrivateUsage]
+    assert summary == f"answered, key refused — {phase}: {answered}"
+
+    result = mcp_server._control_error_result(error, new_id(IdKind.REQUEST), "start")  # pyright: ignore[reportPrivateUsage]
+    mcp_text = cast(dict[str, Any], result.structuredContent)["error"]["message"]
+    assert mcp_text.startswith(
+        "The selected FinishUP server answered and refused this client's key. "
+    )
+
+    attached = _auto_attach(error)
+    attach = observe_hooks._attachment_recovery_context(  # pyright: ignore[reportPrivateUsage]
+        attached.reason, remote_phase=attached.remote_phase
+    )
+    assert attach.startswith(f"FinishUP attachment pending: {phase}. ")
+    assert "answered and refused this client's key" in attach
+    assert attach.endswith(f" Continuation: {token}. ")
+    mapped = hooks_module.unavailable_context(
+        hooks_module.StatusOutcome(
+            "unavailable",
+            remote_reason=hooks_module._remote_reason(error),  # pyright: ignore[reportPrivateUsage]
+        )
+    )
+    assert "answered and refused this client's key" in mapped
+    assert mapped.endswith(f" Continuation: {token}.")
+
+    failure = tui_runtime._connect_failure(error)  # pyright: ignore[reportPrivateUsage]
+    assert (failure.reason, failure.message) == (phase, answered)
+
+    for text in (cli_text, summary, mcp_text, attach, mapped, failure.message):
+        lowered = text.lower()
+        assert "could not be reached" not in lowered, text
+        assert "not reachable" not in lowered, text
+        assert "did not answer" not in lowered, text
+        assert "could not serve" not in lowered, text
+        _assert_remote_words(text)

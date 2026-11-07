@@ -277,8 +277,8 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _UNAVAILABLE,
     ),
     "remote_auth_failed": (
-        "the server did not accept this computer: for SSH load your key (ssh-add) or check your "
-        "SSH configuration; for HTTPS run 'finishup server login'",
+        "the server answered and refused this client's key: for SSH load your key (ssh-add) or "
+        "check your SSH configuration; for HTTPS run 'finishup server login'",
         _UNAVAILABLE,
     ),
     "remote_identity_changed": (
@@ -1632,6 +1632,19 @@ def target_in_use(name: str | None) -> bool:
     return active is not None and active.name == name
 
 
+def _key_refused_line(kind: str, name: str) -> str:
+    """What a server that answered and refused this client's key means, and the fix by kind."""
+
+    if kind == "ssh":
+        fix = (
+            "load the SSH key it accepts (ssh-add) or add it to your OpenSSH configuration, then "
+            f"run 'finishup server test {name}'"
+        )
+    else:
+        fix = f"run 'finishup server login {name}' with an API key it accepts"
+    return f"The server answered and refused this client's key; {fix}."
+
+
 def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
     """The owner display of a status document, a remote target's outside reads included.
 
@@ -1662,6 +1675,10 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
     if not_sent is not None:
         lines.append(f"State: not probed, nothing was sent ({probe['reason']})")
         lines.append(not_sent.format(at=probe["last_reported_at"]))
+    elif probe["reason"] == "remote_auth_failed":
+        # It answered: a refused key is not a server that could not be reached.
+        lines.append(f"State: answered, key refused{reason}")
+        lines.append(_key_refused_line(str(target["kind"]), str(target["name"] or "NAME")))
     else:
         lines.append(f"State: {state}{reason}")
     lines.append(
@@ -1785,7 +1802,13 @@ def server_test(
         # target did not answer.
         raise _probe_refusal(record, str(probe["reason"]))
     if probe["outcome"] not in {"ready", "reachable"}:
-        typer.echo("The target did not answer a status call.", err=True)
+        typer.echo(
+            # A server that refused the key answered; the lines above say how to fix it.
+            "The target answered and refused this client's key."
+            if probe["reason"] == "remote_auth_failed"
+            else "The target did not answer a status call.",
+            err=True,
+        )
         raise typer.Exit(_UNAVAILABLE)
     p95 = probe["round_trip_p95_ms"]
     if isinstance(p95, int) and p95 > _STARTUP_GATE_RISK_MS:

@@ -27,10 +27,12 @@ if TYPE_CHECKING:
     from finishup.protocol.recovery import RecoveryDirective
 
 __all__ = [
+    "AUTH_REFUSED_SUMMARY",
     "REMOTE_LOCKED_SUMMARY",
     "REMOTE_UNAVAILABLE_SUMMARY",
     "ZERO_NETWORK_SUMMARY",
     "RemoteRemedy",
+    "remote_availability",
     "remote_connection_phase",
     "remote_remedy",
     "remote_root_directive",
@@ -56,14 +58,29 @@ ZERO_NETWORK_SUMMARY: Final = (
 )
 
 
+# The server answered and refused this client's credentials: it was reached, so no surface says
+# it could not be reached, did not answer or could not serve the request.
+AUTH_REFUSED_SUMMARY: Final = "the selected FinishUP server answered and refused this client's key"
+
+
 def remote_summary(phase: str | None) -> str:
     """The fixed summary a surface shows for a remote phase (the CLI, the terminal, the hooks)."""
 
-    return (
-        ZERO_NETWORK_SUMMARY
-        if phase == "zero_network_remote_selected"
-        else (REMOTE_UNAVAILABLE_SUMMARY)
-    )
+    if phase == "zero_network_remote_selected":
+        return ZERO_NETWORK_SUMMARY
+    if phase == "remote_auth_failed":
+        return AUTH_REFUSED_SUMMARY
+    return REMOTE_UNAVAILABLE_SUMMARY
+
+
+def remote_availability(phase: str | None) -> str:
+    """The menu's short state of the selected server for a remote phase.
+
+    A server that answered and refused the key was reached; every other phase is not reachable
+    from here now (``zero_network_remote_selected``: this computer sent nothing).
+    """
+
+    return "answered, key refused" if phase == "remote_auth_failed" else "not reachable"
 
 
 @dataclass(frozen=True, slots=True)

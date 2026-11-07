@@ -1920,11 +1920,13 @@ def _vault_initialization_required_message(include_authorize: bool) -> str:
     )
 
 
-_REMOTE_UNAVAILABLE_MESSAGE: Final = (
-    "The selected FinishUP server on another machine could not serve this request, so nothing "
-    "was recorded. Follow the continuation for this phase, then retry this operation with the "
-    "same request_id. Never fall back to another server or a local service, and never run "
-    "local service lifecycle commands for this."
+# After the phase's own summary (``client.remote_remedy.remote_summary``): a server that could
+# not serve the request, one that answered and refused this client's key, or this computer that
+# sent nothing while it is zero-network.
+_REMOTE_UNAVAILABLE_FOLLOW: Final = (
+    "Follow the continuation for this phase, then retry this operation with the same "
+    "request_id. Never fall back to another server or a local service, and never run local "
+    "service lifecycle commands for this."
 )
 _REMOTE_LOCKED_MESSAGE: Final = (
     "The selected FinishUP server's vault is locked, so nothing was recorded. Its owner unlocks "
@@ -1967,7 +1969,7 @@ def _remote_control_error_result(
         request_id,
         operation,
         code=PublicErrorCode.SERVICE_UNAVAILABLE,
-        message=_REMOTE_UNAVAILABLE_MESSAGE,
+        message=f"{remedy.summary[0].upper()}{remedy.summary[1:]}. {_REMOTE_UNAVAILABLE_FOLLOW}",
         retryable=error.retryable,
         host_profile=host_profile,
         safe_details={"reason_code": remedy.reason},

@@ -642,10 +642,17 @@ def _attachment_recovery_context(reason: str, *, remote_phase: str | None = None
         # advice applies; the closed phase and its continuation say what to do instead.
         from finishup.cli.render import render_hook_recovery_suffix
 
+        what = (
+            # The server was reached: it answered and refused the key.
+            "answered and refused this client's key"
+            if remote_phase == "remote_auth_failed"
+            else "could not serve the attachment"
+        )
         return (
-            f"FinishUP attachment pending: {remote_phase}. The selected FinishUP server could not "
-            "serve the attachment, so no task is mapped; never fall back to another server or a "
-            "local service." + render_hook_recovery_suffix(remote_phase) + " "
+            f"FinishUP attachment pending: {remote_phase}. The selected FinishUP server {what}, so "
+            "no task is mapped; never fall back to another server or a local service."
+            + render_hook_recovery_suffix(remote_phase)
+            + " "
         )
     if reason == "service_incompatible":
         return (
