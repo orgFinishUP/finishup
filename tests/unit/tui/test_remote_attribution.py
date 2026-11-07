@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 from tests.unit.protocol.test_models_and_schemas import _receipt_result_wire
@@ -19,6 +20,7 @@ from tests.unit.tui.test_workflow_contract import _SESSION, _Client
 
 from finishup.cli.render import render_human_status
 from finishup.domain.receipts import (
+    CLIENT_ATTESTED_OBSERVATION_LINE,
     CLIENT_ATTESTED_WORKSPACE_LINE,
     WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     workspace_provenance_unknown_block,
@@ -30,7 +32,7 @@ from finishup.domain.workspace_provenance import (
     workspace_provenance_unknown_lines,
     workspace_provenance_unknown_wire,
 )
-from finishup.protocol.canonical import canonical_encode
+from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.models import (
     ReceiptRequestModel,
     ReceiptResultModel,
@@ -57,6 +59,7 @@ class _BoundClient(_Client):
         self.transport = "connector"
         self.human_text: str | None = None
         self.provenance_unknown: WorkspaceProvenanceReason | None = None
+        self.hook_observed = False
 
     async def receipt(self, request: ReceiptRequestModel) -> object:
         self.requests.append(request)
@@ -69,6 +72,10 @@ class _BoundClient(_Client):
             wire["workspace_provenance"] = workspace_provenance_unknown_wire(
                 self.provenance_unknown
             )
+        if self.hook_observed:
+            coverage = cast(dict[str, JsonValue], wire["coverage"])
+            channels = cast(list[JsonValue], coverage["publication_channels"])
+            wire["coverage"] = {**coverage, "publication_channels": [*channels, "hook_observed"]}
         return ReceiptResultModel.model_validate(wire)
 
 
@@ -126,6 +133,28 @@ async def test_a_claim_bound_receipt_names_its_producer_after_the_document(
     runtime, _client = await _runtime(monkeypatch, tmp_path, "client_claim")
     summary = await runtime.build_receipt(_SESSION, "json")
     assert summary.rendered_lines == (*_document_lines(), CLIENT_ATTESTED_WORKSPACE_LINE, _REACHED)
+
+
+async def test_a_claim_bound_json_receipt_with_hook_observed_evidence_carries_the_caveat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-051 decision 12: the terminal interface's JSON receipt says, as a text one does, that
+    the server took the hook observations' consent and session commitments unverified."""
+
+    runtime, client = await _runtime(monkeypatch, tmp_path, "client_claim")
+    client.hook_observed = True
+    summary = await runtime.build_receipt(_SESSION, "json")
+    assert summary.rendered_lines[-3:] == (
+        CLIENT_ATTESTED_WORKSPACE_LINE,
+        CLIENT_ATTESTED_OBSERVATION_LINE,
+        _REACHED,
+    )
+    local, _local_client = await _runtime(monkeypatch, tmp_path, "local_path")
+    _local_client.hook_observed = True
+    assert (
+        CLIENT_ATTESTED_OBSERVATION_LINE
+        not in (await local.build_receipt(_SESSION, "json")).rendered_lines
+    )
 
 
 async def test_a_local_receipt_is_the_document_alone(
