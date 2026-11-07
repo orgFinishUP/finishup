@@ -294,7 +294,10 @@ def test_a_process_still_using_a_removed_target_never_recreates_its_folder(
         def stop(self, _target: Path | None) -> None:
             return None
 
-    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Stopped())
+    def runtime_for(_kind: str) -> _Stopped:
+        return _Stopped()
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     assert _invoke("add", "devbox", "https://devbox.example").exit_code == 0
     assert _invoke("use", "devbox").exit_code == 0
     reset_selection_memo()
@@ -1310,7 +1313,10 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
             if second_stop == "stuck" and len(seen) == 2:
                 raise TargetRuntimeError("service_unavailable", phase="connector_stop")
 
-    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Runtime())
+    def runtime_for(_kind: str) -> _Runtime:
+        return _Runtime()
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     key_file = home / "key"
     key_file.write_text(_KEY, encoding="ascii")
     key_file.chmod(0o600)
@@ -1442,14 +1448,15 @@ def test_login_prefers_the_platform_store(
 class _LockedKeyring:
     """A platform store that is present but cannot be used now (a keychain locked over SSH)."""
 
-    def get_password(self, _service: str, _username: str) -> str | None:
-        raise RuntimeError("locked")
+    def get_password(self, service: str, username: str) -> str | None:
+        raise RuntimeError("locked", service, username)
 
-    def set_password(self, _service: str, _username: str, _password: str) -> None:
-        raise RuntimeError("locked")
+    def set_password(self, service: str, username: str, password: str) -> None:
+        del password
+        raise RuntimeError("locked", service, username)
 
-    def delete_password(self, _service: str, _username: str) -> None:
-        raise RuntimeError("locked")
+    def delete_password(self, service: str, username: str) -> None:
+        raise RuntimeError("locked", service, username)
 
 
 def test_a_locked_platform_store_never_blocks_removing_a_target_or_logging_out(
