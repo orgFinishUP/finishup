@@ -5632,7 +5632,9 @@ user-controlled is ever rendered beside it.
   `render_human_receipt` (CLI), `result_from_public_model(..., attribution=)` for the MCP `status`
   and `receipt` text and its canonical fallback, and the terminal interface's task views and
   receipt (through `FinishUpRuntime`) end with these lines. The connection's lines never enter
-  structured MCP content, CLI JSON or a local connection's output.
+  structured MCP content, CLI JSON or a local connection's output, so a Codex agent outside code
+  mode, which reads only `structuredContent`, sees none of them (codex-integration.md, Remote
+  server).
 - Transport tokens (`CONNECTION_TRANSPORTS`, closed): `unix` (default; a service's local control
   endpoint), `connector` (a local relay process carries the connection on), `ssh` (an SSH channel
   the client process opened) and `https` (HTTPS the client process speaks). Whoever builds the

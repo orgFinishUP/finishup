@@ -1562,6 +1562,15 @@ later process to the default service.
   prompt, message and tool output chunks (and the command input of a test, build, lint or
   typecheck run) reach the server unchanged, as a local service receives them. The server
   disclosure (disclosure 2) names this before the owner types the name.
+- **Service attribution in MCP results.** Host decision: not shown outside code mode. The fixed
+  "read on the client machine" line and the line naming the answering service and transport are
+  appended to the MCP text channel only (`result_from_public_model(..., attribution=)`), and
+  Codex hands the model the serialized `structuredContent`, which never carries them (ADR-051).
+  A Codex agent therefore sees neither on `status` or a receipt, and no page of a paged receipt
+  names the service; a text or markdown receipt's own workspace-evidence section in `human_text`
+  still says where the evidence was read. In code mode the bounded text summary carries the
+  lines. The owner's `finishup` command and terminal interface show them on every host. Follow-up
+  owner: issue #903 (ADR-051), if a closed structured provenance member is wanted.
 - **Receipt provenance.** When the server cannot read the task's opening record, a receipt is
   still made and never refused for it (ADR-051, decision D4): instead of the `client_attested`
   line it ends with the fixed provenance-unknown section (what happened, why it matters, and
