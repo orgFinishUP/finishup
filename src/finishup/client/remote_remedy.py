@@ -114,18 +114,16 @@ class RemoteRemedy:
 def remote_root_selected() -> bool:
     """Whether the root this process uses is a FinishUP server on another machine.
 
-    A root whose record cannot be read is not treated as remote here: the connect seam refuses it
-    on its own (``isolation_root_invalid``), so that refusal keeps its own remedy.
+    Read the way the connect seam reads it (``targets.active_root_may_be_remote``): a root that
+    holds a target record this process cannot read may be a remote target's, so it counts as
+    remote and no surface names a local remedy for it (the connect seam refuses it before any
+    dial, ``isolation_root_invalid``, and never starts a local service there); a root that cannot
+    be resolved at all keeps its local wording. Hook-safe: it loads only the target records.
     """
 
-    from finishup.client.targets import TargetError, active_target_record
-    from finishup.config.paths import PathSafetyError
+    from finishup.client.targets import active_root_may_be_remote
 
-    try:
-        record = active_target_record()
-    except (TargetError, PathSafetyError):
-        return False
-    return record is not None and record.is_remote
+    return active_root_may_be_remote()
 
 
 def remote_connection_phase(error: object) -> str | None:

@@ -4812,7 +4812,9 @@ dials its own stream.
   (`cli.observe._claim_bound_drain`) name the hook's workspace on a remote root, so the drain's
   connection is claim-bound and its rows go out attested.
 - `finishup.client.remote_remedy.remote_remedy(error, *, remote=None) -> RemoteRemedy | None`
-  (`reason`, `summary`, `directive`; `line()`), `remote_root_selected()`,
+  (`reason`, `summary`, `directive`; `line()`), `remote_root_selected()` (read as the connect
+  seam reads the root, `targets.active_root_may_be_remote()`: a record that cannot be read counts
+  as remote, so no surface names a local remedy for it),
   `remote_connection_phase(error)`, and the fixed `REMOTE_UNAVAILABLE_SUMMARY`,
   `REMOTE_LOCKED_SUMMARY`, `REMOTE_UNCLAIMABLE_SUMMARY`, `REMOTE_DRAINING_SUMMARY` (the server
   answered `service_draining`), and `REMOTE_NOT_SENT_SUMMARIES` (the phases raised before any

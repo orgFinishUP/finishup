@@ -289,3 +289,69 @@ def test_the_terminal_interface_names_the_remote_remedy(remote: None, error: Con
     _clean(str(failure))
     for detail in getattr(failure, "details", ()):
         _clean(detail)
+
+
+# --- a target record that cannot be read ----------------------------------------------------------
+
+
+def test_an_unreadable_target_record_fails_closed_and_names_no_local_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected root whose ``target.json`` cannot be read may be a server elsewhere: every
+    surface treats it as remote, so none names a local remedy, and the connect seam refuses it
+    before any dial without starting a local service in it (``isolation_root_invalid``)."""
+
+    import asyncio
+
+    from finishup.client.remote_remedy import remote_root_selected
+    from finishup.ports.control import ControlClientKind
+    from finishup.service import client as client_module
+
+    with ambient_home(monkeypatch):
+        with targets.registry_lock():
+            record, root = targets.new_remote_target("lab", "https", base_url="https://lab.example")
+            targets.write_selection(record)
+        reset_selection_memo()
+        # Restored from a backup, say: the record is group-readable, so it is refused as unsafe.
+        (root / "target.json").chmod(0o640)
+        spawned: list[str] = []
+
+        def no_spawn(*_args: object, **_kwargs: object) -> object:
+            spawned.append("spawn")
+            raise AssertionError("a local service was spawned in a remote target's root")
+
+        monkeypatch.setattr(client_module, "_spawn_service_process", no_spawn)
+        for connect in (client_module.connect_service, client_module.connect_service_on_demand):
+            with pytest.raises(ControlError) as refused:
+                asyncio.run(connect(ControlClientKind.CLI, workspace_locator=None))
+            assert client_module.path_refusal_reason(refused.value) == "isolation_root_invalid"
+        assert spawned == []
+        assert not (root / "run" / "control.sock").exists()
+
+        # Every surface names the remote remedy, never a local one.
+        assert remote_root_selected() is True
+        remedy = remote_remedy(_BARE)
+        assert remedy is not None and remedy.reason == "remote_unreachable"
+        lines: list[str] = []
+        bootstrap.control_failure(_BARE, stderr_writer=lines.append)
+        _clean("\n".join(lines))
+        assert lines[0].startswith("service_unavailable: remote_unreachable: ")
+        locked = remote_remedy(_LOCKED)
+        assert locked is not None and locked.summary == REMOTE_LOCKED_SUMMARY
+        failure = tui_runtime._connect_failure(_BARE)  # pyright: ignore[reportPrivateUsage]
+        assert failure.reason == "remote_unreachable"
+        _clean(str(failure))
+
+
+def test_a_readable_named_local_record_keeps_the_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from finishup.client.remote_remedy import remote_root_selected
+
+    with ambient_home(monkeypatch):
+        with targets.registry_lock():
+            record, _root = targets.new_local_target("work")
+            targets.write_selection(record)
+        reset_selection_memo()
+        assert remote_root_selected() is False
+        assert remote_remedy(_BARE) is None
