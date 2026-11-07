@@ -5080,7 +5080,11 @@ confinement rules:
     own trusted metadata walk would read a file for it (`task_input_read.
     outside_inputs_readable`, no content read); one that names nothing, or only what the local
     read would not read (a hard-linked file, one others may write, a home-private tree), is not
-    reported, as a local read finds nothing there. `snapshot_outside_inputs`, whose values at a
+    reported, as a local read finds nothing there. Unlike existence, that bit tells the server
+    more than `lstat_candidates` does (ADR-051 decision 5): whether a local read would read the
+    path, which depends on its link count and owner, its directories' owners, the home
+    directory's private trees and, for a directory, whether it holds a file the read would read;
+    never a name, a size or content. `snapshot_outside_inputs`, whose values at a
     check or a review are the paths of the server's kept copies, answers `unlisted` for those
     copies instead (`workspace_agent._copies_unlisted`): every value at or beneath a named root
     that no listed folder admits (the complement of `listed` there), whatever is there now and
@@ -5112,8 +5116,9 @@ confinement rules:
   item), or one at or beneath a listed folder; an existing location (one `lstat` finds that the
   outside-input candidate rule would look at) that is neither is `root_not_admitted` when the
   local read's fences and walk would open it (`task_input_read.declared_test_readable`, no
-  content read), and one that does not exist, or that the local read would not open, reads as
-  `None`, as locally. Both comparisons are made on the location as
+  content read; so the refusal, like `unlisted`, also tells the server whether the file's link
+  count, its owner and its directories' owners let the local read open it), and one that does not
+  exist, or that the local read would not open, reads as `None`, as locally. Both comparisons are made on the location as
   written and as the local read walks it (`task_input_read.declared_test_top`: a first component
   that is a root-owned link to a directory at most two levels deep, macOS `/tmp` or `/var`, is
   replaced by its target). One read outside the claimed root in mode `listed` also excludes the
