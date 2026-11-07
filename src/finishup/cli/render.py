@@ -7,7 +7,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Final, cast
 
-from finishup.client.attribution import ServiceAttribution, attribution_lines
+from finishup.client.attribution import (
+    ServiceAttribution,
+    attribution_lines,
+    coverage_hook_observed,
+)
 from finishup.domain.check_totals import render_check_totals
 from finishup.domain.findings import SELF_VERIFIED_GUIDANCE
 from finishup.domain.receipts import (
@@ -1325,7 +1329,14 @@ def render_human_receipt(
     if result.agent_closing_prompt is not None:
         # #1240 D5: the same closing line the MCP reply carries (fixed words and counts only).
         lines.append(result.agent_closing_prompt)
-    lines.extend(attribution_lines(attribution, shown=shown, provenance_unknown=provenance_unknown))
+    lines.extend(
+        attribution_lines(
+            attribution,
+            shown=shown,
+            provenance_unknown=provenance_unknown,
+            hook_observed=coverage_hook_observed(result.coverage.publication_channels),
+        )
+    )
     return "\n".join(lines)
 
 

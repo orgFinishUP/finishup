@@ -46,6 +46,7 @@ from finishup.client.attribution import (
     ServiceAttribution,
     attribution_lines,
     connection_attribution,
+    coverage_hook_observed,
 )
 from finishup.client.workspace_ref import start_request_for_connection
 from finishup.config.env import EnvNameConflictError, read_env
@@ -1345,17 +1346,20 @@ def _attributed_text(
     *,
     receipt_page: bool = False,
     provenance_unknown: bool = False,
+    hook_observed: bool = False,
 ) -> str:
     """``text`` followed by a claim-bound connection's provenance lines (ADR-051), unchanged for
     any other connection. A line the text already carries is not repeated, and a page of a paged
     receipt, or a receipt whose ``workspace_provenance`` says it is unknown, names only the
-    producing service (``attribution_lines``)."""
+    producing service (``attribution_lines``). A receipt with hook-observed evidence also gets
+    the fixed client-attested observation line (decision 12)."""
 
     lines = attribution_lines(
         attribution,
         shown=text,
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
+        hook_observed=hook_observed,
     )
     if not lines:
         return text
@@ -1388,11 +1392,16 @@ def result_from_public_model(
     )
     # ADR-051 decision D4: every receipt format, JSON included, says when its provenance is unknown.
     provenance_unknown = "receipt_id" in wire and "workspace_provenance" in wire
+    coverage = wire.get("coverage") if "receipt_id" in wire else None
+    hook_observed = isinstance(coverage, Mapping) and coverage_hook_observed(
+        cast(Mapping[str, object], coverage).get("publication_channels")
+    )
     rendered = _attributed_text(
         _result_text(wire, host_profile=host_profile, request_id=request_id, operation=operation),
         attribution,
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
+        hook_observed=hook_observed,
     )
     # The service budgets canonical text plus structured content. A small result's prose can
     # repeat several fields more often: fall back to that complete canonical text if needed.
@@ -1405,6 +1414,7 @@ def result_from_public_model(
             attribution,
             receipt_page=receipt_page,
             provenance_unknown=provenance_unknown,
+            hook_observed=hook_observed,
         )
         if mcp_delivery_bytes(wire, text=canonical) < rendered_bytes:
             rendered = canonical

@@ -20,6 +20,7 @@ from finishup.cli import app as app_module
 from finishup.cli.render import render_human_receipt, render_human_status
 from finishup.client.attribution import ServiceAttribution
 from finishup.domain.receipts import (
+    CLIENT_ATTESTED_OBSERVATION_LINE,
     CLIENT_ATTESTED_WORKSPACE_LINE,
     WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     client_attested_receipt_block,
@@ -91,6 +92,36 @@ def test_a_text_receipt_carrying_the_service_block_gets_only_the_transport() -> 
     rendered = render_human_receipt(receipt, attribution=_ATTRIBUTION)
     assert rendered == render_human_receipt(receipt) + "\n" + _REACHED
     assert rendered.count(CLIENT_ATTESTED_WORKSPACE_LINE) == 1
+
+
+def _hook_observed(receipt: ReceiptSuccessModel) -> ReceiptSuccessModel:
+    wire = receipt.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    coverage = dict(wire["coverage"])
+    coverage["publication_channels"] = [*coverage["publication_channels"], "hook_observed"]
+    wire["coverage"] = coverage
+    return ReceiptSuccessModel.model_validate(wire)
+
+
+def test_a_json_receipt_with_hook_observed_evidence_says_the_server_did_not_verify_it() -> None:
+    """ADR-051 decision 12: the CLI's rendering of a JSON receipt carries the same caveat a text
+    receipt's trailer does, after the connection's workspace-evidence line."""
+
+    receipt = _hook_observed(_json_receipt())
+    local = render_human_receipt(receipt)
+    assert CLIENT_ATTESTED_OBSERVATION_LINE not in local
+    assert render_human_receipt(receipt, attribution=_ATTRIBUTION) == "\n".join(
+        (local, CLIENT_ATTESTED_WORKSPACE_LINE, CLIENT_ATTESTED_OBSERVATION_LINE, _REACHED)
+    )
+    # A text receipt whose service trailer already carries it shows it once.
+    wire = _text_receipt(
+        client_attested_receipt_block(_SERVICE_ID, markdown=False, hook_observed=True)
+    ).model_dump(mode="json", by_alias=True, exclude_unset=True)
+    text = _hook_observed(ReceiptSuccessModel.model_validate(wire))
+    rendered = render_human_receipt(text, attribution=_ATTRIBUTION)
+    assert rendered.count(CLIENT_ATTESTED_OBSERVATION_LINE) == 1
+    # Unknown provenance says nothing about where anything was captured.
+    unknown = render_human_receipt(_unknown(receipt), attribution=_ATTRIBUTION)
+    assert CLIENT_ATTESTED_OBSERVATION_LINE not in unknown
 
 
 _REASONS: tuple[WorkspaceProvenanceReason, ...] = WORKSPACE_PROVENANCE_REASONS

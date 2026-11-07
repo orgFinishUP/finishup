@@ -2758,7 +2758,11 @@ class FinishUpRuntime:
         """
 
         from finishup.cli.render import render_human_receipt
-        from finishup.client.attribution import attribution_lines, connection_attribution
+        from finishup.client.attribution import (
+            attribution_lines,
+            connection_attribution,
+            coverage_hook_observed,
+        )
         from finishup.domain.receipts import workspace_provenance_unknown_block
         from finishup.protocol.canonical import canonical_encode
         from finishup.protocol.coverage import CheckType
@@ -2807,7 +2811,11 @@ class FinishUpRuntime:
                         if provenance is not None
                         else ()
                     ),
-                    *attribution_lines(attribution, provenance_unknown=provenance_unknown),
+                    *attribution_lines(
+                        attribution,
+                        provenance_unknown=provenance_unknown,
+                        hook_observed=coverage_hook_observed(success.coverage.publication_channels),
+                    ),
                 )
             )
             if success.document is not None

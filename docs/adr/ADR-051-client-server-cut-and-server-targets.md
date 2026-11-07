@@ -1102,8 +1102,11 @@ the rows were captured there. The server holds none of it and must not borrow it
 - **Honest receipts.** Text and markdown receipts of a claim-bound task whose coverage includes
   hook-observed evidence add one fixed line after the workspace-evidence line: "Hook observations
   were captured on the client machine under its own observation consent and delivered over the
-  connection; the server did not verify that consent or the session commitments." Logs carry the
-  `client_attested` label and closed tokens only.
+  connection; the server did not verify that consent or the session commitments." A JSON
+  receipt has no trailer, so a claim-bound client's rendering of it (the CLI's, the terminal
+  interface's and the MCP text) adds the same line after the connection's workspace-evidence line,
+  never on a receipt page or beside an unknown provenance; raw JSON output carries none. Logs carry
+  the `client_attested` label and closed tokens only.
 - **Limits.** Advice the service prepares for hooks to deliver stays in the claim store and does
   not yet reach a remote client's hooks. After a server restart a claim's pending verification
   resumes when that claim delivers its next row. The server's check barrier reconciles only its
