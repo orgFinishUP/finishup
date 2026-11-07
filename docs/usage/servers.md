@@ -422,8 +422,11 @@ These do not leave: your project folder's full path as its name (a path can stil
 what your agents write and inside hook observations), your API key, your vault passphrase, and
 the secure unlock and consent prompts, which only ever run on the server's own machine. A
 server's mode limits what it reads outside your project, not what your hooks deliver. To keep
-your agent's content on this computer, leave content capture off for that project, or do not give
-it observation consent.
+your agent's content on this computer with Claude Code or Cursor, leave content capture off for
+that project, or do not give it observation consent. Codex hook content comes with observation
+consent itself, so turning content capture off does not stop it: only withholding that consent
+for the project keeps it here, and revoking it with `finishup observe revoke` stops further
+capture.
 
 Whether anything is then sent for AI-powered review is decided by the server's own privacy policy
 and repository permissions, exactly as on one computer. Receipts and task status from a server on
