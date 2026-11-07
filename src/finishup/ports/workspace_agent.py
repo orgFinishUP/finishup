@@ -758,8 +758,15 @@ class OutsideInputsRead:
 
 @dataclass(frozen=True, slots=True)
 class OutsideSnapshotsRead:
-    """``snapshot_outside_inputs``'s answer: the rows read, and ``unlisted`` and ``listed`` as
-    for ``OutsideInputsRead``."""
+    """``snapshot_outside_inputs``'s answer: the rows read, ``unlisted`` and ``listed``.
+
+    ``listed`` is as for ``OutsideInputsRead``. ``unlisted`` answers for the server's kept copies
+    (a check and a review name their paths as the values): in ``listed`` mode, the indices,
+    ascending, of every value at or beneath a named root that no listed folder admits, whether or
+    not anything is there now and whether or not a local read would read it, since the server
+    would send its copy, not the file (ADR-051 decision 5). Never narrowed by this machine's
+    files, it tells the server no more than ``listed`` does, beside the mode; empty in ``local``
+    mode. A task-start snapshot simply keeps no copy of such a value."""
 
     reads: tuple[OutsideSnapshotRead, ...] = field(repr=False)
     unlisted: tuple[int, ...] = ()

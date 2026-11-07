@@ -290,19 +290,43 @@ async def test_a_task_input_beneath_a_client_listed_folder_reaches_review_with_n
 
 
 @pytest.mark.parametrize(
-    ("mode", "listed"),
-    [("listed", False), ("listed", True), ("local", False)],
-    ids=["folder-removed", "folder-listed", "local-mode"],
+    ("mode", "listed", "change"),
+    [
+        ("listed", False, "none"),
+        ("listed", False, "hard_linked"),
+        ("listed", False, "open_to_others"),
+        ("listed", False, "now_a_link"),
+        ("listed", False, "deleted"),
+        ("listed", True, "none"),
+        ("listed", True, "deleted"),
+        ("local", False, "none"),
+        ("local", False, "hard_linked"),
+    ],
+    ids=[
+        "folder-removed",
+        "folder-removed-file-hard-linked",
+        "folder-removed-file-open-to-others",
+        "folder-removed-file-now-a-link",
+        "folder-removed-file-deleted",
+        "folder-listed",
+        "folder-listed-file-deleted",
+        "local-mode",
+        "local-mode-file-hard-linked",
+    ],
 )
 async def test_the_reviewer_reads_a_kept_copy_only_while_its_folder_is_still_listed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, listed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, listed: bool, change: str
 ) -> None:
     """ADR-051 decision 5: a kept copy (#1118) whose folder the owner no longer lists is not
     sent, by the check-time read nor by the reviewer's ``read_file``. The server's own policy
     still admits the root the copy was kept beneath; the task started with the folder listed (or
     in ``local`` mode), and the owner has since removed it (``server folders remove``, or ``mode
     NAME listed``). The reviewer asks for the kept copy by its root alias; a removed folder's
-    copy is never offered, so its bytes never reach the AI provider."""
+    copy is never offered, so its bytes never reach the AI provider.
+
+    What became of the file since the copy was kept never decides it: deleted, hard-linked,
+    opened to other accounts or replaced by a link, a local read would not read it now, yet the
+    server still holds the copy, so only the listing (or ``local`` mode) lets it be sent."""
 
     from dataclasses import replace
 
@@ -322,6 +346,17 @@ async def test_the_reviewer_reads_a_kept_copy_only_while_its_folder_is_still_lis
     kept = TaskInputSnapshotSet(
         "task_start", (SnapshotFile(os.fspath(spec), os.fspath(data), b"KEPT_COPY\n", 10),)
     )
+    # Since the copy was kept, the client's file changed so that a local read no longer reads it.
+    if change == "hard_linked":
+        os.link(spec, data / "twin.md")
+    elif change == "open_to_others":
+        spec.chmod(0o666)
+    elif change == "now_a_link":
+        spec.unlink()
+        (data / "elsewhere.md").write_text("ELSEWHERE\n")
+        spec.symlink_to(data / "elsewhere.md")
+    elif change == "deleted":
+        spec.unlink()
 
     async def snapshots(_runtime: object, _request_id: object) -> tuple[TaskInputSnapshotSet, ...]:
         return (kept,)
