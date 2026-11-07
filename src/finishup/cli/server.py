@@ -297,6 +297,12 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "the same release on both",
         _UNAVAILABLE,
     ),
+    "target_partly_removed": (
+        "the target's folder changed while it was being deleted, so only part of it was removed; "
+        "run the same command again, or, if 'finishup server list' names a leftover folder "
+        "instead, 'finishup server remove' with that folder's id",
+        _UNAVAILABLE,
+    ),
     # The other two remote connection phases; target_reauthorization_required is above.
     "target_root_is_remote": (
         "that server runs on another machine, so no FinishUP service starts for it on this "
@@ -1813,16 +1819,49 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
     The caller already cleared a selection that named it. Its connection is stopped, its key
     deleted, and its connection stopped once more right before the folder goes (SRV-2): a process
     that still remembers the target, an MCP bridge, may have started its SSH master again
-    meanwhile, and the folder would otherwise go from under that master.
+    meanwhile, and the folder would otherwise go from under that master. A folder that something
+    changed while it was deleted is only partly removed: the refusal says so, and how to finish
+    (the same command, or the leftover's id).
     """
 
     from finishup.client.targets import remove_target_root
 
     _stop_for_remove(record, root)
     key_left = _delete_key_for_remove(record, root)
+    key_deleted = record.credential is not None and not key_left
     _stop_for_remove(record, root)
-    remove_target_root(record)
+    try:
+        remove_target_root(record)
+    except OSError:
+        # Something changed the folder while it was deleted (A-REMOVE-RACE): what is left is
+        # either still this target or a leftover folder, and either is removed by running again.
+        _record_no_key(root, key_deleted)
+        raise ServerCommandRefused(
+            "target_partly_removed", message=_PARTLY_REMOVED_KEY_DELETED if key_deleted else None
+        ) from None
     return key_left
+
+
+def _record_no_key(root: Path, key_deleted: bool) -> None:
+    """After a remove that did not finish, record that a key it already deleted is gone.
+
+    ``server status`` must not report a key that no longer exists. The registry lock is held. A
+    record that is gone or cannot be rewritten still gets the refusal that says the key went.
+    """
+
+    if not key_deleted:
+        return
+    with contextlib.suppress(TargetError, OSError):
+        current = read_target(root)
+        if current is not None:
+            write_target(root, replace(current, credential=None))
+
+
+_PARTLY_REMOVED_KEY_DELETED: Final = (
+    "the target's folder changed while it was being deleted, so only part of it was removed, and "
+    "its API key was already deleted; run the same command again, or, if 'finishup server list' "
+    "names a leftover folder instead, 'finishup server remove' with that folder's id"
+)
 
 
 def _delete_key_for_remove(record: ServerTarget, root: Path) -> bool:
