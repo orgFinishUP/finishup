@@ -547,7 +547,9 @@ per server. Your agent's hooks, the FinishUP tools in your agent, the CLI and th
 interface all talk to that helper exactly as they talk to FinishUP on your own computer. The
 helper starts by itself when it is first needed, keeps the connection to the server open so each
 call is quick, and stops after 15 minutes without use. `finishup server connect NAME` starts it
-now and `finishup server disconnect NAME` stops it, and so does switching away from that server
+now, or, when it already runs, connects through it once and reports what it finds then (so after
+a network outage it tells you whether the connection works again), and
+`finishup server disconnect NAME` stops it, and so does switching away from that server
 with `finishup server use`; `finishup server status NAME` shows whether it is connected and, if
 not, why.
 

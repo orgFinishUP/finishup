@@ -5,7 +5,9 @@
 
 * ``ensure_ready`` starts the target root's connector when none runs and waits for its status to
   say ``ready``; a closed remote phase (``remote_unreachable``, ``remote_auth_failed``, …) is
-  reported as it is;
+  reported as it is. A connector that was already running brings its upstream up only as it
+  starts, so a phase it recorded then (an outage since repaired) is checked again with one
+  connection through it, and what that connection finds is reported;
 * ``stop`` signals only the pid stamped in the connector's held lock, and for an SSH target asks
   the master to exit through its control socket (``ssh -O exit``) — never by process pattern;
 * ``probe`` connects through the connector like any client, makes one untimed ``service_status``
@@ -46,6 +48,28 @@ def _remote_root(root: Path | None) -> Path:
     return root
 
 
+def _connect_once(target: Path) -> None:
+    """One connection through ``target``'s connector, closed at once; raises what it found."""
+
+    import anyio
+
+    from finishup.config.paths import selection_override
+    from finishup.ports.control import ControlClientKind, ControlError
+    from finishup.service.client import connect_service_on_demand
+
+    async def connect() -> None:
+        try:
+            client = await connect_service_on_demand(
+                ControlClientKind.CLI, workspace_locator=None, timeout_seconds=_PROBE_SECONDS
+            )
+        except ControlError as error:
+            raise TargetRuntimeError(error.phase or error.reason) from None
+        await client.close()
+
+    with selection_override(target):
+        anyio.run(connect)
+
+
 class ConnectorTargetRuntime:
     """The ``ssh``, ``https`` and ``local_port`` runtime: one connector per target root."""
 
@@ -57,11 +81,13 @@ class ConnectorTargetRuntime:
         )
 
         target = _remote_root(root)
+        started = False
         if connector_holder(target) is None:
             try:
                 spawn_connector(target)
             except OSError:
                 raise TargetRuntimeError("service_unavailable", phase="connector_start") from None
+            started = True
         deadline = time.monotonic() + _READY_SECONDS
         while time.monotonic() < deadline:
             holder = connector_holder(target)
@@ -70,7 +96,12 @@ class ConnectorTargetRuntime:
                 if status.phase == "ready":
                     return
                 if status.phase == "unavailable" and status.reason is not None:
-                    raise TargetRuntimeError(status.reason)
+                    if started:
+                        raise TargetRuntimeError(status.reason)
+                    # Recorded before this call, perhaps during an outage since repaired: what
+                    # one connection through the connector finds now is the answer.
+                    _connect_once(target)
+                    return
             time.sleep(_POLL_SECONDS)
         raise TargetRuntimeError("service_unavailable", phase="timeout")
 

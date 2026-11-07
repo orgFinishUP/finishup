@@ -191,3 +191,61 @@ def test_the_docs_name_the_api_key_entry_that_outlives_a_deleted_folder() -> Non
         .split()
     )
     assert "removes every client-side artifact of that target except an API key" in adr
+
+
+@pytest.mark.parametrize("now", ["repaired", "auth_refused"])
+def test_connect_checks_again_instead_of_repeating_an_earlier_outage(
+    monkeypatch: pytest.MonkeyPatch, now: str
+) -> None:
+    """A running connector warms its upstream once; the phase it recorded during an outage
+    stays in its status until a client happens to be relayed. ``server connect`` checks again
+    through it, once, and reports what that connection finds, never the earlier phase."""
+
+    from builders.server_targets import ambient_home
+    from finishup import __version__
+    from finishup.client import targets
+    from finishup.client.connector_runtime import ConnectorTargetRuntime
+    from finishup.client.connector_status import (
+        ConnectorLock,
+        new_status,
+        now_stamp,
+        write_connector_status,
+    )
+    from finishup.ports.control import ControlError
+    from finishup.protocol.schemas import schema_manifest_digest
+    from finishup.service import client as service_client
+
+    connects: list[str] = []
+
+    class _Client:
+        async def close(self) -> None:
+            return None
+
+    async def on_demand(*_args: object, **_kwargs: object) -> _Client:
+        connects.append("connect")
+        if now == "auth_refused":
+            raise ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
+        return _Client()
+
+    monkeypatch.setattr(service_client, "connect_service_on_demand", on_demand)
+    with ambient_home(monkeypatch):
+        with targets.registry_lock():
+            _record, root = targets.new_remote_target(
+                "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+            )
+        lock = ConnectorLock(root)
+        lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+        try:
+            # The phase recorded during a Wi-Fi drop that has since been repaired.
+            write_connector_status(
+                root, new_status(None, "unavailable", "remote_unreachable", started_at=now_stamp())
+            )
+            if now == "repaired":
+                ConnectorTargetRuntime().ensure_ready(root)
+            else:
+                with pytest.raises(TargetRuntimeError) as raised:
+                    ConnectorTargetRuntime().ensure_ready(root)
+                assert raised.value.reason == "remote_auth_failed"
+        finally:
+            lock.release()
+    assert connects == ["connect"]
