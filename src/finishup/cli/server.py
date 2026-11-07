@@ -278,6 +278,14 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "SSH server, or give a valid API key for an HTTPS server",
         _UNAVAILABLE,
     ),
+    # 'server add ssh://' (ADR-051 decision 7): OpenSSH asked to confirm a host key this computer
+    # does not know yet, on the owner's terminal, and the owner declined or did not answer.
+    "remote_host_key_unconfirmed": (
+        "the server's SSH host key was not confirmed (OpenSSH's question was declined or not "
+        "answered), so nothing was added; run 'finishup server add' again and answer yes to "
+        "OpenSSH's question once you have checked the fingerprint with the server's own",
+        _UNAVAILABLE,
+    ),
     "remote_identity_changed": (
         "the server's host key or certificate was not accepted; verify it another way first",
         _UNAVAILABLE,
@@ -777,11 +785,17 @@ def _probe_ssh_endpoint(
 ) -> tuple[str, str]:
     """Ask the server's own ``finishup service endpoint --json`` over one interactive ``ssh``.
 
-    OpenSSH asks the owner, on this terminal, to confirm a host key it does not know yet; that
-    confirmation is the host-key pin every later ``BatchMode`` connection checks. Returns the
-    server's absolute launcher (the one given, or the single absolute launcher the server
-    reports for itself, never a bare ``finishup``) and its control endpoint, after checking that
-    both sides run the same release. Nothing is written when this fails.
+    ``server add`` has just required the owner's trusted foreground console for the typed
+    confirmation, and refused as ``trusted_console_required`` without it, so this runs on the
+    owner's terminal: OpenSSH may ask there, once, to confirm a host key this computer does not
+    know yet (``probe_argv``: ``StrictHostKeyChecking=ask``, no master, no ``BatchMode``, password
+    and keyboard-interactive login off), and that confirmation is the host-key pin every later
+    ``BatchMode`` connection checks (ADR-051 decision 7). A key the owner declined or did not
+    answer is ``remote_host_key_unconfirmed``; a changed key is never asked about and stays
+    ``remote_identity_changed``; a refused login is ``remote_auth_failed``. Returns the server's
+    absolute launcher (the one given, or the single absolute launcher the server reports for
+    itself, never a bare ``finishup``) and its control endpoint, after checking that both sides
+    run the same release. Nothing is written when this fails.
     """
 
     import json
@@ -789,6 +803,8 @@ def _probe_ssh_endpoint(
 
     from finishup.client.ssh_upstream import (
         UpstreamUnavailable,
+        classify_ssh_failure,
+        host_key_unconfirmed,
         probe_argv,
         remote_command_line,
         resolve_ssh,
@@ -802,15 +818,28 @@ def _probe_ssh_endpoint(
     command = remote_command_line(
         remote_launcher or "finishup", remote_root, "service", "endpoint", "--json"
     )
+    typer.echo(
+        "Asking the server where its FinishUP service listens. If this computer does not know its "
+        "SSH host key yet, OpenSSH asks you to confirm it here: compare the fingerprint with the "
+        "server's own before you answer yes."
+    )
     try:
+        # OpenSSH asks on the terminal itself (/dev/tty); its diagnostics are read to name why a
+        # run failed, by fixed phrases only.
         completed = subprocess.run(  # noqa: S603 - fixed argv; the owner's own terminal
             probe_argv(ssh, user=user, host=host, port=port, command=command),
-            stdout=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
             timeout=_SSH_PROBE_SECONDS,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise ServerCommandRefused("remote_unreachable") from None
+    if completed.returncode == 255:
+        # ``ssh`` itself failed (any exit of the remote command is its own code).
+        if host_key_unconfirmed(completed.stderr):
+            raise ServerCommandRefused("remote_host_key_unconfirmed")
+        raise ServerCommandRefused(classify_ssh_failure(completed.stderr))
     if completed.returncode != 0:
         if completed.returncode == 127 and remote_launcher is None:
             raise ServerCommandRefused("remote_launcher_unknown")

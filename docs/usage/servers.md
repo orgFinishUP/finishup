@@ -574,9 +574,16 @@ not, why.
 `~/.ssh/config` and your `known_hosts`. FinishUP never stores an SSH key and never asks for a
 password. It keeps one SSH connection open and sends each request over it. When you add the
 server, FinishUP asks the server once, over SSH, where its FinishUP service listens and which
-`finishup` it runs; if your computer has not seen that server's host key before, SSH asks you to
-confirm it then. If the server's FinishUP service has stopped while idle, the helper starts it
-again for you.
+`finishup` it runs. If this computer does not know that server's host key yet, `finishup server
+add` lets OpenSSH ask you once, in your terminal, to confirm it: compare the fingerprint with the
+server's own before you answer yes. Your answer goes into your known hosts, and every later
+connection checks it and never asks again; a host key that changed is refused, never asked about.
+That one connection never asks for a password, so it also proves that your key signs you in. If
+you decline OpenSSH's question or do not answer it, FinishUP adds nothing and says so with
+`remote_host_key_unconfirmed`: run `finishup server add` again and answer yes once you have checked
+the fingerprint. Adding a server always needs your terminal, so without it (a script, say)
+`finishup server add` stops before it asks the server anything, with `trusted_console_required`. If
+the server's FinishUP service has stopped while idle, the helper starts it again for you.
 
 **Web (HTTPS) servers.** On the server, its operator runs FinishUP's web gateway and gives you an
 API key:
@@ -701,6 +708,7 @@ repeated safely.
 |---|---|---|
 | `remote_unreachable` | The server could not be reached, or the certificate authority file given with `--ca-file` was moved, cannot be read or holds no certificate. | Run `finishup server test`. If you moved or replaced that file, put it back or add the server again with the new file. |
 | `remote_auth_failed` | The server answered and refused your key; it was reached, so FinishUP never says it could not be reached. `finishup server status` and `test` say "answered, key refused". | SSH: load your key (`ssh-add`) or check your SSH configuration. Web: run `finishup server login NAME`. |
+| `remote_host_key_unconfirmed` | When you added an SSH server, its host key was not confirmed: you declined OpenSSH's question, or did not answer it. Nothing was added. | Run `finishup server add` again and answer yes once you have checked the fingerprint with the server's own. |
 | `remote_identity_changed` | The server's host key or certificate is not the one you confirmed. | Confirm the server's identity another way, then remove and add the server again. |
 | `remote_service_not_running` | The server machine answered, but its FinishUP service is not running. | SSH: `ssh -t <server> finishup service start`. Web: ask the server's operator. |
 | `remote_incompatible` | The two machines run different FinishUP releases. | Install the same release on both. |
