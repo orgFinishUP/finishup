@@ -298,3 +298,27 @@ def test_the_refusal_is_typed_for_every_kind() -> None:
         with pytest.raises(ControlError) as refused:
             rest_client.require_connection_allowed(record)
         assert _phase(refused) == ("service_unavailable", _ZERO, True)
+
+
+@pytest.mark.anyio
+async def test_the_watch_never_keeps_a_dropped_client_alive(keys: ApiKeyStore) -> None:
+    import gc
+    import weakref
+
+    _record, token = keys.create("laptop", "agent")
+    transport = _Recording(make_api(FakeService(), keys))
+    client = await connect_rest_service(
+        ControlClientKind.MCP_BRIDGE,
+        record=_RECORD,
+        root=Path("/x"),
+        _endpoint=_endpoint(transport, token),
+    )
+    watch = client._marker_watch  # pyright: ignore[reportPrivateUsage]
+    assert watch is not None and not watch.done()
+    dropped = weakref.ref(client)
+    del client
+    gc.collect()
+    assert dropped() is None
+    # The watch notices at its next tick and ends.
+    async with asyncio.timeout(5):
+        await watch

@@ -45,6 +45,7 @@ import os
 import secrets
 import ssl
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -554,7 +555,9 @@ class RestServiceClient(ServiceClient):
         self._zero_network_seen = asyncio.Event()
         self._marker_watch: asyncio.Task[None] | None = None
         with contextlib.suppress(RuntimeError):
-            self._marker_watch = asyncio.get_running_loop().create_task(self._watch_marker())
+            self._marker_watch = asyncio.get_running_loop().create_task(
+                RestServiceClient._watch_marker(weakref.ref(self))
+            )
 
     @property
     def transport_kind(self) -> TargetKind:
@@ -578,6 +581,26 @@ class RestServiceClient(ServiceClient):
             with contextlib.suppress(Exception):
                 await self._http.aclose()
 
+    @staticmethod
+    async def _watch_marker(ref: weakref.ref[RestServiceClient]) -> None:
+        """Close an open client within ``MARKER_CHECK_SECONDS`` of the zero-network record.
+
+        An open client (the MCP bridge's, the terminal interface's, a long-polled call's) holds
+        connections to the server; they close, and a request under way is abandoned, so nothing
+        more reaches the server once this computer reported that it makes no network connections.
+        The watch holds the client weakly, so a client dropped without ``close`` is not kept alive.
+        """
+
+        while True:
+            await asyncio.sleep(MARKER_CHECK_SECONDS)
+            client = ref()
+            if client is None or client._closed:
+                return
+            if client._zero_network():
+                await client._fail_connection(_remote(ZERO_NETWORK_PHASE))
+                return
+            del client
+
     def _zero_network(self) -> bool:
         """Whether this computer is (or was found to be) zero-network; the record is read now."""
 
@@ -592,20 +615,6 @@ class RestServiceClient(ServiceClient):
             error = _remote(ZERO_NETWORK_PHASE)
             await self._fail_connection(error)
             raise error
-
-    async def _watch_marker(self) -> None:
-        """Close this client within ``MARKER_CHECK_SECONDS`` of the zero-network record.
-
-        An open client (the MCP bridge's, the terminal interface's, a long-polled call's) holds
-        connections to the server; they close, and a request under way is abandoned, so nothing
-        more reaches the server once this computer reported that it makes no network connections.
-        """
-
-        while not self._closed:
-            await asyncio.sleep(MARKER_CHECK_SECONDS)
-            if self._zero_network():
-                await self._fail_connection(_remote(ZERO_NETWORK_PHASE))
-                return
 
     def _headers(self, request: ControlCallRequest, *, rpc_id: str) -> dict[str, str]:
         headers = _base_headers(self._endpoint, self._claim)
