@@ -632,7 +632,11 @@ def test_a_connection_gives_the_ssh_steps_only_what_is_left_of_its_budget(
     async def unreachable(*_args: object, **_options: object) -> object:
         raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
 
-    def master(_self: object, _record: object, _root: object, *, timeout: float) -> None:
+    def master(
+        _self: object, _record: object, _root: object, *, timeout: float, supervise: bool
+    ) -> None:
+        # This connection started the master's supervisor itself, just before.
+        assert supervise is False
         budgets.append(("master", timeout))
 
     def start(_self: object, _record: object, _root: object, *, timeout: float) -> None:
@@ -660,3 +664,139 @@ def test_a_connection_gives_the_ssh_steps_only_what_is_left_of_its_budget(
     assert raised.value.phase == "remote_unreachable"
     assert [step for step, _ in budgets] == ["master", "start"]
     assert all(0 < budget <= 2.0 for _, budget in budgets)
+
+
+class _ReadyClient:
+    """A connection that answers every status call ready."""
+
+    async def service_status(self) -> object:
+        from finishup.ports.control import ServiceState, ServiceStatus
+
+        return ServiceStatus(
+            "1.0",
+            "0.3.0",
+            "svc_00000000-0000-4000-8000-000000000051",
+            "1",
+            ServiceState.READY,
+            "none",
+            "passphrase",
+            (),
+            "unavailable",
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+def test_every_master_this_client_makes_usable_has_its_supervisor(
+    ssh_root: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-051 decision 8: the target's workspace agent closes the SSH master within about a
+    second of this computer's zero-network record. So whatever starts or finds a master starts
+    that agent when none runs: ``server connect`` (``ensure_ready``), and ``server test``,
+    ``status`` and the terminal's ``/server`` (``probe``), for a target that is not selected too.
+    A start that failed leaves no master and starts nothing, and the agent restoring its own
+    transport does not start itself again."""
+
+    import asyncio
+
+    record, root = ssh_root
+    supervised: list[Path] = []
+
+    def ensure_agent(path: Path) -> bool:
+        supervised.append(path)
+        return True
+
+    def run(
+        argv: list[str], *, timeout: float, detaches: bool = False
+    ) -> subprocess.CompletedProcess[bytes]:
+        del timeout
+        if detaches:
+            _bind(root / "run" / "m")
+            _bind(root / "run" / "api.sock")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    async def connect(*_args: object, **_kwargs: object) -> _ReadyClient:
+        return _ReadyClient()
+
+    monkeypatch.setattr("finishup.client.agent.ensure_agent", ensure_agent)
+    monkeypatch.setattr("finishup.client.rest_client.connect_rest_service", connect)
+    monkeypatch.setattr(rest_runtime, "_run", run)
+    assert targets.read_selected_target_id() is None
+
+    SshTargetRuntime().ensure_ready(root)
+    assert (root / "run" / "m").exists()
+    assert supervised == [root]
+
+    # The master is running: a probe finds it, and its supervisor is made sure of again.
+    assert SshTargetRuntime().probe(root).outcome == "ready"
+    assert supervised == [root, root]
+
+    # The agent brings its own transport back without starting itself.
+    (root / "run" / "api.sock").unlink()
+    asyncio.run(rest_runtime.restore_ssh_transport(record, root))
+    assert supervised == [root, root]
+
+    # A master that could not start leaves nothing to supervise.
+    (root / "run" / "m").unlink()
+    monkeypatch.setattr(
+        rest_runtime, "_run", _Recorder((255, b"", b"connect to host: Connection timed out"))
+    )
+    with pytest.raises(TargetRuntimeError):
+        SshTargetRuntime().ensure_ready(root)
+    assert supervised == [root, root]
+
+
+def test_a_live_master_whose_forward_cannot_come_back_still_gets_its_supervisor(
+    ssh_root: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record, root = ssh_root
+    supervised: list[Path] = []
+
+    def ensure_agent(path: Path) -> bool:
+        supervised.append(path)
+        return True
+
+    monkeypatch.setattr("finishup.client.agent.ensure_agent", ensure_agent)
+    _bind(root / "run" / "m")
+    # ``-O check`` answers; ``-O forward`` does not.
+    monkeypatch.setattr(rest_runtime, "_run", _Recorder((0, b"", b""), (255, b"", b"")))
+    with pytest.raises(TargetRuntimeError) as raised:
+        SshTargetRuntime().ensure_master(record, root)
+    assert (raised.value.reason, raised.value.phase) == ("remote_unreachable", "ssh_forward")
+    assert supervised == [root]
+
+
+def test_closing_every_ssh_master_asks_each_through_its_own_control_socket(
+    ssh_root: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the command that records this computer's zero-network policy runs (ADR-051
+    decision 8): each SSH target whose control socket exists is asked to exit (``-O exit``) and
+    its forward removed; an HTTPS target holds no client process, and an SSH target without a
+    master is left alone. A damaged root is skipped without keeping the others open."""
+
+    record, root = ssh_root
+    with targets.registry_lock():
+        idle, idle_root = targets.new_remote_target(
+            "idle", "ssh", user="owner", host="idle.example", port=22
+        )
+        targets.new_remote_target(
+            "web", "https", base_url="https://fu.example", tls_pin="sha256:" + "a" * 64
+        )
+    damaged = targets.servers_dir() / "t_ffffffff"
+    damaged.mkdir(mode=0o700)
+    (damaged / "target.json").write_bytes(b"not json")
+    _bind(root / "run" / "m")
+    _bind(root / "run" / "api.sock")
+    recorder = _Recorder()
+    monkeypatch.setattr(rest_runtime, "_run", recorder)
+
+    assert rest_runtime.close_ssh_masters() == (record.target_id,)
+
+    ((argv, detaches),) = recorder.calls
+    assert not detaches
+    assert argv[:3] == ["ssh", "-S", str(root / "run" / "m")]
+    assert argv[-4:] == ["-O", "exit", "--", "owner@lab.example"]
+    assert not (root / "run" / "api.sock").exists()
+    assert not (idle_root / "run" / "m").exists()
+    assert idle.target_id not in rest_runtime.close_ssh_masters((idle_root, root))

@@ -42,6 +42,9 @@ from builders.privacy_policies import local_only_policy, minimal_external_policy
 from builders.server_targets import ambient_home
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
+from finishup.cli.zero_network_selection import (
+    _close_held_connections as _REAL_CLOSE_HELD_CONNECTIONS,  # pyright: ignore[reportPrivateUsage]
+)
 from finishup.client import targets
 from finishup.client.everyday_policy import ReportedPolicy, read_marker, record_reported_policy
 from finishup.config.paths import active_root, reset_selection_memo
@@ -335,6 +338,60 @@ def test_a_change_on_this_computer_reads_the_policy_again_and_remembers_it(
     assert requests == [_MACHINE_SCOPE]
     assert cast(ReportedPolicy, read_marker()).zero_network is True
     assert capsys.readouterr() == ("", "")
+
+
+def test_recording_zero_network_here_closes_every_ssh_master_at_once(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-051 decision 8: each SSH master is supervised by its target's workspace agent; the
+    command that records this computer's zero-network policy also closes every SSH target's
+    master itself, through its control socket, so one whose agent could not run does not stay
+    open for its 15 idle minutes. Selected or not. A report that permits network closes nothing."""
+
+    import socket
+    import subprocess
+
+    from finishup.client import rest_runtime
+
+    # The suite's stand-in keeps this step away from a real registry; the real step runs here,
+    # in an ambient home of its own, with ssh recorded instead of run.
+    monkeypatch.setattr(zero_network, "_close_held_connections", _REAL_CLOSE_HELD_CONNECTIONS)
+    ssh_runs: list[list[str]] = []
+
+    def run(
+        argv: list[str], *, timeout: float, detaches: bool = False
+    ) -> subprocess.CompletedProcess[bytes]:
+        del timeout, detaches
+        ssh_runs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(rest_runtime, "_run", run)
+    record = _remote(select=False)
+    root = targets.target_root(record.target_id)
+
+    def open_master() -> None:
+        (root / "run").mkdir(mode=0o700, exist_ok=True)
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(root / "run" / "m"))
+        listener.close()
+
+    def exits() -> list[list[str]]:
+        return [argv for argv in ssh_runs if argv[-4:-2] == ["-O", "exit"]]
+
+    open_master()
+    assert zero_network.remember_reported_policy(_effective(egress=True)) is True
+    _everyday_service(home, monkeypatch, egress=True)
+    assert zero_network.everyday_network_state() == "network_permitted"
+    assert exits() == []
+
+    assert zero_network.remember_reported_policy(_effective(egress=False)) is True
+    ((asked,),) = (exits(),)
+    assert asked[:3] == ["ssh", "-S", str(root / "run" / "m")]
+
+    ssh_runs.clear()
+    _everyday_service(home, monkeypatch, egress=False)
+    assert zero_network.everyday_network_state() == "zero_network"
+    assert len(exits()) == 1
 
 
 def test_a_change_made_on_a_remote_server_reads_nothing_here(

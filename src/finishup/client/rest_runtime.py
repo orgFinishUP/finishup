@@ -26,9 +26,12 @@ ssh's own output is read only to choose a closed reason and is never shown or lo
 Every step that reaches the server (the master, a forward, the remote service start, a probe or a
 connection) asks the shared connection check first (``targets.require_current_authorization``):
 while this computer last reported a zero-network policy, or for a target confirmed under an older
-disclosure, nothing is started or sent, and a probe is ``unavailable`` with that reason. A
-running master is closed by its supervisor, the target's workspace agent, within about a second of
-the zero-network record (``client.agent``).
+disclosure, nothing is started or sent, and a probe is ``unavailable`` with that reason. Every
+master has a supervisor, the target's workspace agent (``client.agent``): whatever makes a master
+usable (``server connect``, ``test`` and ``status``, the terminal's ``/server``, a connection)
+starts that agent when none runs, and the agent closes the master within about a second of this
+computer's zero-network record. The command that records it closes every SSH target's master
+itself as well (``close_ssh_masters``).
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import shlex
 import stat
 import subprocess
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
@@ -63,6 +66,7 @@ __all__ = [
     "RestTargetRuntime",
     "SshEndpoint",
     "SshTargetRuntime",
+    "close_ssh_masters",
     "close_ssh_transport",
     "discover_ssh_endpoint",
     "restore_ssh_transport",
@@ -565,6 +569,14 @@ def _remaining(deadline: float, *, cap: float | None = None) -> float:
     return left if cap is None else min(left, cap)
 
 
+def _supervise(root: Path) -> None:
+    """Start the master's supervisor, the target's workspace agent, when none runs."""
+
+    from finishup.client.agent import ensure_agent
+
+    ensure_agent(root)
+
+
 def _run_directory(root: Path) -> Path:
     from finishup.config.paths import PathSafetyError, ensure_owner_only_dir
 
@@ -690,6 +702,7 @@ class SshTargetRuntime(RestTargetRuntime):
         *,
         timeout: float = _SSH_START_SECONDS,
         honor_recent_failure: bool = True,
+        supervise: bool = True,
     ) -> None:
         """Make this target's master and its forward usable within ``timeout`` seconds.
 
@@ -698,6 +711,12 @@ class SshTargetRuntime(RestTargetRuntime):
         when none answers is a stale control socket removed and a master started. A start that
         could not reach the server is remembered for ``MASTER_FAILURE_HOLD_SECONDS``, and while
         ``honor_recent_failure`` the calls in that window fail at once with the same reason.
+
+        A master this leaves running (found, started, or one whose forward could not be put
+        back) is never left without its supervisor: the target's workspace agent is started when
+        none runs (``client.agent.ensure_agent``), so this computer's zero-network record closes
+        the master within about a second (ADR-051 decision 8). ``supervise`` is false only for a
+        caller that is that agent, or that has just started it.
         """
 
         _require_allowed(record)
@@ -707,27 +726,33 @@ class SshTargetRuntime(RestTargetRuntime):
             remembered = _recent_failure(directory)
             if remembered is not None:
                 raise remembered
-        with _master_lock(directory, deadline):
-            if honor_recent_failure:
-                # Another process may have just failed (or succeeded) while this one waited.
-                remembered = _recent_failure(directory)
-                if remembered is not None:
-                    raise remembered
-            running = self.master_running(
-                record, root, timeout=_remaining(deadline, cap=_SSH_CONTROL_SECONDS)
-            )
-            if running and (directory / API_SOCKET_NAME).exists():
-                return
-            try:
-                if running:
-                    self._forward_again(record, root, deadline)
-                else:
-                    _remove_stale_control_socket(directory)
-                    self._start_master(record, root, deadline)
-            except TargetRuntimeError as error:
-                _note_failure(directory, error)
-                raise
-            _clear_failure(directory)
+        master_up = False
+        try:
+            with _master_lock(directory, deadline):
+                if honor_recent_failure:
+                    # Another process may have just failed (or succeeded) while this one waited.
+                    remembered = _recent_failure(directory)
+                    if remembered is not None:
+                        raise remembered
+                master_up = self.master_running(
+                    record, root, timeout=_remaining(deadline, cap=_SSH_CONTROL_SECONDS)
+                )
+                if master_up and (directory / API_SOCKET_NAME).exists():
+                    return
+                try:
+                    if master_up:
+                        self._forward_again(record, root, deadline)
+                    else:
+                        _remove_stale_control_socket(directory)
+                        self._start_master(record, root, deadline)
+                        master_up = True
+                except TargetRuntimeError as error:
+                    _note_failure(directory, error)
+                    raise
+                _clear_failure(directory)
+        finally:
+            if master_up and supervise:
+                _supervise(root)
 
     def _start_master(self, record: ServerTarget, root: Path, deadline: float) -> None:
         left = _remaining(deadline)
@@ -807,7 +832,56 @@ async def restore_ssh_transport(
 
     if record.kind != "ssh":
         return
-    await asyncio.to_thread(SshTargetRuntime().ensure_master, record, root, timeout=timeout)
+    # The agent is the master's supervisor: it does not start itself again.
+    await asyncio.to_thread(
+        SshTargetRuntime().ensure_master, record, root, timeout=timeout, supervise=False
+    )
+
+
+def close_ssh_masters(roots: Sequence[Path] | None = None) -> tuple[str, ...]:
+    """Close the OpenSSH master of each SSH target; the generated ids of those asked to exit.
+
+    ``roots`` names target roots (records of other kinds are skipped); ``None`` means every target
+    in this computer's registry. Only a master this client started is asked, through its own
+    control socket (``ssh -O exit``), never found by pattern or pid; a target with no control
+    socket, or whose record cannot be read, is skipped, each on its own, so one damaged root never
+    keeps the others' masters open. The command that records this computer's zero-network policy
+    runs this (ADR-051 decision 8), beside each master's own supervisor. Never raises: a master
+    that could not be closed is left to its supervisor, and the shared check refuses every new
+    connection either way.
+    """
+
+    from finishup.client.targets import TargetError, servers_dir
+    from finishup.config.paths import PathSafetyError
+
+    if roots is None:
+        try:
+            chosen = tuple(
+                Path(entry.path)
+                for entry in os.scandir(servers_dir())
+                if entry.is_dir(follow_symlinks=False)
+            )
+        except (OSError, PathSafetyError):
+            return ()
+    else:
+        chosen = tuple(roots)
+    runtime = SshTargetRuntime()
+    closed: list[str] = []
+    for root in chosen:
+        try:
+            record = read_target(root)
+        except (TargetError, OSError, PathSafetyError):
+            continue
+        if record is None or record.kind != "ssh":
+            continue
+        if not (root / "run" / MASTER_SOCKET_NAME).exists():
+            continue
+        try:
+            runtime.teardown(record, root)
+        except (TargetRuntimeError, OSError):
+            continue
+        closed.append(record.target_id)
+    return tuple(closed)
 
 
 async def close_ssh_transport(record: ServerTarget, root: Path) -> None:

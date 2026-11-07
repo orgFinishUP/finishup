@@ -1219,13 +1219,20 @@ SSH (owner-equivalent, no key)
   thread finishes here, but its answer is not sent), no deregistration and no last delivery is
   sent (what the hooks captured stays in this client's outbox), its HTTP connections close, and it
   exits 2 naming `zero_network_remote_selected` and `finishup server use local`. **The SSH master
-  is supervised by the agent:** every connection to an SSH target starts the target's agent when
-  none runs, with or without a workspace to note, an idle agent stays while the master it
-  supervises still answers `-O check` (the master ends on its own after 15 idle minutes), and the
-  agent closes the master through its control socket (`-O exit`) when it stops for the
-  zero-network record, so no master stays open under it. **Limit:** when no agent can run (its
-  lock is unsafe, or it could not be spawned), a master already open stays open until its own 15
-  idle minutes end; nothing is sent over it, because every connection asks the shared check first.
+  is supervised by the agent:** whatever makes a master usable starts the target's agent when none
+  runs (`SshTargetRuntime.ensure_master`): every connection to an SSH target, with or without a
+  workspace to note, and `server connect`, `test` and `status` and the terminal interface's
+  `/server` for any SSH target, selected or not; only the agent restoring its own transport skips
+  it. An idle agent stays while the master it supervises still answers `-O check` (the master ends
+  on its own after 15 idle minutes), and the agent closes the master through its control socket
+  (`-O exit`) when it stops for the zero-network record. The command that records that state
+  closes every SSH target's master too, at once and the same way (`rest_runtime.close_ssh_masters`,
+  from `zero_network_selection`), so a master whose agent could not run (its lock is unsafe, or it
+  could not be spawned) does not stay open either. **Limit:** a master is closed only through its
+  control socket, never found by pattern or pid. One that no longer answers there stays until it
+  ends on its own after its 15 idle minutes; until then it still sends its SSH keepalives
+  (`ServerAliveInterval=15`), but no request goes over it, because every connection asks the
+  shared check first.
 
 **SSH forwards a socket to a socket.** The approach brief proposed forwarding to a loopback TCP
 port of the API. This pull request forwards to the owner-only `api.sock` instead: a request there

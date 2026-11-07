@@ -166,6 +166,29 @@ def _no_real_server_selection_read(  # pyright: ignore[reportUnusedFunction]
     # remembered (maintainer decision, 2026-11-07); a test reaches no real service for it unless
     # it puts ``_read_after_change`` back with its own stand-in for the service.
     monkeypatch.setattr(zero_network_module, "_after_change_state", lambda: "unreadable")
+    # Once this computer reports zero-network, the SSH masters of every target in the registry are
+    # asked to exit (ADR-051 decision 8); no test reaches a real registry's masters for it.
+    monkeypatch.setattr(zero_network_module, "_close_held_connections", lambda: ())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_workspace_agent(  # pyright: ignore[reportUnusedFunction]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep in-process code from starting a real workspace agent (``finishup agent run``).
+
+    A connection to a remote target, and anything that makes an SSH target's master usable,
+    starts that target's agent when none runs (ADR-051). A test's agent would be a detached
+    process outside the test's isolation, so the start answers "none started" unless a test puts
+    its own stand-in in place; a test of the start itself calls the function it imported. The
+    import is inside the fixture for the dependency-free collection reason above.
+    """
+
+    try:
+        import finishup.client.agent as agent_module
+    except ImportError:
+        return
+    monkeypatch.setattr(agent_module, "ensure_agent", lambda _root: False)
 
 
 @pytest.fixture(autouse=True)

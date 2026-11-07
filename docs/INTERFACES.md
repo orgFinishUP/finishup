@@ -5630,8 +5630,19 @@ check first): `remote_auth_failed`, `remote_identity_changed` and `remote_incomp
 nothing; any other phase stores the key, reported as not verified yet. `ensure_master` and
 `start_remote_service` raise the shared check's refusal as `TargetRuntimeError(<reason>)` before
 running ssh, and `probe` answers it as `ProbeResult("unavailable", reason=<reason>)` with nothing
-sent. `close_ssh_transport(record, root)` (`-O exit`) and `ssh_master_alive(record, root)` (`-O
-check`) are for the agent; both do nothing for another kind.
+sent. `ensure_master(record, root, *, timeout, honor_recent_failure=True, supervise=True)` starts
+the master's supervisor (`client.agent.ensure_agent(root)`) once the lock is released whenever it
+leaves a master running (found, started, or one whose `-O forward` failed), so `ensure_ready`
+(`server connect`) and `probe` (`server test`, `status`, the terminal's `/server`) never leave an
+unsupervised master; `supervise=False` only from `restore_ssh_transport` (the agent itself) and
+`_connect_remote` (which started the agent just before). `close_ssh_transport(record, root)` (`-O
+exit`) and `ssh_master_alive(record, root)` (`-O check`) are for the agent; both do nothing for
+another kind. `close_ssh_masters(roots=None) -> tuple[str, ...]` asks the master of each SSH
+target whose `<troot>/run/m` exists (every target in the registry for `None`) to exit through its
+control socket and returns their generated ids; it never raises, and a record that cannot be read
+is skipped. `cli.zero_network_selection._close_held_connections()` runs it whenever
+`everyday_network_state` or `remember_reported_policy` records this computer as zero-network; the
+test suite replaces it so no test reaches a real registry.
 
 **Workspace agent.** `finishup agent run --root <troot>` (`client_only`,
 `client.agent.run_workspace_agent`) holds `<troot>/state/agent.lock` exclusively (stamped with its

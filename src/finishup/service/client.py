@@ -2213,8 +2213,11 @@ async def _connect_remote(
         # The master is this client's own transport, like a TCP connection: any connection may
         # bring it up, within this call's own budget (an unreachable host never holds a hook for
         # ssh's own timeouts, and one that just failed fails at once). Only an on-demand caller
-        # may start the remote service.
-        await asyncio.to_thread(runtime.ensure_master, record, root, timeout=budget())
+        # may start the remote service. This connection started the master's supervisor (the
+        # target's workspace agent) above, so the master does not start a second one.
+        await asyncio.to_thread(
+            runtime.ensure_master, record, root, timeout=budget(), supervise=False
+        )
     except TargetRuntimeError as error:
         raise ControlError(
             "service_unavailable", retryable=True, phase=_remote_phase(error.reason)

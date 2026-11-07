@@ -11,7 +11,8 @@ the web (``ssh``, ``https``, ``local_port``).
   client records whether it was zero-network and when (``client.everyday_policy``). The surfaces
   read the live policy first; while it cannot be read (the service is stopped or locked, the
   normal case while a remote server is used) they fall back to that marker and say "this
-  computer last reported" it.
+  computer last reported" it. A command that records the zero-network state also closes every SSH
+  target's master at once (``_close_held_connections``), beside each master's own supervisor.
 * **Adding or selecting a remote server** is refused in the zero-network state, live or last
   reported (``cli.server``).
 * **A change that would make this computer zero-network while a remote server is selected**
@@ -365,9 +366,25 @@ def everyday_network_state() -> NetworkState:
             permitted = contextvars.Context().run(anyio.run, effective, request)
     if permitted is None:
         return "unreadable"
-    if remember:
-        record_reported_policy(zero_network=not permitted)
+    if remember and record_reported_policy(zero_network=not permitted) and not permitted:
+        _close_held_connections()
     return "network_permitted" if permitted else "zero_network"
+
+
+def _close_held_connections() -> tuple[str, ...]:
+    """Close what this client still holds open to servers elsewhere; the target ids closed.
+
+    Called once this computer's everyday FinishUP has reported a zero-network policy (ADR-051
+    decision 8). Each SSH target's master is supervised by that target's workspace agent, which
+    closes it within about a second of the record; this command closes them too, at once, so a
+    master whose agent could not run (an unsafe agent lock, a spawn that failed) does not stay
+    open for its 15 idle minutes. Each is asked to exit through its own control socket, never
+    found by pattern. Never raises; the test suite replaces it so no test reaches a real registry.
+    """
+
+    from finishup.client.rest_runtime import close_ssh_masters
+
+    return close_ssh_masters()
 
 
 def remember_reported_policy(response: Mapping[str, object]) -> bool:
@@ -395,7 +412,10 @@ def remember_reported_policy(response: Mapping[str, object]) -> bool:
         return False
     from finishup.client.everyday_policy import record_reported_policy
 
-    return record_reported_policy(zero_network=not permitted)
+    written = record_reported_policy(zero_network=not permitted)
+    if written and not permitted:
+        _close_held_connections()
+    return written
 
 
 def read_selection_on_disk() -> ServerTarget | str | None:
