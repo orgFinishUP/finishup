@@ -5618,7 +5618,16 @@ sent). Remote failures are `service_unavailable` with phase `remote_unreachable`
 `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running` or
 `remote_incompatible`. SSH targets (`client.rest_runtime.SshTargetRuntime`) keep one master at
 `<troot>/run/m` forwarding `<troot>/run/api.sock` to the server's `api.sock` (`remote_endpoint` in
-`target.json`), learned by `server add` from `service endpoint --json`. `ensure_master` and
+`target.json`), learned by `server add` from `service endpoint --json`
+(`discover_ssh_endpoint(*, user, host, port, remote_root, remote_launcher, confirm_host_key=False)`;
+`cli.server` passes `confirm_host_key=_trusted_console_present()`, which runs `ssh -o
+StrictHostKeyChecking=ask -o ControlMaster=no -o PasswordAuthentication=no -o
+KbdInteractiveAuthentication=no -T` within 180 s; an unknown host key not confirmed raises
+`TargetRuntimeError("remote_host_key_unconfirmed")`, a changed one `remote_identity_changed`;
+`api_socket_unconfigured` is refused with the `api_socket = true` line). `server login` checks
+the key first with `rest_client.check_api_key(record, root, secret)` (`GET /v1/server`, the shared
+check first): `remote_auth_failed`, `remote_identity_changed` and `remote_incompatible` store
+nothing; any other phase stores the key, reported as not verified yet. `ensure_master` and
 `start_remote_service` raise the shared check's refusal as `TargetRuntimeError(<reason>)` before
 running ssh, and `probe` answers it as `ProbeResult("unavailable", reason=<reason>)` with nothing
 sent. `close_ssh_transport(record, root)` (`-O exit`) and `ssh_master_alive(record, root)` (`-O

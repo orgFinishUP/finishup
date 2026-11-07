@@ -100,6 +100,7 @@ __all__ = [
     "ZERO_NETWORK_PHASE",
     "RestEndpoint",
     "RestServiceClient",
+    "check_api_key",
     "connect_rest_service",
     "open_rest_http",
     "read_server_info",
@@ -317,8 +318,14 @@ class RestEndpoint:
         return f"RestEndpoint(kind={self.kind!r}, <redacted>)"
 
 
-def rest_endpoint_for(record: ServerTarget, root: Path) -> RestEndpoint:
-    """The endpoint of a remote target root: its URL, TLS trust, and credential."""
+def rest_endpoint_for(
+    record: ServerTarget, root: Path, *, credential: str | None = None
+) -> RestEndpoint:
+    """The endpoint of a remote target root: its URL, TLS trust, and credential.
+
+    ``credential`` is a key not stored yet (``server login`` checks it before keeping it); by
+    default the target's stored key is read.
+    """
 
     if not record.is_remote:
         raise ControlError("frame_invalid")
@@ -331,12 +338,13 @@ def rest_endpoint_for(record: ServerTarget, root: Path) -> RestEndpoint:
         )
     from finishup.client.credentials import CredentialError, KeyringOrFileCredential
 
-    try:
-        credential = KeyringOrFileCredential(
-            record.target_id, root, recorded=record.credential
-        ).read()
-    except CredentialError:
-        raise _remote("remote_auth_failed", retryable=False) from None
+    if credential is None:
+        try:
+            credential = KeyringOrFileCredential(
+                record.target_id, root, recorded=record.credential
+            ).read()
+        except CredentialError:
+            raise _remote("remote_auth_failed", retryable=False) from None
     mismatch: _PinMismatch | None = None
     transport: httpx.AsyncBaseTransport
     if record.tls_pin is not None:
@@ -896,6 +904,33 @@ async def connect_rest_service(
             await http.aclose()
         raise
     return RestServiceClient(http, endpoint, info, client_kind, claim=claim, _token=_PRIVATE)
+
+
+async def check_api_key(
+    record: ServerTarget,
+    root: Path,
+    secret: str,
+    *,
+    _transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    """``GET /v1/server`` with ``secret`` before ``server login`` stores it (ADR-051 decision 7).
+
+    Returns when the server accepted the key and runs this release. Raises the
+    ``service_unavailable`` of its remote phase otherwise: ``remote_auth_failed`` (the server
+    refused the key), ``remote_identity_changed`` (the TLS trust recorded for the target did not
+    match, checked in the handshake before the key is sent), ``remote_incompatible`` (another
+    release), or a phase that says the server could not be asked (``remote_unreachable``,
+    ``remote_service_not_running``, or the shared check's refusal, with nothing sent).
+    """
+
+    require_connection_allowed(record)
+    endpoint = rest_endpoint_for(record, root, credential=secret)
+    http = _client(endpoint, transport=_transport)
+    try:
+        await read_server_info(http, endpoint, None)
+    finally:
+        with contextlib.suppress(Exception):
+            await http.aclose()
 
 
 def open_rest_http(record: ServerTarget, root: Path) -> tuple[Any, dict[str, str]]:

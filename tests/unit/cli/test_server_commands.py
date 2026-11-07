@@ -71,8 +71,13 @@ def remote_seams(monkeypatch: pytest.MonkeyPatch) -> None:
         launcher = address["remote_launcher"] or "/srv/owner/.local/bin/finishup"
         return SshEndpoint("/srv/finishup/run/api.sock", cast(str, launcher))
 
+    def accepted(_record: object, _secret: str) -> None:
+        # ``server login`` checks the key with the server; here it accepts it.
+        return None
+
     monkeypatch.setattr(server_cli, "_zero_network_in_force", lambda: False)
     monkeypatch.setattr(server_cli, "_discover_ssh_endpoint", discover)
+    monkeypatch.setattr(server_cli, "_check_api_key", accepted)
 
 
 @pytest.fixture
@@ -1185,6 +1190,216 @@ def test_a_shared_key_file_is_refused(
     assert result.exit_code == 2
     assert result.stderr.startswith("credential_invalid:")
     assert _KEY not in result.output
+
+
+# --- server add and login behave alike for every kind (ADR-051 decision 7, 2026-11-07) ---------
+
+
+def _key_file(home: Path) -> Path:
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    return key_file
+
+
+@pytest.mark.parametrize(
+    ("phase", "words"),
+    [
+        ("remote_auth_failed", "the server refused this API key, so it was not stored"),
+        ("remote_identity_changed", "so the key was not sent and not stored"),
+        ("remote_incompatible", "so the key was not stored"),
+    ],
+)
+def test_login_never_stores_a_key_the_server_rejects(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    no_platform_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    words: str,
+) -> None:
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    (record,) = targets.list_targets()
+    checked: list[str] = []
+
+    def refused(_record: object, secret: str) -> str:
+        checked.append(secret)
+        return phase
+
+    monkeypatch.setattr(server_cli, "_check_api_key", refused)
+
+    result = _invoke("login", "fu", "--key-file", str(_key_file(home)))
+
+    assert result.exit_code != 0
+    assert result.stderr.startswith(f"{phase}: ")
+    assert words in result.stderr
+    assert checked == [_KEY]
+    assert not (targets.target_root(record.target_id) / "config" / "credential").exists()
+    assert targets.list_targets()[0].credential is None
+    assert _KEY not in result.output
+
+
+def test_login_keeps_a_key_it_could_not_check_and_says_it_is_not_verified_yet(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    no_platform_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+
+    def unreachable(_record: object, _secret: str) -> str:
+        return "remote_unreachable"
+
+    monkeypatch.setattr(server_cli, "_check_api_key", unreachable)
+
+    result = _invoke("login", "fu", "--key-file", str(_key_file(home)))
+
+    assert result.exit_code == 0, result.output
+    assert "in an owner-only file, not verified yet." in result.stdout
+    assert "The server did not answer yet (remote_unreachable)" in result.stdout
+    assert "checked on the first connection" in result.stdout
+    assert "'finishup server test fu'" in result.stdout
+    assert targets.list_targets()[0].credential == "file"
+
+
+def test_login_says_when_the_server_accepted_the_key(
+    home: Path, authorized: list[tuple[str, str]], no_platform_store: None
+) -> None:
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    result = _invoke("login", "fu", "--key-file", str(_key_file(home)))
+    assert result.exit_code == 0, result.output
+    assert result.stdout.rstrip().endswith("; the server accepted it.")
+
+
+def test_login_checks_the_key_with_the_servers_own_api(
+    home: Path, authorized: list[tuple[str, str]], no_platform_store: None
+) -> None:
+    """The real check (``rest_client.check_api_key``) behind ``_check_api_key``'s phases."""
+
+    import anyio
+    import httpx
+
+    from builders.network_api import FakeService, key_store, make_api
+    from finishup.client import rest_client
+    from finishup.ports.control import ControlError
+
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    keys = key_store(home)
+    _key, token = keys.create("laptop", "agent")
+    app = make_api(FakeService(), keys).asgi("https")
+
+    async def check(secret: str, transport: httpx.AsyncBaseTransport) -> str | None:
+        try:
+            await rest_client.check_api_key(record, root, secret, _transport=transport)
+        except ControlError as error:
+            return error.phase
+        return None
+
+    def asgi() -> httpx.AsyncBaseTransport:
+        return httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("unreachable", request=request)
+
+    assert anyio.run(check, token, asgi()) is None
+    assert anyio.run(check, "fu_" + "x" * 43, asgi()) == "remote_auth_failed"
+    assert anyio.run(check, token, httpx.MockTransport(refuse)) == "remote_unreachable"
+
+
+class _SshDiscovery:
+    """``rest_runtime.discover_ssh_endpoint`` as the add calls it, with no ssh."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, console: bool, fail: object) -> None:
+        from finishup.client import rest_runtime
+
+        self.calls: list[bool] = []
+        self._fail = fail
+
+        def discover(**address: object) -> object:
+            self.calls.append(cast(bool, address["confirm_host_key"]))
+            if isinstance(self._fail, BaseException):
+                raise self._fail
+            return rest_runtime.SshEndpoint("/srv/finishup/run/api.sock", "/opt/f/bin/finishup")
+
+        monkeypatch.setattr(rest_runtime, "discover_ssh_endpoint", discover)
+        monkeypatch.setattr(server_cli, "_trusted_console_present", lambda: console)
+        # The fixture's stand-in for the whole step is put back: these tests drive the real one.
+        monkeypatch.setattr(server_cli, "_discover_ssh_endpoint", _REAL_DISCOVER)
+
+
+_REAL_DISCOVER = server_cli._discover_ssh_endpoint  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("console", [True, False])
+def test_ssh_add_lets_openssh_ask_only_on_the_owners_console(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    console: bool,
+) -> None:
+    discovery = _SshDiscovery(monkeypatch, console=console, fail=None)
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code == 0, result.output
+    assert discovery.calls == [console]
+    asked = "OpenSSH asks you to confirm it here" in result.stdout
+    assert asked is console
+    if console:
+        assert "'api_socket = true' under [network]" in result.stdout
+    assert [record.name for record in targets.list_targets()] == ["lab"]
+
+
+@pytest.mark.parametrize(
+    ("console", "words"),
+    [
+        (True, "answer yes to OpenSSH's question once you have checked the fingerprint"),
+        (False, "there is no terminal of yours here for OpenSSH to ask you to confirm it"),
+    ],
+)
+def test_ssh_add_refuses_an_unconfirmed_host_key_with_the_fix_and_adds_nothing(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    console: bool,
+    words: str,
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    _SshDiscovery(
+        monkeypatch, console=console, fail=TargetRuntimeError("remote_host_key_unconfirmed")
+    )
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code != 0
+    assert result.stderr.startswith("remote_host_key_unconfirmed: ")
+    assert words in result.stderr and "nothing was added" in result.stderr
+    assert "lab.example" not in result.stderr
+    assert targets.list_targets() == ()
+
+
+def test_ssh_add_names_the_api_socket_setting_when_the_server_does_not_offer_it(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    _SshDiscovery(
+        monkeypatch,
+        console=True,
+        fail=TargetRuntimeError("remote_incompatible", phase="api_socket_unconfigured"),
+    )
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code != 0
+    assert result.stderr.startswith("remote_incompatible: ")
+    assert "add 'api_socket = true' under [network] in its config.toml" in result.stderr
+    assert "'finishup service restart'" in result.stderr
+    assert "(phase api_socket_unconfigured)" in result.stderr
+    assert targets.list_targets() == ()
 
 
 def test_ssh_targets_take_no_api_key(home: Path, authorized: list[tuple[str, str]]) -> None:

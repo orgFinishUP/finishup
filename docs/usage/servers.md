@@ -46,6 +46,19 @@ finishup server add bench https://127.0.0.1:8443 --tls-pin sha256:<64 hex digits
 A **local** server needs its own setup: select it (below) and run `finishup setup`, exactly as for a
 first installation.
 
+An **SSH** server needs its network API turned on for SSH clients first: on the server, its
+`config.toml` needs `api_socket = true` under `[network]` (see [Turn on the server's network
+API](#turn-on-the-servers-network-api)), and its FinishUP service restarted. Without it,
+`finishup server add` adds nothing and says exactly that, with the line to add. FinishUP runs
+your own `ssh`, with your keys, `ssh-agent` and known hosts. If this computer does not know the
+server's host key yet, `finishup server add` lets OpenSSH ask you once, in your terminal, to
+confirm it: compare the fingerprint with the server's own before you answer yes. Your answer goes
+into your known hosts, and every later connection checks it and never asks again; a host key that
+changed is refused, never asked about. Password questions stay off for that one connection, so
+your SSH key must already let you in (`ssh-add`). Without your terminal to ask in (a script, say),
+FinishUP adds nothing and says so with `remote_host_key_unconfirmed`: run `finishup server add`
+in your own terminal, or connect once with `ssh` yourself, then add it again.
+
 For every other kind, FinishUP first shows what will leave this computer (see
 [What leaves this computer](#what-leaves-this-computer)), then asks what the server may read
 outside your projects on this computer, its *mode* (see
@@ -186,6 +199,12 @@ environment variable, a settings file, a log, a message your agent can read, or 
 `logout` deletes it. The server's operator gives you the key; a key has a scope, and an `agent` key
 allows what your agents need while an `operator` key also allows management reads such as privacy
 status.
+
+`login` checks the key with the server before keeping it. If the server refuses the key, or runs
+another FinishUP release, or its certificate is not the one you trusted, nothing is stored and
+FinishUP says why and what to do. If the server cannot be reached right now, FinishUP stores the key
+and says it is not verified yet: it is checked on the first connection, and `finishup server test
+NAME` checks it as soon as the server is up.
 
 SSH servers need no FinishUP sign-in. Your SSH keys, `ssh-agent` and known hosts stay with SSH;
 FinishUP stores no SSH key and never asks for an SSH password.
@@ -647,8 +666,9 @@ repeated safely.
 | `request_timeout` | The request reached the server, or may have, but its answer was lost on the way back. It may have been recorded. | Follow the shown continuation: it repeats the request safely under its original identity. |
 | `remote_auth_failed` | The server did not accept you, or cannot check keys until its operator repairs its key file. | SSH: load your key (`ssh-add`) or check your SSH configuration. Web: run `finishup server login NAME`, or ask the server's operator. |
 | `remote_identity_changed` | The server's host key or certificate is not the one you confirmed. | Confirm the server's identity another way, then remove and add the server again. |
+| `remote_host_key_unconfirmed` | When you added an SSH server, its host key was not confirmed: you declined OpenSSH's question, or there was no terminal of yours to ask in. Nothing was added. | Run `finishup server add` again in your own terminal and answer yes once you have checked the fingerprint, or connect once with `ssh` yourself first. |
 | `remote_service_not_running` | The server machine answered, but its FinishUP service is not running. | SSH: `ssh -t <server> finishup service start`. Web: ask the server's operator. |
-| `remote_incompatible` | The two machines run different FinishUP releases. | Install the same release on both. |
+| `remote_incompatible` | The two machines run different FinishUP releases, or (when you add an SSH server) the server's FinishUP does not offer its network API to SSH clients. | Install the same release on both. For an SSH server: on the server, add `api_socket = true` under `[network]` in its `config.toml`, run `finishup service restart` there, then add it again. |
 | `target_reauthorization_required` | This release shows a newer disclosure of what leaves your computer than the one you confirmed for that server, so nothing is sent to it. | Run `finishup server use NAME` in your own terminal and confirm again. |
 | `vault_locked` | The server's vault is locked. | SSH: `ssh -t <server> finishup service unlock`. Web: the operator unlocks it on the server. |
 | `requires_server_host` | That command belongs to the server. | Run it on the server, as shown above. |

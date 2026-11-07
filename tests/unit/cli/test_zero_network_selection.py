@@ -662,6 +662,7 @@ def test_server_login_of_a_server_not_in_use_names_this_computers_policy_as_the_
 ) -> None:
     record = _remote(kind, select=False)
     record_reported_policy(zero_network=True, now=_AT)
+    monkeypatch.setattr(server_cli, "_check_api_key", _never)
     monkeypatch.setattr(server_cli, "_read_secret_on_console", _never)
 
     result = _invoke("server", "login", _NAME)
@@ -675,6 +676,7 @@ def test_server_login_of_the_selected_server_names_server_use_local_and_that_fix
 ) -> None:
     record = _remote("https", select=True)
     record_reported_policy(zero_network=True, now=_AT)
+    monkeypatch.setattr(server_cli, "_check_api_key", _never)
     monkeypatch.setattr(server_cli, "_read_secret_on_console", _never)
 
     first = _invoke("server", "login", _NAME)

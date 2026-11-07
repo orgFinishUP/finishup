@@ -84,6 +84,9 @@ _MASTER_IDLE_SECONDS: Final = 900
 _SSH_START_SECONDS: Final = 30.0
 _SSH_CONTROL_SECONDS: Final = 10.0
 _DISCOVERY_SECONDS: Final = 30.0
+# Room for the owner to read OpenSSH's host-key question at ``server add`` and answer it (the
+# bound approach A's and approach B's add use).
+_CONFIRM_DISCOVERY_SECONDS: Final = 180.0
 _MAX_DISCOVERY_BYTES: Final = 65_536
 _MAX_PATH_TEXT: Final = 1_024
 # Where a FinishUP launcher is commonly installed when ``server add`` was given none. The first
@@ -218,6 +221,19 @@ def _ssh_environment() -> dict[str, str]:
     return {name: os.environ[name] for name in keep if name in os.environ}
 
 
+def _host_key_unconfirmed(stderr: bytes) -> bool:
+    """Whether OpenSSH refused a host key it does not know (never one that changed).
+
+    Strict checking says "No … host key is known for …"; a declined or unanswerable question says
+    only "Host key verification failed". A changed key says "REMOTE HOST IDENTIFICATION HAS
+    CHANGED" and stays ``remote_identity_changed``.
+    """
+
+    if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr:
+        return False
+    return b"host key is known" in stderr or b"Host key verification failed" in stderr
+
+
 def _ssh_failure(stderr: bytes) -> TargetRuntimeError:
     if _HOST_KEY_FAILURE.search(stderr):
         return TargetRuntimeError("remote_identity_changed", phase="ssh_host_key")
@@ -295,23 +311,47 @@ def discover_ssh_endpoint(
     port: int,
     remote_root: str | None,
     remote_launcher: str | None,
+    confirm_host_key: bool = False,
 ) -> SshEndpoint:
-    """Ask the server, over one batch-mode SSH command, where its API socket is.
+    """Ask the server, over one SSH command, where its API socket is.
 
     Runs ``<launcher> service endpoint --json`` there (``--remote-launcher``, or the first common
     install path that exists). The answer must name an owner-only API socket: a server without
-    ``[network] api_socket = true`` is refused with ``remote_incompatible``. OpenSSH must already
-    trust the host key (``StrictHostKeyChecking=yes``); nothing here prompts.
+    ``[network] api_socket = true`` is refused with ``remote_incompatible`` (phase
+    ``api_socket_unconfigured``).
+
+    ``confirm_host_key`` (``server add`` on the owner's trusted console) makes this the one
+    interactive ``ssh`` of the topology, as approach A's and approach B's ``server add`` are:
+    ``StrictHostKeyChecking=ask`` with no master and no ``BatchMode``, so OpenSSH itself asks, on
+    that terminal, to confirm a host key it does not know yet, and that answer is the
+    ``known_hosts`` pin every later ``BatchMode`` connection checks. Password and
+    keyboard-interactive login stay off, so the host key is the only question and the add proves
+    the key authentication later connections need. Without it nothing is asked
+    (``StrictHostKeyChecking=yes``). An unknown host key that was not confirmed (no console, or the
+    owner declined) raises ``TargetRuntimeError("remote_host_key_unconfirmed")``; a changed one
+    stays ``remote_identity_changed``.
     """
 
     launcher = remote_launcher
     command = _remote_command(remote_root, launcher, "service", "endpoint", "--json")
+    trust = (
+        [
+            "-o",
+            "StrictHostKeyChecking=ask",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=no",
+            "-T",
+        ]
+        if confirm_host_key
+        else ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    )
     argv = [
         _SSH,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
+        *trust,
         "-o",
         f"ConnectTimeout={_SSH_CONNECT_SECONDS}",
         "-p",
@@ -320,8 +360,12 @@ def discover_ssh_endpoint(
         _destination_of(user, host),
         command,
     ]
-    completed = _run(argv, timeout=_DISCOVERY_SECONDS)
+    completed = _run(
+        argv, timeout=_CONFIRM_DISCOVERY_SECONDS if confirm_host_key else _DISCOVERY_SECONDS
+    )
     if completed.returncode == 255:
+        if _host_key_unconfirmed(completed.stderr):
+            raise TargetRuntimeError("remote_host_key_unconfirmed")
         raise _ssh_failure(completed.stderr)
     if completed.returncode == 127:
         raise TargetRuntimeError("remote_incompatible", phase="launcher_not_found")

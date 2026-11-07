@@ -715,7 +715,39 @@ answers bounded `workspace_call`s on a connection that declared it.
 - The credential never appears in argv, the environment, `target.json`, a host registration, a
   log, hook output, an MCP frame or JSON output.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks
-  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`.
+  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, except
+  for the one probe of `server add` below.
+- **`server add` and `server login` behave alike for every kind** (maintainer decision of
+  2026-11-07: the three approaches and the three remote kinds behave the same and work without
+  friction once set up; refusal is the last resort; say what happened, why, and the fix).
+  - *SSH add.* After the owner's typed confirmation on the trusted console, `server add
+    ssh://…` asks the server where its network API is over one `ssh` that lets OpenSSH ask, on
+    that same terminal, to confirm a host key this computer does not know yet
+    (`StrictHostKeyChecking=ask`, no master, no `BatchMode`, 180 seconds), as approach A's add
+    does, so a first add no longer fails until the owner has run `ssh` by hand. Password and
+    keyboard-interactive login stay off for that probe, so the host key is the only question and
+    the add proves the key authentication every later connection needs. The owner's answer is
+    OpenSSH's own `known_hosts` entry, the pin every later connection checks with
+    `StrictHostKeyChecking=yes`; a key that changed is never asked about
+    (`remote_identity_changed`). The command says beforehand that OpenSSH may ask and to compare
+    the fingerprint with the server's own. Without that console nothing is asked: an unknown key
+    is refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the fix
+    (run `server add` in your own terminal, or `ssh` once yourself); a declined key is refused the
+    same way, naming the question to answer. Approach C's SSH kind reaches the server's own
+    owner-only API socket, so the server's `config.toml` needs `api_socket = true` under
+    `[network]` (inherent to this approach); the add says so before it asks, and a server without
+    it is refused (`remote_incompatible`, phase `api_socket_unconfigured`) with that exact line and
+    `finishup service restart` there, nothing added.
+  - *Login.* `server login` checks the key with the server (`GET /v1/server` with the new key,
+    `rest_client.check_api_key`) before storing it. A key the server refuses
+    (`remote_auth_failed`), a server whose identity does not match the recorded trust
+    (`remote_identity_changed`, refused inside the TLS handshake before the key is sent) or that
+    runs another release (`remote_incompatible`) stores nothing, and the message says why, that
+    nothing was stored, and the fix. A server that cannot be reached keeps the key, and the
+    command says it is not verified yet, that it is checked on the first connection, and that
+    `server test NAME` checks it once the server is up; a target confirmed under an older
+    disclosure is not sent the key either, and the command says so and names `finishup server use
+    NAME`. Until 2026-11-07 approach C stored any key without checking it.
 - Which client process reads the credential is part of each approach's topology. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.
@@ -1160,9 +1192,10 @@ SSH (owner-equivalent, no key)
   that could not reach the server is remembered for 10 seconds (`<troot>/run/m.failed`, closed
   tokens only), so the hooks right after it fail at once with the same phase; `server connect`
   and `server test` always try again. `server add` for SSH runs `<launcher> service endpoint
-  --json` once (batch mode, `ConnectTimeout=10`) to record the server's API socket and the
+  --json` once (`ConnectTimeout=10`; on the owner's console the one probe that lets OpenSSH ask to
+  confirm a new host key, decision 7, else batch mode) to record the server's API socket and the
   launcher that answered; a server without `api_socket = true` is refused with
-  `remote_incompatible` (phase `api_socket_unconfigured`).
+  `remote_incompatible` (phase `api_socket_unconfigured`) and the line to add.
 - `client/agent.py` (`finishup agent run --root <troot>`, `client_only`): the pull-based workspace
   agent. Client processes note each workspace they work in (an owner-only
   `yoetz.agent-workspace/1` record beneath the target root; the path never leaves the machine) and

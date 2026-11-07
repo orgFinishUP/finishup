@@ -111,6 +111,63 @@ def test_the_master_argv_is_fixed_and_forwards_the_api_socket() -> None:
             ssh_master_argv(_ssh_record(remote_endpoint=endpoint), root)
 
 
+def test_the_add_time_discovery_lets_openssh_ask_to_confirm_a_new_host_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``server add`` on the owner's console: OpenSSH asks once, on that terminal, as approach A's
+    # and approach B's add do; no master, no BatchMode, no password question, a long bound.
+    report: dict[str, object] = {
+        "schema": "yoetz.service-endpoint/1",
+        "endpoint": "/run/user/1000/finishup/control.sock",
+        "network": {"api_socket": "/run/user/1000/finishup/api.sock", "listen": [], "tls": False},
+    }
+    recorder = _Recorder((0, json.dumps(report).encode(), b""))
+    monkeypatch.setattr(rest_runtime, "_run", recorder)
+    found = discover_ssh_endpoint(
+        user="owner",
+        host="lab.example",
+        port=2222,
+        remote_root=None,
+        remote_launcher="/opt/finishup/bin/finishup",
+        confirm_host_key=True,
+    )
+    assert found.api_socket == "/run/user/1000/finishup/api.sock"
+    ((argv, _detaches),) = recorder.calls
+    assert argv[:15] == [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=ask",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-T",
+        "-o",
+        "ConnectTimeout=10",
+        "-p",
+        "2222",
+        "--",
+    ]
+    assert "BatchMode=yes" not in argv
+    assert recorder.timeouts == [180.0]
+    # A key the owner declined is unconfirmed, nothing else.
+    monkeypatch.setattr(
+        rest_runtime, "_run", _Recorder((255, b"", b"Host key verification failed.\r\n"))
+    )
+    with pytest.raises(TargetRuntimeError) as declined:
+        discover_ssh_endpoint(
+            user=None,
+            host="lab.example",
+            port=22,
+            remote_root=None,
+            remote_launcher=None,
+            confirm_host_key=True,
+        )
+    assert declined.value.reason == "remote_host_key_unconfirmed"
+
+
 def test_discovery_reads_the_api_socket_and_the_launcher_that_answered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -155,7 +212,18 @@ def test_discovery_reads_the_api_socket_and_the_launcher_that_answered(
     ("result", "reason", "phase"),
     [
         ((255, b"", b"owner@lab: Permission denied (publickey)."), "remote_auth_failed", None),
-        ((255, b"", b"Host key verification failed."), "remote_identity_changed", None),
+        # An unknown host key nobody confirmed is not a changed one (ADR-051, server add parity).
+        ((255, b"", b"Host key verification failed."), "remote_host_key_unconfirmed", None),
+        (
+            (255, b"", b"No ED25519 host key is known for lab.example and you have requested"),
+            "remote_host_key_unconfirmed",
+            None,
+        ),
+        (
+            (255, b"", b"@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @"),
+            "remote_identity_changed",
+            None,
+        ),
         (
             (255, b"", b"ssh: connect to host lab port 22: Connection refused"),
             "remote_unreachable",

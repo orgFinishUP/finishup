@@ -273,8 +273,15 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _UNAVAILABLE,
     ),
     "remote_identity_changed": (
-        "the server's host key or certificate is not one this computer trusts; connect with ssh "
-        "once to confirm a new host key, or confirm the server another way and add it again",
+        "the server's host key or certificate is not the one this computer trusts (an SSH host key "
+        "that changed, or a certificate that does not match the recorded trust); confirm the "
+        "server another way, then remove it and add it again",
+        _UNAVAILABLE,
+    ),
+    # ADR-051 decision 7 (server add parity, 2026-11-07): an SSH host key nobody confirmed.
+    "remote_host_key_unconfirmed": (
+        "the server's SSH host key was not confirmed on this computer, so nothing was added; run "
+        "'finishup server add' in your own terminal and confirm the key when OpenSSH asks",
         _UNAVAILABLE,
     ),
     "remote_service_not_running": (
@@ -633,10 +640,26 @@ def _discover_ssh_endpoint(
     remote_root: str | None,
     remote_launcher: str | None,
 ) -> SshEndpointFacts:
-    """Where an SSH server's API socket is, through one batch-mode SSH command (ADR-051)."""
+    """Where an SSH server's API socket is, through one SSH command (ADR-051).
+
+    On the owner's trusted console OpenSSH may ask, once, to confirm a host key this computer does
+    not know yet (``StrictHostKeyChecking=ask``, as approach A's and approach B's ``server add``
+    do); that answer is the pin every later connection checks. Without that console nothing is
+    asked, and an unknown host key is refused with the fix (decision 7, server add and login
+    parity). A server whose FinishUP does not offer its API socket is refused with the exact
+    setting to change there.
+    """
 
     from finishup.client.rest_runtime import discover_ssh_endpoint
 
+    console = _trusted_console_present()
+    if console:
+        typer.echo(
+            "Asking the server where its FinishUP network API is (its config.toml needs "
+            "'api_socket = true' under [network]). If this computer does not know its SSH host "
+            "key yet, OpenSSH asks you to confirm it here: compare the fingerprint with the "
+            "server's own before you answer yes."
+        )
     try:
         return discover_ssh_endpoint(
             user=user,
@@ -644,9 +667,93 @@ def _discover_ssh_endpoint(
             port=port,
             remote_root=remote_root,
             remote_launcher=remote_launcher,
+            confirm_host_key=console,
         )
     except TargetRuntimeError as error:
+        if error.reason == "remote_host_key_unconfirmed":
+            raise ServerCommandRefused(
+                "remote_host_key_unconfirmed",
+                message=_HOST_KEY_DECLINED if console else _HOST_KEY_NO_CONSOLE,
+            ) from None
+        if error.reason == "remote_incompatible" and error.phase == "api_socket_unconfigured":
+            raise ServerCommandRefused(
+                "remote_incompatible",
+                detail="phase api_socket_unconfigured",
+                message=_NO_API_SOCKET,
+            ) from None
         _runtime_failure(error)
+
+
+_HOST_KEY_DECLINED: Final = (
+    "the server's SSH host key was not confirmed, so nothing was added; run 'finishup server add' "
+    "again and answer yes to OpenSSH's question once you have checked the fingerprint with the "
+    "server's own"
+)
+_HOST_KEY_NO_CONSOLE: Final = (
+    "this computer does not know the server's SSH host key yet, and there is no terminal of yours "
+    "here for OpenSSH to ask you to confirm it, so nothing was added; run 'finishup server add' in "
+    "your own terminal, or connect once with 'ssh' yourself, then add it again"
+)
+# Approach C's SSH kind reaches the server's own owner-only API socket (decision 9).
+_NO_API_SOCKET: Final = (
+    "the server's FinishUP does not offer its network API to SSH clients, so nothing was added; on "
+    "the server, add 'api_socket = true' under [network] in its config.toml and run 'finishup "
+    "service restart' there, then run 'finishup server add' again"
+)
+
+
+def _trusted_console_present() -> bool:
+    """Whether this command runs on the owner's terminal, where OpenSSH can ask its question.
+
+    ``server add`` of a remote kind has just required the owner's trusted foreground console for
+    the typed confirmation (``_confirm_on_trusted_console``), which fails closed without it; this
+    checks, without opening it again, that the probe that follows still has that terminal
+    (standard input and error on a terminal, and ``/dev/tty``), as OpenSSH needs to ask.
+    """
+
+    import os
+
+    try:
+        return os.isatty(0) and os.isatty(2) and os.path.exists("/dev/tty")
+    except OSError:
+        return False
+
+
+# ``server login``: why the server's answer keeps the key from being stored, and the fix.
+_LOGIN_REFUSED: Final[Mapping[str, str]] = {
+    "remote_auth_failed": (
+        "the server refused this API key, so it was not stored; check the key with the server's "
+        "owner ('finishup service api-key list' on the server shows its keys) and run "
+        "'finishup server login' again"
+    ),
+    "remote_identity_changed": (
+        "the server's certificate does not match the trust recorded for it, so the key was not "
+        "sent and not stored; verify the server another way, then remove and add it again"
+    ),
+    "remote_incompatible": (
+        "that server is not running this FinishUP release (or is not a FinishUP server), so the "
+        "key was not stored; install the same release on both, then run 'finishup server login' "
+        "again"
+    ),
+}
+
+
+def _check_api_key(record: ServerTarget, secret: str) -> str | None:
+    """``GET /v1/server`` with ``secret``: ``None`` when the server accepted it, else the phase."""
+
+    import anyio
+
+    from finishup.client.rest_client import check_api_key
+    from finishup.ports.control import ControlError
+
+    async def check() -> None:
+        await check_api_key(record, target_root(record.target_id), secret)
+
+    try:
+        anyio.run(check)
+    except ControlError as error:
+        return error.phase or error.reason
+    return None
 
 
 def _emit(lines: tuple[str, ...]) -> None:
@@ -1607,11 +1714,22 @@ def server_login(
         raise ServerCommandRefused("credential_not_applicable")
     refusal = zero_network_connection_refusal(record)
     if refusal is not None:
-        # A key is stored only to reach a server elsewhere, and nothing is sent to one while
-        # this computer is zero-network (ADR-051 decision 8): no key is read or stored.
+        # The key is checked against the server before it is stored: a connection, and nothing
+        # is sent to a server elsewhere while this computer is zero-network (ADR-051 decision 8).
         raise refusal
     try:
         secret = read_key_file(key_file) if key_file is not None else _read_secret_on_console()
+    except CredentialError as error:
+        raise ServerCommandRefused(error.reason)
+    # The key is checked against the server before it is kept (decision 7, server add and login
+    # parity): a refused key, a server whose identity does not match the recorded trust, or
+    # another release is never stored. A server that cannot be asked now keeps the key, and the
+    # command says it is not verified yet.
+    unanswered = _check_api_key(record, secret)
+    refused = _LOGIN_REFUSED.get(unanswered or "")
+    if refused is not None:
+        raise ServerCommandRefused(cast(str, unanswered), message=refused)
+    try:
         root = target_root(record.target_id)
         location = KeyringOrFileCredential(
             record.target_id, root, recorded=record.credential
@@ -1623,7 +1741,22 @@ def server_login(
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
-    typer.echo(f"Stored the API key for {record.target_id} in {where}.")
+    if unanswered is None:
+        typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
+        return
+    typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+    if unanswered == "target_reauthorization_required":
+        typer.echo(
+            "It was not sent: you confirmed this server under an older disclosure, so nothing is "
+            f"sent to it until you run 'finishup server use {record.name}'. The key is checked on "
+            "the first connection after that."
+        )
+        return
+    typer.echo(
+        f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
+        f"checked on the first connection; run 'finishup server test {record.name}' once the "
+        "server is up to check it now."
+    )
 
 
 @server_app.command("logout")
