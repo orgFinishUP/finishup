@@ -472,7 +472,16 @@ answers bounded `workspace_call`s on a connection that declared it.
   task statement costs nothing. Whether a path exists is answered only for one the local
   outside-input candidate rule would look at (no hidden component, not credential-named, in no
   system or protected directory), so the server learns no more than `lstat_candidates` already
-  tells it. A named root beneath which the task names nothing is left unopened, and one that
+  tells it. What exists counts only where a local read would read it (review of #1313): a task
+  input left unread is reported `unlisted` only when the local read's own trusted metadata walk
+  (`task_input_read.outside_inputs_readable`: its home-private, hidden and credential-named
+  refusals, its directory and file trust tests, a single link, an owner's, writable by no other
+  account) would read a file for it, and a declared test is `root_not_admitted` only when the
+  local `read_declared_test`'s fences and walk would open it (`declared_test_readable`); any
+  other reads as nothing in both modes, as locally, because no folder the owner lists and no
+  mode would let it be read. Neither looks at content, so a declared test that is not text the
+  local read returns (binary, empty, over 1 MiB) is still counted, and an empty task input
+  counts though it gives the review nothing: a known over-count, never a hidden omission. A named root beneath which the task names nothing is left unopened, and one that
   holds a listed folder is walked only to the values beneath that folder. Beneath the server's own
   roots the client's record narrows them in `listed` mode, and a folder narrower than the server's
   root admits what lies beneath that folder alone; a listed folder beneath none of the server's
