@@ -4791,10 +4791,11 @@ dials its own stream.
   `handshake` (or `handshake_git_version`). `ServiceClient.closed` and `async wait_closed()` serve
   long-lived agent connections.
 - `finishup.client.agent_session.BridgeBackgroundWork(*, lease_seconds=900.0,
-  drain_interval=30.0, connect=None, binding_for=None, pending=None, clock=time.monotonic)`: the MCP
-  bridge's background agent connection (`connect_service`, never on demand) and drain;
-  `note_activity(locator)` (each bridge service call) renews the lease, `run_pass() ->
-  BackgroundPass(connected, drained)`, `run()`, `aclose()`. `start_remote_background_work() ->
+  drain_interval=30.0, connect=None, binding_for=None, pending=None, clock=time.monotonic,
+  root=None, zero_network_check=1.0)`: the MCP bridge's background agent connection
+  (`connect_service`, never on demand) and drain; `note_activity(locator)` (each bridge service
+  call) renews the lease, `run_pass() -> BackgroundPass(connected, drained, refused)`, `run()`,
+  `aclose()`. `start_remote_background_work() ->
   (work, task) | None` starts it for a remote root only; the bridge keeps it in its client slot
   (`_ClientSlot.remote_background`). The drain probe is
   `client.observation_outbox.capture_pending(workspace, *, state=None) -> bool` (read-only).
