@@ -414,8 +414,11 @@ answers bounded `workspace_call`s on a connection that declared it.
   also admits a task's files in `local` mode, even where the server's own policy admits no folder;
   it records FOLDER canonicalized
   by the local service's own input-root rule (an existing directory named by its absolute,
-  normalized, link-free path; never hidden or a system tree), and never the home directory, a
-  folder that holds it, or one in its private trees. `server folders remove NAME FOLDER|--all` is
+  normalized, link-free path of plain parts; never a part starting with a dot, the filesystem
+  root, or `/boot`, `/dev`, `/etc`, `/proc`, `/run`, `/sys`, `/var/run`, `/private/etc` or
+  `/private/var/run` or beneath them), and never the home directory, a folder that holds it, or
+  one in its private trees (`Library`, `AppData`, `snap`); any other folder, `/usr/lib` included,
+  may be listed. `server folders remove NAME FOLDER|--all` is
   the way out; like a change of mode, it applies from the workspace agent's next read, and a read
   already in progress may still return files from that folder (a review the server already
   prepared may still send what it read there). Listing or removing a folder keeps the mode; a

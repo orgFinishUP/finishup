@@ -210,8 +210,10 @@ def test_a_folder_the_input_root_rule_refuses_is_refused_before_asking(
         value = os.fspath(hidden)
     result = _invoke("add", "lab", value)
     assert result.exit_code == 2
-    assert result.stderr.startswith("folder_invalid:")
-    assert value not in result.stderr
+    # Only the fixed text, which names the system trees by itself: never the folder given.
+    fixed = server_cli.refusal_message(server_cli.ServerCommandRefused("folder_invalid"))
+    assert result.stderr == f"folder_invalid: {fixed}\n"
+    assert value not in result.stderr.replace(fixed, "")
     assert confirmed == []
     assert read_folders(root, record.target_id) == ()
 
@@ -729,3 +731,34 @@ def test_status_text_and_json_show_the_mode_and_its_origin(
         "mode_source": "owner",
         "folders": [folder],
     }
+
+
+def test_the_folder_refusal_names_exactly_what_is_refused() -> None:
+    """RE-8: the refusal and the guide name the rule itself, not "no hidden or system folder".
+
+    Every system tree the input-root shape refuses and every home private tree is named; nothing
+    broader is promised, and a folder outside that list, such as ``/usr/lib``, is admitted.
+    """
+
+    from finishup.adapters.home_project_reads import (
+        _PRIVATE_TREES,  # pyright: ignore[reportPrivateUsage]
+    )
+    from finishup.client.server_folders import folder_admissible
+    from finishup.domain.privacy import SYSTEM_DIRECTORY_PREFIXES
+
+    message = server_cli.refusal_message(server_cli.ServerCommandRefused("folder_invalid"))
+    guide = (Path(__file__).parents[3] / "docs/usage/servers.md").read_text()
+    for text in (message, guide):
+        assert "system folder" not in text
+        assert "hidden or system" not in text
+    for prefix in SYSTEM_DIRECTORY_PREFIXES:
+        assert prefix in message
+        assert f"`{prefix}`" in guide
+    for tree in _PRIVATE_TREES:
+        assert tree in message
+        assert f"`{tree}`" in guide
+    assert "filesystem root" in message and "filesystem root" in guide
+    for prefix in SYSTEM_DIRECTORY_PREFIXES:
+        assert not folder_admissible(prefix)
+    if Path("/usr/lib").is_dir() and not Path("/usr/lib").is_symlink():
+        assert folder_admissible("/usr/lib")
