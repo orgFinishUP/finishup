@@ -172,30 +172,45 @@ _REMOTE_UNAVAILABLE_CONTEXT: Final = (
     "The selected FinishUP server could not serve this mapped session; no live receipt can be "
     "promised. Never fall back to another server or a local service."
 )
-# ADR-051 decision 8: this computer refused to connect while it is zero-network; the server did
-# not fail, and nothing was sent to it.
-_REMOTE_ZERO_NETWORK_CONTEXT: Final = (
-    "This computer's FinishUP is set to make no network connections, so nothing was sent to the "
-    "selected FinishUP server for this mapped session; no live receipt can be promised. Never "
-    "fall back to another server or a local service."
-)
 _REMOTE_LOCKED_CONTEXT: Final = (
     "The selected FinishUP server's vault is locked for this mapped session; no live receipt "
     "can be promised. Its owner unlocks it on the server host."
 )
 
 
+def remote_refusal_context(phase: str) -> str:
+    """The hook text for a connection this computer refused before any dial (ADR-051 decision 8).
+
+    ``phase`` is one of ``targets.PRE_DIAL_REFUSALS`` (``zero_network_remote_selected``,
+    ``target_reauthorization_required``): not an outage of the server, so the text names the
+    closed reason, the registry directive (that nothing was sent, why, and the command the owner
+    runs in their own terminal) and its continuation token, as MCP ``start`` and the CLI do, and
+    never a hook budget that was not spent.
+    """
+
+    from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+    from finishup.protocol.recovery import directive_for
+
+    token = REASON_CODE_CONTINUATIONS[phase]
+    directive = directive_for(token)
+    assert directive is not None
+    nudge = "" if directive.nudge is None else f" {directive.nudge}"
+    return (
+        f"FinishUP refused the selected server's connection before anything was sent ({phase}). "
+        f"{directive.directive}{nudge} Continuation: {token}. "
+    )
+
+
 def unavailable_context(outcome: StatusOutcome) -> str:
     """The unavailable hook context: the remote phase and its continuation on a remote root."""
 
+    from finishup.client.targets import PRE_DIAL_REFUSALS
+
+    if outcome.remote_reason in PRE_DIAL_REFUSALS:
+        return remote_refusal_context(outcome.remote_reason).rstrip()
     if outcome.remote_reason is None:
         return _UNAVAILABLE_CONTEXT
-    context = (
-        _REMOTE_ZERO_NETWORK_CONTEXT
-        if outcome.remote_reason == "zero_network_remote_selected"
-        else _REMOTE_UNAVAILABLE_CONTEXT
-    )
-    return context + render_hook_recovery_suffix(outcome.remote_reason)
+    return _REMOTE_UNAVAILABLE_CONTEXT + render_hook_recovery_suffix(outcome.remote_reason)
 
 
 def locked_context(outcome: StatusOutcome) -> str:

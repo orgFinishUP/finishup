@@ -158,6 +158,10 @@ _REASONS: Final = frozenset(
         "auto_attach_mapping_write_failed",
         "auto_attach_recovery_busy",
         "auto_attach_binding_ambiguous",
+        # This computer refused the selected server before anything was sent (ADR-051 decision
+        # 8): zero-network, or a target confirmed under an older disclosure.
+        "target_reauthorization_required",
+        "zero_network_remote_selected",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",

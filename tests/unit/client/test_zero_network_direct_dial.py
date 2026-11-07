@@ -888,8 +888,8 @@ def test_the_cli_terminal_interface_and_hooks_say_why_and_the_one_fix(home: Path
 
     context = unavailable_context(StatusOutcome("unavailable", remote_reason=_PHASE))
     assert context.startswith(
-        "This computer's FinishUP is set to make no network connections, so nothing was sent to "
-        "the selected FinishUP server for this mapped session"
+        "FinishUP refused the selected server's connection before anything was sent "
+        f"({_PHASE}). {directive.directive}"
     )
     assert context.endswith(" Continuation: zero_network_local_server_required.")
     assert "could not serve" not in context
