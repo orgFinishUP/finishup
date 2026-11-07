@@ -441,6 +441,46 @@ def test_a_remote_connection_claims_its_workspace_and_records_it_for_the_connect
     assert recorded == workspace
 
 
+def test_a_client_that_dials_while_the_connector_stops_starts_its_successor(
+    remote: Path, monkeypatch: pytest.MonkeyPatch, no_local_service: None
+) -> None:
+    """The connector closes its endpoint first and releases its lock only once its agents, its
+    relays and its SSH master have closed (a second or two at its idle exit or a stop). A client
+    that dialled in between found the lock held and started nothing; it starts the successor as
+    soon as the lock is released, within its own wait."""
+
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    lock = ConnectorLock(remote)
+    lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+    spawned: list[Path] = []
+    daemon = ScriptedDaemon()
+
+    async def exercise() -> None:
+        tasks = _fake_connector(monkeypatch, daemon.serve, spawned)
+
+        async def finish_stopping() -> None:
+            await asyncio.sleep(0.5)  # the stopping connector still closes what it relayed
+            lock.release()
+
+        stopping = asyncio.create_task(finish_stopping())
+        try:
+            client = await service_client.connect_service_on_demand(
+                ControlClientKind.CLI, timeout_seconds=5.0
+            )
+            await client.close()
+        finally:
+            await stopping
+            _stop(tasks)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        lock.release()
+    assert spawned == [remote] and daemon.connections == 1
+
+
 def test_an_outage_the_connector_never_named_is_remote_unreachable(
     remote: Path, monkeypatch: pytest.MonkeyPatch, no_local_service: None
 ) -> None:

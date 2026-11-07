@@ -5685,7 +5685,8 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   target's claim (`binding_for_active_root`, over the locator normalized to its worktree's top
   level by `canonical_workspace_locator`), record it in the claimed-workspace index, send no
   `workspace_locator`, set the connection's `transport` to `connector`, and start the connector
-  (never `service run` or a supersede) when none answers; with `serve_workspace` the connection
+  (never `service run` or a supersede) when none answers, or once a connector that was stopping
+  when they dialled releases the root's lock during their wait; with `serve_workspace` the connection
   also offers the workspace agent (the CLI's `build_service_client` and the MCP bridge pass it,
   hooks do not). A local root ignores `serve_workspace`. A target confirmed under an older
   disclosure is refused before any dial, with or without a locator (`service_unavailable`, phase

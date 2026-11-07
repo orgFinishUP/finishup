@@ -2662,14 +2662,25 @@ async def _connect_remote_attempts(
         if not await asyncio.to_thread(stop_connector, root):
             raise ControlError("service_unavailable", retryable=True)
         holder = None
+    spawned = False
     if holder is None:
         try:
             spawn_connector(root)
         except OSError as exc:
             raise ControlError("service_unavailable", retryable=True) from exc
+        spawned = True
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        if not spawned and connector_holder(root) is None:
+            # The connector that held the root was stopping (its idle exit, a stop): it closes
+            # its endpoint first and releases its lock once its relays have closed. Start its
+            # successor now instead of waiting on an endpoint nothing will serve again.
+            try:
+                spawn_connector(root)
+            except OSError as exc:
+                raise ControlError("service_unavailable", retryable=True) from exc
+            spawned = True
         try:
             return await attempt()
         except ControlError as exc:
