@@ -3005,6 +3005,13 @@ class FinishUpTui(App[int]):
             # ADR-051 decision 8: connections to the server are refused; "Use local" below is the
             # way out, and nothing switches until the owner chooses it.
             self.say(Level.UNPROVEN, self.runtime.zero_network_heading(), zero_network)
+        held: tuple[str, ...] = ()
+        if not zero_network:
+            # ADR-051 decision 8, round 4: this repository's work is held from the selected server
+            # elsewhere, or kept here; nothing is sent until the owner chooses below.
+            held = await self.runtime.refresh_repository_hold_item()
+            if held:
+                self.say(Level.UNPROVEN, self.runtime.repository_hold_heading(), held)
         options = [
             Option(
                 f"use:{row.name}",
@@ -3014,6 +3021,14 @@ class FinishUpTui(App[int]):
             for row in rows
             if not row.selected
         ]
+        if held:
+            options.append(
+                Option(
+                    "repo-send",
+                    "Send this repository's work to this server anyway",
+                    "asks you to confirm on this terminal",
+                )
+            )
         options.extend(
             (
                 Option("status", "Show the selected server's status"),
@@ -3021,6 +3036,7 @@ class FinishUpTui(App[int]):
                 Option("remove", "Remove a server"),
                 Option("login", "Store an HTTPS server's API key"),
                 Option("folders", "Choose what a server may read outside your projects"),
+                Option("repositories", "Choose which held repositories a server receives anyway"),
             )
         )
         choice = await self.ask(
@@ -3034,8 +3050,11 @@ class FinishUpTui(App[int]):
         if choice == "add":
             await self._server_add()
             return
-        if choice in {"remove", "login", "folders"}:
+        if choice in {"remove", "login", "folders", "repositories"}:
             self.say(Level.OPTIONAL, "Run this in your shell", _SERVER_SHELL_COMMANDS[choice])
+            return
+        if choice == "repo-send":
+            await self._server_repository_send()
             return
         name = choice.removeprefix("use:")
         row = next(row for row in rows if row.name == name)
@@ -3088,6 +3107,53 @@ class FinishUpTui(App[int]):
                 "The connection to the server you left did not close",
                 switch.left_lines,
             )
+        await self._refresh_header()
+
+    async def _server_repository_send(self) -> None:
+        """``/server`` repo-send: ``finishup server repositories add`` for this repository, with
+        the terminal handed over to its disclosure and typed name (ADR-051 decision 8, round 4).
+        Nothing switches servers or changes a privacy policy."""
+
+        confirmed = await self.ask(
+            ApprovalView(
+                name="server-repository-send",
+                title="Send this repository's work to the selected server anyway?",
+                body=(
+                    "FinishUP will hand this terminal to its confirmation prompt.",
+                    "It shows what that server would receive; type the server's",
+                    "name there to allow it.",
+                ),
+                approve_label="Continue to confirmation",
+                decline_label="Not now",
+                default_to_safe=True,
+            )
+        )
+        declined = ("Nothing changed; this repository's work stays on this computer.",)
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
+            return
+        try:
+            target_id, allowed = await self.hand_over_terminal(self.runtime.allow_repository_here)
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot hand over for the confirmation",
+                ("Run this from your shell instead:", "", "    finishup server repositories add"),
+            )
+            return
+        except RuntimeError_ as error:
+            if error.reason != "authorization_declined":
+                raise
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
+            return
+        if allowed:
+            self.say(
+                Level.VERIFIED,
+                f"Sending this repository's work to {target_id}",
+                ("Your agent can repeat its last FinishUP request now.",),
+            )
+        else:
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
         await self._refresh_header()
 
     async def _server_add(self) -> None:
@@ -3423,6 +3489,18 @@ def _server_add_official_lines(hosts: tuple[str, ...]) -> tuple[str, ...]:
 
 # ``/server`` prints these for the changes that belong on the command line (ADR-051).
 _SERVER_SHELL_COMMANDS: Final[dict[str, tuple[str, ...]]] = {
+    "repositories": (
+        "    finishup server repositories list NAME",
+        "    finishup server repositories add NAME --repository FOLDER",
+        "    finishup server repositories keep NAME --repository FOLDER",
+        "    finishup server repositories remove NAME --repository FOLDER",
+        "    finishup server repositories remove NAME --all",
+        "",
+        "A repository whose privacy policy on this computer allows no network use is held for a",
+        "server elsewhere until you add it here, or keep it on this computer; adding asks you to",
+        "confirm in your terminal. Removing applies from the next connection; open ones close",
+        "within about a second.",
+    ),
     "remove": ("    finishup server remove NAME",),
     "login": ("    finishup server login NAME",),
     "folders": (
