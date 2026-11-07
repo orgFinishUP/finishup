@@ -46,6 +46,7 @@ __all__ = [
     "ensure_owner_only_dir",
     "existing_owner_only_dir",
     "installation_naming",
+    "installation_state_dir",
     "isolated_root",
     "isolated_root_variable",
     "isolation_binding",
@@ -752,6 +753,22 @@ def state_dir(*, _probe: _PathProbe | None = None) -> Path:
     isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "state"
+    return Path(_ambient_dirs(probe).user_state_dir)
+
+
+def installation_state_dir(*, _probe: _PathProbe | None = None) -> Path:
+    """Return this installation's own state directory, whichever server it selected.
+
+    An explicit isolation root's (the variable or the runtime pin), else the everyday ambient
+    installation's: never a server selection's (ADR-051). Host-registration bookkeeping lives here
+    (the host-configuration lock and its membership record): registrations never follow the
+    selection, so two setup processes that resolved different targets still share one lock.
+    """
+
+    probe = _probe_or_default(_probe)
+    explicit = isolated_root(_probe=probe)
+    if explicit is not None:
+        return explicit / "state"
     return Path(_ambient_dirs(probe).user_state_dir)
 
 

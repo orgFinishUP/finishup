@@ -72,8 +72,9 @@ def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
 ) -> None:
     """Keep setup's per-configuration lock files out of the developer's real state directory.
 
-    ``host_config_lock`` (#1058) keys a lock file under ``state_dir()``; every test that applies
-    a host connection would otherwise create one in the machine's own FinishUP state.
+    ``host_config_lock`` (#1058) keys a lock file under the installation's own state directory
+    (``installation_state_dir()``); every test that applies a host connection would otherwise
+    create one in the machine's own FinishUP state.
     """
 
     try:
@@ -82,7 +83,7 @@ def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
         return
     root = tmp_path_factory.mktemp("host-config-locks")
     root.chmod(0o700)
-    monkeypatch.setattr(host_projects_module, "state_dir", lambda: Path(root))
+    monkeypatch.setattr(host_projects_module, "installation_state_dir", lambda: Path(root))
 
 
 @pytest.fixture(autouse=True)
