@@ -288,8 +288,8 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _UNAVAILABLE,
     ),
     "remote_service_not_running": (
-        "no FinishUP service answers on that server; run 'finishup service start' there, or give "
-        "--remote-launcher so this client can start it",
+        "the server answered but its FinishUP service is not running; start it there with "
+        "'finishup service start'",
         _UNAVAILABLE,
     ),
     "remote_incompatible": (

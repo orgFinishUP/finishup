@@ -1706,6 +1706,29 @@ def test_ssh_targets_take_no_api_key(home: Path, authorized: list[tuple[str, str
     assert _invoke("logout", "lab").stderr.startswith("credential_not_applicable:")
 
 
+@pytest.mark.parametrize("address", ["ssh://lab.example", "https://lab.example"])
+def test_a_stopped_remote_service_is_named_alike_for_every_kind(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    """An HTTPS server has no SSH launcher: the line for a server whose FinishUP service does not
+    run names the service and the one fix, the same for every kind of server."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    class _Stopped:
+        def ensure_ready(self, _root: Path | None) -> None:
+            raise TargetRuntimeError("service_unavailable", phase="remote_service_not_running")
+
+    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Stopped())
+    assert _invoke("add", "lab", address).exit_code == 0
+    result = _invoke("connect", "lab")
+    assert result.exit_code != 0
+    assert result.stderr == (
+        "remote_service_not_running: the server answered but its FinishUP service is not "
+        "running; start it there with 'finishup service start' (service_unavailable)\n"
+    )
+
+
 def test_remote_connect_without_a_runtime_is_a_typed_refusal(
     home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
