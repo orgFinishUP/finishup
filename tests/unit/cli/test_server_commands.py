@@ -1216,6 +1216,50 @@ def test_login_and_logout_with_an_owner_only_key_file(
     assert again.exit_code == 0 and "No API key was stored" in again.stdout
 
 
+@pytest.mark.parametrize("second_stop", ["stops", "stuck"])
+def test_remove_clears_the_selection_first_and_stops_again_right_before_the_folder_goes(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    second_stop: str,
+) -> None:
+    """SRV-2: ``remove`` stopped the connection while the selection still named the target, then
+    deleted the key, so a fresh hook could start the connection again and the folder was deleted
+    under it. Now the selection goes first, and the connection is stopped once more after the key
+    is deleted, right before the folder goes. A stop is best effort: an SSH master that cannot be
+    asked to exit ends on its own after its idle minutes."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    keyring = _MemoryKeyring()
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: keyring)
+    seen: list[tuple[str | None, bool, bool]] = []
+
+    class _Runtime:
+        def stop(self, target: Path | None) -> None:
+            assert target is not None
+            seen.append((targets.read_selected_target_id(), bool(keyring.entries), target.is_dir()))
+            if second_stop == "stuck" and len(seen) == 2:
+                raise TargetRuntimeError("service_unavailable", phase="remote_unreachable")
+
+    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Runtime())
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
+    assert _invoke("use", "fu").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+
+    result = _invoke("remove", "fu", "--select-local")
+
+    assert seen == [(None, True, True), (None, False, True)]
+    assert targets.read_selected_target_id() is None
+    assert result.exit_code == 0, result.output
+    assert not root.exists() and targets.list_targets() == ()
+
+
 def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
     home: Path,
     authorized: list[tuple[str, str]],
