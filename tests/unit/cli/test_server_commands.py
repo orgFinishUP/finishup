@@ -1367,6 +1367,63 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
         assert (kept.credential, len(keyring.entries)) == (None, 0)
 
 
+@pytest.mark.parametrize("record_left", [True, False])
+def test_a_folder_changed_while_it_is_removed_is_refused_with_the_way_to_finish(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    record_left: bool,
+) -> None:
+    """A-REMOVE-RACE: an OSError from deleting the folder (something wrote into it meanwhile)
+    surfaced as a bare internal_error after the selection was switched and the key deleted. Now
+    the refusal says the folder was only partly removed, that the key is gone, and how to finish:
+    the same command while the record is left, else the leftover's id that 'list' names."""
+
+    import errno
+
+    keyring = _MemoryKeyring()
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: keyring)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
+    assert _invoke("use", "fu").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    real_remove = targets.remove_target_root
+
+    def partly(target: targets.ServerTarget) -> None:
+        if not record_left:
+            (root / targets.SERVER_TARGET_FILE_NAME).unlink()
+        raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+    monkeypatch.setattr(targets, "remove_target_root", partly)
+
+    result = _invoke("remove", "fu", "--select-local")
+
+    assert result.exit_code == 20
+    assert result.stdout == _SWITCHED_BACK
+    assert result.stderr == (
+        "target_partly_removed: the target's folder changed while it was being deleted, so only "
+        "part of it was removed, and its API key was already deleted; run the same command "
+        "again, or, if 'finishup server list' names a leftover folder instead, 'finishup server "
+        "remove' with that folder's id\n"
+    )
+    assert "fu.example" not in result.output
+    assert targets.read_selected_target_id() is None and keyring.entries == {}
+    monkeypatch.setattr(targets, "remove_target_root", real_remove)
+    if record_left:
+        (kept,) = targets.list_targets()
+        assert kept.credential is None  # never reported as a key that is gone
+        assert _invoke("remove", "fu").exit_code == 0
+    else:
+        assert targets.list_targets() == ()
+        assert record.target_id in _invoke("list").stdout
+        assert _invoke("remove", record.target_id).exit_code == 0
+    assert not root.exists()
+
+
 def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
     home: Path,
     authorized: list[tuple[str, str]],
