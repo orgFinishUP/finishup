@@ -8659,6 +8659,7 @@ async def provide_service_ready_context(
         state_root=paths.state,
         coordinator_for=claim_observation_coordinator,
         resolve_route=catalog.resolve_route,
+        session_binding=catalog.session_binding,
         observation_enabled=config.observation.enabled,
     )
     observation_sweeper = ObservationOutboxSweeper(
