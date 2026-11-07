@@ -1127,6 +1127,21 @@ SSH (owner-equivalent, no key)
   waits for up to 30 seconds or its deadline. `server_keys_unusable` is `remote_auth_failed` (the
   owner repairs the key file on the server host) and `internal_failure` is `internal_error`; neither
   is reported as a service that is not running.
+- **Every REST connection asks the shared connection check** (decision 8 and the disclosure rule
+  above). `rest_client.require_connection_allowed(record)`, which asks
+  `targets.require_current_authorization`, runs in `connect_rest_service` and `open_rest_http`
+  (every client, the workspace agent's, its delivery's and a probe's), and
+  `service.client._connect_remote` asks it first for every connection, with a workspace to claim
+  or without one (until 2026-11-07 a connection with no workspace never asked it): nothing is
+  noted, no workspace agent or SSH master is started and nothing is dialled for a target confirmed
+  under an older disclosure (`target_reauthorization_required`) or while this computer last
+  reported a zero-network policy (`zero_network_remote_selected`). The SSH runtime asks it before
+  a master, a forward or a remote service start, and a probe of such a target is `unavailable`
+  with that reason (as approach A's). An open `RestServiceClient` (the MCP bridge's, the terminal
+  interface's, a hook's) reads the zero-network record before every request and every 0.5 seconds
+  while it is open: once it answers, the client closes its connections, abandons a long-poll under
+  way (a request already being answered on the server may still finish there), sends no cancel
+  and fails every call with `zero_network_remote_selected`.
 - **Who reads the target credential:** each client process that dials an HTTPS or `local_port`
   target reads it from `CredentialSource` (as in approach B). Same-user software can read it as
   well, as it can read today's auto-unlock custody; no surface an agent reaches reveals or switches
@@ -1162,6 +1177,20 @@ SSH (owner-equivalent, no key)
   SSH target, a request the agent or its background delivery loses on the transport brings the
   master back (`rest_runtime.restore_ssh_transport`, never the remote service), so a master that
   died while the user was idle does not wait for a foreground client.
+- **The workspace agent under zero-network** (decision 8). `finishup agent run` refuses to start
+  while the shared check refuses its target (exit 2, one stderr line: the reason, the fixed
+  summary and its directive). While it runs it reads this computer's zero-network record before
+  every registration, long-poll, reply, delivery pass and transport restore, and every 0.5 seconds
+  (`MARKER_CHECK_SECONDS`). On finding it, it stops within about a second: its long-polls,
+  deliveries and replies under way are abandoned (a workspace read already running in a worker
+  thread finishes here, but its answer is not sent), no deregistration and no last delivery is
+  sent (what the hooks captured stays in this client's outbox), its HTTP connections close, and it
+  exits 2 naming `zero_network_remote_selected` and `finishup server use local`. **The SSH master
+  is supervised by the agent:** every connection to an SSH target starts the target's agent when
+  none runs, with or without a workspace to note, an idle agent stays while the master it
+  supervises still answers `-O check` (the master ends on its own after 15 idle minutes), and the
+  agent closes the master through its control socket (`-O exit`) when it stops for the
+  zero-network record, so no master stays open under it.
 
 **SSH forwards a socket to a socket.** The approach brief proposed forwarding to a loopback TCP
 port of the API. This pull request forwards to the owner-only `api.sock` instead: a request there

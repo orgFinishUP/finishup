@@ -22,6 +22,13 @@
 Nothing here runs a shell on this machine or kills a process by name: the master is stopped
 through its own control socket and the agent through its stop request file, never a signal.
 ssh's own output is read only to choose a closed reason and is never shown or logged.
+
+Every step that reaches the server (the master, a forward, the remote service start, a probe or a
+connection) asks the shared connection check first (``targets.require_current_authorization``):
+while this computer last reported a zero-network policy, or for a target confirmed under an older
+disclosure, nothing is started or sent, and a probe is ``unavailable`` with that reason. A
+running master is closed by its supervisor, the target's workspace agent, within about a second of
+the zero-network record (``client.agent``).
 """
 
 from __future__ import annotations
@@ -56,9 +63,11 @@ __all__ = [
     "RestTargetRuntime",
     "SshEndpoint",
     "SshTargetRuntime",
+    "close_ssh_transport",
     "discover_ssh_endpoint",
     "restore_ssh_transport",
     "ssh_command_prefix",
+    "ssh_master_alive",
     "ssh_master_argv",
 ]
 
@@ -373,14 +382,28 @@ def _runtime_error(error: BaseException) -> TargetRuntimeError:
         return error
     if isinstance(error, ControlError):
         phase = error.phase
-        if (
-            error.reason == "service_unavailable"
-            and phase is not None
-            and phase.startswith("remote_")
-        ):
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+        if error.reason == "service_unavailable" and phase in REMOTE_CONNECTION_PHASES:
+            # A remote phase is the reason itself, the shared check's refusals included.
             return TargetRuntimeError(phase)
         return TargetRuntimeError(error.reason, phase=phase)
     return TargetRuntimeError("remote_unreachable", phase="timeout")
+
+
+def _require_allowed(record: ServerTarget) -> None:
+    """The shared connection check before any step that reaches ``record``'s server.
+
+    Raises the closed ``TargetRuntimeError`` of a refusal (``zero_network_remote_selected``,
+    ``target_reauthorization_required``), so ``_remote_phase`` keeps its name on every surface.
+    """
+
+    from finishup.client.targets import TargetError, require_current_authorization
+
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        raise TargetRuntimeError(error.reason) from None
 
 
 class RestTargetRuntime:
@@ -435,6 +458,9 @@ class RestTargetRuntime:
         try:
             record = _record(root)
             assert root is not None
+            # The shared connection check first: nothing is sent to probe a target nothing may be
+            # sent to now (the reason names why), and no SSH master is started for it.
+            _require_allowed(record)
             self._prepare(record, root)
         except TargetRuntimeError as error:
             return ProbeResult("unavailable", reason=error.reason, phase=error.phase)
@@ -630,6 +656,7 @@ class SshTargetRuntime(RestTargetRuntime):
         ``honor_recent_failure`` the calls in that window fail at once with the same reason.
         """
 
+        _require_allowed(record)
         deadline = time.monotonic() + timeout
         directory = _run_directory(root)
         if honor_recent_failure:
@@ -690,6 +717,7 @@ class SshTargetRuntime(RestTargetRuntime):
     ) -> None:
         """Start an idle-stopped remote service once, through the master and its launcher."""
 
+        _require_allowed(record)
         if record.remote_launcher is None:
             raise TargetRuntimeError("remote_service_not_running", phase="launcher_unknown")
         argv = [
@@ -703,6 +731,11 @@ class SshTargetRuntime(RestTargetRuntime):
             raise _ssh_failure(completed.stderr)
         if completed.returncode != 0:
             raise TargetRuntimeError("remote_service_not_running", phase="service_start_failed")
+
+    def teardown(self, record: ServerTarget, root: Path) -> None:
+        """Stop this target's master through its control socket and remove its forward."""
+
+        self._teardown(record, root)
 
     def _teardown(self, record: ServerTarget, root: Path) -> None:
         if (root / "run" / MASTER_SOCKET_NAME).exists():
@@ -731,3 +764,23 @@ async def restore_ssh_transport(
     if record.kind != "ssh":
         return
     await asyncio.to_thread(SshTargetRuntime().ensure_master, record, root, timeout=timeout)
+
+
+async def close_ssh_transport(record: ServerTarget, root: Path) -> None:
+    """Close an SSH target's master through its control socket; nothing for any other kind.
+
+    The workspace agent, the master's supervisor, runs this once this computer last reported a
+    zero-network policy (ADR-051 decision 8). Never a signal, never by name.
+    """
+
+    if record.kind != "ssh":
+        return
+    await asyncio.to_thread(SshTargetRuntime().teardown, record, root)
+
+
+async def ssh_master_alive(record: ServerTarget, root: Path) -> bool:
+    """Whether an SSH target's master still answers on its control socket (never for others)."""
+
+    if record.kind != "ssh":
+        return False
+    return await asyncio.to_thread(SshTargetRuntime().master_running, record, root)

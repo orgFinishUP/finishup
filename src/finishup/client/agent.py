@@ -19,6 +19,14 @@ long-lived, pull-based client of the server's network API, one per target root:
   transport (``rest_runtime.restore_ssh_transport``), so a master that died while the user was
   idle (a sleep, a network blip) is restored before the server's next background call, not only
   when a foreground client happens to connect.
+* It never sends anything while this computer last reported a zero-network privacy policy
+  (ADR-051 decision 8): it asks the shared connection check before it starts, reads that record
+  (``client.everyday_policy``, a file read) before every registration, poll, reply, delivery and
+  transport restore, and at least once a second while it runs (``MARKER_CHECK_SECONDS``). On
+  finding it, it stops at once: every long-poll, reply and delivery under way is abandoned, no
+  last delivery and no deregistration is sent, its HTTP connections close, an SSH target's master
+  (which it supervises) exits through its control socket, and it names
+  ``zero_network_remote_selected`` with the fix, ``finishup server use local``.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file
@@ -53,7 +61,17 @@ from finishup.client.remote_workspace import (
     claim_for_workspace,
     handler_for_workspace,
 )
-from finishup.client.targets import ServerTarget, TargetError, read_target
+from finishup.client.rest_client import (
+    MARKER_CHECK_SECONDS,
+    ZERO_NETWORK_PHASE,
+    zero_network_reported,
+)
+from finishup.client.targets import (
+    ServerTarget,
+    TargetError,
+    read_target,
+    require_current_authorization,
+)
 from finishup.config.paths import PathSafetyError, ensure_owner_only_dir
 from finishup.domain.values import JsonObject, freeze_json
 from finishup.observability.logging import record_bounded_event_without_raising
@@ -431,6 +449,8 @@ class _Delivery(Protocol):
 
 type _ClaimFactory = Callable[[ServerTarget, WorkspaceLocator], Awaitable[WorkspaceClaim | None]]
 type _TransportRestorer = Callable[[ServerTarget, Path], Awaitable[None]]
+type _TransportCloser = Callable[[ServerTarget, Path], Awaitable[None]]
+type _TransportProbe = Callable[[ServerTarget, Path], Awaitable[bool]]
 type _HandlerFactory = Callable[[WorkspaceLocator, Path], WorkspaceCallHandler | None]
 type _DeliveryFactory = Callable[[ServerTarget, Path, WorkspaceLocator, WorkspaceClaim], _Delivery]
 
@@ -439,6 +459,18 @@ async def _restore_transport(record: ServerTarget, root: Path) -> None:
     from finishup.client.rest_runtime import restore_ssh_transport
 
     await restore_ssh_transport(record, root)
+
+
+async def _close_transport(record: ServerTarget, root: Path) -> None:
+    from finishup.client.rest_runtime import close_ssh_transport
+
+    await close_ssh_transport(record, root)
+
+
+async def _transport_alive(record: ServerTarget, root: Path) -> bool:
+    from finishup.client.rest_runtime import ssh_master_alive
+
+    return await ssh_master_alive(record, root)
 
 
 def _captured_observation_delivery(
@@ -487,10 +519,14 @@ class WorkspaceAgentLoop:
         handler_factory: _HandlerFactory = handler_for_workspace,
         delivery_factory: _DeliveryFactory = _captured_observation_delivery,
         transport_restorer: _TransportRestorer = _restore_transport,
+        transport_closer: _TransportCloser = _close_transport,
+        transport_alive: _TransportProbe = _transport_alive,
+        zero_network: Callable[[], bool] = zero_network_reported,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         scan_seconds: float = _SCAN_SECONDS,
         idle_exit_seconds: float = IDLE_EXIT_SECONDS,
+        marker_seconds: float = MARKER_CHECK_SECONDS,
     ) -> None:
         self._root = root
         self._record = record
@@ -500,6 +536,12 @@ class WorkspaceAgentLoop:
         self._handler_factory = handler_factory
         self._delivery_factory = delivery_factory
         self._transport_restorer = transport_restorer
+        self._transport_closer = transport_closer
+        self._transport_alive = transport_alive
+        self._zero_network_reported = zero_network
+        self._marker_seconds = marker_seconds
+        # Set once this computer's zero-network record stopped the agent (ADR-051 decision 8).
+        self.stopped_for: str | None = None
         self._clock = clock
         self._wall_clock = wall_clock
         self._scan_seconds = scan_seconds
@@ -511,6 +553,30 @@ class WorkspaceAgentLoop:
     def stop(self) -> None:
         self._stopping.set()
 
+    def _zero_network(self) -> bool:
+        """Stop for good once this computer last reported zero-network; whether it did.
+
+        Read before everything the agent sends and every ``marker_seconds`` while it runs. Once
+        it answers, nothing more is sent: the loop stops, and what is under way is abandoned.
+        """
+
+        if self.stopped_for is not None:
+            return True
+        if not self._zero_network_reported():
+            return False
+        self.stopped_for = ZERO_NETWORK_PHASE
+        _record("workspace_agent_exit", ZERO_NETWORK_PHASE)
+        self._stopping.set()
+        return True
+
+    async def _watch_marker(self) -> None:
+        while not self._stopping.is_set():
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(self._marker_seconds):
+                    await self._stopping.wait()
+            if self._zero_network():
+                return
+
     def _open(self) -> _AgentApi:
         if self._http is None or self._headers is None:
             from finishup.client.rest_client import open_rest_http
@@ -519,10 +585,18 @@ class WorkspaceAgentLoop:
         return _AgentApi(self._http, self._headers)
 
     async def run(self) -> int:
+        if self._zero_network():
+            # Nothing is opened, registered or delivered; the master this agent supervises closes.
+            with contextlib.suppress(Exception):
+                await self._transport_closer(self._record, self._root)
+            return 0
         api = self._open()
+        watch = asyncio.create_task(self._watch_marker())
         idle_since = self._clock()
         try:
             while not self._stopping.is_set():
+                if self._zero_network():
+                    break
                 if _stop_requested(self._root):
                     _record("workspace_agent_exit", "stop_requested")
                     break
@@ -546,17 +620,28 @@ class WorkspaceAgentLoop:
                 if self._served:
                     idle_since = self._clock()
                 elif self._clock() - idle_since >= self._idle_exit_seconds:
-                    _record("workspace_agent_exit", "idle")
-                    break
+                    if await self._transport_alive(self._record, self._root):
+                        # The SSH master this agent supervises still runs (it ends on its own
+                        # after 15 idle minutes): stay, so the zero-network record still closes it.
+                        idle_since = self._clock()
+                    else:
+                        _record("workspace_agent_exit", "idle")
+                        break
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(self._scan_seconds):
                         await self._stopping.wait()
         finally:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
             for name in tuple(self._served):
                 await self._end(api, name)
             if self._http is not None:
                 with contextlib.suppress(Exception):
                     await self._http.aclose()
+            if self.stopped_for is not None:
+                # This computer is zero-network: close the SSH master this agent supervises too.
+                with contextlib.suppress(Exception):
+                    await self._transport_closer(self._record, self._root)
         return 0
 
     async def _end(self, api: _AgentApi, name: str) -> None:
@@ -565,7 +650,9 @@ class WorkspaceAgentLoop:
             return
         served.task.cancel()
         await asyncio.gather(served.task, return_exceptions=True)
-        if served.agent_id is not None:
+        # A registration ends with a request to the server; none is sent once this computer is
+        # zero-network (the server ends it when its polls stop).
+        if served.agent_id is not None and not self._zero_network():
             await api.end(served.agent_id)
 
     async def _serve(self, api: _AgentApi, name: str, locator: WorkspaceLocator) -> None:
@@ -599,6 +686,8 @@ class WorkspaceAgentLoop:
 
         delay = self._scan_seconds
         while not self._stopping.is_set():
+            if self._zero_network():
+                return
             summary: object = None
             try:
                 summary = await delivery.deliver()
@@ -621,6 +710,8 @@ class WorkspaceAgentLoop:
         attempt = 0
         nudge = self._served[name].nudge
         while not self._stopping.is_set():
+            if self._zero_network():
+                return
             try:
                 registration = await api.register(claim, handler)
                 self._served[name].agent_id = registration.agent_id
@@ -654,6 +745,8 @@ class WorkspaceAgentLoop:
 
         from finishup.client.target_runtime import TargetRuntimeError
 
+        if self._zero_network():
+            return
         try:
             await self._transport_restorer(self._record, self._root)
         except asyncio.CancelledError:
@@ -669,6 +762,8 @@ class WorkspaceAgentLoop:
         pending: set[asyncio.Task[None]] = set()
         try:
             while not self._stopping.is_set():
+                if self._zero_network():
+                    return
                 calls = await api.work(agent_id)
                 if calls is None:
                     return
@@ -698,6 +793,9 @@ class WorkspaceAgentLoop:
         body = canonical_encode(dict(workspace_reply_frame(reply)))
         delay = _REPLY_RETRY_FIRST_SECONDS
         while True:
+            if self._zero_network():
+                # The answer stays on this computer: nothing is sent once it is zero-network.
+                return
             try:
                 delivered = await api.reply(agent_id, body)
             except asyncio.CancelledError:
@@ -715,8 +813,24 @@ class WorkspaceAgentLoop:
             return
 
 
+def _refusal_line(reason: str) -> str:
+    """The agent's one stderr line for a refusal of the shared connection check (fixed words)."""
+
+    from finishup.client.remote_remedy import remote_summary
+    from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+    directive = directive_for(continuation_for_reason(reason))
+    remedy = "" if directive is None else f" {directive.directive}"
+    return f"{reason}: {remote_summary(reason)}.{remedy}"
+
+
 def run_workspace_agent(root: Path) -> int:
-    """The ``finishup agent run`` body: hold the lock, serve until idle or ``SIGTERM``."""
+    """The ``finishup agent run`` body: hold the lock, serve until idle or ``SIGTERM``.
+
+    Refused (exit 2, one stderr line naming the reason and its fix) when the shared connection
+    check refuses the target, and stops the same way when this computer reports a zero-network
+    policy while it runs.
+    """
 
     try:
         record = read_target(root)
@@ -724,6 +838,17 @@ def run_workspace_agent(root: Path) -> int:
         record = None
     if record is None or not record.is_remote:
         _record("workspace_agent_start", "target_not_remote")
+        return 2
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        # Nothing may be sent to this target now (ADR-051): nothing is started, and under
+        # zero-network the SSH master an earlier agent supervised closes too.
+        _record("workspace_agent_start", error.reason)
+        if error.reason == ZERO_NETWORK_PHASE:
+            with contextlib.suppress(Exception):
+                asyncio.run(_close_transport(record, root))
+        print(_refusal_line(error.reason), file=sys.stderr)
         return 2
     try:
         descriptor = _open_lock(root)
@@ -753,7 +878,11 @@ def run_workspace_agent(root: Path) -> int:
             running = asyncio.get_running_loop()
             for signum in (signal.SIGTERM, signal.SIGINT):
                 running.add_signal_handler(signum, loop.stop)
-            return await loop.run()
+            code = await loop.run()
+            if loop.stopped_for is not None:
+                print(_refusal_line(loop.stopped_for), file=sys.stderr)
+                return 2
+            return code
 
         try:
             return asyncio.run(main())

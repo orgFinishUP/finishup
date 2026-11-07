@@ -315,9 +315,16 @@ class _SshSteps:
         def start(_self: object, _record: object, _root: object, **_options: object) -> None:
             self.steps.append("start")
 
+        self.supervised: list[Path] = []
+
+        def ensure_agent(root: Path) -> bool:
+            self.supervised.append(root)
+            return False
+
         monkeypatch.setattr(rest_client, "connect_rest_service", connect)
         monkeypatch.setattr(SshTargetRuntime, "ensure_master", master)
         monkeypatch.setattr(SshTargetRuntime, "start_remote_service", start)
+        monkeypatch.setattr("finishup.client.agent.ensure_agent", ensure_agent)
         self.connected = connected
 
 
@@ -363,6 +370,18 @@ async def test_an_ssh_connection_brings_its_master_up_and_only_on_demand_starts_
     with pytest.raises(ControlError) as raised:
         await _ssh_connect(on_demand=True)
     assert raised.value.phase == "remote_auth_failed" and steps.steps == ["connect"]
+
+
+@pytest.mark.anyio
+async def test_every_ssh_connection_keeps_the_masters_supervisor_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The target's workspace agent supervises its SSH master: it closes the master within about a
+    # second of this computer's zero-network record (ADR-051 decision 8). A connection with no
+    # workspace to note starts that agent too, so no master runs unsupervised.
+    steps = _SshSteps(monkeypatch)
+    assert await _ssh_connect(on_demand=False) is steps.connected
+    assert steps.supervised == [Path("/x/t")]
 
 
 @pytest.mark.anyio

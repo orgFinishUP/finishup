@@ -5593,12 +5593,24 @@ own handle, and the hub never admits another worktree's agent under a live one.
 `ControlError`s, plus `transport_kind`, `workspace_binding`, `workspace_handle`,
 `service_instance_id` and `transport` — `https`, also for `local_port`, or `ssh`) for a root whose
 `target.json` names a remote kind; a remote root never spawns or supersedes a service.
-`connect_rest_service(client_kind, *, record, root, claim=None)` builds one. At the seam
+`connect_rest_service(client_kind, *, record, root, claim=None)` builds one. Every REST
+connection asks the shared connection check first: `rest_client.require_connection_allowed(record)`
+(`targets.require_current_authorization`, refused as `service_unavailable` with phase
+`zero_network_remote_selected` or `target_reauthorization_required`, nothing dialled) runs in
+`connect_rest_service` and `open_rest_http`, and `service.client._connect_remote` runs
+`_require_remote_authorization(record)` first for every connection, with or without a workspace,
+before it notes, starts or dials anything. An open `RestServiceClient` reads
+`rest_client.zero_network_reported()` (the marker, a file read) before every request and every
+`MARKER_CHECK_SECONDS` (0.5) while open: once it answers, the client closes, a request under way is
+abandoned, no `DELETE /v1/operations/{id}` is sent, and every call fails with
+`ZERO_NETWORK_PHASE` (`zero_network_remote_selected`). At the seam
 (`service.client._connect_remote`) a `workspace_locator` is claimed with
 `binding_for_active_root(locator, serve_workspace=False)` (`_remote_claim`; a caller's
 `workspace_binding` is used as given; an unresolvable locator gives no claim, never a path), noted
 for the agent (`client.agent.note_workspace`) and the agent started when none runs
-(`client.agent.ensure_agent`). An SSH connection tries the forward first; only when nothing answers
+(`client.agent.ensure_agent`); a connection to an SSH target starts the agent even with no
+workspace to note, because the agent supervises the master. An SSH connection tries the forward
+first; only when nothing answers
 does it bring the target's master up and try again, and only an on-demand connect then starts an
 idle-stopped remote service once. `RestServiceClient.call` refuses a
 `start` whose `workspace_ref` is still an absolute path (`WorkspaceRefNotPortable`, nothing
@@ -5606,7 +5618,11 @@ sent). Remote failures are `service_unavailable` with phase `remote_unreachable`
 `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running` or
 `remote_incompatible`. SSH targets (`client.rest_runtime.SshTargetRuntime`) keep one master at
 `<troot>/run/m` forwarding `<troot>/run/api.sock` to the server's `api.sock` (`remote_endpoint` in
-`target.json`), learned by `server add` from `service endpoint --json`.
+`target.json`), learned by `server add` from `service endpoint --json`. `ensure_master` and
+`start_remote_service` raise the shared check's refusal as `TargetRuntimeError(<reason>)` before
+running ssh, and `probe` answers it as `ProbeResult("unavailable", reason=<reason>)` with nothing
+sent. `close_ssh_transport(record, root)` (`-O exit`) and `ssh_master_alive(record, root)` (`-O
+check`) are for the agent; both do nothing for another kind.
 
 **Workspace agent.** `finishup agent run --root <troot>` (`client_only`,
 `client.agent.run_workspace_agent`) holds `<troot>/state/agent.lock` exclusively (stamped with its
@@ -5626,7 +5642,17 @@ target's; a root that holds no remote target, or a target record that cannot be 
 `listed` with no folder), and
 `CapturedObservationDelivery(record, root, locator, claim, *, connect=None)` whose `deliver()` runs
 one `ClientObservationDrain` pass (state `<troot>/state`) over one claim-bound `RestServiceClient`
-kept between passes and released after a pass that stopped at a control failure.
+kept between passes and released after a pass that stopped at a control failure. Under this
+computer's zero-network record (ADR-051 decision 8) `run_workspace_agent` refuses to start (exit
+2, one stderr line `zero_network_remote_selected: <ZERO_NETWORK_SUMMARY>. <directive>`, and the
+master closed), and a running `WorkspaceAgentLoop` (`zero_network=zero_network_reported`,
+`marker_seconds=MARKER_CHECK_SECONDS`, `transport_closer=close_ssh_transport`,
+`transport_alive=ssh_master_alive`) checks the record before each registration, poll, reply,
+delivery pass and transport restore and every `marker_seconds`; on finding it, `stopped_for` is
+`zero_network_remote_selected`, everything under way is cancelled, no `DELETE /v1/agents/{id}`
+and no delivery is sent, the HTTP client closes, the transport closer runs, and
+`run_workspace_agent` exits 2 with that line. An idle agent exits only once `transport_alive`
+answers false.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is

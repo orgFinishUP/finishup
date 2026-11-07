@@ -2085,11 +2085,45 @@ async def _remote_claim(
     except RepositoryIdentityError:
         return None
     except TargetError as error:
-        # The record went unreadable after it was read: fail closed, never as a local root.
-        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable") from (
-            error
-        )
+        # The shared connection check refused (it keeps its phase), or the record went unreadable
+        # after it was read: fail closed, never as a local root.
+        raise _remote_target_refusal(error) from None
     return None if binding is None else binding.claim
+
+
+def _remote_target_refusal(error: Exception) -> ControlError:
+    """A remote root's own ``TargetError`` as the retryable phase every surface renders.
+
+    ``zero_network_remote_selected`` and ``target_reauthorization_required`` keep their names;
+    any other reason (a record that can no longer be read) is ``remote_unreachable``, as this
+    seam named it before. The reason is a closed token and names no path.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    reason = getattr(error, "reason", None)
+    phase = reason if reason in REMOTE_CONNECTION_PHASES else "remote_unreachable"
+    return ControlError("service_unavailable", retryable=True, phase=phase)
+
+
+def _require_remote_authorization(record: ServerTarget) -> None:
+    """Refuse, before anything is sent, a remote target nothing may be sent to now (ADR-051).
+
+    Every connection to a remote target asks the shared check (``targets.
+    require_current_authorization``), with or without a workspace to claim: while this computer
+    last reported a zero-network policy (decision 8, 2026-11-07) every remote target is refused as
+    ``zero_network_remote_selected``, until ``finishup server use local``; a target confirmed
+    under an older disclosure as ``target_reauthorization_required``, until ``finishup server use
+    NAME``. No workspace is noted, no workspace agent and no SSH master is started, and nothing is
+    dialled.
+    """
+
+    from finishup.client.targets import TargetError, require_current_authorization
+
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
 
 
 async def _connect_remote(
@@ -2103,7 +2137,9 @@ async def _connect_remote(
 ) -> ServiceClient:
     """Connect to a remote target's network API (ADR-051); never spawn or supersede a service.
 
-    The workspace is named by its claim (``_remote_claim``), never by its path. A connection that
+    Every connection first asks the shared connection check (``_require_remote_authorization``):
+    nothing is noted, started or dialled for a target nothing may be sent to now. The workspace
+    is named by its claim (``_remote_claim``), never by its path. A connection that
     names a workspace by its locator also notes it for this target's workspace agent
     (``finishup agent run``), starting that agent when none runs, so the server's workspace calls
     for it are answered while this call is live and after it returns. An on-demand caller also
@@ -2114,12 +2150,21 @@ async def _connect_remote(
     from finishup.client.rest_client import connect_rest_service
 
     record, root = target
+    # The shared connection check, for every connection, with a workspace or without one.
+    _require_remote_authorization(record)
     claim = await _remote_claim(workspace_locator, workspace_binding)
     noted = workspace_locator if claim is not None else None
     if noted is not None:
         from finishup.client.agent import ensure_agent, note_workspace
 
         note_workspace(root, noted)
+        ensure_agent(root)
+    elif record.kind == "ssh":
+        from finishup.client.agent import ensure_agent
+
+        # An SSH target's master is supervised by the target's workspace agent, which closes it
+        # within about a second of this computer's zero-network record (ADR-051 decision 8),
+        # so a connection with no workspace to note starts that agent too.
         ensure_agent(root)
     deadline = time.monotonic() + timeout_seconds
 

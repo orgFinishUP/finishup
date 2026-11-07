@@ -25,6 +25,14 @@ dispatch), so every surface may say that nothing was recorded. A call that may h
 the server no longer keeps — is ``request_timeout`` instead: its outcome is unknown, and the
 ADR-030 timeout continuation says how to recover it under the same identity. Proxy variables are
 ignored: the server hop goes only where the owner's target record says.
+
+Every REST connection goes through the shared connection check first
+(``require_connection_allowed``, which asks ``targets.require_current_authorization``): nothing is
+sent to a target confirmed under an older disclosure, and nothing at all while this computer last
+reported a zero-network privacy policy (ADR-051 decision 8). A ``RestServiceClient`` also reads
+that record before every request and at least once a second while it is open; on finding it, it
+closes its connections, sends nothing more (not even the cancel of a call it stops waiting for),
+and fails every call with the remote phase ``zero_network_remote_selected``.
 """
 
 from __future__ import annotations
@@ -88,13 +96,24 @@ if TYPE_CHECKING:
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
 
 __all__ = [
+    "MARKER_CHECK_SECONDS",
+    "ZERO_NETWORK_PHASE",
     "RestEndpoint",
     "RestServiceClient",
     "connect_rest_service",
     "open_rest_http",
     "read_server_info",
+    "require_connection_allowed",
     "rest_endpoint_for",
+    "zero_network_reported",
 ]
+
+# Why nothing is sent to a server elsewhere while this computer last reported a zero-network
+# policy (ADR-051 decision 8): the remote phase every surface names, fixed by
+# 'finishup server use local'.
+ZERO_NETWORK_PHASE: Final = "zero_network_remote_selected"
+# A client that holds connections to a server elsewhere reads that record at least this often.
+MARKER_CHECK_SECONDS: Final = 0.5
 
 # Room past the long-poll window for the server to answer.
 _READ_SLACK_SECONDS: Final = 10.0
@@ -127,6 +146,42 @@ _WORKFLOW: Final = frozenset(
 
 def _remote(phase: str, *, retryable: bool = True) -> ControlError:
     return ControlError("service_unavailable", retryable=retryable, phase=phase)
+
+
+def zero_network_reported() -> bool:
+    """Whether this computer last reported a zero-network privacy policy (a file read only).
+
+    ``client.everyday_policy``'s marker, never a service round trip, so a hook, the MCP bridge
+    and the workspace agent can read it before every request. It never answers under an isolation
+    variable or runtime pin.
+    """
+
+    from finishup.client.everyday_policy import last_reported_zero_network
+
+    return last_reported_zero_network() is not None
+
+
+def require_connection_allowed(record: ServerTarget) -> None:
+    """The shared connection check before any REST connection to ``record`` (ADR-051).
+
+    ``targets.require_current_authorization`` decides: while this computer last reported a
+    zero-network policy every remote target is refused as ``zero_network_remote_selected``
+    (until ``finishup server use local``); a target confirmed under an older disclosure as
+    ``target_reauthorization_required`` (until ``finishup server use NAME``). The refusal is the
+    retryable ``service_unavailable`` with that phase, so every surface names it and its
+    directive; nothing has been sent.
+    """
+
+    from finishup.client.targets import TargetError, require_current_authorization
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        phase = (
+            error.reason if error.reason in REMOTE_CONNECTION_PHASES else "target_root_is_remote"
+        )
+        raise _remote(phase) from None
 
 
 class _RestPeer:
@@ -438,7 +493,7 @@ class RestServiceClient(ServiceClient):
     socket-specific state of its base class is never initialized or used.
     """
 
-    __slots__ = ("_claim", "_endpoint", "_http")
+    __slots__ = ("_claim", "_endpoint", "_http", "_marker_watch", "_zero_network_seen")
 
     def __init__(
         self,
@@ -486,6 +541,12 @@ class RestServiceClient(ServiceClient):
             workspace_binding=binding,
             workspace_handle=info.workspace_handle,
         )
+        # This computer's zero-network record, read at least once a second while this client is
+        # open (ADR-051 decision 8): once it says so, the client closes and sends nothing more.
+        self._zero_network_seen = asyncio.Event()
+        self._marker_watch: asyncio.Task[None] | None = None
+        with contextlib.suppress(RuntimeError):
+            self._marker_watch = asyncio.get_running_loop().create_task(self._watch_marker())
 
     @property
     def transport_kind(self) -> TargetKind:
@@ -500,11 +561,43 @@ class RestServiceClient(ServiceClient):
 
     async def _fail_connection(self, error: ControlError, *, from_receiver: bool = False) -> None:
         del error, from_receiver
+        watch = self._marker_watch
+        if watch is not None and watch is not asyncio.current_task() and not watch.done():
+            watch.cancel()
         if not self._closed:
             self._closed = True
             self._session.close()
             with contextlib.suppress(Exception):
                 await self._http.aclose()
+
+    def _zero_network(self) -> bool:
+        """Whether this computer is (or was found to be) zero-network; the record is read now."""
+
+        if not self._zero_network_seen.is_set() and zero_network_reported():
+            self._zero_network_seen.set()
+        return self._zero_network_seen.is_set()
+
+    async def _refuse_zero_network(self) -> None:
+        """Close and refuse, before anything is sent, once this computer is zero-network."""
+
+        if self._zero_network():
+            error = _remote(ZERO_NETWORK_PHASE)
+            await self._fail_connection(error)
+            raise error
+
+    async def _watch_marker(self) -> None:
+        """Close this client within ``MARKER_CHECK_SECONDS`` of the zero-network record.
+
+        An open client (the MCP bridge's, the terminal interface's, a long-polled call's) holds
+        connections to the server; they close, and a request under way is abandoned, so nothing
+        more reaches the server once this computer reported that it makes no network connections.
+        """
+
+        while not self._closed:
+            await asyncio.sleep(MARKER_CHECK_SECONDS)
+            if self._zero_network():
+                await self._fail_connection(_remote(ZERO_NETWORK_PHASE))
+                return
 
     def _headers(self, request: ControlCallRequest, *, rpc_id: str) -> dict[str, str]:
         headers = _base_headers(self._endpoint, self._claim)
@@ -541,8 +634,25 @@ class RestServiceClient(ServiceClient):
         phase; one after the request went out may have reached the server.
         """
 
+        await self._refuse_zero_network()
+        sending = asyncio.ensure_future(
+            self._http.request(method, path, content=content, headers=headers)
+        )
+        stopped = asyncio.ensure_future(self._zero_network_seen.wait())
         try:
-            response = await self._http.request(method, path, content=content, headers=headers)
+            await asyncio.wait((sending, stopped), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+            if not sending.done():
+                sending.cancel()
+                await asyncio.gather(sending, return_exceptions=True)
+        if self._zero_network_seen.is_set() and (sending.cancelled() or sending.exception()):
+            # The client closed under this request for this computer's zero-network record.
+            failure = _remote(ZERO_NETWORK_PHASE)
+            await self._fail_connection(failure)
+            raise failure
+        try:
+            response = sending.result()
         except httpx.HTTPError as error:
             failure = (
                 _transport_failure(error, self._endpoint)
@@ -592,7 +702,8 @@ class RestServiceClient(ServiceClient):
     async def _cancel_remote(self, rpc_id: str) -> None:
         """Best effort: ask the server to cancel an operation this client stopped waiting for."""
 
-        if self._closed:
+        if self._closed or self._zero_network():
+            # Nothing more is sent once this computer is zero-network, not even a cancel.
             return
         with contextlib.suppress(Exception):
             async with asyncio.timeout(_CANCEL_SECONDS):
@@ -603,6 +714,7 @@ class RestServiceClient(ServiceClient):
                 )
 
     async def call(self, request: ControlCallRequest) -> ControlResult:
+        await self._refuse_zero_network()
         self._ensure_live()
         self._admit(request.method)
         if (
@@ -712,6 +824,7 @@ class RestServiceClient(ServiceClient):
             delay = min(delay * 2, _BUSY_MAX_SECONDS)
 
     async def cancel(self, request: ControlCancelRequest) -> None:
+        await self._refuse_zero_network()
         self._ensure_live()
         if (
             request.service_instance_id != self._session.service_instance_id
@@ -773,6 +886,7 @@ async def connect_rest_service(
         raise TypeError("control_client_kind_invalid")
     if claim is not None and type(claim) is not WorkspaceClaim:
         raise TypeError("workspace_claim_invalid")
+    require_connection_allowed(record)
     endpoint = _endpoint or rest_endpoint_for(record, root)
     http = _client(endpoint, transport=_transport)
     try:
@@ -785,7 +899,12 @@ async def connect_rest_service(
 
 
 def open_rest_http(record: ServerTarget, root: Path) -> tuple[Any, dict[str, str]]:
-    """An HTTP client for ``record``'s API and the headers every request carries (the agent's)."""
+    """An HTTP client for ``record``'s API and the headers every request carries (the agent's).
 
+    The shared connection check runs first (``require_connection_allowed``); the agent itself
+    reads this computer's zero-network record before each request it sends over this client.
+    """
+
+    require_connection_allowed(record)
     endpoint = rest_endpoint_for(record, root)
     return _client(endpoint, transport=None), _base_headers(endpoint, None)

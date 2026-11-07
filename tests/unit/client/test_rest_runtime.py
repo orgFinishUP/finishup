@@ -577,6 +577,12 @@ def test_a_connection_gives_the_ssh_steps_only_what_is_left_of_its_budget(
     monkeypatch.setattr(SshTargetRuntime, "ensure_master", master)
     monkeypatch.setattr(SshTargetRuntime, "start_remote_service", start)
     monkeypatch.setattr(client_module, "_spawn_service_process", no_spawn)
+
+    def no_agent(_root: Path) -> bool:
+        return False
+
+    # The master's supervisor (the target's workspace agent) is not started from a unit test.
+    monkeypatch.setattr("finishup.client.agent.ensure_agent", no_agent)
     with pytest.raises(ControlError) as raised:
         asyncio.run(
             client_module.connect_service_on_demand(
