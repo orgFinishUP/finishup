@@ -1083,11 +1083,13 @@ def test_an_unreadable_everyday_policy_refuses_the_hop(
     assert targets.list_targets() == ()
 
 
-def test_an_unreadable_policy_names_a_way_that_works_while_a_server_elsewhere_is_selected(
-    home: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("selected_kind", ["https", "local"])
+def test_an_unreadable_policy_names_a_way_that_works_while_another_server_is_selected(
+    home: Path, monkeypatch: pytest.MonkeyPatch, selected_kind: str
 ) -> None:
-    """SRV-3: with a server elsewhere selected, 'service start' and 'service unlock' are refused
-    (requires_server_host), so the refusal names 'server connect local', which starts this
+    """SRV-3: with any server selected, 'service start' and 'service unlock' never reach this
+    computer's own FinishUP: they are refused (requires_server_host) for a server elsewhere and act
+    on a named local one. So the refusal names 'server connect local', which starts this
     computer's FinishUP from that state, and the way to unlock it."""
 
     from finishup.ports.control import ControlError
@@ -1095,7 +1097,10 @@ def test_an_unreadable_policy_names_a_way_that_works_while_a_server_elsewhere_is
     _everyday_installation(home)
     _serve_policy(monkeypatch, ControlError("service_unavailable", retryable=True))
     with targets.registry_lock():
-        alpha, _root = targets.new_remote_target("alpha", "https", base_url="https://a.example")
+        if selected_kind == "local":
+            alpha, _root = targets.new_local_target("alpha")
+        else:
+            alpha, _root = targets.new_remote_target("alpha", "https", base_url="https://a.example")
         targets.new_remote_target("beta", "https", base_url="https://b.example")
     targets.write_selection(alpha)
 

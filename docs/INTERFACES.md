@@ -4900,10 +4900,11 @@ enters `selection_override(None)` again itself.
 "Use NAME" reads it in a worker thread and the typed confirmation on its loop thread with Python's
 default Ctrl-C handler, `cli.server.confirm_use_on_this_thread`, so an interrupt cancels it);
 when it is `unreadable` a marker that says zero-network refuses `zero_network_in_force` with the
-fixed sentence naming `reported_at`, and anything else refuses `network_policy_unreadable` (while a
-remote target is selected its text names `server connect local`, and `server use local` before
-`service unlock`, since `service start|unlock` are refused there). `find_zero_network_selection()`
-reads the selection file afresh (`read_selection_on_disk()`, never the memo) and returns a
+fixed sentence naming `reported_at`, and anything else refuses `network_policy_unreadable` (while
+any target is selected, a named local one included, its text names `server connect local`, and
+`server use local` before `service unlock`, since `service start|unlock` are refused for a remote
+target and act on a named local one). `find_zero_network_selection()` reads the selection file
+afresh (`read_selection_on_disk()`, never the memo) and returns a
 `ZeroNetworkSelection(reason, target_id, kind, detail, policy_read, last_reported_at)` under
 `zero_network` (`policy_read="live"`), or under `unreadable` when the marker says zero-network
 (`last_reported`), never under an isolation variable or pin, with the closed `reason`
