@@ -589,3 +589,58 @@ async def test_the_stored_api_key_is_read_off_the_event_loop(
     finally:
         await client.close()
     assert len(readers) == 1 and readers[0] != threading.get_ident()
+
+
+@pytest.mark.anyio
+async def test_a_kept_client_is_not_reused_once_its_key_changed(
+    keys: ApiKeyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-CRED-STALE on approach C: a holder that keeps a client between calls (the MCP bridge) sent
+    the key it read at connect for as long as it kept the client, a key ``server logout`` deleted
+    or ``server login`` replaced included. Once the target's record changed, the client refuses
+    its reuse (retryable), so the holder connects again with the key now stored."""
+
+    from dataclasses import replace
+
+    from finishup.client import targets
+    from finishup.client.credentials import KeyringOrFileCredential
+
+    api = make_api(FakeService(), keys)
+    _key, token = keys.create("laptop", "operator")
+    reads: list[str] = []
+
+    def read(_self: KeyringOrFileCredential) -> str:
+        reads.append("read")
+        return token
+
+    monkeypatch.setattr(KeyringOrFileCredential, "read", read)
+    with ambient_home(monkeypatch):
+        with targets.registry_lock():
+            record, root = targets.new_remote_target("lab", "https", base_url="https://api.test")
+
+        async def connect() -> RestServiceClient:
+            return await connect_rest_service(
+                ControlClientKind.MCP_BRIDGE,
+                record=record,
+                root=root,
+                _transport=httpx.ASGITransport(app=api.asgi("https")),  # type: ignore[arg-type]
+            )
+
+        client = await connect()
+        try:
+            await client.connect()  # unchanged: reused as it is
+            with targets.registry_lock():
+                targets.write_target(root, replace(record, credential=None))  # as logout does
+            with pytest.raises(ControlError) as refused:
+                await client.connect()
+            assert (refused.value.reason, refused.value.retryable) == ("service_unavailable", True)
+            with pytest.raises(ControlError):
+                await client.connect()  # closed for good
+        finally:
+            await client.close()
+        fresh = await connect()
+        try:
+            await fresh.connect()
+        finally:
+            await fresh.close()
+    assert reads == ["read", "read"]

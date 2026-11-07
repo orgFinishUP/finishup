@@ -4931,8 +4931,14 @@ none is usable, the owner-only file store at `<target root>/config/credential`. 
 `credential_store_unavailable` only when the store the key is recorded in cannot be used (a recorded
 platform store that cannot be loaded now included); the other store is tidied best effort. `server
 remove` asks no store for an SSH target, and when the recorded platform store cannot be used it
-still removes the target and names, on stderr, the entry left there (service and target id). The
-credential never appears in argv, the environment, `target.json`, a registration, a log, hook
+still removes the target and names, on stderr, the entry left there (service and target id).
+`server login` and `server logout` then stop the target's workspace agent through its runtime
+(`_leave`, as `server disconnect` does), which kept the key it read; one that does not stop in
+time is named on stderr by generated id with that fix. `RestServiceClient.connect()` (a holder's
+check before reusing a kept client) also compares the target record's stamp
+(`(inode, mtime_ns, size)` of `target.json`, taken before the key was read) and, once it
+changed, closes the client and raises a retryable `service_unavailable`, so the holder connects
+again with the key now stored. The credential never appears in argv, the environment, `target.json`, a registration, a log, hook
 output, an MCP frame or JSON output.
 
 **Control envelopes 2.10.0.** All four control envelopes move together.

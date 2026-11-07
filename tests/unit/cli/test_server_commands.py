@@ -1294,6 +1294,57 @@ def test_login_and_logout_with_an_owner_only_key_file(
     assert again.exit_code == 0 and "No API key was stored" in again.stdout
 
 
+@pytest.mark.parametrize("stuck", [False, True])
+def test_login_and_logout_stop_an_agent_that_kept_the_earlier_key(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    no_platform_store: None,
+    monkeypatch: pytest.MonkeyPatch,
+    stuck: bool,
+) -> None:
+    """A-CRED-STALE on approach C: the workspace agent keeps the key it read when it started, so
+    after ``logout`` it would keep sending the deleted key, and after ``login`` an earlier one.
+    Both stop it through its runtime, as ``server disconnect`` does; one that does not stop in
+    time is named with that fix."""
+
+    from finishup.client.rest_runtime import RestTargetRuntime
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    stops: list[Path | None] = []
+
+    def stop(_self: RestTargetRuntime, target: Path | None) -> None:
+        stops.append(target)
+        if stuck:
+            raise TargetRuntimeError("service_unavailable", phase="agent_stop")
+
+    monkeypatch.setattr(RestTargetRuntime, "stop", stop)
+    monkeypatch.setattr(server_cli, "_check_api_key", lambda _record, _secret: None)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+
+    login = _invoke("login", "fu", "--key-file", str(key_file))
+    assert login.exit_code == 0, login.output
+    assert stops == [root]
+    logout = _invoke("logout", "fu")
+    assert logout.exit_code == 0, logout.output
+    assert stops == [root, root]
+    assert targets.list_targets()[0].credential is None
+    for result, which in ((login, "earlier"), (logout, "deleted")):
+        if stuck:
+            assert result.stderr == (
+                f"The workspace agent for the server {record.target_id} (https) did not stop in "
+                f"time, so it may still use the {which} key until it stops. Run 'finishup server "
+                "disconnect' with that server's name ('finishup server list' shows it).\n"
+            )
+        else:
+            assert result.stderr == ""
+        assert _KEY not in result.output
+
+
 def test_remove_never_deletes_a_target_whose_agent_did_not_stop(
     home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1374,6 +1425,7 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
     (record,) = targets.list_targets()
     assert record.credential == "keyring"
     root = targets.target_root(record.target_id)
+    seen.clear()  # login stops an agent that kept an earlier key; only remove's stops count
 
     result = _invoke("remove", "fu", "--select-local")
 

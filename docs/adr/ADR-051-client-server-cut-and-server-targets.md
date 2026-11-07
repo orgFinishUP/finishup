@@ -817,7 +817,13 @@ answers bounded `workspace_call`s on a connection that declared it.
     server's operator repairs the file (`finishup service api-key list` there names what is wrong
     and the fix), since refusal is the last resort. A target confirmed under an older
     disclosure is not sent the key either, and the command says so and names `finishup server use
-    NAME`. Until 2026-11-07 approach C stored any key without checking it.
+    NAME`. Until 2026-11-07 approach C stored any key without checking it. When `login` stores
+    a key or `logout` deletes one, the command then stops the target's workspace agent through
+    its runtime, as `server disconnect` does, since the agent keeps the key it read when it
+    started; a stop that does not finish in time is named on stderr with `server disconnect` as
+    the fix. A `RestServiceClient` kept between calls (the MCP bridge's) refuses its reuse once
+    the target's record changed since it read the key (`connect()` answers a retryable
+    `service_unavailable`), so its holder connects again with the key now stored.
 - Which client process reads the credential is part of each approach's topology. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.

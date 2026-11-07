@@ -214,6 +214,12 @@ cannot check any key until its operator repairs its key file (`server_keys_unusa
 stores the key and says it is not verified yet and why: it is checked on the first connection, and
 `finishup server test NAME` checks it as soon as the server is up or its key file is repaired.
 
+When `login` stores a key or `logout` deletes one, the command stops the workspace agent FinishUP
+runs for that server, so it never goes on using an earlier or deleted key; the next request starts
+it again with the key now stored. An agent session's open connection to that server reconnects
+with that key before its next request. If the agent does not stop in time, the command says so
+and `finishup server disconnect` stops it.
+
 SSH servers need no FinishUP sign-in. Your SSH keys, `ssh-agent` and known hosts stay with SSH;
 FinishUP stores no SSH key and never asks for an SSH password.
 

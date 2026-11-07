@@ -34,7 +34,9 @@ long-lived, pull-based client of the server's network API, one per target root:
   (``_END_SECONDS``): the server ends one whose polls stop, so a stop never waits on a
   black-holed network.
 * It reads the target's API key off its event loop (a platform credential store can block), so
-  its signal handlers and the zero-network watch keep running meanwhile.
+  its signal handlers and the zero-network watch keep running meanwhile. It keeps that key for
+  its life, so ``server login`` and ``server logout`` stop it (as ``server disconnect`` does): it
+  never goes on with a key that was replaced or deleted.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file

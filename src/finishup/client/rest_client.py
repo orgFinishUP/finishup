@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 import httpx
 
 from finishup.client.targets import ServerTarget, TargetKind
+from finishup.config.paths import SERVER_TARGET_FILE_NAME
 from finishup.domain.values import JsonObject, freeze_json
 from finishup.ports.control import (
     ControlCallRequest,
@@ -507,7 +508,14 @@ class RestServiceClient(ServiceClient):
     socket-specific state of its base class is never initialized or used.
     """
 
-    __slots__ = ("_claim", "_endpoint", "_http", "_marker_watch", "_zero_network_seen")
+    __slots__ = (
+        "_claim",
+        "_endpoint",
+        "_http",
+        "_marker_watch",
+        "_record_seen",
+        "_zero_network_seen",
+    )
 
     def __init__(
         self,
@@ -518,6 +526,7 @@ class RestServiceClient(ServiceClient):
         *,
         claim: WorkspaceClaim | None,
         _token: object,
+        record_seen: _RecordSeen | None = None,
     ) -> None:
         # Deliberately not ``super().__init__``: that starts a receiver on a Unix stream, and
         # this client has none. Every base method that touches the stream is overridden here.
@@ -530,6 +539,8 @@ class RestServiceClient(ServiceClient):
         self._endpoint = endpoint
         self._claim = claim
         self._client_kind = client_kind
+        # The target record as it was when this client read the key (``None``: no stored key).
+        self._record_seen = record_seen
         # The base class's socket-side members, never used here: this client serves no workspace
         # calls (the target's workspace agent does) and owns no stream or receiver.
         self._agent = None
@@ -563,6 +574,23 @@ class RestServiceClient(ServiceClient):
             self._marker_watch = asyncio.get_running_loop().create_task(
                 RestServiceClient._watch_marker(weakref.ref(self))
             )
+
+    async def connect(self) -> None:
+        """Confirm that this open client is still usable, its key still the one stored.
+
+        A holder that keeps a client between calls (the MCP bridge) asks this before each reuse.
+        The client sends the API key it read when it connected; once the target's record changed
+        since (``server login`` stored a key, ``server logout`` deleted it, or the key moved), it
+        closes and refuses with a retryable ``service_unavailable``, so its holder connects again
+        with the key now stored and never goes on with a replaced or deleted one.
+        """
+
+        self._ensure_live()
+        seen = self._record_seen
+        if seen is not None and _record_stamp(seen.path) != seen.stamp:
+            error = ControlError("service_unavailable", retryable=True)
+            await self._fail_connection(error)
+            raise error
 
     @property
     def transport_kind(self) -> TargetKind:
@@ -915,6 +943,13 @@ async def connect_rest_service(
     if claim is not None and type(claim) is not WorkspaceClaim:
         raise TypeError("workspace_claim_invalid")
     require_connection_allowed(record)
+    # Taken before the key is read: a record changed after this keeps the client from reuse.
+    record_file = root / SERVER_TARGET_FILE_NAME
+    record_seen = (
+        None
+        if _endpoint is not None or record.kind == "ssh"
+        else _RecordSeen(record_file, _record_stamp(record_file))
+    )
     # The stored API key may come from a platform credential store, which can block (a locked
     # Secret Service collection, a keychain prompt): it is read off the event loop, so a
     # long-lived holder's other work (the workspace agent's polls, the MCP bridge) keeps running.
@@ -926,7 +961,30 @@ async def connect_rest_service(
         with contextlib.suppress(Exception):
             await http.aclose()
         raise
-    return RestServiceClient(http, endpoint, info, client_kind, claim=claim, _token=_PRIVATE)
+    return RestServiceClient(
+        http, endpoint, info, client_kind, claim=claim, _token=_PRIVATE, record_seen=record_seen
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordSeen:
+    """A target record file and its stamp when a client read the key it names."""
+
+    path: Path
+    stamp: tuple[int, int, int] | None
+
+
+def _record_stamp(path: Path) -> tuple[int, int, int] | None:
+    """``(inode, mtime_ns, size)`` of a target record file, ``None`` when it cannot be read.
+
+    ``write_target`` replaces the file whole, so every login, logout or other rewrite changes it.
+    """
+
+    try:
+        facts = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    return (facts.st_ino, facts.st_mtime_ns, facts.st_size)
 
 
 async def check_api_key(

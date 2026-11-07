@@ -12,7 +12,8 @@ trusted console; refusals name a target by its id or not at all, with a closed r
   typed confirmation. ``use local`` is the reverse. A switch away from a remote target also stops
   what this client runs for it, as ``disconnect`` does (``TargetSwitch``).
 * ``login``/``logout`` store or delete an HTTPS target's API key (platform store or owner-only
-  file); ``connect``/``disconnect`` make the target usable or stop what this client runs for it.
+  file), then stop the target's workspace agent, which kept the key it read in memory;
+  ``connect``/``disconnect`` make the target usable or stop what this client runs for it.
 * ``list``, ``status [--json]`` and ``test`` show the deciding source, the target, and a probe.
 
 An isolation root or a runtime pin outranks the selection; while one is in force every command
@@ -2053,28 +2054,52 @@ def server_login(
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
     if unanswered is None:
         typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
-        return
-    typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+    else:
+        typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+        typer.echo(_not_verified_line(record, unanswered))
+    _stop_agent_keeping_a_key(record, which="earlier")
+
+
+def _not_verified_line(record: ServerTarget, unanswered: str) -> str:
+    """Why login could not have the key checked now, and when it is checked."""
+
     if unanswered == "server_keys_unusable":
-        typer.echo(
+        return (
             "The server answered, but it cannot check any API key until its operator repairs "
             "its key file there (server_keys_unusable), so it did not judge this one. Ask the "
             "server's operator to run 'finishup service api-key list' on the server, which names "
             "what is wrong with the file and how to fix it. The key is checked on the first "
             f"connection after that; run 'finishup server test {record.name}' then to check it now."
         )
-        return
     if unanswered == "target_reauthorization_required":
-        typer.echo(
+        return (
             "It was not sent: you confirmed this server under an older disclosure, so nothing is "
             f"sent to it until you run 'finishup server use {record.name}'. The key is checked on "
             "the first connection after that."
         )
-        return
-    typer.echo(
+    return (
         f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
         f"checked on the first connection; run 'finishup server test {record.name}' once the "
         "server is up to check it now."
+    )
+
+
+def _stop_agent_keeping_a_key(record: ServerTarget, *, which: str) -> None:
+    """Stop the workspace agent this client runs for ``record`` after its stored key changed.
+
+    The agent keeps the key it read when it started: after ``logout`` it would keep sending the
+    deleted key, and after ``login`` an earlier one. It is stopped through the target's runtime,
+    exactly as ``server disconnect`` stops it; the next client process starts it again with the
+    key now stored. One that did not stop in time is named, by generated id, with that fix.
+    """
+
+    if not _leave(None, record).left_open:
+        return
+    typer.echo(
+        f"The workspace agent for the server {record.target_id} ({record.kind}) did not stop in "
+        f"time, so it may still use the {which} key until it stops. Run 'finishup server "
+        "disconnect' with that server's name ('finishup server list' shows it).",
+        err=True,
     )
 
 
@@ -2108,6 +2133,7 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
         if removed
         else f"No API key was stored for {record.target_id}."
     )
+    _stop_agent_keeping_a_key(record, which="deleted")
 
 
 _KEY_KEPT: Final = (
