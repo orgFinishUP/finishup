@@ -86,6 +86,9 @@ _CLIENT_TARGETS: Final = {
     ("client/targets.py", "active_target_record", "active_root"): 1,
     # ``finishup server status``/``connect`` with no name act on this process's own root.
     ("cli/server.py", "_resolve", "active_root"): 1,
+    # ``server status|test local`` says "chosen by" only while this process uses the everyday
+    # server (its root is the ambient one), never for a server it does not use.
+    ("cli/server.py", "target_in_use", "active_root"): 1,
     # A workspace agent is bound to the outside-read record (mode and listed folders) of the
     # target this process uses when the agent is built.
     ("client/server_folders.py", "outside_reads_reader", "active_root"): 1,
