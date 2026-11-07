@@ -4714,7 +4714,14 @@ beside the server's policy. `server folders add`
 refuses a folder that `client.server_folders.folder_admissible` rejects (`folder_invalid`: not the
 input-root shape, the home directory, a folder holding it by spelling or identity, or one in its
 private trees) before it asks on the trusted console, and `add_folder` applies the same rule again
-under the registry lock. `server folders remove NAME --all` on a record that cannot be read
+under the registry lock. The input-root shape (`domain.privacy.admitted_input_root_valid`, with
+`cli.privacy_setup.admitted_root_from_path` for existence and links) refuses exactly: a path that
+is not absolute and normalized, missing or reached through a link, over 190 characters or 16
+parts, a part with other characters than letters, digits and `. _ + @ -` or starting with a dot,
+the filesystem root, and `SYSTEM_DIRECTORY_PREFIXES` (`/boot`, `/dev`, `/etc`, `/proc`, `/run`,
+`/sys`, `/var/run`, `/private/etc`, `/private/var/run`) and beneath them; the private trees are
+`Library`, `AppData` and `snap`. The `folder_invalid` text and the servers guide name exactly
+these and nothing broader ("system folder" is not a rule: `/usr/lib` is admitted). `server folders remove NAME --all` on a record that cannot be read
 replaces it with an empty one in `listed` mode (`clear_folders` → `reset_to_listed`). `server
 add` prints a remote target's mode and the command that changes it. `server status --json` emits
 `server-target-status-1.0.0` and names the deciding root source, never a credential; for a remote
