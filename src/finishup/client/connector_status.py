@@ -399,8 +399,32 @@ def connector_environment(root: Path) -> dict[str, str]:
     return {name: os.environ[name] for name in _ENVIRONMENT_NAMES if name in os.environ}
 
 
+def _connector_command(root: Path) -> tuple[str, ...]:
+    return (sys.executable, "-m", "finishup", "connector", "run", "--root", str(root))
+
+
+def _reap(process: subprocess.Popen[bytes]) -> None:
+    """Wait for this process's own connector child, so it never lingers as a zombie.
+
+    ``Popen.wait`` waits on that one pid (``waitpid``), never on any other child, and tolerates a
+    child something else already reaped. Errors are dropped: the reaper has nothing to report.
+    """
+
+    with contextlib.suppress(BaseException):
+        process.wait()
+
+
 def spawn_connector(root: Path) -> subprocess.Popen[bytes]:
-    """Start one detached connector for ``root``; its stderr goes to ``log/connector.stderr``."""
+    """Start one detached connector for ``root``; its stderr goes to ``log/connector.stderr``.
+
+    The connector outlives the call and usually stops on another process's word (``server use``,
+    ``disconnect``, a zero-network policy) or its idle exit, while this process, a long-lived MCP
+    bridge or terminal interface, keeps running. A daemon thread waits on exactly the spawned
+    pid, so the stopped connector is reaped at once instead of staying ``<defunct>`` until this
+    process exits; nothing here ever waits on, or signals, a process by pattern.
+    """
+
+    import threading
 
     log = root / "log"
     log.mkdir(mode=0o700, exist_ok=True)
@@ -408,8 +432,8 @@ def spawn_connector(root: Path) -> subprocess.Popen[bytes]:
     descriptor = os.open(log / "connector.stderr", flags, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
-        return subprocess.Popen(  # noqa: S603 - fixed interpreter, module and arguments
-            (sys.executable, "-m", "finishup", "connector", "run", "--root", str(root)),
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter, module and arguments
+            _connector_command(root),
             close_fds=True,
             env=connector_environment(root),
             stdin=subprocess.DEVNULL,
@@ -419,6 +443,10 @@ def spawn_connector(root: Path) -> subprocess.Popen[bytes]:
         )
     finally:
         os.close(descriptor)
+    threading.Thread(
+        target=_reap, args=(process,), name="finishup-connector-reaper", daemon=True
+    ).start()
+    return process
 
 
 def stop_connector(root: Path, *, timeout_seconds: float = 5.0) -> bool:

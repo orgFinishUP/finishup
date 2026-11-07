@@ -5701,6 +5701,10 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   zero_network_remote_selected` when `stopped`), `correlation_id`, `pid`, `started_at`. Both are
   owner-only and hold no host, name or path. `finishup.client.connector_status` reads and writes
   them and owns `spawn_connector(root)` and `stop_connector(root)` (the stamped pid only).
+  `spawn_connector` starts a daemon thread in the spawning process that waits on exactly the
+  spawned pid, so a connector that another process stops (a switch, `disconnect`, zero-network)
+  or that exits idle is reaped at once and never stays `<defunct>` under a long-lived MCP bridge or
+  terminal interface.
 - `<troot>/run/m` and `<troot>/run/upstream.sock`: the OpenSSH master's control socket and its
   stream-local forward (`finishup.client.ssh_upstream`; argv fixed by `master_argv`).
 - `finishup.client.connector_runtime.ConnectorTargetRuntime`: the `TargetRuntime` registered for

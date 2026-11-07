@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
+import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -17,6 +20,7 @@ from finishup.client.connector_status import (
     connector_holder,
     new_status,
     read_connector_status,
+    spawn_connector,
     stop_connector,
     write_connector_status,
 )
@@ -169,3 +173,43 @@ def test_the_environment_lets_the_platform_keyring_find_the_session_bus(
     )
     assert found.returncode == 0
     assert found.stdout.strip() == b"/run/user/1000/bus"
+
+
+def _process_state(pid: int) -> str | None:
+    """The kernel's one-letter state of ``pid`` (``Z`` for a zombie), ``None`` once it is gone."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    return stat.rsplit(")", 1)[1].split()[0]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads the kernel's /proc")
+def test_a_spawned_connector_that_another_process_stops_is_reaped_at_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-3: a bridge's connector stopped by a switch or zero-network never stays <defunct>.
+
+    The spawning process drops the handle, as every caller does, and keeps running; the stop comes
+    from elsewhere (here the test signals the one pid it spawned, as ``stop_connector`` signals the
+    stamped one). The child must be reaped while this process lives, not when it exits.
+    """
+
+    import finishup.client.connector_status as connector_status
+
+    def paused(_root: Path) -> tuple[str, ...]:
+        return (sys.executable, "-c", "import signal; signal.pause()")
+
+    monkeypatch.setattr(connector_status, "_connector_command", paused)
+    process = spawn_connector(root)
+    pid = process.pid
+    del process
+    assert _process_state(pid) not in {None, "Z"}
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 10.0
+    state = _process_state(pid)
+    while state is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+        state = _process_state(pid)
+    assert state is None, f"connector child left in state {state}"
