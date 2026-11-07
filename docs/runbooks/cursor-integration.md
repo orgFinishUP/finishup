@@ -674,7 +674,10 @@ default service.
   trust, mappings and the outbox live in the selected target's client-side root, and
   `finishup observe ...` administers them here. Each row a remote target receives carries the
   client attestation (ADR-051 decision 12); the server accepts it as `client_attested`, and
-  receipts with hook-observed evidence carry one more fixed line.
+  receipts with hook-observed evidence carry one more fixed line. Host decision for content:
+  with `cursor-ordinary-observation-v1` enabled, the prompt, message and tool input and output
+  chunks reach the server unchanged, as a local service receives them; without the profile none
+  is sent. The server disclosure (disclosure 2) names this before the owner types the name.
 - **Zero-network and a remote target are never in force together** (maintainer decision, 2026-11-07,
   replacing 2026-11-06; ADR-051 decision 8). Adding or selecting a remote target is refused while
   this computer's privacy policy is zero-network, live or as this computer last reported it. A

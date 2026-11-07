@@ -10,7 +10,10 @@ digest and the FinishUP route mapped for the host session. The server records it
 ``client_attested`` and verifies none of it.
 
 The workspace path never leaves either: any workspace-locator content in the row is replaced by
-the connection's own ``client:`` handle. A claim-bound connection the server gave no handle (its
+the connection's own ``client:`` handle. Every other content chunk (prompts, agent messages, tool
+inputs and outputs captured under this client's consent and content profiles) is sent unchanged,
+as a local service would receive it; the server disclosure the owner confirmed names that
+(``cli.server.DISCLOSURE_LINES``), and a target confirmed under an older disclosure sends nothing. A claim-bound connection the server gave no handle (its
 vault was not ready at hello) sends nothing at all: the row stays pending behind a retryable
 ``vault_locked`` and a fresh connection after the unlock delivers it. Whether a connection is
 claim-bound is decided by its binding, never by the handle alone. A connection that is not
