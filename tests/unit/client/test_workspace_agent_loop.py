@@ -527,3 +527,48 @@ def test_the_pinned_pool_has_room_for_every_agent_poll_and_its_replies() -> None
     # registrations, with room to spare: the size httpx gives every unpinned client.
     assert pool._max_connections >= MAX_AGENTS_PER_KEY + agent_module._MAX_CONCURRENT_CALLS + 1  # pyright: ignore[reportPrivateUsage]
     assert pool._max_connections == 100  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_an_agent_stops_for_good_once_its_target_is_removed(
+    remote: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-REMOVE-RACE: an agent that outlived ``server remove`` (a process that still remembered the
+    target started it after remove's last stop) kept registering with the removed target's
+    server, and its transport restore (an SSH master's, through ``ensure_owner_only_dir``)
+    recreated the deleted folder. Once the record is gone it stops for good and sends nothing."""
+
+    import shutil
+
+    record, root = remote
+    monkeypatch.setattr(agent_module, "_RETRY_SECONDS", (0.01,))
+    registrations: list[str] = []
+    restored: list[Path] = []
+
+    async def restorer(_record: ServerTarget, at_root: Path) -> None:
+        restored.append(at_root)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        registrations.append(request.url.path)
+        # The server cannot be reached while ``server remove`` deletes the target here.
+        shutil.rmtree(root)
+        raise httpx.ConnectError("unreachable", request=request)
+
+    note_workspace(root, _WORKSPACE)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(answer), base_url="https://lab.example")
+    loop = _loop(
+        root,
+        record,
+        http,
+        "unused",
+        workspace=claim("repo"),
+        handler=_Handler(),
+        transport_restorer=restorer,
+    )
+    try:
+        assert await asyncio.wait_for(loop.run(), 5) == 0
+    finally:
+        loop.stop()
+    assert registrations == ["/v1/agents"]
+    assert restored == []
+    assert not root.exists()

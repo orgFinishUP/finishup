@@ -27,6 +27,10 @@ long-lived, pull-based client of the server's network API, one per target root:
   last delivery and no deregistration is sent, its HTTP connections close, an SSH target's master
   (which it supervises) exits through its control socket, and it names
   ``zero_network_remote_selected`` with the fix, ``finishup server use local``.
+* It stops for good, sending nothing more, once its target's record is gone or cannot be read
+  (``server remove`` deleted the target while it ran): it never registers, delivers, ends a
+  registration or brings an SSH master back for a removed target, so it never recreates the
+  target's folder either.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file
@@ -542,6 +546,8 @@ class WorkspaceAgentLoop:
         self._marker_seconds = marker_seconds
         # Set once this computer's zero-network record stopped the agent (ADR-051 decision 8).
         self.stopped_for: str | None = None
+        # Set once the target's record was found gone (``server remove``): nothing more is sent.
+        self._target_removed = False
         self._clock = clock
         self._wall_clock = wall_clock
         self._scan_seconds = scan_seconds
@@ -569,6 +575,33 @@ class WorkspaceAgentLoop:
         self._stopping.set()
         return True
 
+    def _target_gone(self) -> bool:
+        """Stop for good once this target's record is gone or cannot be read; whether it is.
+
+        ``server remove`` deletes the target while a stray agent may still run (one a process that
+        still remembered the target started after remove's last stop): nothing more is sent to
+        that server, and no SSH master or folder of the removed target is brought back. A file
+        read only.
+        """
+
+        if self._target_removed:
+            return True
+        try:
+            record = read_target(self._root)
+        except TargetError:
+            record = None
+        if record is not None and record.target_id == self._record.target_id:
+            return False
+        self._target_removed = True
+        _record("workspace_agent_exit", "target_removed")
+        self._stopping.set()
+        return True
+
+    def _may_send(self) -> bool:
+        """Whether anything may be sent to this agent's server now (the record, then the policy)."""
+
+        return not self._target_gone() and not self._zero_network()
+
     async def _watch_marker(self) -> None:
         while not self._stopping.is_set():
             with contextlib.suppress(TimeoutError):
@@ -595,7 +628,7 @@ class WorkspaceAgentLoop:
         idle_since = self._clock()
         try:
             while not self._stopping.is_set():
-                if self._zero_network():
+                if not self._may_send():
                     break
                 if _stop_requested(self._root):
                     _record("workspace_agent_exit", "stop_requested")
@@ -651,8 +684,8 @@ class WorkspaceAgentLoop:
         served.task.cancel()
         await asyncio.gather(served.task, return_exceptions=True)
         # A registration ends with a request to the server; none is sent once this computer is
-        # zero-network (the server ends it when its polls stop).
-        if served.agent_id is not None and not self._zero_network():
+        # zero-network or the target was removed (the server ends it when its polls stop).
+        if served.agent_id is not None and self._may_send():
             await api.end(served.agent_id)
 
     async def _serve(self, api: _AgentApi, name: str, locator: WorkspaceLocator) -> None:
@@ -686,7 +719,7 @@ class WorkspaceAgentLoop:
 
         delay = self._scan_seconds
         while not self._stopping.is_set():
-            if self._zero_network():
+            if not self._may_send():
                 return
             summary: object = None
             try:
@@ -710,7 +743,7 @@ class WorkspaceAgentLoop:
         attempt = 0
         nudge = self._served[name].nudge
         while not self._stopping.is_set():
-            if self._zero_network():
+            if not self._may_send():
                 return
             try:
                 registration = await api.register(claim, handler)
@@ -745,7 +778,8 @@ class WorkspaceAgentLoop:
 
         from finishup.client.target_runtime import TargetRuntimeError
 
-        if self._zero_network():
+        if not self._may_send():
+            # Never for a removed target either: restoring would recreate its folder.
             return
         try:
             await self._transport_restorer(self._record, self._root)
@@ -762,7 +796,7 @@ class WorkspaceAgentLoop:
         pending: set[asyncio.Task[None]] = set()
         try:
             while not self._stopping.is_set():
-                if self._zero_network():
+                if not self._may_send():
                     return
                 calls = await api.work(agent_id)
                 if calls is None:
@@ -793,8 +827,9 @@ class WorkspaceAgentLoop:
         body = canonical_encode(dict(workspace_reply_frame(reply)))
         delay = _REPLY_RETRY_FIRST_SECONDS
         while True:
-            if self._zero_network():
-                # The answer stays on this computer: nothing is sent once it is zero-network.
+            if not self._may_send():
+                # The answer stays on this computer: nothing is sent once it is zero-network, or
+                # once its target was removed.
                 return
             try:
                 delivered = await api.reply(agent_id, body)

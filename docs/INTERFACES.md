@@ -5780,8 +5780,12 @@ master closed), and a running `WorkspaceAgentLoop` (`zero_network=zero_network_r
 delivery pass and transport restore and every `marker_seconds`; on finding it, `stopped_for` is
 `zero_network_remote_selected`, everything under way is cancelled, no `DELETE /v1/agents/{id}`
 and no delivery is sent, the HTTP client closes, the transport closer runs, and
-`run_workspace_agent` exits 2 with that line. An idle agent exits only once `transport_alive`
-answers false.
+`run_workspace_agent` exits 2 with that line. Before each of those it also reads its target's
+record: once that is gone or cannot be read (`server remove` deleted the target under an agent a
+process that still remembered it started), it stops for good (`workspace_agent_exit`
+`target_removed`), sending nothing more, not even `DELETE /v1/agents/{id}`, and never restores
+the transport, which would recreate the removed folder. An idle agent exits only once
+`transport_alive` answers false.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is
