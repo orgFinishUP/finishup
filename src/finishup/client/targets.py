@@ -80,6 +80,7 @@ __all__ = [
     "active_target_record",
     "clear_selection",
     "find_target",
+    "leftover_target_ids",
     "list_targets",
     "new_local_target",
     "new_remote_target",
@@ -89,6 +90,7 @@ __all__ = [
     "read_target",
     "reauthorized",
     "registry_lock",
+    "remove_leftover_root",
     "remove_target_root",
     "require_current_authorization",
     "selection_path",
@@ -672,8 +674,8 @@ def registry_lock() -> Generator[None]:
         os.close(descriptor)
 
 
-def list_targets() -> tuple[ServerTarget, ...]:
-    """Every target, ordered by name; a damaged root fails closed instead of being skipped."""
+def _registry_roots() -> tuple[tuple[Path, ServerTarget | None], ...]:
+    """Every ``t_`` folder in the registry with its record (``None``: it holds no record)."""
 
     directory = servers_dir()
     try:
@@ -682,17 +684,37 @@ def list_targets() -> tuple[ServerTarget, ...]:
         return ()
     except OSError:
         raise TargetError("target_root_unsafe") from None
-    records: list[ServerTarget] = []
+    found: list[tuple[Path, ServerTarget | None]] = []
     for entry in entries:
         if not _TARGET_ID.match(entry.name):
             continue
         if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
             raise TargetError("target_root_unsafe")
-        record = read_target(Path(entry.path))
-        if record is None:
-            raise TargetError("target_record_invalid")
-        records.append(record)
+        root = Path(entry.path)
+        found.append((root, read_target(root)))
+    return tuple(found)
+
+
+def list_targets() -> tuple[ServerTarget, ...]:
+    """Every target, ordered by name; a damaged root fails closed instead of being skipped.
+
+    A folder that holds no ``target.json`` at all is not a target (``leftover_target_ids``): an
+    add or a remove that was interrupted left it, nothing can select it, and it never keeps the
+    registry from being read.
+    """
+
+    records = [record for _root, record in _registry_roots() if record is not None]
     return tuple(sorted(records, key=lambda record: record.name))
+
+
+def leftover_target_ids() -> tuple[str, ...]:
+    """The ids of registry folders that hold no ``target.json``, in id order.
+
+    Left by an add or a remove that was interrupted. ``finishup server list`` reports them and
+    ``finishup server remove ID`` deletes one (``remove_leftover_root``).
+    """
+
+    return tuple(root.name for root, record in _registry_roots() if record is None)
 
 
 def find_target(name: str) -> ServerTarget:
@@ -870,6 +892,22 @@ def remove_target_root(record: ServerTarget) -> None:
     if root.is_symlink() or not root.is_dir():
         raise TargetError("target_root_unsafe")
     shutil.rmtree(root)
+
+
+def remove_leftover_root(target_id: str) -> bool:
+    """Delete the registry folder ``target_id`` when it still holds no ``target.json``.
+
+    Callers hold ``registry_lock()`` and have stopped what this client ran there. Returns False
+    when it is not a leftover (no such folder, or it holds a record), and changes nothing then.
+    """
+
+    root = target_root(target_id)
+    if root.is_symlink() or not root.is_dir():
+        return False
+    if read_target(root) is not None:
+        return False
+    shutil.rmtree(root)
+    return True
 
 
 def read_selected_target_id() -> str | None:

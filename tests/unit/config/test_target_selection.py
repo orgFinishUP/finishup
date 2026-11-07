@@ -187,6 +187,36 @@ def test_a_selected_root_without_its_record_fails_closed(home: Path) -> None:
     assert raised.value.reason_code == "isolation_root_invalid"
 
 
+@pytest.mark.parametrize("remembered", ["memo", "override"])
+def test_a_remembered_root_whose_target_was_removed_fails_closed_and_is_never_recreated(
+    home: Path, remembered: str
+) -> None:
+    """SRV-1: an MCP bridge, the terminal interface or the menu remember the root they started
+    with. Once ``server remove`` deleted it, every path beneath it fails closed exactly as a fresh
+    read would, so no helper recreates the removed folder (which then broke the registry)."""
+
+    from contextlib import nullcontext
+
+    from finishup.config.paths import ensure_owner_only_dir, log_dir
+
+    record, root = _local_target()
+    _select(record)
+    assert active_root() == root
+    if remembered == "override":
+        targets.clear_selection()
+    with selection_override(root) if remembered == "override" else nullcontext():
+        assert state_dir() == root / "state"
+        shutil.rmtree(root)  # what ``server remove`` does with the folder
+        for resolve in (active_root, state_dir, log_dir, runtime_dir):
+            with pytest.raises(PathSafetyError) as raised:
+                resolve()
+            assert raised.value.reason_code == "isolation_root_invalid"
+        with pytest.raises(PathSafetyError):
+            ensure_owner_only_dir(log_dir())
+    assert not root.exists()
+    assert targets.list_targets() == ()
+
+
 def test_a_too_broad_target_root_fails_closed_with_its_own_reason(home: Path) -> None:
     record, root = _local_target()
     _select(record)
