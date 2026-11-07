@@ -1738,8 +1738,56 @@ def test_ssh_targets_take_no_api_key(home: Path, authorized: list[tuple[str, str
     assert _invoke("logout", "lab").stderr.startswith("credential_not_applicable:")
 
 
-def test_remote_connect_without_a_runtime_is_a_typed_refusal(
-    home: Path, authorized: list[tuple[str, str]]
+def test_remote_connect_and_disconnect_dispatch_to_the_connector_runtime(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, Path | None]] = []
+
+    def ensure_ready(_self: object, root: Path | None) -> None:
+        calls.append(("ensure_ready", root))
+
+    def stop(_self: object, root: Path | None) -> None:
+        calls.append(("stop", root))
+
+    runtime = "finishup.client.connector_runtime.ConnectorTargetRuntime"
+    monkeypatch.setattr(f"{runtime}.ensure_ready", ensure_ready)
+    monkeypatch.setattr(f"{runtime}.stop", stop)
+    assert _invoke("add", "lab", "ssh://lab.example").exit_code == 0
+    (record,) = targets.list_targets()
+    assert record.remote_endpoint == "/run/user/1000/finishup/control.sock"
+    assert record.remote_launcher == "/opt/finishup/bin/finishup"
+    root = targets.target_root(record.target_id)
+    assert _invoke("connect", "lab").exit_code == 0
+    assert _invoke("disconnect", "lab").exit_code == 0
+    assert calls == [("ensure_ready", root), ("stop", root)]
+
+
+@pytest.mark.parametrize("address", ["ssh://lab.example", "https://lab.example"])
+def test_a_stopped_remote_service_is_named_alike_for_every_kind(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    """An SSH server has no gateway: the line for a server whose FinishUP service does not run
+    names the service and the one fix, the same for every kind of server."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    def ensure_ready(_self: object, _root: Path | None) -> None:
+        raise TargetRuntimeError("remote_service_not_running")
+
+    monkeypatch.setattr(
+        "finishup.client.connector_runtime.ConnectorTargetRuntime.ensure_ready", ensure_ready
+    )
+    assert _invoke("add", "lab", address).exit_code == 0
+    result = _invoke("connect", "lab")
+    assert result.exit_code != 0
+    assert result.stderr == (
+        "remote_service_not_running: the server answered but its FinishUP service is not "
+        "running; start it there with 'finishup service start'\n"
+    )
+
+
+def test_a_remote_kind_without_a_runtime_is_a_typed_refusal(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert _invoke("add", "lab", "ssh://lab.example").exit_code == 0
     for command in ("connect", "disconnect"):
