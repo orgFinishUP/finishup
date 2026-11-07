@@ -697,7 +697,8 @@ answers bounded `workspace_call`s on a connection that declared it.
   `workspace_agent_refused` (`check_time_change_unavailable_workspace_agent_refused`, its own
   fixed sentence), while `workspace_agent_unavailable`'s sentence covers an agent that was not
   connected, too slow or failed; a refused reviewer read reads as nothing. A reviewer read whose
-  time ran out on the client ends the review `deadline`, as a slow local read does, and one the
+  time ran out, on the client or while the server waited for the client's answer, ends the
+  review `deadline` on every transport, as a slow local read does, and one the
   agent did not serve for any other reason (busy, failed, an answer too large to carry) ends it
   `workspace_agent_unavailable`: a read the agent never made is never shown as an empty listing
   or an absent file. Since listed mode
