@@ -5798,6 +5798,14 @@ most 5 seconds for a request still running. `key list` shows each key as `active
 `gateway-audit.jsonl.1` (replacing the previous one) once it reaches 8 MiB. A refusal of a request
 no key authenticated is written at most once per reason per minute; the next window first writes
 `event` `gateway_refusals_suppressed` with that `reason` and the `count` not written.
+The gateway reaches the daemon through `service.client.ensure_service_running(*,
+timeout_seconds=30.0, start=True)`, a raw control stream to this root's service, started on
+demand; with `start=False` (a session sent with `FinishUP-Service-Start: never`) a service that is
+not running is `service_unavailable` and nothing is spawned. The gateway command composes
+`build_gateway_app(..., connect_upstream=ensure_service_running,
+reach_upstream=partial(ensure_service_running, start=False))`; `reach_upstream` serves the
+`never` sessions, and an app built without it (in-process stand-ins whose `connect_upstream`
+starts nothing) uses `connect_upstream` for them.
 
 ### Several-agent setup batches (issue #1119)
 
