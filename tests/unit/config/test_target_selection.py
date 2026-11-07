@@ -90,6 +90,33 @@ def test_the_environment_outranks_the_selection(
     assert isolation_binding() == "environment"
 
 
+def test_the_host_config_lock_and_its_membership_record_stay_with_the_installation(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-5: the lock that guards a host configuration root's project record, and the
+    membership record beside it, moved with the server selection, so two setup processes that
+    resolved different targets took different locks. They stay with the installation, as the
+    registrations they guard do: the everyday state, or an explicit isolation root's."""
+
+    from finishup.adapters.integrations import host_projects
+    from finishup.adapters.integrations.host_projects import lock_path_for, witness_path_for
+
+    # The suite keeps these locks in a temporary folder; resolve them as a real setup does.
+    monkeypatch.setattr(host_projects, "installation_state_dir", paths.installation_state_dir)
+    host_config = home / "claude-config"
+    everyday = lock_path_for(host_config)
+    assert everyday.parent == home / "state" / "finishup" / "host-config-locks"
+    record, root = _local_target()
+    _select(record)
+    assert active_root() == root
+    assert lock_path_for(host_config) == everyday
+    assert witness_path_for(host_config).parent == everyday.parent
+    explicit = home / "explicit"
+    explicit.mkdir(mode=0o700)
+    monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(explicit))
+    assert lock_path_for(host_config).parent == explicit / "state" / "host-config-locks"
+
+
 def test_a_pinned_runtime_never_sees_the_selection(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
