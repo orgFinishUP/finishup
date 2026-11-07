@@ -1979,6 +1979,23 @@ _REMOTE_NOT_SENT_MESSAGES: Final[Mapping[str, str]] = MappingProxyType(
         ),
     }
 )
+# ``remote_auth_failed``: the server answered and refused this client's key. It was reached, so
+# the message never says it could not be reached (RE-6).
+_REMOTE_KEY_REFUSED_MESSAGE: Final = (
+    "The selected FinishUP server on another machine answered and refused this client's key. If "
+    "it received this request before it refused the key, the request may be recorded; retrying "
+    "with the same request_id returns that record instead of a second one. Follow the "
+    "continuation for this phase: the owner repairs the key, then retry this operation with the "
+    "same request_id. Never fall back to another server or a local service, and never ask for, "
+    "paste or send a key."
+)
+# ``remote_auth_failed`` for a web server this computer holds no API key for: nothing was sent.
+_REMOTE_NO_KEY_MESSAGE: Final = (
+    "This computer holds no API key for the selected FinishUP server on another machine, so "
+    "nothing was sent to it. Follow the continuation for this phase: the owner stores a key, then "
+    "retry this operation with the same request_id. Never fall back to another server or a local "
+    "service, and never ask for, paste or send a key."
+)
 _REMOTE_DRAINING_MESSAGE: Final = (
     "The selected FinishUP server on another machine answered that it is shutting down or "
     "restarting, so it did not serve this request. Wait a few seconds, then retry this operation "
@@ -2010,11 +2027,27 @@ def _remote_control_error_result(
     any other reason; no host, user, name or path is ever in the text.
     """
 
-    from finishup.client.remote_remedy import remote_remedy
+    from finishup.client.remote_remedy import REMOTE_KEY_REFUSED_SUMMARY, remote_remedy
 
     remedy = remote_remedy(error)
     if remedy is None:
         return None
+    if remedy.reason == "remote_auth_failed":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                _REMOTE_KEY_REFUSED_MESSAGE
+                if remedy.summary == REMOTE_KEY_REFUSED_SUMMARY
+                else _REMOTE_NO_KEY_MESSAGE
+            ),
+            retryable=error.retryable,
+            host_profile=host_profile,
+            safe_details={"reason_code": remedy.reason},
+            diagnostic_reason=remedy.reason,
+        )
     if remedy.reason == "vault_locked":
         return _control_public_error_result(
             error,

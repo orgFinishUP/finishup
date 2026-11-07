@@ -8,7 +8,9 @@ and the terminal interface) asks this module instead, so they all say the same t
 
 * a failed connection names its remote phase (``remote_unreachable``, ``remote_auth_failed``,
   ``remote_identity_changed``, ``remote_service_not_running``, ``remote_incompatible``) with that
-  phase's ADR-030 directive from ``protocol.recovery`` (the text lives there, once);
+  phase's ADR-030 directive from ``protocol.recovery`` (the text lives there, once); a server
+  that refused this client's key answered, so it is never "could not be reached" (and a web
+  server this computer holds no API key for was sent nothing);
 * a connection never opened names why nothing was sent: a target confirmed under an older
   disclosure (``target_reauthorization_required``), a local service asked for in a remote
   target's root (``target_root_is_remote``), or this computer last reporting a zero-network
@@ -36,12 +38,16 @@ if TYPE_CHECKING:
 
 __all__ = [
     "REMOTE_DRAINING_SUMMARY",
+    "REMOTE_KEY_REFUSED_SUMMARY",
     "REMOTE_LOCKED_SUMMARY",
+    "REMOTE_NO_KEY_SUMMARY",
     "REMOTE_NOT_SENT_SUMMARIES",
     "REMOTE_UNAVAILABLE_SUMMARY",
     "REMOTE_UNCLAIMABLE_SUMMARY",
     "RemoteRemedy",
     "remote_connection_phase",
+    "remote_key_was_sent",
+    "remote_phase_summary",
     "remote_remedy",
     "remote_root_selected",
 ]
@@ -53,6 +59,19 @@ REMOTE_UNAVAILABLE_SUMMARY: Final = (
     "the selected FinishUP server on another machine could not be reached, or the connection to "
     "it ended before it answered; a request it already received may be recorded, and repeating "
     "that request under the same request id returns that record instead of a second one"
+)
+# ``remote_auth_failed``: the server answered and refused this client's key. It was reached, so
+# no surface says it could not be reached or did not answer. A key revoked while a connection was
+# open can be refused after a request was sent, so the same-request replay stays open.
+REMOTE_KEY_REFUSED_SUMMARY: Final = (
+    "the selected FinishUP server on another machine answered and refused this client's key; a "
+    "request it received before that may be recorded, and repeating that request under the same "
+    "request id returns that record instead of a second one"
+)
+# ``remote_auth_failed`` for a web server this computer holds no API key for: nothing was sent.
+REMOTE_NO_KEY_SUMMARY: Final = (
+    "this computer holds no API key for the selected FinishUP server on another machine, so "
+    "nothing was sent to it"
 )
 REMOTE_DRAINING_SUMMARY: Final = (
     "the selected FinishUP server on another machine answered that it is shutting down or "
@@ -110,6 +129,15 @@ class RemoteRemedy:
 
         return f"{self.reason}: {self.summary}"
 
+    def availability(self) -> str:
+        """The menu's short state of the selected server: a server that refused the key answered."""
+
+        if self.summary == REMOTE_KEY_REFUSED_SUMMARY:
+            return "answered, key refused"
+        if self.summary == REMOTE_NO_KEY_SUMMARY:
+            return "no API key stored"
+        return "not reachable"
+
 
 def remote_root_selected() -> bool:
     """Whether the root this process uses is a FinishUP server on another machine.
@@ -124,6 +152,36 @@ def remote_root_selected() -> bool:
     from finishup.client.targets import active_root_may_be_remote
 
     return active_root_may_be_remote()
+
+
+def remote_key_was_sent() -> bool:
+    """Whether a ``remote_auth_failed`` of the selected server means it refused a key it was sent.
+
+    False only for a web server (``https``, ``local_port``) this computer holds no API key for: the
+    connection never opened, so nothing reached that server. Every other case (an SSH server, a
+    stored key, a record that cannot be read) is the server's refusal. Hook-safe: it reads only the
+    target records, never a key.
+    """
+
+    from finishup.client.targets import TargetError, active_target_record
+
+    try:
+        record = active_target_record()
+    except TargetError:
+        return True
+    return not (
+        record is not None
+        and record.kind in {"https", "local_port"}
+        and record.credential is None
+    )
+
+
+def remote_phase_summary(phase: str) -> str:
+    """The fixed words a surface shows for one remote phase of the selected server."""
+
+    if phase == "remote_auth_failed":
+        return REMOTE_KEY_REFUSED_SUMMARY if remote_key_was_sent() else REMOTE_NO_KEY_SUMMARY
+    return REMOTE_NOT_SENT_SUMMARIES.get(phase, REMOTE_UNAVAILABLE_SUMMARY)
 
 
 def remote_connection_phase(error: object) -> str | None:
@@ -178,7 +236,5 @@ def remote_remedy(error: object, *, remote: bool | None = None) -> RemoteRemedy 
             return RemoteRemedy(error.phase, REMOTE_UNCLAIMABLE_SUMMARY, directive)
         phase = "remote_unreachable"
     return RemoteRemedy(
-        phase,
-        REMOTE_NOT_SENT_SUMMARIES.get(phase, REMOTE_UNAVAILABLE_SUMMARY),
-        directive_for(continuation_for_reason(phase)),
+        phase, remote_phase_summary(phase), directive_for(continuation_for_reason(phase))
     )

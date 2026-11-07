@@ -274,8 +274,9 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _UNAVAILABLE,
     ),
     "remote_auth_failed": (
-        "the server refused this computer's credentials; for SSH load your key (ssh-add) or check "
-        "~/.ssh/config, for HTTPS run 'finishup server login'",
+        "the server answered and refused this computer's credentials (or no API key is stored for "
+        "it here); for SSH load your key (ssh-add) or check ~/.ssh/config, for HTTPS run "
+        "'finishup server login'",
         _UNAVAILABLE,
     ),
     "remote_host_key_unconfirmed": (
@@ -1622,6 +1623,31 @@ def target_in_use(name: str | None) -> bool:
     return active is not None and active.name == name
 
 
+def _key_refused(probe: Mapping[str, JsonValue]) -> bool:
+    """Whether a probe ended in ``remote_auth_failed`` (approach B keeps it as the phase)."""
+
+    return "remote_auth_failed" in (probe["reason"], probe["phase"])
+
+
+def _no_key_stored(target: Mapping[str, JsonValue]) -> bool:
+    """A web server this computer holds no API key for: its probe sent nothing."""
+
+    return target["kind"] in {"https", "local_port"} and target["credential"] == "none"
+
+
+def _key_refused_line(kind: str, name: str) -> str:
+    """What a server that answered and refused this client's key means, and the fix by kind."""
+
+    if kind == "ssh":
+        fix = (
+            "load the SSH key it accepts (ssh-add) or add it to your OpenSSH configuration, then "
+            f"run 'finishup server test {name}'"
+        )
+    else:
+        fix = f"run 'finishup server login {name}' with an API key it accepts"
+    return f"The server answered and refused this client's key; {fix}."
+
+
 def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
     """The owner display of a status document, a remote target's outside reads included.
 
@@ -1652,6 +1678,17 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
     if not_sent is not None:
         lines.append(f"State: not probed, nothing was sent ({probe['reason']})")
         lines.append(not_sent.format(at=probe["last_reported_at"]))
+    elif _key_refused(probe) and _no_key_stored(target):
+        # No key was read, so no connection was opened: the server was not asked.
+        lines.append(f"State: no API key stored, nothing was sent{reason}")
+        lines.append(
+            "This computer holds no API key for this server; run 'finishup server login "
+            f"{target['name'] or 'NAME'}' with an API key it accepts."
+        )
+    elif _key_refused(probe):
+        # It answered: a refused key is not a server that could not be reached.
+        lines.append(f"State: answered, key refused{reason}")
+        lines.append(_key_refused_line(str(target["kind"]), str(target["name"] or "NAME")))
     else:
         lines.append(f"State: {state}{reason}")
     lines.append(
@@ -1769,7 +1806,15 @@ def server_test(
         refusal = zero_network_connection_refusal(record)
         raise refusal if refusal is not None else ServerCommandRefused(str(probe["reason"]))
     if probe["outcome"] not in {"ready", "reachable"}:
-        typer.echo("The target did not answer a status call.", err=True)
+        target = cast(dict[str, JsonValue], document["target"])
+        if not _key_refused(probe):
+            ending = "The target did not answer a status call."
+        elif _no_key_stored(target):
+            ending = "Nothing was sent: this computer holds no API key for the target."
+        else:
+            # A server that refused the key answered; the lines above say how to fix it.
+            ending = "The target answered and refused this client's key."
+        typer.echo(ending, err=True)
         raise typer.Exit(_UNAVAILABLE)
     p95 = probe["round_trip_p95_ms"]
     if isinstance(p95, int) and p95 > _STARTUP_GATE_RISK_MS:

@@ -211,7 +211,8 @@ async def _service_summary() -> str:
 
         remedy = remote_remedy(error)
         if remedy is not None:
-            return f"not reachable — {remedy.line()}"
+            # A server that refused this client's key answered: never "not reachable".
+            return f"{remedy.availability()} — {remedy.line()}"
         return "not reachable — start it with 'finishup service run'"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 

@@ -195,7 +195,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import REMOTE_CONNECTION_PHASES, ProtocolValueError, PublicErrorCode
 from finishup.protocol.ids import IdKind, is_valid_id
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 
@@ -557,9 +557,16 @@ class AutoAttachOutcome:
     reason: str | None
     recovered: bool = False
     candidate_count: int | None = None
+    # The selected server's closed remote phase when a ``service_unavailable`` attach failed on
+    # a server elsewhere (ADR-051), so the context names what happened there.
+    phase: str | None = None
 
     def __post_init__(self) -> None:
         if (self.mapping is None) == (self.reason is None):
+            raise ValueError("auto_attach_outcome_invalid")
+        if self.phase is not None and (
+            self.reason != "service_unavailable" or self.phase not in REMOTE_CONNECTION_PHASES
+        ):
             raise ValueError("auto_attach_outcome_invalid")
         if self.candidate_count is not None and (
             self.reason != "auto_attach_binding_ambiguous"
@@ -616,8 +623,13 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 
-def _attachment_recovery_context(reason: str) -> str:
-    """Render only trusted classifications, never host/error payload text."""
+def _attachment_recovery_context(reason: str, phase: str | None = None) -> str:
+    """Render only trusted classifications, never host/error payload text.
+
+    ``phase`` is the selected server's closed remote phase of a ``service_unavailable`` attach
+    (ADR-051); a phase other than ``remote_unreachable`` says what the server did instead of
+    "could not be reached": a server that refused the key answered.
+    """
 
     from finishup.client.targets import PRE_DIAL_REFUSALS
 
@@ -644,6 +656,32 @@ def _attachment_recovery_context(reason: str) -> str:
     # the agent never sees, so no timeout replay token applies: the agent's own start is the
     # recovery (issue #739).
     if reason in {"service_unavailable", "timeout"}:
+        if reason == "service_unavailable" and phase in REMOTE_CONNECTION_PHASES:
+            # ADR-051: the selected server is on another machine. Name its closed phase, what
+            # happened there (a server that refused the key answered) and its continuation, never
+            # a local service startup; the agent's own start repeats the attempt.
+            from finishup.client.remote_remedy import remote_phase_summary
+            from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+
+            summary = remote_phase_summary(phase)
+            return (
+                f"FinishUP attachment pending: service_unavailable ({phase}). "
+                f"{summary[0].upper()}{summary[1:]}. Call start before material work; its result "
+                "names the remote phase and its repair. Never fall back to another server or a "
+                f"local service. Continuation: {REASON_CODE_CONTINUATIONS[phase]}. "
+            )
+        from finishup.client.remote_remedy import remote_root_selected
+
+        if remote_root_selected():
+            # A server on another machine without a remote phase (the hook budget ran out, or this
+            # folder could not be claimed before any dial): nothing starts a local service for it.
+            return (
+                f"FinishUP attachment pending: {reason}. The connection to the selected FinishUP "
+                "server on another machine did not complete within the hook budget. Call start "
+                "before material work; its result names the cause and its repair, and later turn "
+                "hooks also retry within their budget. Never fall back to another server or a "
+                "local service. "
+            )
         return (
             "FinishUP attachment pending: service_unavailable. The bounded service connection "
             "did not complete. Call start before material work to finish service startup and "
@@ -3583,9 +3621,10 @@ async def _try_auto_start(
         if error.phase in PRE_DIAL_REFUSALS:
             # A selection that changed after the check above: the connect seam refused it.
             return AutoAttachOutcome(None, error.phase)
-        return AutoAttachOutcome(
-            None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
-        )
+        reason = _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
+        if reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
+            return AutoAttachOutcome(None, reason, phase=error.phase)
+        return AutoAttachOutcome(None, reason)
     except TimeoutError:
         return AutoAttachOutcome(None, "timeout")
     except WorkspaceRefNotPortable as refusal:
@@ -4978,6 +5017,7 @@ def _session_start_attach(
     additional = ""
     recap_text = ""
     attach_reason: str | None = None
+    attach_phase: str | None = None
     attach_advisory_only = False
     session_lifecycle_lock = (
         contextlib.nullcontext(True)
@@ -5015,6 +5055,7 @@ def _session_start_attach(
 
                     attach_outcome = cast(AutoAttachOutcome, resolve_runner()(_attach))
                     attach_reason = attach_outcome.reason
+                    attach_phase = attach_outcome.phase
                     mapping = _record_auto_attach(
                         attach_outcome,
                         event,
@@ -5031,7 +5072,9 @@ def _session_start_attach(
                         "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                     )
                     if attach_reason is not None:
-                        additional = _attachment_recovery_context(attach_reason) + additional
+                        additional = (
+                            _attachment_recovery_context(attach_reason, attach_phase) + additional
+                        )
                     attach_advisory_only = True
                 else:
                     additional = _active_context(mapping, mapping.last_frontier)

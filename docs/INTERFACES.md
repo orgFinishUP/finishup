@@ -5729,7 +5729,21 @@ The remote connection phases ride as `phase` on a retryable `service_unavailable
 `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running`,
 `remote_incompatible` (whose text names both releases), and the client's own refusals
 `target_reauthorization_required`, `target_root_is_remote` and `zero_network_remote_selected`. A client that catches that `TargetError` from the binding
-helpers raises it as this phase, so every surface renders its directive. The check-time change gains the
+helpers raises it as this phase, so every surface renders its directive. `remote_auth_failed` is
+a server that answered and refused this client's key, so no surface calls it unreachable or
+unanswered: the CLI headline, MCP's message and the terminal interface say the selected FinishUP
+server on another machine "answered and refused this client's key"
+(`client.remote_remedy.REMOTE_KEY_REFUSED_SUMMARY`), keeping the same-request replay open for a
+request it received before a revoked key was refused; the menu says "answered, key refused",
+`server status` and `server test` "State: answered, key refused" with the fix for the target's
+kind, and the SessionStart hook's attach and status contexts the same words beside the phase and
+its continuation (`AutoAttachOutcome.phase`). In approach B a web server's key is read before the
+connection opens, so for an HTTPS or localhost-port target this computer holds no API key for
+(`credential` none) nothing was sent: every surface says so instead
+(`client.remote_remedy.REMOTE_NO_KEY_SUMMARY`; the menu "no API key stored"; `server status` and
+`test` "State: no API key stored, nothing was sent"). An unmapped SessionStart on a server
+elsewhere names its remote phase and continuation, or, without one, that the connection did not
+complete within the hook budget; it never names a local service startup. The check-time change gains the
 unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`, so
 `check_time_change_unavailable_workspace_agent_unavailable` and
 `check_time_change_unavailable_workspace_agent_refused` join

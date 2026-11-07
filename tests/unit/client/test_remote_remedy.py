@@ -355,3 +355,120 @@ def test_a_readable_named_local_record_keeps_the_local_path(
         reset_selection_memo()
         assert remote_root_selected() is False
         assert remote_remedy(_BARE) is None
+
+
+_REFUSED_KEY = ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
+
+
+def _never_unreachable(text: str) -> None:
+    lowered = text.lower()
+    for phrase in ("could not be reached", "not reachable", "did not answer", "could not serve"):
+        assert phrase not in lowered, (phrase, text)
+
+
+def test_a_refused_key_reads_as_an_answer_on_every_surface(
+    remote: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-6 (B-1): a server that answered and refused the key is never "could not be reached".
+
+    The CLI headline and its Next line, the menu, MCP, the SessionStart hook (attach and mapped
+    status) and the terminal interface each say it answered and refused this client's key, and
+    keep the same-request replay open for a request it received before that.
+    """
+
+    import asyncio
+
+    from finishup.cli.observe_hooks import (
+        _attachment_recovery_context,  # pyright: ignore[reportPrivateUsage]
+    )
+    from finishup.client.remote_remedy import REMOTE_KEY_REFUSED_SUMMARY
+
+    del remote
+    phase = "remote_auth_failed"
+    directive = directive_for("remote_credential_repair")
+    assert directive is not None
+    lines: list[str] = []
+    bootstrap.control_failure(_REFUSED_KEY, json_output=False, stderr_writer=lines.append)
+    cli_text = "\n".join(lines)
+    assert cli_text.splitlines()[0] == f"service_unavailable: {phase}: {REMOTE_KEY_REFUSED_SUMMARY}"
+    assert "answered and refused this client's key" in cli_text
+    assert directive.directive in cli_text
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise _REFUSED_KEY
+
+    monkeypatch.setattr("finishup.cli.app.build_service_client", refuse)
+    summary = asyncio.run(menu._service_summary())  # pyright: ignore[reportPrivateUsage]
+    assert summary.startswith(f"answered, key refused — {phase}: ")
+
+    result = bridge._control_error_result(_REFUSED_KEY, None, "start")  # pyright: ignore[reportPrivateUsage]
+    structured = json.dumps(result.structuredContent)
+    assert "answered and refused this client's key" in structured
+    assert "same request_id" in structured and "remote_credential_repair" in structured
+
+    attach = _attachment_recovery_context("service_unavailable", phase)
+    assert f"service_unavailable ({phase})" in attach
+    assert "answered and refused this client's key" in attach
+    assert "Continuation: remote_credential_repair." in attach
+    mapped = hooks.unavailable_context(hooks.StatusOutcome("unavailable", remote_reason=phase))
+    assert "answered and refused this client's key" in mapped
+    assert f"({phase})" in mapped and mapped.endswith("Continuation: remote_credential_repair.")
+
+    failure = tui_runtime._connect_failure(_REFUSED_KEY)  # pyright: ignore[reportPrivateUsage]
+    assert str(getattr(failure, "message", "")) == REMOTE_KEY_REFUSED_SUMMARY
+
+    for text in (cli_text, summary, structured, attach, mapped, str(failure)):
+        _never_unreachable(text)
+        _clean(text)
+
+
+def test_a_web_server_with_no_stored_key_was_sent_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RE-6 on approach B: the key is read before the connection opens, so a web server this
+    computer holds no API key for was never asked: no surface says it answered."""
+
+    from finishup.client.remote_remedy import REMOTE_NO_KEY_SUMMARY
+
+    with ambient_home(monkeypatch):
+        with targets.registry_lock():
+            record, _root = targets.new_remote_target(
+                "lab", "https", base_url="https://lab.example:8443", tls_pin="sha256:" + "a" * 64
+            )
+            targets.write_selection(record)
+        reset_selection_memo()
+        remedy = remote_remedy(_REFUSED_KEY)
+        assert remedy is not None and remedy.summary == REMOTE_NO_KEY_SUMMARY
+        assert remedy.availability() == "no API key stored"
+        result = bridge._control_error_result(_REFUSED_KEY, None, "start")  # pyright: ignore[reportPrivateUsage]
+        structured = json.dumps(result.structuredContent)
+        assert "holds no API key" in structured and "nothing was sent" in structured
+        mapped = hooks.unavailable_context(
+            hooks.StatusOutcome("unavailable", remote_reason="remote_auth_failed")
+        )
+        assert mapped.startswith("This computer holds no API key for the selected FinishUP server")
+        for text in (remedy.summary, structured, mapped):
+            assert "answered" not in text, text
+            _never_unreachable(text)
+
+
+def test_a_session_start_on_a_remote_server_never_names_a_local_service_startup(
+    remote: None,
+) -> None:
+    """B-2: an unmapped SessionStart on a server elsewhere names its phase, never local startup."""
+
+    from finishup.cli.observe_hooks import (
+        _attachment_recovery_context,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    del remote
+    for phase in ("remote_unreachable", "remote_service_not_running", "remote_incompatible"):
+        context = _attachment_recovery_context("service_unavailable", phase)
+        assert f"service_unavailable ({phase})" in context
+        assert "finish service startup" not in context
+        _clean(context)
+    for reason in ("service_unavailable", "timeout"):
+        context = _attachment_recovery_context(reason)
+        assert "on another machine" in context
+        assert "finish service startup" not in context
+        _clean(context)

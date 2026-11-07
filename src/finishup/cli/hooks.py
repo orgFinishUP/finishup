@@ -210,6 +210,22 @@ def unavailable_context(outcome: StatusOutcome) -> str:
         return remote_refusal_context(outcome.remote_reason).rstrip()
     if outcome.remote_reason is None:
         return _UNAVAILABLE_CONTEXT
+    if outcome.remote_reason == "remote_auth_failed":
+        # The server was reached: it answered and refused the key (or, for a web server this
+        # computer holds no API key for, nothing was sent). Never "could not serve".
+        from finishup.client.remote_remedy import remote_key_was_sent
+
+        what = (
+            "The selected FinishUP server answered and refused this client's key"
+            if remote_key_was_sent()
+            else "This computer holds no API key for the selected FinishUP server, so nothing "
+            "was sent"
+        )
+        return (
+            f"{what} for this mapped session ({outcome.remote_reason}); no live receipt can be "
+            "promised. Never fall back to another server or a local service."
+            + render_hook_recovery_suffix(outcome.remote_reason)
+        )
     return _REMOTE_UNAVAILABLE_CONTEXT + render_hook_recovery_suffix(outcome.remote_reason)
 
 

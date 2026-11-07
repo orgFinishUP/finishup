@@ -2522,3 +2522,89 @@ def test_chosen_by_is_shown_only_for_the_server_in_use(
     del web
     # Without a name the lines describe this process's own server, which is in use.
     assert server_cli.target_in_use(None) is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "fix"),
+    [
+        ("ssh", "load the SSH key it accepts (ssh-add)"),
+        ("https", "run 'finishup server login lab' with an API key it accepts"),
+    ],
+)
+def test_server_status_and_test_say_a_refused_key_was_an_answer(
+    home: Path, monkeypatch: pytest.MonkeyPatch, kind: str, fix: str
+) -> None:
+    """RE-6: a server that refused this client's key answered: never "did not answer"."""
+
+    from finishup.client.target_runtime import ProbeResult
+
+    with targets.registry_lock():
+        if kind == "ssh":
+            targets.new_remote_target(
+                "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+            )
+        else:
+            record, root = targets.new_remote_target(
+                "lab", "https", base_url="https://lab.example:8443", tls_pin="sha256:" + "a" * 64
+            )
+            # A key is stored, so the probe sent it and the server refused it.
+            targets.write_target(root, replace(record, credential="file"))
+
+    def refused(_self: object, _root: Path | None) -> object:
+        # Approach B keeps the remote phase beside the connection's reason.
+        return ProbeResult("unavailable", reason="service_unavailable", phase="remote_auth_failed")
+
+    monkeypatch.setattr(_OfflineRemoteRuntime, "probe", refused)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code != 0
+    assert (
+        "State: answered, key refused (service_unavailable, phase remote_auth_failed)"
+        in tested.stdout
+    )
+    assert "The server answered and refused this client's key; " in tested.stdout
+    assert fix in tested.stdout
+    assert "The target answered and refused this client's key." in tested.stderr
+    for text in (tested.stdout, tested.stderr):
+        assert "did not answer" not in text
+        assert "could not be reached" not in text
+    shown = server_cli.status_lines(server_cli.build_status_document("lab"), in_use=False)
+    assert (
+        "State: answered, key refused (service_unavailable, phase remote_auth_failed)" in shown
+    )
+    document = _status_json("lab")
+    probe = cast(dict[str, JsonValue], document["probe"])
+    assert (probe["outcome"], probe["reason"], probe["phase"]) == (
+        "unavailable",
+        "service_unavailable",
+        "remote_auth_failed",
+    )
+
+
+def test_server_status_and_test_say_nothing_was_sent_without_a_stored_key(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-6 on approach B: a web server this computer holds no API key for was never asked.
+
+    The key is read before the connection opens, so a missing one is ``remote_auth_failed``
+    without any answer from the server: never "answered", and never "did not answer" either.
+    """
+
+    from finishup.client.target_runtime import ProbeResult
+
+    with targets.registry_lock():
+        targets.new_remote_target(
+            "lab", "https", base_url="https://lab.example:8443", tls_pin="sha256:" + "a" * 64
+        )
+
+    def no_key(_self: object, _root: Path | None) -> object:
+        return ProbeResult("unavailable", reason="service_unavailable", phase="remote_auth_failed")
+
+    monkeypatch.setattr(_OfflineRemoteRuntime, "probe", no_key)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code != 0
+    assert "State: no API key stored, nothing was sent" in tested.stdout
+    assert "run 'finishup server login lab' with an API key it accepts" in tested.stdout
+    assert "Nothing was sent: this computer holds no API key for the target." in tested.stderr
+    for text in (tested.stdout, tested.stderr):
+        assert "answered" not in text
+        assert "did not answer" not in text

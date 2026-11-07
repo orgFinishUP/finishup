@@ -723,7 +723,7 @@ repeated safely.
 | You see | What it means | What to do |
 |---|---|---|
 | `remote_unreachable` | The server could not be reached. | Run `finishup server test`. SSH: if the server's FinishUP service runs and this persists, the server's SSH daemon may refuse forwarding to it; it must allow `AllowStreamLocalForwarding` (OpenSSH's default) and must not set `DisableForwarding yes`. |
-| `remote_auth_failed` | The server did not accept you. | SSH: load your key (`ssh-add`) or check your SSH configuration. Web: run `finishup server login NAME`. |
+| `remote_auth_failed` | The server answered and refused your key; it was reached, so FinishUP never says it could not be reached. `finishup server status` and `test` say "answered, key refused". When no API key is stored here for a web server, nothing was sent, and they say so instead. | SSH: load your key (`ssh-add`) or check your SSH configuration. Web: run `finishup server login NAME`. |
 | `remote_identity_changed` | The server's host key or certificate is not the one you confirmed. | Confirm the server's identity another way, then remove and add the server again. |
 | `remote_host_key_unconfirmed` | When you added an SSH server, its host key was not confirmed: you declined OpenSSH's question, or did not answer it in time. Nothing was added. | Run `finishup server add` again and answer yes once you have checked the fingerprint with the server's own. |
 | `remote_service_not_running` | The server machine answered, but its FinishUP service is not running. | SSH: `ssh -t <server> finishup service start`. Web: ask the server's operator. |
