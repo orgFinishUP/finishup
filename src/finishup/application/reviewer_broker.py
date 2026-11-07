@@ -205,7 +205,7 @@ class ReadRoot:
     ``refuse_many``, when set, is the same rule asked for many paths at once (the paths it
     refuses) within the read's stop (the read's ``expired``), and is asked in its place: a
     listing answered by a workspace agent costs one round trip per batch rather than one per
-    entry, and no probe runs past the read's own stop.
+    entry, and no probe is sent once the read's own stop has passed.
     """
 
     alias: str
