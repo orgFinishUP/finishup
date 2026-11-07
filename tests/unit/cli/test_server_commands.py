@@ -1297,6 +1297,65 @@ def test_login_prefers_the_platform_store(
     assert keyring.entries == {}
 
 
+class _LockedKeyring:
+    """A platform store that is present but cannot be used now (a keychain locked over SSH)."""
+
+    def get_password(self, _service: str, _username: str) -> str | None:
+        raise RuntimeError("locked")
+
+    def set_password(self, _service: str, _username: str, _password: str) -> None:
+        raise RuntimeError("locked")
+
+    def delete_password(self, _service: str, _username: str) -> None:
+        raise RuntimeError("locked")
+
+
+def test_a_locked_platform_store_never_blocks_removing_a_target_or_logging_out(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-4: a store a key is not recorded in never blocks the way out; a key that stays in the
+    store it is recorded in is named (by generated id) and the target is still removed."""
+
+    keyring: object = _MemoryKeyring()
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: keyring)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    for arguments in (
+        ("add", "lab", "ssh://owner@lab.example"),
+        ("add", "fu", "https://fu.example"),
+        ("add", "kept", "https://kept.example"),
+    ):
+        assert _invoke(*arguments).exit_code == 0
+    assert _invoke("login", "kept", "--key-file", str(key_file)).exit_code == 0
+    kept = targets.find_target("kept")
+    assert kept.credential == "keyring"
+    keyring = None  # no platform store: the next key goes to a file
+    assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
+    fu = targets.find_target("fu")
+    assert fu.credential == "file"
+    keyring = _LockedKeyring()
+
+    logout = _invoke("logout", "fu")
+    assert logout.exit_code == 0, logout.output
+    assert not (targets.target_root(fu.target_id) / "config" / "credential" / fu.target_id).exists()
+    lab = targets.find_target("lab")
+    removed = _invoke("remove", "lab")
+    assert removed.exit_code == 0, removed.output
+    assert removed.stderr == ""
+    assert not targets.target_root(lab.target_id).exists()
+
+    left = _invoke("remove", "kept")
+    assert left.exit_code == 0, left.output
+    assert not targets.target_root(kept.target_id).exists()
+    assert left.stderr == (
+        "Its API key stays in the platform credential store, which could not be used now (it may "
+        f"be locked): unlock it, then delete the entry '{SERVER_CREDENTIAL_SERVICE}' for "
+        f"{kept.target_id} with your system's credential tool.\n"
+    )
+    assert "kept.example" not in left.output
+
+
 def test_a_shared_key_file_is_refused(
     home: Path, authorized: list[tuple[str, str]], no_platform_store: None
 ) -> None:
