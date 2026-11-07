@@ -1210,6 +1210,123 @@ async def test_a_claim_on_a_locked_service_binds_no_handle_and_registers_no_agen
         await daemon.close()
 
 
+async def test_a_claim_its_hello_could_not_key_is_never_served_as_unbound(
+    tmp_path: Path,
+) -> None:
+    """ADR-051: a claim-bound connection with no handle answers ``vault_locked`` to every call
+    that needs the ready service, never serves it as an unbound connection (where no claim rule
+    applies and a task call is fenced with a remedy that is wrong for a claim)."""
+
+    from integration.service import test_daemon_clients as clients
+
+    daemon, application, vault, _listener = clients._daemon()  # pyright: ignore[reportPrivateUsage]
+    await daemon.start()
+    vault.ready = False  # the hello cannot key the claim
+    client_stream, server_stream = _pair()
+    served = asyncio.create_task(
+        daemon._serve_control_connection(server_stream)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    )
+    client: _ClaimClient | None = None
+    try:
+        session = await client_handshake(
+            client_stream,  # pyright: ignore[reportArgumentType]
+            ControlClientKind.CLI,
+            "0.3.0",
+            workspace_claim=_claim_for(tmp_path),
+            workspace_agent=fake_declaration(),
+        )
+        assert session.workspace_binding == "client_claim"
+        assert session.workspace_handle is None
+        client = _ClaimClient(client_stream, session, None)
+        client.start()
+        refused = await client.call(ControlMethod.CHECK, clients._check_body())  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(refused, ControlError)
+        assert (refused.reason, refused.retryable) == ("vault_locked", True)
+        assert application.check_requests == []
+        # What needs no ready service is still answered on it.
+        status = await client.call(ControlMethod.SERVICE_STATUS, clients.JsonObject({}))
+        assert not isinstance(status, ControlError)
+    finally:
+        if client is not None:
+            await client.close()
+        served.cancel()
+        await asyncio.gather(served, return_exceptions=True)
+        await daemon.close()
+
+
+async def test_a_claim_its_hello_could_not_key_is_ended_once_the_vault_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background agent sends no call to be answered ``vault_locked``: its connection ends once
+    a ready generation is published, so its client connects again and gets a handle."""
+
+    from integration.service import test_daemon_clients as clients
+
+    application = clients._Application()  # pyright: ignore[reportPrivateUsage]
+    vault = clients._KeyedPassphraseVault()  # pyright: ignore[reportPrivateUsage]
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+
+    async def factory(service_generation: int, vault_generation: int) -> Any:  # noqa: ANN401
+        del service_generation, vault_generation
+        return application
+
+    clients._patch_auto_unlock_store(monkeypatch, secret)  # pyright: ignore[reportPrivateUsage]
+    daemon = clients._soft_lock_daemon(tmp_path, factory=factory, vault=vault)  # pyright: ignore[reportPrivateUsage]
+    await daemon.start()
+    daemon._state_reason = "explicit_lock"  # pyright: ignore[reportPrivateUsage]
+    claim = _claim_for(tmp_path)
+    client_stream, server_stream = _pair()
+    served = asyncio.create_task(
+        daemon._serve_control_connection(server_stream)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    )
+    later_stream, later_server = _pair()
+    later: asyncio.Task[None] | None = None
+    client: _ClaimClient | None = None
+    try:
+        session = await client_handshake(
+            client_stream,  # pyright: ignore[reportArgumentType]
+            ControlClientKind.CLI,
+            "0.3.0",
+            workspace_claim=claim,
+            workspace_agent=fake_declaration(),
+        )
+        assert session.workspace_handle is None
+        client = _ClaimClient(client_stream, session, None)
+        client.start()
+        # A hard lock: no retry helps until it is lifted, and the answer says so.
+        refused = await client.call(ControlMethod.CHECK, clients._check_body())  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(refused, ControlError)
+        assert (refused.reason, refused.retryable) == ("vault_locked", False)
+        assert not served.done()
+        # The lock is lifted and the ready generation published: the connection ends.
+        daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+        assert await daemon._soft_lock_auto_ready_owned()  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(served, clients._WAIT_SECONDS)  # pyright: ignore[reportPrivateUsage]
+        # The client's next connection gets its handle and registers its agent.
+        later = asyncio.create_task(
+            daemon._serve_control_connection(later_server)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        )
+        again = await client_handshake(
+            later_stream,  # pyright: ignore[reportArgumentType]
+            ControlClientKind.CLI,
+            "0.3.0",
+            workspace_claim=claim,
+            workspace_agent=fake_declaration(),
+        )
+        assert again.workspace_handle is not None
+        assert daemon.composition.workspace_hub.has_agent(again.workspace_handle)
+    finally:
+        for task in (served, later):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if client is not None:
+            await client.close()
+        await later_stream.aclose()
+        await daemon.close()
+
+
 async def test_a_child_attached_by_its_handle_keeps_the_client_attested_receipt(
     tmp_path: Path, service: _Service
 ) -> None:
