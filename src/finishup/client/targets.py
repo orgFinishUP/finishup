@@ -66,6 +66,7 @@ from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json
 __all__ = [
     "CLAIM_SALT_BYTES",
     "DISCLOSURE_VERSION",
+    "PRE_DIAL_REFUSALS",
     "REMOTE_KINDS",
     "RESERVED_NAMES",
     "TARGET_KINDS",
@@ -76,6 +77,7 @@ __all__ = [
     "TargetError",
     "TargetKind",
     "TargetRecordUnreadable",
+    "active_remote_refusal",
     "active_root_may_be_remote",
     "active_target_is_remote",
     "active_target_record",
@@ -173,6 +175,10 @@ _REASONS: Final = frozenset(
         "selection_invalid",
         "zero_network_remote_selected",
     }
+)
+# The refusals ``require_current_authorization`` makes before anything is sent to a remote target.
+PRE_DIAL_REFUSALS: Final = frozenset(
+    {"target_reauthorization_required", "zero_network_remote_selected"}
 )
 
 
@@ -990,6 +996,28 @@ def active_target_is_remote() -> bool:
     except TargetError:
         return False
     return record is not None and record.is_remote
+
+
+def active_remote_refusal() -> str | None:
+    """The closed reason every connection from this process is refused with before any dial.
+
+    ``zero_network_remote_selected`` or ``target_reauthorization_required`` when the root this
+    process uses is a remote target that ``require_current_authorization`` refuses, exactly as
+    the connect seams do (``finishup.service.client``); ``None`` otherwise, including for a local
+    root and for a root that cannot be resolved or whose record cannot be read, which the
+    connect seams name on their own. Hook-safe: it reads only the target record and this
+    computer's last-reported policy marker, never a service, so a hook can name the refusal
+    without spending its budget (ADR-051 decision 8). Never raises.
+    """
+
+    try:
+        record = active_target_record()
+        require_current_authorization(record)
+    except TargetError as error:
+        return error.reason if error.reason in PRE_DIAL_REFUSALS else None
+    except Exception:
+        return None
+    return None
 
 
 def active_root_may_be_remote() -> bool:
