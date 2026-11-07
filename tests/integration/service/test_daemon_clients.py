@@ -5301,6 +5301,62 @@ async def test_connected_check_wait_timeout_and_disconnect_preserve_admitted_han
 
 
 @pytest.mark.anyio
+async def test_a_detached_check_its_caller_stopped_waiting_for_is_background_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-051: once its caller has stopped waiting, the detached check's workspace calls wait
+    the background bound for an agent, not the live call's, and prefer no connection's agent."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    seen: dict[str, bool] = {}
+    original = application.check
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        seen["while_waited_for"] = in_live_call()
+        entered.set()
+        try:
+            await release.wait()
+            seen["after_the_caller_left"] = in_live_call()
+            return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        finally:
+            finished.set()
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(client_stream, session, ControlClientKind.CLI)  # pyright: ignore[reportArgumentType]
+        request = _check_body().model_copy(update={"mode": "semantic_required"})
+        with pytest.raises(ControlError) as timeout:
+            await service_client.check(request, deadline_ms=50)
+        assert timeout.value.reason == "request_timeout"
+        assert entered.is_set()
+        # The caller is gone with its connection; the check goes on, detached.
+        await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        release.set()
+        async with asyncio.timeout(_WAIT_SECONDS):
+            await finished.wait()
+        assert seen == {"while_waited_for": True, "after_the_caller_left": False}
+    finally:
+        release.set()
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
