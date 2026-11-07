@@ -114,8 +114,9 @@ _GIT_SECONDS: Final = 60.0
 _READ_SECONDS: Final = 15.0
 _SNAPSHOT_GRACE_SECONDS: Final = 5.0
 # A reviewer's read (and its ignored-path probe) stops at the reviewer's own per-read budget, so
-# a slow agent ends the review ``deadline`` as a slow local read does, never past its reserve.
-# Within it, each call waits no longer than the read's own stop (``ReadStop``) leaves.
+# a slow agent ends the review ``deadline`` as a slow local read does. Within it, the agent's
+# answer gets no more time than the read's own stop (``ReadStop``) leaves when the read starts;
+# the wait for an agent connection keeps the hub's own bound.
 _REVIEWER_READ_SECONDS: Final = LOCAL_READ_SECONDS + 1.0
 # Less time than this before a read's stop is no time at all: nothing is sent.
 _MIN_READ_SECONDS: Final = 0.001
