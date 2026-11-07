@@ -8837,8 +8837,8 @@ plus optional `"unknown_members": true`; refused unless a regular file owned by 
 account with no group or other bits; a compare-then-rename replace through a 0600 temporary
 with a parent-directory fsync) names the projects that connected a Codex home or Cursor config
 root. Each installation also keeps a membership witness, `host_projects.witness_path_for(root)` =
-`<state_dir()>/host-config-locks/<same key>.members` (same canonical JSON and checks as the record,
-0600): every project it recorded for that root minus those it saw disconnect
+`<installation_state_dir()>/host-config-locks/<same key>.members` (same canonical JSON and checks
+as the record, 0600): every project it recorded for that root minus those it saw disconnect
 (`write_connected_projects(..., departed=..., shared_removed=...)`); `recorded_members(root)`
 reads it (absent or unreadable names none; maintained best effort after each record write and
 deleted when the shared pieces go). The record write re-reads and compares the record with the
@@ -8847,8 +8847,9 @@ rename with a parent-directory fsync; between the compare and the rename a write
 neither lock (another installation) can still change it, so cross-installation updates are
 narrowed, not excluded. `host_projects.host_config_lock(config_root)` is the per-root setup lock `apply_connection`
 holds for every host across refresh, apply and the record update: an exclusive `flock` on
-`host_projects.lock_path_for(config_root)` = `<state_dir()>/host-config-locks/<sha256 of the
-resolved absolute path, NFC, case-folded>.lock`, a 0600 regular file owned by the invoking account
+`host_projects.lock_path_for(config_root)` = `<installation_state_dir()>/host-config-locks/<sha256
+of the resolved absolute path, NFC, case-folded>.lock` (an explicit isolation root's state, else the
+everyday installation's; never a selected server's), a 0600 regular file owned by the invoking account
 in a 0700 directory without symlinked components, opened `O_NOFOLLOW`, never deleted; it does not
 serialise another installation's setups (the record's compare-then-rename narrows that race; it does not close it). A lock that cannot be
 created, opened or taken raises `HostProjectsError("lock_unavailable")`, surfaced as the
