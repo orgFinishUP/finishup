@@ -56,7 +56,7 @@ from finishup.client.targets import (
     ServerTarget,
     TargetError,
     TargetKind,
-    active_target_is_remote,
+    TargetRecordUnreadable,
     active_target_record,
     clear_selection,
     find_target,
@@ -446,16 +446,32 @@ def _zero_network_in_force() -> bool:
                     "the privacy policy on this computer first, with 'finishup privacy setup'"
                 ),
             )
-        # While a server elsewhere is selected, 'service start' and 'service unlock' are refused
-        # here (requires_server_host): name the way that works from this state (SRV-3).
+        # While any server is selected, 'service start' and 'service unlock' never reach this
+        # computer's own FinishUP: they are refused (requires_server_host) for one elsewhere and
+        # act on a named local one. Name the way that works from this state (SRV-3).
         raise ServerCommandRefused(
             "network_policy_unreadable",
-            message=_POLICY_UNREADABLE_WHILE_REMOTE if active_target_is_remote() else None,
+            message=_POLICY_UNREADABLE_WHILE_SELECTED if _a_server_is_selected() else None,
         )
     return state == "zero_network"
 
 
-_POLICY_UNREADABLE_WHILE_REMOTE: Final = (
+def _a_server_is_selected() -> bool:
+    """Whether this process uses a selected server, of any kind, rather than this computer's own.
+
+    Never raises: a root whose record cannot be read counts (it may name a server elsewhere), and
+    a root that cannot be resolved does not (the remedy every local root gets).
+    """
+
+    try:
+        return active_target_record() is not None
+    except TargetRecordUnreadable:
+        return True
+    except TargetError:
+        return False
+
+
+_POLICY_UNREADABLE_WHILE_SELECTED: Final = (
     "this computer's FinishUP has its own privacy policy, which could not be read (its service "
     "is stopped, locked, or did not answer), so a server on another machine is refused; start "
     "it with 'finishup server connect local' and retry, or, if its vault is locked, run "
