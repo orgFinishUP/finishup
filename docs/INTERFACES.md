@@ -5703,8 +5703,14 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   `connector-<generation>`. `connect_service_stream(stream, client_kind, *,
   workspace_binding, transport, timeout_seconds=5.0)` handshakes a claim-bound connection over a
   stream a relay already holds; `ServiceClient.closed` and `ServiceClient.wait_closed()` let a
-  holder reconnect. `ensure_service_running()` returns a raw control stream to this root's
-  service, starting it on demand, for the gateway.
+  holder reconnect. `ensure_service_running(*, timeout_seconds=30.0, start=True)` returns a raw
+  control stream to this root's service for the gateway, starting it on demand; with
+  `start=False` (a gateway session sent with `FinishUP-Service-Start: never`) a service that is
+  not running is `service_unavailable` and nothing is spawned. The gateway command composes
+  `build_gateway_app(..., connect_upstream=ensure_service_running,
+  reach_upstream=partial(ensure_service_running, start=False))`; `reach_upstream` serves the
+  `never` sessions, and an app built without it (in-process stand-ins whose `connect_upstream`
+  starts nothing) uses `connect_upstream` for them.
 - `client.workspace_ref.start_request_for_connection`: a connection whose `transport` is not
   `unix` never sends an absolute `workspace_ref`, claim-bound or not (`WorkspaceRefNotPortable`).
 - `client.targets.active_target_is_remote() -> bool` (never raises) and
