@@ -1869,6 +1869,99 @@ def test_remote_use_refreshes_the_recorded_authorization(
     assert authorized == [("fu", "https"), ("fu", "https")]
 
 
+def test_a_slow_use_or_login_keeps_what_another_command_changed_meanwhile(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-12: ``use`` and ``login`` read the record before a slow step (the typed name, the key
+    prompt and check) and wrote that copy back whole, losing a key ``login`` recorded meanwhile,
+    or a refreshed authorization. Each now changes only its own field on the stored record."""
+
+    keyring = _MemoryKeyring()
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: keyring)
+    assert _invoke("add", "team", "https://team.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    stale = "2026-01-01T00:00:00.000Z"
+    targets.write_target(root, replace(record, authorized_at=stale))
+
+    def login_meanwhile(_name: str, _kind: str) -> None:
+        with targets.registry_lock():
+            stored = targets.read_target(root)
+            assert stored is not None
+            targets.write_target(root, replace(stored, credential="keyring"))
+
+    server_cli.use_target("team", authorize=login_meanwhile)
+    used = targets.find_target("team")
+    assert used.credential == "keyring" and used.authorized_at != stale
+
+    renewed = used.authorized_at
+    targets.write_target(root, replace(used, credential=None))
+
+    def use_meanwhile(_record: targets.ServerTarget, _secret: str) -> None:
+        with targets.registry_lock():
+            stored = targets.read_target(root)
+            assert stored is not None
+            targets.write_target(root, replace(stored, authorized_at=stale))
+
+    monkeypatch.setattr(server_cli, "_check_https_key", use_meanwhile)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    assert _invoke("login", "team", "--key-file", str(key_file)).exit_code == 0
+    logged_in = targets.find_target("team")
+    assert logged_in.credential == "keyring" and logged_in.authorized_at == stale != renewed
+
+
+def test_a_target_removed_during_a_slow_use_or_login_stays_removed(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-12: ``use`` finishing after ``remove`` recreated the removed folder with only its
+    record and selected it again; ``login`` left its key behind. Both now refuse
+    ``target_unknown`` and leave nothing."""
+
+    keyring = _MemoryKeyring()
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: keyring)
+    assert _invoke("add", "team", "https://team.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+
+    def removed_meanwhile(*_arguments: object) -> None:
+        with targets.registry_lock():
+            targets.remove_target_root(record)
+
+    with pytest.raises(server_cli.ServerCommandRefused) as refused:
+        server_cli.use_target("team", authorize=removed_meanwhile)
+    assert refused.value.reason == "target_unknown"
+    assert not root.exists() and targets.read_selected_target_id() is None
+
+    assert _invoke("add", "team", "https://team.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    monkeypatch.setattr(server_cli, "_check_https_key", removed_meanwhile)
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    login = _invoke("login", "team", "--key-file", str(key_file))
+    assert login.exit_code == 2 and login.stderr.startswith("target_unknown:")
+    assert not root.exists() and keyring.entries == {}
+
+    from finishup.client.credentials import KeyringOrFileCredential
+
+    assert _invoke("add", "team", "https://team.example").exit_code == 0
+    (record,) = targets.list_targets()
+    root = targets.target_root(record.target_id)
+    deleted = KeyringOrFileCredential.delete
+
+    def delete_then_removed(credential: KeyringOrFileCredential) -> bool:
+        removed = deleted(credential)
+        removed_meanwhile()
+        return removed
+
+    monkeypatch.setattr(KeyringOrFileCredential, "delete", delete_then_removed)
+    assert _invoke("logout", "team").exit_code == 0
+    assert not root.exists()
+
+
 def test_a_stale_disclosure_is_refused_by_connect_and_renewed_by_use(
     home: Path,
     authorized: list[tuple[str, str]],
