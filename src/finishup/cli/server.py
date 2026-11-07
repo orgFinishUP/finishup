@@ -35,6 +35,7 @@ client's own (``finishup.client.server_folders``) and never sent to the server.
 from __future__ import annotations
 
 import functools
+import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -61,6 +62,7 @@ from finishup.client.targets import (
     active_target_record,
     clear_selection,
     find_target,
+    leftover_target_ids,
     list_targets,
     normalize_https_url,
     parse_ssh_url,
@@ -68,6 +70,7 @@ from finishup.client.targets import (
     read_target,
     reauthorized,
     registry_lock,
+    remove_leftover_root,
     require_current_authorization,
     selection_source,
     target_root,
@@ -1131,6 +1134,22 @@ def server_list() -> None:
     _show_zero_network_item(machine_readable=False)
     rows, source = target_rows()
     _emit(render_target_rows(rows, source))
+    _emit(_leftover_lines())
+
+
+def _leftover_lines() -> tuple[str, ...]:
+    """A line per registry folder that holds no target record, with the command that deletes it."""
+
+    try:
+        leftovers = leftover_target_ids()
+    except TargetError:
+        return ()
+    return tuple(
+        f"Folder {target_id} holds no server target record: adding or removing a server was "
+        f"interrupted, and FinishUP does not use it. Delete it with 'finishup server remove "
+        f"{target_id}'."
+        for target_id in leftovers
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1636,7 +1655,10 @@ def _probe_refusal(record: ServerTarget | None, reason: str) -> ServerCommandRef
 @server_app.command("remove")
 @_cli
 def server_remove(
-    name: Annotated[str, typer.Argument(help="The target to remove.")],
+    name: Annotated[
+        str,
+        typer.Argument(help="The target to remove, or a leftover folder id that 'list' reports."),
+    ],
     select_local: Annotated[
         bool,
         typer.Option("--select-local", help="If it is selected, switch to 'local' first."),
@@ -1645,6 +1667,9 @@ def server_remove(
     """Remove a target: stop what this client runs for it, delete its key and its folder."""
 
     _require_no_explicit_source()
+    if _LEFTOVER_ID.match(name):
+        _remove_leftover(name)
+        return
     record = _target_or_fail(name)
     unreadable_selection = False
     try:
@@ -1699,6 +1724,30 @@ def server_remove(
     if selected == record.target_id or unreadable_selection:
         typer.echo("Using this computer's everyday FinishUP server.")
         _warn_open_sessions()
+
+
+# A target id (``t_`` and 8 hex digits): never a target name, which has no underscore.
+_LEFTOVER_ID: Final = re.compile(r"^t_[0-9a-f]{8}$", re.ASCII)
+
+
+def _remove_leftover(target_id: str) -> None:
+    """``server remove ID`` for a registry folder that holds no target record (SRV-1).
+
+    Only a folder ``server list`` reports as a leftover: an add or a remove that was interrupted
+    left it, so nothing selects it and this client runs nothing for it. The record is checked
+    again under the registry lock; a folder that holds one is a target, removed by its name.
+    """
+
+    try:
+        with registry_lock():
+            removed = remove_leftover_root(target_id)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    except OSError:
+        raise ServerCommandRefused("target_root_unsafe") from None
+    if not removed:
+        raise ServerCommandRefused("target_unknown")
+    typer.echo(f"Removed the leftover server folder {target_id}.")
 
 
 def _read_secret_on_console() -> str:
