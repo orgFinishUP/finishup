@@ -1155,7 +1155,9 @@ through the same relay; human-control and secret channels never leave the server
   file, or its `sha256:` pin of the leaf certificate, checked right after the handshake and before
   any request byte. Only the connector reads the API key, and it rereads it after a refusal, from
   wherever the target record now says it lives, so a key `server login` stored or moved after the
-  connector started takes effect without a restart.
+  connector started takes effect without a restart. It reads the key in a worker thread, one read
+  at a time, so a platform store that blocks (an unanswered unlock prompt) never holds up its
+  other connections, its zero-network check or its stop.
 - **Gateway** (`finishup.gateway`; `finishup service gateway run --listen H:P (--tls-cert F
   --tls-key F | --behind-proxy)` and `service gateway key create|list|revoke`, all `server_host`).
   A same-user process with no vault, storage or policy authority: it may import SHARED modules and

@@ -693,3 +693,46 @@ def test_a_background_agent_never_has_the_gateway_start_a_stopped_service(home: 
 
     with selection_override(root):
         asyncio.run(exercise())
+
+
+def test_a_key_store_that_blocks_never_freezes_the_connector(home: Path) -> None:
+    """The platform store can block: a locked keyring shows an unlock prompt, or the Secret
+    Service hangs. The key is read off the event loop, so meanwhile the connector still serves
+    its zero-network tick and its stop (the signal ``server disconnect`` sends)."""
+
+    import threading
+    import time
+
+    from finishup.adapters.control.unix_socket import bind_control_listener
+
+    _state, connector, _daemon, key, root, transport = _setup(home)
+    unlocked = threading.Event()
+    reading = threading.Event()
+
+    def unlock_prompt() -> str:
+        reading.set()
+        unlocked.wait(10.0)  # the owner has not answered the prompt yet
+        return key
+
+    record = targets.read_target(root)
+    assert record is not None
+    connector = Connector(root, record, https_transport=transport, credential=unlock_prompt)
+
+    async def exercise() -> float:
+        listener = await bind_control_listener()
+        serving = asyncio.create_task(connector.serve(listener))  # warming reads the key
+        try:
+            async with asyncio.timeout(5):
+                while not reading.is_set():
+                    await asyncio.sleep(0.01)
+            asked = time.monotonic()
+            connector.request_stop()
+            async with asyncio.timeout(3):
+                assert await serving == "stop_requested"
+            return time.monotonic() - asked
+        finally:
+            unlocked.set()
+
+    with selection_override(root):
+        elapsed = asyncio.run(exercise())
+    assert elapsed < 2.0

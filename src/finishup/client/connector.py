@@ -152,14 +152,27 @@ class _ClaimLease:
 
 @dataclass(slots=True)
 class _Credential:
-    """The HTTPS key, read once from the platform store or owner-only file and kept in memory."""
+    """The HTTPS key, read once from the platform store or owner-only file and kept in memory.
+
+    The platform store can block (a locked keyring's unlock prompt, a hung Secret Service), so
+    ``load`` reads it in a worker thread, one read at a time, and the connector keeps serving its
+    relays, its zero-network tick and its stop meanwhile. ``read`` answers only the loaded key.
+    """
 
     reader: Callable[[], str]
     value: str | None = field(default=None, repr=False)
+    loading: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    async def load(self) -> None:
+        if self.value is not None:
+            return
+        async with self.loading:
+            if self.value is None:
+                self.value = await asyncio.to_thread(self.reader)
 
     def read(self) -> str:
         if self.value is None:
-            self.value = self.reader()
+            raise LookupError("credential_not_loaded")
         return self.value
 
     def forget(self) -> None:
@@ -310,6 +323,15 @@ class Connector:
             current.target_id, self._root, recorded=current.credential
         ).read()
 
+    async def _load_credential(self) -> None:
+        """Read the key off the event loop before a request needs it; ``remote_auth_failed``
+        when none can be read."""
+
+        try:
+            await self._credential.load()
+        except Exception:
+            raise UpstreamUnavailable("remote_auth_failed") from None
+
     def _https_upstream(self) -> object:
         if self._https is None:
             from finishup.client.https_upstream import HttpsUpstream
@@ -333,6 +355,7 @@ class Connector:
                 from finishup.client.https_upstream import HttpsUpstream
                 from finishup.protocol.schemas import schema_manifest_digest
 
+                await self._load_credential()
                 info = await cast(HttpsUpstream, self._https_upstream()).server_info()
                 if info.get("schema_manifest_digest") != schema_manifest_digest():
                     raise UpstreamUnavailable("remote_incompatible")
@@ -425,6 +448,7 @@ class Connector:
                 from finishup.client.https_upstream import HttpsUpstream, relay_https_connection
 
                 try:
+                    await self._load_credential()
                     # Built on first use and kept; a failure is named and tried again next time.
                     upstream = cast(HttpsUpstream, self._https_upstream())
                 except UpstreamUnavailable as error:
