@@ -283,7 +283,8 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _UNAVAILABLE,
     ),
     "remote_service_not_running": (
-        "the server's FinishUP gateway answers but its service does not; its operator starts it",
+        "the server answered but its FinishUP service is not running; start it there with "
+        "'finishup service start'",
         _UNAVAILABLE,
     ),
     "target_still_connected": (
