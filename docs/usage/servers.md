@@ -393,7 +393,13 @@ When you use a server on another machine, a port or the web, these travel to it:
 
 - your agents' FinishUP calls and their results: task statements, published work, evidence,
   checks, responses and receipts;
-- hook observations, under the observation consent you gave;
+- hook observations, under the observation consent you gave. From Codex, and from Claude Code
+  or Cursor once you turn on content capture for a project, these can hold your prompts, your
+  agent's messages, and its tool inputs and outputs, which can name file paths on this computer
+  and hold the contents of files your agent read, even outside your project or the folders you
+  list for that server. The server keeps them as FinishUP on this computer would. The
+  confirmation you type when you add or choose a server says so; a server you confirmed before
+  it said so asks you to confirm again (`finishup server use NAME`) before anything is sent;
 - a fingerprint of your project folder (a keyed digest, not its path);
 - what the server asks your workspace agent for (below): the change since the task started,
   facts about files the task names, files the reviewer asks to read, task input files, declared
@@ -401,8 +407,12 @@ When you use a server on another machine, a port or the web, these travel to it:
   folder and from outside it as you chose for that server (its mode, above), each within the same
   size limits FinishUP uses on one computer.
 
-These do not leave: your project folder's full path, your API key, your vault passphrase, and
-the secure unlock and consent prompts, which only ever run on the server's own machine.
+These do not leave: your project folder's full path as its name (a path can still appear inside
+what your agents write and inside hook observations), your API key, your vault passphrase, and
+the secure unlock and consent prompts, which only ever run on the server's own machine. A
+server's mode limits what it reads outside your project, not what your hooks deliver. To keep
+your agent's content on this computer, leave content capture off for that project, or do not give
+it observation consent.
 
 Whether anything is then sent for AI-powered review is decided by the server's own privacy policy
 and repository permissions, exactly as on one computer. Receipts and task status from a server on

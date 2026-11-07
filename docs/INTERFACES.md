@@ -5522,7 +5522,10 @@ pending and never carries the workspace path):
 | `check_policy_digest` | the one approved-check policy digest trusted on the client, or null |
 | `route` | `{task_id, session_id, writer_id}` from the client's mapping, or null |
 
-Workspace-locator content in the row is replaced by the connection's `client:` handle. The service
+Workspace-locator content in the row is replaced by the connection's `client:` handle; every other
+content chunk (prompts, agent messages, tool inputs and outputs captured under the client's consent
+and content profiles) is sent unchanged, as a local service would receive it, which the server
+disclosure names (`cli.server.DISCLOSURE_LINES`, `client.targets.DISCLOSURE_VERSION` 2). The service
 (`application.observation_claims.ClaimObservationRouter`) accepts the envelope's session
 commitment and the attestation as `client_attested`, records them in the claimed worktree's own
 store `<state dir>/observation-claims/<16 hex of the handle>/` (`ClientAttestedObservationStore`,

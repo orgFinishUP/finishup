@@ -1912,8 +1912,10 @@ record changes as follows.
   owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one
   of the four non-LLM channels, and enabling it enables none of them. It carries the ordinary
   control traffic (task statements, published work, evidence, check, respond and receipt
-  traffic), observation rows, the workspace claim digest, and the workspace evidence the server
-  asks the client's workspace agent for within each operation's existing bound. It never carries
+  traffic), observation rows (with the native content captured under the client's observation
+  consent and content profiles, sent as a local service would receive it and named in the
+  disclosure), the workspace claim digest, and the workspace evidence the server asks the
+  client's workspace agent for within each operation's existing bound. It never carries
   a vault secret, a provider credential, or human-control or secret-ingress traffic.
 - **Authorization.** Each remote target is authorized by the owner on the trusted foreground
   console with a versioned disclosure and a typed confirmation, recorded in the target record; a

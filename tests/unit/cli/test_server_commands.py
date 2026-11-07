@@ -484,6 +484,38 @@ def test_remote_add_asks_every_kind_the_same_question_in_its_typed_confirmation(
     assert console.opened == 1
 
 
+def test_the_disclosure_names_hook_observations_and_the_content_they_carry(
+    home: Path, remote_seams: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-051 decisions 6 and 12: over a claim-bound connection the hooks send captured content
+    (prompts, messages, tool inputs and outputs) as a local service would receive it, so the
+    disclosure the owner confirms says so before the typed name, in every mode; and a target
+    confirmed under the disclosure that did not say so must be confirmed again before use."""
+
+    console = _scripted(monkeypatch, b"listed", b"gw")
+    assert _invoke("add", "gw", "https://fu.example").exit_code == 0
+    assert console.asked[-1] == (b"gw",)
+    # What the owner saw before typing the name.
+    shown = " ".join("".join(console.shown[: console.asked_at[-1]]).split())
+    for words in (
+        "Hook observations of projects where you gave observation consent are sent too.",
+        "once you turn on content capture for a project",
+        "your prompts, its messages, and tool inputs and outputs",
+        "can name file paths on this computer and hold the contents of files it read, even "
+        "outside your project or the folders you list for that server.",
+        "Your project folder is named by a keyed label, not its path.",
+    ):
+        assert words in shown
+    # The old promise that no path leaves is gone: captured content can name one.
+    assert "No file path" not in shown
+    (record,) = targets.list_targets()
+    assert record.disclosure_version == targets.DISCLOSURE_VERSION >= 2
+    # A target confirmed under disclosure 1, which never named that content, sends nothing
+    # until the owner confirms the current disclosure.
+    stale = replace(record, disclosure_version=1)
+    assert stale.needs_reauthorization
+
+
 # The sentence of the local-mode notice that names what a rule-breaking server could read.
 _RULE_BREAKING: Final = "such a server could read any other such file on this computer"
 

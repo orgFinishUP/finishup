@@ -149,6 +149,39 @@ def test_a_claim_bound_row_carries_the_attestation_and_the_handle_not_the_path(
     assert attested.envelope == request.envelope
 
 
+def test_captured_content_travels_as_a_local_service_receives_it_and_only_the_locator_changes(
+    tmp_path: Path,
+) -> None:
+    """ADR-051 decision 12 (2026-11-07): with a content profile on, the server receives what a
+    local service would, a tool input naming an absolute path included. The owner was told so
+    before confirming the server (``cli.server.DISCLOSURE_LINES``, disclosure 2); only the
+    workspace locator, which FinishUP itself adds, is replaced by the handle."""
+
+    from dataclasses import replace
+
+    store, workspace, state, path = _store(tmp_path)
+    request = _request(store, workspace, path)
+    tool_input = ObservationContentChunk(
+        content_kind=ObservationContentKind.TOOL_INPUT,
+        correlation_identity="hook:codex-session-1:2:tool-input",
+        source_commitment=request.envelope.session_commitment,
+        media_type="application/json",
+        part_index=0,
+        part_count=1,
+        content=('{"file_path":"' + path + '/secret_plan.md"}').encode(),
+    )
+    request = replace(request, content_chunks=(*request.content_chunks, tool_input))
+    sent = attest_for_connection(
+        request, _Connection(_HANDLE), store=store, workspace_commitment=workspace, state=state
+    )
+    assert [chunk.content_kind for chunk in sent.content_chunks] == [
+        ObservationContentKind.WORKSPACE_LOCATOR,
+        ObservationContentKind.TOOL_INPUT,
+    ]
+    assert sent.content_chunks[0].content == _HANDLE.encode()
+    assert sent.content_chunks[1] == tool_input
+
+
 def test_only_a_claim_bound_connection_attests(tmp_path: Path) -> None:
     store, workspace, state, path = _store(tmp_path)
     request = _request(store, workspace, path)
