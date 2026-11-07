@@ -1972,7 +1972,8 @@ its `-part-NN` parts, not the source file; renderings say "of the captured item"
 - `task_statement_unavailable`, `task_statement_not_supplied`, `task_statement_not_authorized` —
   what the reviewer knew of the user's request (issue #908; see "Task statement" below).
 - `outside_reads_not_listed` — a claim-bound task's server is in `listed` mode for the client's
-  owner, and the client's workspace agent left unread an existing file the task names (a
+  owner, and the client's workspace agent left unread an existing file the task names, or kept
+  back the server's copy of one kept when the task started, whatever that file is now (a
   `read_outside_inputs` or kept-copy `snapshot_outside_inputs` answer with a non-empty
   `unlisted`, counted in `CheckChangeCapture.outside_inputs_not_listed`) or refused a declared
   test (`root_not_admitted`, counted in the case object's `declared_tests_not_listed`), because its
@@ -4984,7 +4985,7 @@ Bytes travel as base64 strings inside canonical JSON, and every codec round-trip
 | `count_change_lines` | git | `count_change_lines` | `ChangeLineCounts` |
 | `classify_undeclared_references` | git | `classify_undeclared_references` | reference triples |
 | `read_outside_inputs` | reads | `task_input_read.read_outside_inputs` | `OutsideInputsRead` (`inputs`: `TaskInputFile` tuple; `unlisted` and `listed`: ascending indices into the call's `values`) |
-| `snapshot_outside_inputs` | reads | `task_input_read.snapshot_outside_inputs` | `OutsideSnapshotsRead` (`reads`: `OutsideSnapshotRead` tuple; `unlisted` and `listed` as above) |
+| `snapshot_outside_inputs` | reads | `task_input_read.snapshot_outside_inputs` | `OutsideSnapshotsRead` (`reads`: `OutsideSnapshotRead` tuple; `unlisted` and `listed` as above, `unlisted` answering for kept copies) |
 | `read_declared_test` | reads | `task_input_read.read_declared_test` | bytes or absent |
 | `read_text_beneath` | reads | `task_input_read.read_text_beneath` | `(bytes, size)` or absent |
 | `list_beneath` | reads | `task_input_read.list_beneath` | bounded listing |
@@ -5079,7 +5080,13 @@ confinement rules:
     own trusted metadata walk would read a file for it (`task_input_read.
     outside_inputs_readable`, no content read); one that names nothing, or only what the local
     read would not read (a hard-linked file, one others may write, a home-private tree), is not
-    reported, as a local read finds nothing there. The rest is read: the call
+    reported, as a local read finds nothing there. `snapshot_outside_inputs`, whose values at a
+    check or a review are the paths of the server's kept copies, answers `unlisted` for those
+    copies instead (`workspace_agent._copies_unlisted`): every value at or beneath a named root
+    that no listed folder admits (the complement of `listed` there), whatever is there now and
+    past the window too, since the server would send its copy, not the file; it looks at nothing
+    on the client, so it tells the server no more than `listed` does, beside the mode. Either
+    call reads every value it did not leave unread: it
     walks the named roots that are admitted or hold an admitted folder, and the listed folders,
     for the values it kept, and each input keeps the root it was read beneath
     (`TaskInputFile.root`); a named root with no value beneath it is left out unopened. The
@@ -5088,10 +5095,11 @@ confinement rules:
     then does not send) that lie beneath none of those values, as the count
     `CheckChangeCapture.outside_inputs_not_listed` (written only when not zero), and discloses
     `outside_reads_not_listed` (below); a task-start snapshot simply keeps no copy of an unlisted
-    value. The reviewer's kept-copy root (`s{n}`) follows the same answer: when a review is
-    prepared, `ready_composition._copies_still_listed` asks `snapshot_outside_inputs` with
-    `limit` 0 (no bytes read) and offers only the copies it does not name `unlisted`; an agent
-    that cannot answer leaves the root out.
+    value. A copy whose file has since been deleted or changed is counted and left out alike:
+    listing its folder again, or `local` mode, sends it. The reviewer's kept-copy root (`s{n}`)
+    follows the same answer: when a review is prepared, `ready_composition._copies_still_listed`
+    asks `snapshot_outside_inputs` with `limit` 0 (no bytes read) and offers only the copies it
+    does not name `unlisted`; an agent that cannot answer leaves the root out.
   Outside reads never enter the claimed workspace through an outside root and never enter a
   protected directory, whatever the server lists as excluded; an `lstat` candidate inside either
   is reported as not found. An exclusion naming a directory this user cannot examine does not

@@ -5427,9 +5427,10 @@ def _copies_still_listed(
 
     The agent is asked, reading no bytes, which of them its owner no longer lists for this
     server (``unlisted``, ADR-051 decision 5): a folder removed, or ``local`` mode narrowed to
-    ``listed``, since the copy was kept. Those are left out, exactly as the check-time read leaves
-    them out (``CurrentInputsRead.unlisted``). ``None`` when none is left, or when the agent cannot
-    say: no copy is offered on the server's own word.
+    ``listed``, since the copy was kept, whatever its file is now (deleted or changed included).
+    Those are left out, exactly as the check-time read leaves them out
+    (``CurrentInputsRead.unlisted``). ``None`` when none is left, or when the agent cannot say: no
+    copy is offered on the server's own word.
     """
 
     prefix = root.rstrip("/") + "/"
