@@ -5380,10 +5380,16 @@ FinishUP workspace agent on the client machine gave no usable answer to the serv
 workspace (it was not connected, did not answer in time, or failed), so the server could not see
 the change. On the client machine, the computer that holds the project, `finishup server status
 NAME` shows the connection; keep the agent session open, or, without one, run `finishup server
-connect NAME --agent` in the project folder; checking again then can help." A reviewer read the agent refused reads as nothing. A reviewer whose file
-read finds the agent gone ends `workspace_agent_unavailable`
-(`application.reviewer_loop.WORKSPACE_AGENT_UNAVAILABLE_ENDING`), which becomes an unavailable
-semantic result with failure class `transport`, never a judgment.
+connect NAME --agent` in the project folder; checking again then can help." A reviewer read the agent refused reads as nothing. One whose time ran out on the
+client (the agent's `read_deadline`, or the client's own `deadline_exceeded`) raises
+`ReadDeadline`, as a slow local read does, so the review ends `deadline`; a declared test then
+reads as not visible, as the local declared-test read has it. A reviewer whose file read finds
+the agent gone, busy or failed, or whose answer was too large to carry, ends
+`workspace_agent_unavailable` (`application.reviewer_loop.WORKSPACE_AGENT_UNAVAILABLE_ENDING`),
+which becomes an unavailable semantic result with failure class `transport`, never a judgment:
+what the agent never read is never shown to the reviewer as an empty listing or an absent file.
+An ignored-path probe batch the agent refused, or answered with a change-capture reason, refuses
+its paths, as the local per-path rule does.
 
 **Client connection.** `service.client.ClientWorkspaceBinding(claim, agent=None)` is how a
 connection to a remote root names its workspace: `claim` (`ports.control.WorkspaceClaim`) replaces

@@ -690,7 +690,11 @@ answers bounded `workspace_call`s on a connection that declared it.
   (or an operation it never offered) is named apart: the check-time change records
   `workspace_agent_refused` (`check_time_change_unavailable_workspace_agent_refused`, its own
   fixed sentence), while `workspace_agent_unavailable`'s sentence covers an agent that was not
-  connected, too slow or failed; a refused reviewer read reads as nothing. Since listed mode
+  connected, too slow or failed; a refused reviewer read reads as nothing. A reviewer read whose
+  time ran out on the client ends the review `deadline`, as a slow local read does, and one the
+  agent did not serve for any other reason (busy, failed, an answer too large to carry) ends it
+  `workspace_agent_unavailable`: a read the agent never made is never shown as an empty listing
+  or an absent file. Since listed mode
   leaves an unlisted input unread instead of refusing the read (decision 5, amended 2026-11-07),
   a check-time refusal is now a request the agent does not answer (a handle it did not claim, an
   unknown operation or argument, a root no owner could admit), in practice two releases that do
