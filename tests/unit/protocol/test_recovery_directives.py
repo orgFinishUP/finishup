@@ -570,6 +570,8 @@ class TestWorkspaceBindingAndServerTargetReasons:
         "remote_service_not_running": "remote_service_start_required",
         "remote_incompatible": "remote_release_mismatch",
         "zero_network_remote_selected": "zero_network_local_server_required",
+        "repository_egress_held": "repository_send_decision_required",
+        "repository_egress_kept": "repository_kept_on_this_computer",
     }
 
     @pytest.mark.parametrize("reason", sorted(_EXPECTED))
@@ -631,6 +633,8 @@ class TestWorkspaceBindingAndServerTargetReasons:
             "target_reauthorization_required",
             "target_root_is_remote",
             "zero_network_remote_selected",
+            "repository_egress_held",
+            "repository_egress_kept",
         }
         assert REMOTE_CONNECTION_PHASES <= PROTOCOL_REASON_CODES
         for phase in REMOTE_CONNECTION_PHASES:
@@ -664,6 +668,30 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert "nothing was sent" in entry.directive
         assert "'finishup server use local'" in entry.directive
         assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
+
+    def test_a_held_repository_asks_once_and_a_kept_one_never_asks_again(self) -> None:
+        # Maintainer decision of 2026-11-07, round 4: a repository whose privacy policy here
+        # allows no network use is held from a server elsewhere; the agent asks the user once,
+        # only the user allows it, and a decline is remembered with 'keep', which an agent may
+        # run. A kept repository is never asked about again. Both say nothing was sent.
+        held = directive_for("repository_send_decision_required")
+        assert held is not None and held.nudge is not None
+        assert "allows no network use" in held.directive
+        assert "nothing from it was sent" in held.directive
+        assert "Ask the user once" in held.directive
+        assert "'finishup server repositories add'" in held.directive
+        assert held.directive.endswith("then repeat this request.")
+        assert "'finishup server repositories keep'" in held.nudge
+        assert "do not ask again" in held.nudge and "Never run 'add'" in held.nudge
+        kept = directive_for("repository_kept_on_this_computer")
+        assert kept is not None and kept.nudge is not None
+        assert "kept on this computer" in kept.directive
+        assert "nothing from it was sent" in kept.directive
+        assert "do not ask about it again" in kept.directive
+        assert "Ask" not in kept.directive
+        assert "'finishup server repositories add'" in kept.nudge
+        for entry in (held, kept):
+            assert entry.guidance_uri is not None
 
     def test_the_new_tokens_are_protocol_tokens_not_local_ones(self) -> None:
         tokens = set(self._EXPECTED.values())

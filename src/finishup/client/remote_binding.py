@@ -7,6 +7,13 @@ installation, an isolated root that is not a target, or a named local server) se
 exactly as before and needs none of this; a remote root (``local_port``, ``ssh``, ``https``)
 claims under the ``claim_salt`` its ``target.json`` keeps. The agent's adapters load only when an
 agent is asked for, so a connection that only claims (a short-lived hook, say) stays light.
+
+Before anything is claimed, the hold of a repository whose privacy policy on this computer allows
+no network use is decided here, once, for every remote kind alike (ADR-051 decision 8, maintainer
+decision of 2026-11-07, round 4; ``client.repository_hold``): a held or kept repository raises its
+``TargetError`` (``repository_egress_held`` or ``repository_egress_kept``), after the
+authorization checks, so nothing is claimed, dialled, started or recorded; otherwise the binding
+carries the ``SendHold`` a long-lived connection re-checks.
 """
 
 from __future__ import annotations
@@ -15,17 +22,23 @@ import base64
 import binascii
 import hashlib
 import hmac
+import posixpath
 from collections.abc import Sequence
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
+from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
+from finishup.client.repository_hold import require_sendable
 from finishup.client.targets import (
     TargetError,
     active_target_record,
     require_current_authorization,
 )
-from finishup.client.workspace_claim import workspace_claim
+from finishup.client.workspace_claim import workspace_claim_for_root
 from finishup.ports.control import WorkspaceLocator
 from finishup.service.client import ClientWorkspaceBinding
+
+if TYPE_CHECKING:
+    from finishup.client.targets import ServerTarget
 
 # Derives the agents' opened-workspace handle key from the target's claim salt (a client secret).
 _OPENED_HANDLE_KEY_DOMAIN: Final = b"yoetz/opened-workspace-key/v1"
@@ -39,6 +52,7 @@ async def remote_workspace_binding(
     *,
     serve_workspace: bool = True,
     protected: Sequence[str] | None = None,
+    target: ServerTarget | None = None,
 ) -> ClientWorkspaceBinding:
     """The claim on ``workspace`` under ``claim_salt``, with its agent when ``serve_workspace``.
 
@@ -49,11 +63,23 @@ async def remote_workspace_binding(
     is ``listed`` with no folder. A locator the shared root rule
     cannot resolve raises its closed ``RepositoryIdentityError``; the caller must then not connect
     with a path instead.
+
+    With ``target`` (the remote record whose salt ``claim_salt`` is), the repository's hold is
+    decided once the root is resolved (its one Git read) and before the claim:
+    ``repository_hold.require_sendable`` raises ``TargetError("repository_egress_held")`` or
+    ``TargetError("repository_egress_kept")``, and otherwise the binding carries its ``hold``.
     """
 
-    claim = await workspace_claim(workspace, claim_salt)
+    if type(workspace) is not WorkspaceLocator:
+        raise TypeError("workspace_locator_invalid")
+    worktree = posixpath.normpath(workspace.path)
+    if worktree == "/":
+        raise RepositoryIdentityError("repository_locator_invalid")
+    root = await canonical_workspace_root(workspace)
+    hold = None if target is None else require_sendable(target, root)
+    claim = workspace_claim_for_root(root, claim_salt, worktree)
     if not serve_workspace:
-        return ClientWorkspaceBinding(claim)
+        return ClientWorkspaceBinding(claim, hold=hold)
     from finishup.client.server_folders import outside_reads_reader
     from finishup.client.workspace_agent import WorkspaceAgentHandler
 
@@ -69,6 +95,7 @@ async def remote_workspace_binding(
         WorkspaceAgentHandler(
             workspace, protected=protected, opened_handle_key=opened_key, outside_reads=outside
         ),
+        hold=hold,
     )
 
 
@@ -103,7 +130,9 @@ async def binding_for_active_root(
     Fails closed: a root or record that cannot be read raises its ``TargetError``, a remote
     target authorized under an older disclosure raises ``target_reauthorization_required`` (with
     or without a workspace), and a locator the shared root rule cannot resolve raises
-    ``RepositoryIdentityError``; the caller must not fall back to sending the locator.
+    ``RepositoryIdentityError``; the caller must not fall back to sending the locator. Then a
+    repository held from that target, or kept on this computer, raises
+    ``repository_egress_held`` or ``repository_egress_kept`` (``remote_workspace_binding``).
     """
 
     record = active_target_record()
@@ -114,4 +143,6 @@ async def binding_for_active_root(
         salt = base64.b64decode(cast(str, record.claim_salt), validate=True)
     except (TypeError, ValueError, binascii.Error):
         raise TargetError("target_record_invalid") from None
-    return await remote_workspace_binding(locator, salt, serve_workspace=serve_workspace)
+    return await remote_workspace_binding(
+        locator, salt, serve_workspace=serve_workspace, target=record
+    )

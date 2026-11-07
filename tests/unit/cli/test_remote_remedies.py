@@ -126,13 +126,21 @@ def test_the_cli_never_says_nothing_was_recorded_for_a_remote_phase(
     control_failure(error, json_output=False, stderr_writer=lines.append)
     text = "\n".join(lines)
     first = text.splitlines()[0]
-    summary = (
-        # This computer refused to connect (ADR-051 decision 8): the server did not fail.
-        "this computer's FinishUP is set to make no network connections, so nothing was sent to "
-        "the selected FinishUP server"
-        if phase == "zero_network_remote_selected"
-        else "the selected FinishUP server could not serve this connection"
-    )
+    # This computer refused to send (ADR-051 decision 8): the server did not fail.
+    summary = {
+        "zero_network_remote_selected": (
+            "this computer's FinishUP is set to make no network connections, so nothing was sent "
+            "to the selected FinishUP server"
+        ),
+        "repository_egress_held": (
+            "this repository's privacy policy on this computer allows no network use, so nothing "
+            "from it was sent to the selected FinishUP server"
+        ),
+        "repository_egress_kept": (
+            "this repository's work is kept on this computer, as its owner chose, so nothing from "
+            "it was sent to the selected FinishUP server"
+        ),
+    }.get(phase, "the selected FinishUP server could not serve this connection")
     assert first == f"service_unavailable: {phase}: {summary}"
     directive = RECOVERY_DIRECTIVES[REASON_CODE_CONTINUATIONS[phase]]
     assert directive.directive in text

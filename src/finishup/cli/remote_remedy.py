@@ -9,6 +9,7 @@ function, so its surfaces keep their exact text.
 
 from __future__ import annotations
 
+from finishup.client.repository_hold import HELD, KEPT, KEPT_SUMMARY, SUMMARY
 from finishup.client.targets import active_target_is_remote
 from finishup.ports.control import ControlError
 from finishup.protocol.errors import REASON_CODE_CONTINUATIONS, REMOTE_CONNECTION_PHASES
@@ -36,9 +37,19 @@ _REMOTE_SUMMARY = "the selected FinishUP server could not serve this connection"
 
 
 def remote_summary(phase: str | None) -> str:
-    """The fixed summary a surface shows for a remote phase (the CLI line, the terminal)."""
+    """The fixed summary a surface shows for a remote phase (the CLI line, the terminal).
 
-    return _ZERO_NETWORK_SUMMARY if phase == "zero_network_remote_selected" else _REMOTE_SUMMARY
+    This computer refusing to send (zero-network, or a repository held or kept here, ADR-051
+    decision 8) is named as such, never as the server failing to serve.
+    """
+
+    if phase == "zero_network_remote_selected":
+        return _ZERO_NETWORK_SUMMARY
+    if phase == HELD:
+        return SUMMARY
+    if phase == KEPT:
+        return KEPT_SUMMARY
+    return _REMOTE_SUMMARY
 
 
 def _directive(token: str | None) -> RecoveryDirective:

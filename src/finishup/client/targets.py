@@ -172,6 +172,11 @@ _REASONS: Final = frozenset(
         "target_root_unsafe",
         "selection_invalid",
         "zero_network_remote_selected",
+        # A repository whose privacy policy on this computer allows no network use, held from a
+        # server elsewhere until the owner decides, or kept here as they chose
+        # (``finishup.client.repository_hold``).
+        "repository_egress_held",
+        "repository_egress_kept",
     }
 )
 

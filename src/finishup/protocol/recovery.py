@@ -789,6 +789,32 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select a FinishUP server or change the privacy policy for the owner.",
     ),
+    # A repository whose privacy policy on this computer allows no network use, while a server
+    # elsewhere is selected (ADR-051 decision 8, maintainer decision of 2026-11-07, round 4): held
+    # until the user decides; asked once; kept here, without asking again, once they decline.
+    RecoveryDirective(
+        token="repository_send_decision_required",
+        directive=(
+            "This repository's privacy policy here allows no network use, so nothing from it was "
+            "sent to the selected server elsewhere. Ask the user once; only they can allow it "
+            "('finishup server repositories add'), then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "If they decline, run 'finishup server repositories keep' and do not ask again. Never "
+            "run 'add' for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="repository_kept_on_this_computer",
+        directive=(
+            "This repository's work is kept on this computer, as the user chose, so nothing from "
+            "it was sent to the selected server elsewhere. Continue without FinishUP for this "
+            "repository and do not ask about it again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Only the user changes this, with 'finishup server repositories add' in their own terminal.",
+    ),
     RecoveryDirective(
         token="server_selection_overridden",
         directive=(

@@ -141,6 +141,7 @@ __all__ = [
     "PrivacyReceiptFound",
     "PrivacyReceiptGetResult",
     "PrivacyReceiptNotFound",
+    "SendHoldCheck",
     "ServiceClient",
     "WorkspaceCallHandler",
     "accepted_but_unresponsive",
@@ -395,17 +396,35 @@ class WorkspaceCallHandler(Protocol):
     def answer(self, call: WorkspaceCall, *, workspace_handle: str | None) -> WorkspaceReply: ...
 
 
+class SendHoldCheck(Protocol):
+    """Whether a connection's repository may still be sent to its server (ADR-051 decision 8).
+
+    ``finishup.client.repository_hold.SendHold`` is the production check; declared structurally
+    here so the service package imports no client code. ``held`` is true while nothing of the
+    repository may be sent (held from that server, or kept on this computer); ``phase`` names
+    which (``repository_egress_held`` or ``repository_egress_kept``), or is None. Both read small
+    owner-only files and never raise; a long-lived holder re-checks at least once a second.
+    """
+
+    def held(self) -> bool: ...
+
+    def phase(self) -> str | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ClientWorkspaceBinding:
     """How a connection to a FinishUP server on another machine names its workspace (ADR-051).
 
     ``claim`` takes the place of the workspace locator in the hello, so no path is sent. ``agent``,
     when set, is declared in the hello and answers the server's workspace calls on this
-    connection; without one the connection answers none.
+    connection; without one the connection answers none. ``hold``, when set, is the repository's
+    send hold (ADR-051 decision 8): the binding was made while it was sendable, and a long-lived
+    holder of the connection re-checks it.
     """
 
     claim: WorkspaceClaim
     agent: WorkspaceCallHandler | None = None
+    hold: SendHoldCheck | None = None
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
