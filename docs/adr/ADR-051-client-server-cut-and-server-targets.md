@@ -782,6 +782,10 @@ answers bounded `workspace_call`s on a connection that declared it.
   store cannot be used (locked, or not loadable in this session, such as a desktop keyring reached
   over SSH), `logout` refuses (`credential_store_unavailable`, the key stays, and the refusal says
   so) and `remove` still removes the target and names the entry it left there, by target id.
+  Here every connection reads the target record and the key as it opens (`HttpsTransport` is
+  built per dial), so a key stored, moved or deleted later takes effect at the next connection; a
+  connection already open (an MCP bridge's) keeps the key it opened with until it closes, and
+  no client-side process holds a key in between.
 - The credential never appears in argv, the environment, `target.json`, a host registration, a
   log, hook output, an MCP frame or JSON output.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks

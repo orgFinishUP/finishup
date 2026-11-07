@@ -190,9 +190,11 @@ you can read where no credential store is usable. It never puts the key in a com
 environment variable, a settings file, a log, a message your agent can read, or JSON output.
 `logout` deletes it. If your system's credential store holds the key but cannot be used right now
 (for example, it is locked, or this session cannot reach it), `logout` keeps the key, says so, and
-asks you to run it again once the store can be used. The server's operator gives you the key; a key
-has a scope, and an `agent` key allows what your agents need while an `operator` key also allows
-management reads such as privacy status.
+asks you to run it again once the store can be used. Every new connection reads the key stored at
+that moment; a connection that is already open, such as an agent session's, keeps the key it
+connected with until it closes, so restart open agent sessions to switch them at once. The
+server's operator gives you the key; a key has a scope, and an `agent` key allows what your agents
+need while an `operator` key also allows management reads such as privacy status.
 
 `login` checks the key with the server before keeping it. If the server refuses the key, or runs
 another FinishUP release, or its certificate is not the one you trusted, nothing is stored and
