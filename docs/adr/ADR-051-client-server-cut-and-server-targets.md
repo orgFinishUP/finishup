@@ -1335,9 +1335,10 @@ SSH (owner-equivalent, no key)
   start the agent when none runs. It holds `<troot>/state/agent.lock` stamped with its pid,
   registers each claimed workspace, long-polls its calls, answers them in worker threads (each
   bounded by the call's deadline: one not answered by then is `deadline_exceeded` at once, as a
-  local connection's worker answers it), and
-  exits 15 minutes after its last workspace; `server disconnect`, and a `server use` that leaves
-  the target (decision 8), ask it to stop through an owner-only request file
+  local connection's worker answers it), and exits 15 minutes after its last workspace (a
+  workspace a client noted while it ended starts its successor once the lock is released; a
+  deliberate stop has none); `server disconnect`, and a `server use` that leaves the target
+  (decision 8), ask it to stop through an owner-only request file
   (`<troot>/state/agent.stop`) and wait up to 10 seconds for its lock, never signalling a stamped
   pid that may by now belong to another process; an agent still holding the lock then is reported
   (`service_unavailable`, phase `agent_stop`), never as stopped. Only the agent takes the lock

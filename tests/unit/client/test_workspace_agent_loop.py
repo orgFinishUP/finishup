@@ -716,3 +716,43 @@ async def test_an_answer_past_the_calls_deadline_is_deadline_exceeded_at_once(
         await asyncio.wait_for(answering, 2)
     finally:
         handler.release.set()
+
+
+@pytest.mark.parametrize("ending", ["idle", "stop_requested"])
+def test_a_workspace_noted_while_the_agent_ends_idle_gets_a_successor(
+    remote: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    """A-HANDOFF on approach C: an agent at its idle exit read no live workspace on its last scan,
+    then ended and released its lock last. A client that noted its workspace in between found the
+    lock still held and started nothing, so the server's calls for its work found no agent until
+    the next client came. Once the lock is released after an idle exit, a workspace noted since
+    starts the successor; a deliberate stop stays a stop."""
+
+    record, root = remote
+    started: list[int | None] = []
+
+    class _Ending:
+        stopped_for: str | None = None
+
+        def __init__(self, at_root: Path, at_record: ServerTarget) -> None:
+            assert (at_root, at_record) == (root, record)
+            self.exited_idle = False
+
+        def stop(self) -> None:
+            return None
+
+        async def run(self) -> int:
+            # A client notes its workspace while this agent is ending.
+            note_workspace(root, _WORKSPACE)
+            self.exited_idle = ending == "idle"
+            return 0
+
+    def ensure(at_root: Path) -> bool:
+        assert at_root == root
+        started.append(agent_pid(root))  # the lock is free by then
+        return True
+
+    monkeypatch.setattr(agent_module, "WorkspaceAgentLoop", _Ending)
+    monkeypatch.setattr(agent_module, "ensure_agent", ensure)
+    assert run_workspace_agent(root) == 0
+    assert started == ([None] if ending == "idle" else [])

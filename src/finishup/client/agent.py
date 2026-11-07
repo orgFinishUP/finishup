@@ -566,6 +566,8 @@ class WorkspaceAgentLoop:
         self.stopped_for: str | None = None
         # Set once the target's record was found gone (``server remove``): nothing more is sent.
         self._target_removed = False
+        # Set when the loop ended at its idle exit, the one ending that may need a successor.
+        self.exited_idle = False
         self._clock = clock
         self._wall_clock = wall_clock
         self._scan_seconds = scan_seconds
@@ -681,6 +683,7 @@ class WorkspaceAgentLoop:
                         idle_since = self._clock()
                     else:
                         _record("workspace_agent_exit", "idle")
+                        self.exited_idle = True
                         break
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(self._scan_seconds):
@@ -941,7 +944,7 @@ def run_workspace_agent(root: Path) -> int:
     except (OSError, PathSafetyError):
         _record("workspace_agent_start", "agent_lock_unsafe")
         return 20
-    held = False
+    held = exited_idle = False
     try:
         # A probe holds the lock shared for a moment; another agent holds it for good.
         deadline = time.monotonic() + _LOCK_RETRY_SECONDS
@@ -960,11 +963,13 @@ def run_workspace_agent(root: Path) -> int:
         os.pwrite(descriptor, f"{os.getpid()}\n".encode("ascii"), 0)
 
         async def main() -> int:
+            nonlocal exited_idle
             loop = WorkspaceAgentLoop(root, record)
             running = asyncio.get_running_loop()
             for signum in (signal.SIGTERM, signal.SIGINT):
                 running.add_signal_handler(signum, loop.stop)
             code = await loop.run()
+            exited_idle = loop.exited_idle
             if loop.stopped_for is not None:
                 print(_refusal_line(loop.stopped_for), file=sys.stderr)
                 return 2
@@ -980,3 +985,21 @@ def run_workspace_agent(root: Path) -> int:
             with contextlib.suppress(OSError):
                 os.ftruncate(descriptor, 0)
         os.close(descriptor)
+        if exited_idle:
+            _start_successor_if_noted(root)
+
+
+def _start_successor_if_noted(root: Path) -> None:
+    """After an idle exit, start the next agent for a workspace noted while this one ended.
+
+    The idle exit read no live workspace on its last scan, then ended, and released the lock last.
+    A client process that noted its workspace in between found the lock still held and started
+    nothing, so the server's calls for its work would find no agent until the next client came.
+    Any live note now was written after that scan: its successor starts here. Only the idle exit
+    has a successor; a deliberate stop (``stop_agent``, a signal, zero-network, a removed target)
+    stays a stop.
+    """
+
+    live, _idle = _noted_workspaces(root, now=time.time())
+    if live and ensure_agent(root):
+        _record("workspace_agent_exit", "successor_started")

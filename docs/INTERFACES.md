@@ -5801,7 +5801,10 @@ The agent opens its HTTP client (`open_rest_http`, which reads the stored API ke
 thread, and `connect_rest_service` reads the key there too (`rest_endpoint_for` through
 `asyncio.to_thread`): a platform credential store can block, and the event loop of a long-lived
 holder (the agent, its deliveries, the MCP bridge) keeps running meanwhile. An idle agent exits
-only once `transport_alive` answers false.
+only once `transport_alive` answers false; once its lock is released after that idle exit, a
+workspace noted since (by a client that found the lock still held while the agent ended, and so
+started nothing) starts its successor (`ensure_agent`). Only the idle exit has a successor: a
+stop request, a signal, zero-network or a removed target stays a stop.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is
