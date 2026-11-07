@@ -164,6 +164,11 @@ _REASONS: Final = frozenset(
         "target_reauthorization_required",
         "target_root_is_remote",
         "zero_network_remote_selected",
+        # ADR-051 decision 8 (2026-11-07, round 4): a repository whose privacy policy on this
+        # computer allows no network use is held from the selected server elsewhere until the
+        # owner decides, or kept here as they chose; its observations wait in the outbox.
+        "repository_egress_held",
+        "repository_egress_kept",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",

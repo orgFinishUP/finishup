@@ -360,3 +360,133 @@ async def test_once_the_owner_chose_no_surface_asks_again(
     expected = ("ok", None) if mode == "local" else ("refused", "root_not_admitted")
     for _call in range(2):
         assert _outside_read(agent, outside) == expected
+
+
+# --- a repository whose privacy policy here allows no network use (ADR-051 decision 8) --------
+
+_HELD_AT = "2026-11-07T09:30:00.000Z"
+
+
+async def _report_no_network(workspace: WorkspaceLocator) -> str:
+    """Record that this computer's FinishUP said the workspace's repository allows no network."""
+
+    from datetime import UTC, datetime
+
+    from finishup.adapters.workspace_root import canonical_workspace_root
+    from finishup.client.everyday_policy import record_repository_report
+    from finishup.client.repository_hold import repository_key
+
+    key = repository_key(await canonical_workspace_root(workspace))
+    assert record_repository_report(
+        key, workspace.path, no_network=True, now=datetime(2026, 11, 7, 9, 30, tzinfo=UTC)
+    )
+    return key
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+@pytest.mark.parametrize("serve_workspace", [True, False])
+async def test_a_held_repository_is_refused_before_anything_is_claimed(
+    home: Path,
+    workspace: WorkspaceLocator,
+    kind: targets.TargetKind,
+    serve_workspace: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every remote kind alike: nothing is claimed, and no agent is built, for a held repository."""
+
+    import finishup.client.remote_binding as remote_binding
+
+    _select(_remote(kind))
+    await _report_no_network(workspace)
+    claimed: list[object] = []
+
+    def claim(*args: object) -> None:
+        claimed.append(args)
+
+    monkeypatch.setattr(remote_binding, "workspace_claim_for_root", claim)
+    with pytest.raises(TargetError) as refused:
+        await binding_for_active_root(workspace, serve_workspace=serve_workspace)
+    assert refused.value.reason == "repository_egress_held"
+    assert claimed == []
+
+
+@pytest.mark.anyio
+async def test_a_kept_repository_is_refused_as_kept_and_an_allowed_one_binds(
+    home: Path, workspace: WorkspaceLocator
+) -> None:
+    from finishup.client.repository_hold import add_kept, add_override
+
+    record = _remote("https")
+    _select(record)
+    key = await _report_no_network(workspace)
+    root = targets.target_root(record.target_id)
+    with targets.registry_lock():
+        add_kept(root, record.target_id, key, workspace.path, _HELD_AT)
+    with pytest.raises(TargetError) as refused:
+        await binding_for_active_root(workspace, serve_workspace=True)
+    assert refused.value.reason == "repository_egress_kept"
+    with targets.registry_lock():
+        add_override(root, record.target_id, key, workspace.path, _HELD_AT)
+    binding = await binding_for_active_root(workspace, serve_workspace=True)
+    assert binding is not None and binding.hold is not None
+    assert binding.hold.held() is False
+
+
+@pytest.mark.anyio
+async def test_zero_network_and_an_older_disclosure_are_refused_before_the_hold(
+    home: Path, workspace: WorkspaceLocator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.everyday_policy import record_reported_policy
+
+    _select(_remote("ssh"))
+    await _report_no_network(workspace)
+    _release_with_a_newer_disclosure(monkeypatch)
+    with pytest.raises(TargetError) as stale:
+        await binding_for_active_root(workspace, serve_workspace=True)
+    assert stale.value.reason == "target_reauthorization_required"
+    record_reported_policy(zero_network=True)
+    with pytest.raises(TargetError) as zero:
+        await binding_for_active_root(workspace, serve_workspace=True)
+    assert zero.value.reason == "zero_network_remote_selected"
+
+
+@pytest.mark.anyio
+async def test_a_local_root_or_a_named_local_server_is_never_held(
+    home: Path, workspace: WorkspaceLocator
+) -> None:
+    await _report_no_network(workspace)
+    assert await binding_for_active_root(workspace, serve_workspace=True) is None
+    with targets.registry_lock():
+        record, _root = targets.new_local_target("work")
+    _select(record)
+    assert await binding_for_active_root(workspace, serve_workspace=True) is None
+
+
+@pytest.mark.anyio
+async def test_the_root_is_resolved_once_and_the_binding_carries_a_live_hold(
+    home: Path, workspace: WorkspaceLocator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import finishup.client.remote_binding as remote_binding
+
+    record = _remote("ssh")
+    _select(record)
+    real = remote_binding.canonical_workspace_root
+    calls: list[WorkspaceLocator] = []
+
+    async def counted(locator: WorkspaceLocator) -> object:
+        calls.append(locator)
+        return await real(locator)
+
+    monkeypatch.setattr(remote_binding, "canonical_workspace_root", counted)
+    binding = await binding_for_active_root(workspace, serve_workspace=True)
+    assert len(calls) == 1
+    assert binding is not None and binding.hold is not None
+    salt = base64.b64decode(record.claim_salt or "", validate=True)
+    assert binding.claim == await workspace_claim(workspace, salt)
+    assert binding.hold.held() is False and binding.hold.phase() is None
+    # A report that arrives later is seen by the hold the connection keeps.
+    monkeypatch.setattr(remote_binding, "canonical_workspace_root", real)
+    await _report_no_network(workspace)
+    assert binding.hold.held() is True
+    assert binding.hold.phase() == "repository_egress_held"
