@@ -366,3 +366,25 @@ def test_a_linked_worktree_of_a_reported_repository_is_recorded_without_asking(
     assert len(live) == 1
     report = repository_report(_key(repository))
     assert report is not None and report.worktrees == (linked, repository)
+
+
+def test_the_whole_session_start_pass_is_bounded_its_git_read_included(
+    home: Path, repository: str, live: list[tuple[str, float]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    async def never(_worktree: str) -> str | None:
+        await asyncio.Event().wait()
+        return None
+
+    monkeypatch.setattr(everyday_repository, "repository_key_for", never)
+    finished: list[bool] = []
+    thread = threading.Thread(
+        target=lambda: finished.append(refresh_at_session_start(repository, budget_seconds=0.05)),
+        daemon=True,
+    )
+    thread.start()
+    # A bounded wait on the pass itself: it ends by its own budget, long before this deadline.
+    thread.join(timeout=10)
+    assert finished == [False]
+    assert live == []
