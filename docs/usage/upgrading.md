@@ -217,7 +217,8 @@ chose system secure storage, the operating system keyring also holds entries und
 `yoetz.vault-root.v1` and `yoetz.auto-unlock.v1`; both the old and the new name use these same
 entries. An API key you stored with `finishup server login` is kept there too, under
 `yoetz.server-credential.v1` with the server's `t_` id as the account; `finishup server remove` and
-`finishup server logout` delete it, and deleting the folders does not.
+`finishup server logout` delete it (when the keyring cannot be used, they say that the key stays),
+and deleting the folders does not.
 
 Deleting these folders permanently deletes your FinishUP tasks, receipts and vault, and nothing in
 FinishUP can recover them afterwards. Back them up first if you may want them again.

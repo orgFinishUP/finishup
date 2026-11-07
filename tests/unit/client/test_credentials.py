@@ -109,6 +109,27 @@ def test_a_store_the_key_is_not_recorded_in_never_blocks_its_delete(root: Path) 
     assert raised.value.reason == "credential_store_unavailable"
 
 
+def test_a_recorded_platform_store_that_cannot_be_loaded_keeps_the_key_and_says_so(
+    root: Path,
+) -> None:
+    """SRV-4: a key recorded in the platform store, on a machine where no platform store can be
+    loaded now (a Linux desktop reached over SSH, with no D-Bus session), was skipped silently:
+    ``logout`` then said no key was stored and ``remove`` said nothing about the key left
+    behind. The recorded store decides, so the delete is refused and the key stays."""
+
+    keyring = _Keyring()
+    stored = KeyringOrFileCredential(_TARGET, root, recorded=None, platform=keyring)
+    assert stored.store(_KEY) == "keyring"
+    absent = KeyringOrFileCredential(_TARGET, root, recorded="keyring", platform=None)
+    with pytest.raises(CredentialError) as raised:
+        absent.delete()
+    assert raised.value.reason == "credential_store_unavailable"
+    assert absent.location() == "keyring"
+    assert keyring.entries == {(SERVER_CREDENTIAL_SERVICE, _TARGET): _KEY}
+    # A target that records no platform key is not refused by a store it never used.
+    assert not KeyringOrFileCredential(_TARGET, root, recorded=None, platform=None).delete()
+
+
 @pytest.mark.parametrize("secret", ["", "short", "has space in it here", "x" * 513, "é" * 20])
 def test_secret_shape_is_checked_without_echo(secret: str) -> None:
     with pytest.raises(CredentialError) as raised:
