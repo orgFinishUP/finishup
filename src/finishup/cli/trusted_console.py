@@ -5,9 +5,12 @@ from __future__ import annotations
 import ctypes
 import hmac
 import os
+import signal
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from types import TracebackType
+from types import FrameType, TracebackType
 from typing import Final, Protocol, Self, cast
 
 __all__ = ["TrustedConsoleError", "TrustedForegroundConsole"]
@@ -44,6 +47,24 @@ class TrustedConsoleError(Exception):
 def _overwrite(value: bytearray) -> None:
     for index in range(len(value)):
         value[index] = 0
+
+
+def _sigint_handler_to_replace() -> Callable[[int, FrameType | None], object] | None:
+    """Return the SIGINT handler a blocking console read must swap out, or ``None``.
+
+    The CLI runs ceremonies under ``anyio.run``. asyncio's runner installs a SIGINT handler that,
+    on the first Ctrl-C, only cancels the main task and returns; PEP 475 then retries the
+    blocking read, which keeps waiting and takes the next line typed (#1326). Any Python handler
+    other than ``signal.default_int_handler`` may return like that. ``SIG_IGN`` and ``SIG_DFL``
+    never resume the read, and only the main thread may change a handler.
+    """
+
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    current = signal.getsignal(signal.SIGINT)
+    if not callable(current) or current is signal.default_int_handler:
+        return None
+    return current
 
 
 class _ConsoleAdapter(Protocol):
@@ -137,46 +158,57 @@ class _PosixConsoleAdapter:
         original = None
         storage = bytearray(maximum + 1)
         used = 0
+        # Ctrl-C must end this read as `cancelled`, also under the CLI's asyncio runner (#1326).
+        # Looked up before the try, so its finally can only put back the handler found here.
+        replaced_sigint = _sigint_handler_to_replace()
         try:
-            if hidden:
-                original = termios.tcgetattr(self.fd)
-                changed = original.copy()
-                # Read one byte at a time so the user receives immediate masked feedback.
-                # ISIG remains enabled, so Ctrl-C retains its ordinary cancellation behavior.
-                changed[3] = cast(int, changed[3]) & ~(termios.ECHO | termios.ICANON)
-                termios.tcsetattr(self.fd, termios.TCSADRAIN, changed)
-            self.write(prompt)
-            while used < len(storage):
-                view = (
-                    memoryview(storage)[used : used + 1] if hidden else memoryview(storage)[used:]
-                )
-                try:
-                    count = os.readv(self.fd, [view])
-                except KeyboardInterrupt as exc:
-                    raise TrustedConsoleError("cancelled") from exc
-                except InterruptedError as exc:
-                    raise TrustedConsoleError("interrupted") from exc
-                finally:
-                    view.release()
-                if count <= 0:
-                    raise TrustedConsoleError("eof")
+            try:
+                if replaced_sigint is not None:
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
                 if hidden:
-                    received = storage[used]
-                    if received in {10, 13}:
-                        break
-                    if received in {8, 127}:
-                        storage[used] = 0
-                        if used > 0:
-                            used -= 1
+                    original = termios.tcgetattr(self.fd)
+                    changed = original.copy()
+                    # Read one byte at a time so the user receives immediate masked feedback.
+                    # ISIG remains enabled, so Ctrl-C raises KeyboardInterrupt and cancels.
+                    changed[3] = cast(int, changed[3]) & ~(termios.ECHO | termios.ICANON)
+                    termios.tcsetattr(self.fd, termios.TCSADRAIN, changed)
+                self.write(prompt)
+                while used < len(storage):
+                    view = (
+                        memoryview(storage)[used : used + 1]
+                        if hidden
+                        else memoryview(storage)[used:]
+                    )
+                    try:
+                        count = os.readv(self.fd, [view])
+                    except InterruptedError as exc:
+                        raise TrustedConsoleError("interrupted") from exc
+                    finally:
+                        view.release()
+                    if count <= 0:
+                        raise TrustedConsoleError("eof")
+                    if hidden:
+                        received = storage[used]
+                        if received in {10, 13}:
+                            break
+                        if received in {8, 127}:
                             storage[used] = 0
-                            self.write("\b \b")
+                            if used > 0:
+                                used -= 1
+                                storage[used] = 0
+                                self.write("\b \b")
+                            continue
+                        used += 1
+                        self.write("*")
                         continue
-                    used += 1
-                    self.write("*")
-                    continue
-                used += count
-                if storage[used - 1] == 10:
-                    break
+                    used += count
+                    if storage[used - 1] == 10:
+                        break
+            finally:
+                # Hand Ctrl-C back before any cleanup runs, so a second press cannot cut short
+                # the buffer overwrite or the terminal restore below.
+                if replaced_sigint is not None:
+                    signal.signal(signal.SIGINT, replaced_sigint)
             if hidden:
                 if used == 0:
                     raise TrustedConsoleError("empty_input")
@@ -195,6 +227,9 @@ class _PosixConsoleAdapter:
                 storage[index] = 0
             del storage[used - 1 :]
             return storage
+        except KeyboardInterrupt as exc:
+            _overwrite(storage)
+            raise TrustedConsoleError("cancelled") from exc
         except BaseException:
             _overwrite(storage)
             raise
@@ -596,6 +631,10 @@ class _WindowsConsoleAdapter:
             raise TypeError("console_bound_invalid")
         if not self._input or not self._output:
             raise TrustedConsoleError(_TRUST_FAILURE)
+        # No SIGINT swap here, unlike the POSIX read (#1326). Nothing retries this ctypes
+        # `ReadConsoleW` call the way PEP 475 retries `os.readv`, and no Python handler runs until
+        # the call returns, so a swap could not end a blocked read. The CLI refuses native
+        # Windows at its entry point; this path is unverified on a real console.
         self.write(prompt)
         encoded = self._api.read_line(self._input, self._output, maximum, hidden=hidden)
         if hidden:

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
+import select
+import signal
+import threading
+import time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+import anyio
 import pytest
 
 from finishup.cli import trusted_console
@@ -126,6 +131,145 @@ def test_posix_hidden_input_renders_live_masks_and_erases_on_backspace() -> None
     changed = set_attributes.call_args_list[0].args[2]
     assert cast(int, changed[3]) & (termios.ECHO | termios.ICANON) == 0
     assert set_attributes.call_args_list[-1].args[2] is attributes
+
+
+_READ_DEADLINE_SECONDS = 10.0
+
+
+def _wait_for_prompt(master: int, prompt: bytes) -> None:
+    """Block until the console under test has written ``prompt``, or the deadline passes.
+
+    It never raises: the caller still presses Ctrl-C and types a fallback line, so the read under
+    test always ends and its outcome is what the test asserts on.
+    """
+
+    seen = b""
+    deadline = time.monotonic() + _READ_DEADLINE_SECONDS
+    while prompt not in seen:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        ready, _, _ = select.select([master], [], [], remaining)
+        if ready:
+            seen += os.read(master, 1024)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+@pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
+def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool) -> None:
+    """Issue #1326: the CLI reads under ``anyio.run``, whose first Ctrl-C only cancels a task.
+
+    That handler returns, so PEP 475 retried the blocking read and it took the next line typed.
+    """
+
+    import termios
+
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+    attributes_before = termios.tcgetattr(slave)
+    main_thread = threading.get_ident()
+    read_ended = threading.Event()
+    late_line_typed = threading.Event()
+
+    def press_ctrl_c_at_the_prompt() -> None:
+        _wait_for_prompt(master, b"Decision: ")
+        signal.pthread_kill(main_thread, signal.SIGINT)
+        # A swallowed Ctrl-C leaves the read waiting; type a line so the test cannot hang.
+        if not read_ended.wait(_READ_DEADLINE_SECONDS):
+            late_line_typed.set()
+            os.write(master, b"approve\n")
+
+    async def ceremony() -> tuple[bytearray | TrustedConsoleError, object, object]:
+        runner_handler = signal.getsignal(signal.SIGINT)
+        try:
+            outcome: bytearray | TrustedConsoleError = adapter.read_line(
+                "Decision: ", 32, hidden=hidden
+            )
+        except TrustedConsoleError as exc:
+            outcome = exc
+        finally:
+            read_ended.set()
+        handler_after_read = signal.getsignal(signal.SIGINT)
+        await anyio.sleep(0)
+        return outcome, runner_handler, handler_after_read
+
+    helper = threading.Thread(target=press_ctrl_c_at_the_prompt, daemon=True)
+    helper.start()
+    try:
+        try:
+            outcome, runner_handler, handler_after_read = anyio.run(ceremony)
+        except KeyboardInterrupt:
+            pytest.fail(
+                "Ctrl-C did not cancel the console read; the asyncio runner took it later "
+                f"(a later line was typed: {late_line_typed.is_set()})"
+            )
+        helper.join(_READ_DEADLINE_SECONDS)
+        attributes_after = termios.tcgetattr(slave)
+    finally:
+        read_ended.set()
+        os.close(slave)
+        os.close(master)
+
+    assert not late_line_typed.is_set(), "the read kept waiting after Ctrl-C"
+    assert isinstance(outcome, TrustedConsoleError)
+    assert outcome.reason == "cancelled"
+    # The read ran under the runner's own handler, and handed that handler back afterwards.
+    assert runner_handler is not signal.default_int_handler
+    assert handler_after_read is runner_handler
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert attributes_after == attributes_before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+@pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
+def test_posix_completed_read_under_asyncio_runner_restores_its_sigint_handler(
+    hidden: bool,
+) -> None:
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+    os.write(master, b"approve\n")
+
+    async def ceremony() -> tuple[bytearray, object, object]:
+        runner_handler = signal.getsignal(signal.SIGINT)
+        line = adapter.read_line("Decision: ", 32, hidden=hidden)
+        return line, runner_handler, signal.getsignal(signal.SIGINT)
+
+    try:
+        line, runner_handler, handler_after_read = anyio.run(ceremony)
+    finally:
+        os.close(slave)
+        os.close(master)
+
+    assert line == bytearray(b"approve")
+    assert runner_handler is not signal.default_int_handler
+    assert handler_after_read is runner_handler
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_posix_read_off_the_main_thread_leaves_sigint_alone() -> None:
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+    os.write(master, b"approve\n")
+    outcome: list[bytearray | BaseException] = []
+
+    def read() -> None:
+        try:
+            outcome.append(adapter.read_line("Decision: ", 32, hidden=False))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    handler_before = signal.getsignal(signal.SIGINT)
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(_READ_DEADLINE_SECONDS)
+    os.close(slave)
+    os.close(master)
+
+    assert outcome == [bytearray(b"approve")]
+    assert signal.getsignal(signal.SIGINT) is handler_before
 
 
 class _WindowsApi:

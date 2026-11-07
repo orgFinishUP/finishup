@@ -761,6 +761,10 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Fixed
 
+- Ctrl-C at a prompt FinishUP reads from your terminal (a passphrase, an approve/deny decision, a
+  recovery-set path) now cancels it at once and sends no answer; `finishup service unlock` and
+  `finishup privacy decide-policy`, for example, print `cancelled` and exit 130. The first Ctrl-C
+  used to be ignored, so the prompt kept waiting and took the next line typed as its answer (#1326).
 - Claude Code and Cursor now work like Codex after setup. Connecting them records the project's
   bounded structural event recording in the same reviewed step Codex setup has always shown, so
   their hooks observe work and tell the agent about FinishUP; before, the agent was never told and
