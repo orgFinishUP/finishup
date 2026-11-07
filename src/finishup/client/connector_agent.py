@@ -20,7 +20,10 @@ Before every connection attempt the agent asks the shared connection check
 reported a zero-network policy (ADR-051 decision 8, maintainer decision of 2026-11-07), or once
 the target needs a fresh confirmation or its record is gone or cannot be read (``server remove``),
 it stops for good instead of connecting again, and it delivers nothing while that record says
-zero-network.
+zero-network. The same holds for its own repository once that is held from its target, or kept on
+this computer (ADR-051 decision 8, round 4; the binding's ``hold``): its connection closes within
+a second (``ServiceClient`` re-checks the hold), it delivers nothing, and it does not connect
+again; a client whose repository may be sent again opens a new agent through the same check.
 """
 
 from __future__ import annotations
@@ -119,10 +122,11 @@ class ConnectorAgent:
     def _may_connect(self) -> bool:
         """Whether anything may be sent to this agent's target now (the shared check).
 
-        A file read only. While this computer last reported a zero-network policy, or once the
+        File reads only. While this computer last reported a zero-network policy, or once the
         target's record needs a fresh confirmation or can no longer be read, nothing is. A record
         that is gone (``server remove`` deleted the target) can no longer be read either: the
-        agent never reconnects to a removed target.
+        agent never reconnects to a removed target. Nor while this agent's repository is held
+        from its target or kept on this computer.
         """
 
         try:
@@ -132,7 +136,13 @@ class ConnectorAgent:
             require_current_authorization(record)
         except TargetError:
             return False
-        return True
+        return not self._held()
+
+    def _held(self) -> bool:
+        """Whether this agent's repository is held from its target or kept on this computer."""
+
+        hold = self._binding.hold
+        return hold is not None and hold.held()
 
     async def _supervise(self) -> None:
         delay = _RECONNECT_MIN_SECONDS
@@ -177,9 +187,10 @@ class ConnectorAgent:
         client = self._client
         if client is None or client.closed:
             return
-        if last_reported_zero_network() is not None:
-            # Nothing leaves this computer while it last reported zero-network (ADR-051
-            # decision 8); the rows wait in the outbox.
+        if last_reported_zero_network() is not None or await asyncio.to_thread(self._held):
+            # Nothing leaves this computer while it last reported zero-network, nor from a
+            # repository held from this target or kept on this computer (ADR-051 decision 8);
+            # the rows wait in the outbox.
             return
         async with self._drain_lock:
             with contextlib.suppress(Exception):

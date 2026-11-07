@@ -853,3 +853,83 @@ def test_a_background_agent_opened_before_zero_network_never_reconnects_or_deliv
     assert (before, after) == (1, 1)
     # One delivery while permitted; none once zero-network was reported.
     assert (delivered_before, delivered_after) == (1, 1)
+
+
+def test_a_background_agent_whose_repository_becomes_held_closes_and_never_reconnects(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-051 decision 8, round 4: once this computer reports the agent's own repository to
+    allow no network use, its open connection closes within one check of its send hold, it
+    delivers nothing, and it never connects again; a client whose repository may be sent opens
+    a new agent through the same check."""
+
+    from finishup.adapters.control.unix_socket import connect_owner_only_endpoint
+    from finishup.client import everyday_policy
+    from finishup.client.claimed_workspaces import record_claimed_workspace
+    from finishup.client.connector import open_background_agent
+    from finishup.client.connector_agent import ConnectorAgent
+    from finishup.client.everyday_repository import repository_key_for
+    from finishup.client.workspace_claim import workspace_claim
+    from finishup.service import client as service_client
+
+    monkeypatch.setattr(service_client, "_HOLD_RECHECK_SECONDS", 0.01)
+    record, root = _ssh_target(home)
+    (tmp_path / "workspace").mkdir()
+    workspace = WorkspaceLocator(os.fspath((tmp_path / "workspace").resolve(strict=True)))
+
+    class _Drain:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def drain(self, _client: object) -> None:
+            self.calls += 1
+
+        def close(self) -> None:
+            return None
+
+    async def exercise() -> tuple[int, int, int, int, object]:
+        daemon = ScriptedDaemon()
+        master = _StubMaster(root, restarts=[])
+        upstream = await _serve_upstream(master.upstream_path, daemon, [True])
+
+        async def dial() -> AuthenticatedUnixStream:
+            return await connect_owner_only_endpoint(master.upstream_path)
+
+        salt = base64.b64decode(record.claim_salt or "", validate=True)
+        claim = await workspace_claim(workspace, salt)
+        key = await repository_key_for(workspace.path)
+        assert key is not None
+        assert record_claimed_workspace(root, claim, workspace) is True
+        # Reported to allow network use: the agent opens and serves.
+        assert everyday_policy.record_repository_report(key, workspace.path, no_network=False)
+        agent = await open_background_agent(root, claim, dial)
+        assert isinstance(agent, ConnectorAgent)
+        drain = _Drain()
+        agent._drain = drain  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        try:
+            assert await agent.wait_connected(5.0)
+            await agent.drain()
+            delivered_before = drain.calls
+            before = daemon.connections
+            # Now reported to allow no network use: held from this server elsewhere.
+            assert everyday_policy.record_repository_report(key, workspace.path, no_network=True)
+            await agent.drain()
+            delivered_after = drain.calls
+            async with asyncio.timeout(5):
+                while agent.alive:
+                    await asyncio.sleep(0.01)
+            assert not agent.connected
+            # A new agent for the same claim is not opened while it is held.
+            reopened = await open_background_agent(root, claim, dial)
+            return before, daemon.connections, delivered_before, delivered_after, reopened
+        finally:
+            await agent.aclose()
+            upstream.cancel()
+            await asyncio.gather(upstream, return_exceptions=True)
+
+    with selection_override(root):
+        before, after, delivered_before, delivered_after, reopened = asyncio.run(exercise())
+    # One connection, made while it could be sent; none after.
+    assert (before, after) == (1, 1)
+    assert (delivered_before, delivered_after) == (1, 1)
+    assert reopened is None

@@ -169,6 +169,10 @@ _MAX_WORKSPACE_CALLS: Final = 4
 _FRAME_PREFIX_BYTES: Final = 4
 _CANCEL_SEND_TIMEOUT_SECONDS: Final = 0.05
 _STREAM_CLOSE_TIMEOUT_SECONDS: Final = 0.05
+# How often a connection that carries a repository's send hold (ADR-051 decision 8) re-checks it,
+# in seconds: ``client.repository_hold.HOLD_RECHECK_SECONDS``, spelled here so the service package
+# imports no client code. A held or kept repository's open connection closes within one check.
+_HOLD_RECHECK_SECONDS: Final = 1.0
 _WORKFLOW_METHODS: Final = frozenset(
     {
         ControlMethod.START,
@@ -1107,6 +1111,9 @@ class ServiceClient(ControlClientPort):
         "_agent_calls",
         "_client_kind",
         "_closed",
+        "_failure",
+        "_hold",
+        "_hold_watch",
         "_last_project_request",
         "_pending",
         "_pid",
@@ -1127,6 +1134,7 @@ class ServiceClient(ControlClientPort):
         _token: object,
         workspace_agent: WorkspaceCallHandler | None = None,
         transport: ConnectionTransport = "unix",
+        send_hold: SendHoldCheck | None = None,
     ) -> None:
         if _token is not _PRIVATE_CONSTRUCTOR_TOKEN:
             raise TypeError("service_client_constructor_private")
@@ -1153,14 +1161,70 @@ class ServiceClient(ControlClientPort):
         self._pending: dict[str, asyncio.Future[ControlResult]] = {}
         self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
+        # Why this connection ended, when its repository's send hold ended it: a later call is
+        # refused with that phase, not as a lost connection.
+        self._failure: ControlError | None = None
+        # The repository's send hold (ADR-051 decision 8): re-checked before every frame this
+        # connection sends and once a second while it is open.
+        self._hold = send_hold
         self._receiver = asyncio.create_task(self._receive_results())
+        self._hold_watch = None if send_hold is None else asyncio.create_task(self._watch_hold())
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
             self._closed = True
             raise ControlError("service_unavailable")
         if self._closed:
+            if self._failure is not None:
+                raise self._failure
             raise self._named(ControlError("service_unavailable", retryable=True))
+
+    def _held_failure(self) -> ControlError | None:
+        """The retryable refusal while this connection's repository may not be sent; else None.
+
+        A repository whose privacy policy on this computer allows no network use, held from this
+        connection's server elsewhere or kept on this computer (ADR-051 decision 8): the phase
+        ``client.repository_hold`` names. A check that fails holds nothing new.
+        """
+
+        hold = self._hold
+        if hold is None:
+            return None
+        try:
+            phase = hold.phase()
+        except Exception:  # noqa: BLE001 - a check that cannot be made holds nothing new
+            return None
+        if phase is None:
+            return None
+        return ControlError("service_unavailable", retryable=True, phase=phase)
+
+    async def _refuse_if_held(self) -> None:
+        """End this connection with its hold's phase when its repository may not be sent now."""
+
+        failure = self._held_failure()
+        if failure is not None:
+            self._failure = self._failure or failure
+            await self._fail_connection(failure)
+            raise failure
+
+    async def _watch_hold(self) -> None:
+        """Re-check the send hold every ``_HOLD_RECHECK_SECONDS`` while the connection is open.
+
+        Once its repository is held or kept, the connection ends at once: every pending call
+        fails with the phase, the server's workspace calls go unanswered, and later calls are
+        refused with it. The check runs in a worker thread (two small owner-only file reads).
+        """
+
+        try:
+            while not self._closed:
+                await asyncio.sleep(_HOLD_RECHECK_SECONDS)
+                failure = await asyncio.to_thread(self._held_failure)
+                if failure is not None and not self._closed:
+                    self._failure = self._failure or failure
+                    await self._fail_connection(failure)
+                    return
+        except asyncio.CancelledError:
+            return
 
     def _named(self, error: ControlError) -> ControlError:
         """``error``, naming the remote phase when this connection runs through a connector.
@@ -1250,6 +1314,9 @@ class ServiceClient(ControlClientPort):
         validate_request(request)
         async with self._write_lock:
             self._ensure_live()
+            # Nothing more of a repository held from this server, or kept on this computer, is
+            # sent: the hold is checked before every frame (ADR-051 decision 8).
+            await self._refuse_if_held()
             try:
                 await write_control_frame(self._stream, request)
             except LocalControlTransportError as exc:
@@ -1333,6 +1400,10 @@ class ServiceClient(ControlClientPort):
             encoded = await self._run_workspace_call(agent, call)
         async with self._write_lock:
             if self._closed:
+                return
+            try:
+                await self._refuse_if_held()
+            except ControlError:
                 return
             try:
                 await self._stream.send_all(encoded)
@@ -1419,6 +1490,10 @@ class ServiceClient(ControlClientPort):
                 # Their daemon workers finish (or end with the process) without being waited for.
                 if task is not current:
                     task.cancel()
+            watch = self._hold_watch
+            if watch is not None and watch is not current and not watch.done():
+                watch.cancel()
+                watch.add_done_callback(_consume_background_task)
             await _best_effort_close_stream(self._stream)
         if not from_receiver and self._receiver is not asyncio.current_task():
             self._receiver.cancel()
@@ -1922,6 +1997,7 @@ def _connected_client(
     workspace_agent: WorkspaceCallHandler | None = None,
     *,
     transport: ConnectionTransport = "unix",
+    send_hold: SendHoldCheck | None = None,
 ) -> ServiceClient:
     return ServiceClient(
         stream,
@@ -1930,6 +2006,7 @@ def _connected_client(
         _token=_PRIVATE_CONSTRUCTOR_TOKEN,
         workspace_agent=workspace_agent,
         transport=transport,
+        send_hold=send_hold,
     )
 
 
@@ -2219,7 +2296,14 @@ async def _connect_service_attempt(
             handshake.add_done_callback(_consume_background_task)
             raise TimeoutError
         session = handshake.result()
-        return _connected_client(stream, session, client_kind, agent, transport=transport)
+        return _connected_client(
+            stream,
+            session,
+            client_kind,
+            agent,
+            transport=transport,
+            send_hold=None if workspace_binding is None else workspace_binding.hold,
+        )
     except TimeoutError as exc:
         accepted = stream is not None
         if stream is not None:
@@ -2377,7 +2461,9 @@ async def connect_service_stream(
     except BaseException:
         await _best_effort_close_stream(stream)
         raise
-    return _connected_client(stream, session, client_kind, agent, transport=transport)
+    return _connected_client(
+        stream, session, client_kind, agent, transport=transport, send_hold=workspace_binding.hold
+    )
 
 
 def _singleton_lock_path() -> Path:
