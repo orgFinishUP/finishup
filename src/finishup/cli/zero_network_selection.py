@@ -549,7 +549,7 @@ def candidate_forbids_network(candidate: object) -> bool:
 
 
 @contextmanager
-def _interrupt_answers_the_prompt() -> Generator[None]:
+def interrupt_answers_the_prompt() -> Generator[None]:
     """While the choice is read, Ctrl-C raises ``KeyboardInterrupt`` at the read itself.
 
     An event loop's runner (``asyncio.run``, ``anyio.run``) answers the first SIGINT by cancelling
@@ -613,7 +613,7 @@ def _ask_before_change(item: ZeroNetworkSelection) -> Literal["switch", "cancel"
         else "Cancel this change and keep the server selection as it is"
     )
     try:
-        with _interrupt_answers_the_prompt(), TrustedForegroundConsole() as console:
+        with interrupt_answers_the_prompt(), TrustedForegroundConsole() as console:
             console.write("\n")
             for line in _change_lines(item):
                 console.write(line + "\n")

@@ -4782,7 +4782,9 @@ The test suite points `_location` at a per-test folder (`tests/conftest.py`).
 from the everyday installation's effective machine-scope policy, in a fresh `contextvars.Context`
 (`asyncio.to_thread` copies a context naming the running async library under `anyio.run`), which
 enters `selection_override(None)` again itself.
-`server add|use` refuse `zero_network_in_force` from it; when it is `unreadable` a marker that says
+`server add|use` refuse `zero_network_in_force` from it (the terminal interface's `/server`
+"Use NAME" reads it in a worker thread and the typed confirmation on its loop thread with Python's
+default Ctrl-C handler, `cli.server.confirm_use_on_this_thread`, so an interrupt cancels it); when it is `unreadable` a marker that says
 zero-network refuses `zero_network_in_force` with the fixed sentence naming `reported_at`, and
 anything else refuses `network_policy_unreadable` (while a remote target is selected its text
 names `server connect local`, and `server use local` before `service unlock`, since `service
