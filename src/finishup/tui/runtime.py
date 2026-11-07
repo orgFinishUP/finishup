@@ -1605,12 +1605,28 @@ class FinishUpRuntime:
 
         import asyncio
 
-        from finishup.cli.server import ServerCommandRefused, use_target
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            check_remote_hop,
+            confirm_use_on_this_thread,
+            use_target,
+        )
         from finishup.client.targets import TargetError
         from finishup.config.paths import PathSafetyError
 
+        loop = asyncio.get_running_loop()
+
+        async def confirm_on_loop(target: str, kind: str) -> None:
+            confirm_use_on_this_thread(target, kind)
+
+        def authorize(target: str, kind: str) -> None:
+            # The policy read runs its own event loop, so here in the worker thread; the typed
+            # confirmation on the loop thread, where Ctrl-C reaches the read (SRV-6).
+            check_remote_hop()
+            asyncio.run_coroutine_threadsafe(confirm_on_loop(target, kind), loop).result()
+
         try:
-            switch = await asyncio.to_thread(use_target, name)
+            switch = await asyncio.to_thread(use_target, name, authorize=authorize)
         except (ServerCommandRefused, TargetError, PathSafetyError) as error:
             raise _server_failure(error) from None
         record = switch.record

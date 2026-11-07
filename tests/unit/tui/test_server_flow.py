@@ -516,3 +516,63 @@ async def test_the_real_runtime_status_shows_what_a_remote_server_may_read_outsi
             "Repair it on this computer with 'finishup server folders remove devbox --all'" in line
             for line in lines
         )
+
+
+@pytest.mark.parametrize("answer", ["typed", "interrupted"])
+async def test_the_typed_confirmation_of_a_remote_server_is_read_on_the_loop_thread(
+    monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """SRV-6: ``/server`` "Use NAME" ran the whole switch in a worker thread, so its typed
+    confirmation read the terminal there, where Ctrl-C never reached it while the event loop
+    tore the interface down. The policy read stays in the worker (it runs its own event loop);
+    the confirmation runs on the loop thread with Python's default Ctrl-C handler, so an
+    interrupt cancels it and the interface keeps running."""
+
+    import signal
+    import threading
+
+    from builders.server_targets import ambient_home
+    from finishup.cli import server as server_cli
+    from finishup.client import targets
+    from finishup.config.paths import reset_selection_memo
+    from finishup.tui.runtime import FinishUpRuntime
+
+    seen: dict[str, object] = {}
+
+    def policy_read() -> bool:
+        seen["policy_on_main"] = threading.current_thread() is threading.main_thread()
+        return False
+
+    def confirm(_name: str, _kind: str, **_question: object) -> None:
+        seen["confirm_on_main"] = threading.current_thread() is threading.main_thread()
+        seen["default_handler"] = signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        if answer == "interrupted":
+            raise KeyboardInterrupt
+
+    def loop_handler(_signum: int, _frame: object) -> None:
+        raise AssertionError("the loop's own handler never answers the prompt")
+
+    monkeypatch.setattr(server_cli, "_zero_network_in_force", policy_read)
+    monkeypatch.setattr(server_cli, "_confirm_on_trusted_console", confirm)
+    previous = signal.signal(signal.SIGINT, loop_handler)  # what an event loop runner installs
+    try:
+        with ambient_home(monkeypatch) as home:
+            with targets.registry_lock():
+                record, _root = targets.new_remote_target(
+                    "lab", "ssh", user="owner", host="lab.example", port=22
+                )
+            reset_selection_memo()
+            runtime = FinishUpRuntime(cwd=home)
+            if answer == "typed":
+                switch = await runtime.use_server("lab")
+                assert switch.indicator == f"ssh {record.target_id}"
+                assert targets.read_selected_target_id() == record.target_id
+            else:
+                with pytest.raises(RuntimeError_) as raised:
+                    await runtime.use_server("lab")
+                assert raised.value.reason == "authorization_declined"
+                assert targets.read_selected_target_id() is None
+            assert signal.getsignal(signal.SIGINT) is loop_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert seen == {"policy_on_main": False, "confirm_on_main": True, "default_handler": True}
