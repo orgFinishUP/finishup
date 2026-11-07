@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import functools
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
