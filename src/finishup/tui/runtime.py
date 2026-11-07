@@ -3009,13 +3009,16 @@ class FinishUpRuntime:
 def _remote_doctor_remediation() -> dict[str, str]:
     """On a server on another machine, the service and vault steps are not this machine's."""
 
-    from finishup.client.remote_remedy import REMOTE_LOCKED_SUMMARY, remote_root_selected
+    from finishup.client.remote_remedy import (
+        REMOTE_LOCKED_SUMMARY,
+        remote_root_directive,
+        remote_root_selected,
+    )
 
     if not remote_root_selected():
         return {}
-    from finishup.protocol.recovery import directive_for
-
-    directive = directive_for("remote_server_test")
+    # Testing the server, or 'finishup server use local' while this computer is zero-network.
+    directive = remote_root_directive()
     return {
         "service_reachable": "" if directive is None else directive.directive,
         "vault_ready": REMOTE_LOCKED_SUMMARY,

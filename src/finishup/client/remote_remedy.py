@@ -33,6 +33,8 @@ __all__ = [
     "RemoteRemedy",
     "remote_connection_phase",
     "remote_remedy",
+    "remote_root_directive",
+    "remote_root_phase",
     "remote_root_selected",
     "remote_summary",
 ]
@@ -97,6 +99,30 @@ def remote_root_selected() -> bool:
     return active_root_may_be_remote()
 
 
+def remote_root_phase() -> str:
+    """The phase of a remote root's connection that named none (a closed one, or none yet).
+
+    ``zero_network_remote_selected`` while this computer last reported a zero-network policy
+    (ADR-051 decision 8): every connection to a server elsewhere is refused then, so the way out
+    is ``finishup server use local``, never testing the server. ``remote_unreachable`` otherwise.
+    Hook-safe: a file read only.
+    """
+
+    from finishup.client.everyday_policy import last_reported_zero_network
+
+    if last_reported_zero_network() is not None:
+        return "zero_network_remote_selected"
+    return "remote_unreachable"
+
+
+def remote_root_directive() -> RecoveryDirective | None:
+    """The directive a remote root's unreachable service names (``remote_root_phase``'s)."""
+
+    from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+    return directive_for(continuation_for_reason(remote_root_phase()))
+
+
 def remote_connection_phase(error: object) -> str | None:
     """The remote connection phase a failed connection carries, or None for any other failure."""
 
@@ -118,7 +144,9 @@ def remote_remedy(error: object, *, remote: bool | None = None) -> RemoteRemedy 
     A failure carrying a remote phase is remote by construction. Any other ``service_unavailable``
     or ``vault_locked`` is checked against the selected root (``remote`` when the caller already
     knows): on a remote root a bare ``service_unavailable`` (a connection that closed) is
-    ``remote_unreachable``, and a locked vault is the server owner's to unlock.
+    ``remote_root_phase()`` (``remote_unreachable``, or ``zero_network_remote_selected`` while this
+    computer last reported a zero-network policy), and a locked vault is the server owner's to
+    unlock.
     """
 
     from finishup.ports.control import ControlError
@@ -135,5 +163,5 @@ def remote_remedy(error: object, *, remote: bool | None = None) -> RemoteRemedy 
             return None
         if error.reason == "vault_locked":
             return RemoteRemedy("vault_locked", REMOTE_LOCKED_SUMMARY, None)
-        phase = "remote_unreachable"
+        phase = remote_root_phase()
     return RemoteRemedy(phase, remote_summary(phase), directive_for(continuation_for_reason(phase)))

@@ -5662,7 +5662,11 @@ connect exactly as before.
 
 **Remedies.** `client.remote_remedy`: `remote_root_selected() -> bool` (hook-safe;
 `targets.active_root_may_be_remote()`: an unreadable record counts as remote, as at the seam),
-`remote_connection_phase(error) -> str | None`, and
+`remote_connection_phase(error) -> str | None`, `remote_root_phase() -> str` (the phase of a
+remote root's connection that named none: `zero_network_remote_selected` while
+`last_reported_zero_network()` answers, else `remote_unreachable`), `remote_root_directive()` (its
+directive, which setup's next steps and the terminal interface's doctor remediation name for an
+unreachable service on a remote root), and
 `remote_remedy(error, *, remote=None) -> RemoteRemedy | None` (`reason`: a remote phase, or
 `vault_locked`; `summary`: fixed words, `remote_summary(phase)`, which for
 `zero_network_remote_selected` is `ZERO_NETWORK_SUMMARY`, "this computer's FinishUP is set to make

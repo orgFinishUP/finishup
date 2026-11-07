@@ -464,3 +464,43 @@ def test_the_hook_contexts_say_this_computer_refused(home: Path) -> None:
     assert "could not serve" not in attach
     assert attach.endswith(" Continuation: zero_network_local_server_required. ")
     _assert_remote_words(context + attach)
+
+
+@pytest.mark.usefixtures("remote_root")
+def test_a_remote_roots_own_remedies_name_the_zero_network_fix() -> None:
+    """The remote-root path (``remote_root_selected``) under round 3's record.
+
+    A connection that closed without a phase, setup's next step for an unreachable service and
+    the terminal interface's doctor remediation would send the owner to test the server; while
+    this computer last reported zero-network, nothing reaches the server, so each names
+    'finishup server use local' instead. Without the record they keep the server test.
+    """
+
+    from finishup.client.everyday_policy import record_reported_policy, remove_marker
+
+    tested = directive_for("remote_server_test")
+    local = directive_for("zero_network_local_server_required")
+    assert tested is not None and local is not None
+    closed = ControlError("service_unavailable", retryable=True)
+
+    remedy = remote_remedy(closed)
+    assert remedy is not None and remedy.reason == "remote_unreachable"
+    assert cli_setup._service_next_steps({"reachable": False, "state": None}) == (  # pyright: ignore[reportPrivateUsage]
+        tested.directive,
+    )
+    assert tui_runtime._remote_doctor_remediation()["service_reachable"] == tested.directive  # pyright: ignore[reportPrivateUsage]
+
+    assert record_reported_policy(zero_network=True)
+    remedy = remote_remedy(closed)
+    assert remedy is not None and remedy.reason == _ZERO
+    assert remedy.summary == _ZERO_WORDS and remedy.directive is local
+    assert cli_setup._service_next_steps({"reachable": False, "state": None}) == (  # pyright: ignore[reportPrivateUsage]
+        local.directive,
+    )
+    assert tui_runtime._remote_doctor_remediation()["service_reachable"] == local.directive  # pyright: ignore[reportPrivateUsage]
+    text, _ = _cli(closed)
+    assert text.startswith(f"service_unavailable: {_ZERO}: {_ZERO_WORDS}")
+
+    assert remove_marker()
+    remedy = remote_remedy(closed)
+    assert remedy is not None and remedy.reason == "remote_unreachable"

@@ -127,7 +127,11 @@ _NEXT_UNLOCK: Final = "run 'finishup service unlock' from a local terminal if th
 def _service_next_steps(service: Mapping[str, JsonValue]) -> tuple[str, ...]:
     """The service's next steps; on a server on another machine, never a local command (ADR-051)."""
 
-    from finishup.client.remote_remedy import REMOTE_LOCKED_SUMMARY, remote_root_selected
+    from finishup.client.remote_remedy import (
+        REMOTE_LOCKED_SUMMARY,
+        remote_root_directive,
+        remote_root_selected,
+    )
 
     if not remote_root_selected():
         steps: list[str] = []
@@ -137,9 +141,8 @@ def _service_next_steps(service: Mapping[str, JsonValue]) -> tuple[str, ...]:
             steps.append(_NEXT_UNLOCK)
         return tuple(steps)
     if not service.get("reachable"):
-        from finishup.protocol.recovery import directive_for
-
-        directive = directive_for("remote_server_test")
+        # Testing the server, or 'finishup server use local' while this computer is zero-network.
+        directive = remote_root_directive()
         return () if directive is None else (directive.directive,)
     if service.get("state") != "ready":
         return (REMOTE_LOCKED_SUMMARY,)
