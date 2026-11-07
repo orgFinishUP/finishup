@@ -188,7 +188,11 @@ def _no_real_workspace_agent(  # pyright: ignore[reportUnusedFunction]
         import finishup.client.agent as agent_module
     except ImportError:
         return
-    monkeypatch.setattr(agent_module, "ensure_agent", lambda _root: False)
+
+    def none_started(_root: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_module, "ensure_agent", none_started)
 
 
 @pytest.fixture(autouse=True)
