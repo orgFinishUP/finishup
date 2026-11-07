@@ -148,7 +148,9 @@ you added earlier but have not chosen, choosing this computer's FinishUP would c
 `finishup server login`, `connect`, `test` and `status` for it say `zero_network_in_force`, with
 when this computer last reported the setting, and the fix is to change this computer's privacy
 policy with `finishup privacy setup` first. `finishup server status` and `test` then show "not
-probed, nothing was sent" instead of probing it, and `test` never says the server did not answer.
+probed, nothing was sent" instead of probing it, with when this computer last reported the
+setting, for the chosen server and for any other; `finishup server status --json` gives that time
+as the probe's `last_reported_at`, and `test` never says the server did not answer.
 
 ### What this computer last reported
 

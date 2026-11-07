@@ -84,9 +84,28 @@ class ServerTargetDescription(BaseModel):
 
 
 class ServerTargetProbe(BaseModel):
-    """One probe: closed outcome and reason tokens, the server's release, and timing."""
+    """One probe: closed outcome and reason tokens, the server's release, and timing.
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    ``not_probed``: nothing was sent, because this computer last reported a zero-network privacy
+    policy (ADR-051 decision 8); ``reason`` is ``zero_network_remote_selected`` (the selected
+    server) or ``zero_network_in_force`` (any other server elsewhere), and ``last_reported_at``
+    is when this computer reported that policy, as ``server login``, ``connect`` and ``test``
+    say. ``last_reported_at`` is set exactly for ``not_probed`` (amended in place, 2026-11-07,
+    as 1.0.0 is unreleased).
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        json_schema_extra={
+            "if": {
+                "properties": {"outcome": {"const": "not_probed"}},
+                "required": ["outcome"],
+            },
+            "then": {"properties": {"last_reported_at": {"not": {"type": "null"}}}},
+            "else": {"properties": {"last_reported_at": {"type": "null"}}},
+        },
+    )
 
     outcome: Literal["ready", "reachable", "not_running", "unavailable", "not_probed"]
     reason: Token | None
@@ -103,6 +122,14 @@ class ServerTargetProbe(BaseModel):
     vault_mode: Token | None
     round_trip_p95_ms: int | None = Field(ge=0)
     samples: int = Field(ge=0)
+    # Set exactly when ``outcome`` is ``not_probed``.
+    last_reported_at: Timestamp | None
+
+    @model_validator(mode="after")
+    def _reported_time_matches_the_outcome(self) -> "ServerTargetProbe":
+        if (self.outcome == "not_probed") != (self.last_reported_at is not None):
+            raise ValueError("probe_last_reported_at_mismatch")
+        return self
 
 
 class ServerTargetZeroNetworkSelection(BaseModel):
