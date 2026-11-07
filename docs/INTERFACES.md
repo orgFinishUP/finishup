@@ -5777,7 +5777,11 @@ target's; a root that holds no remote target, or a target record that cannot be 
 `listed` with no folder), and
 `CapturedObservationDelivery(record, root, locator, claim, *, connect=None)` whose `deliver()` runs
 one `ClientObservationDrain` pass (state `<troot>/state`) over one claim-bound `RestServiceClient`
-kept between passes and released after a pass that stopped at a control failure. Under this
+kept between passes and released after a pass that stopped at a control failure. Each call's
+answer is bounded by the call's `deadline_ms`, counted from its arrival, as a local connection's
+worker is (`service.client.ServiceClient._run_workspace_call`): a handler that has not answered by
+then gets the closed reply `deadline_exceeded` sent at once, and its worker keeps one of the
+agent's four call slots until it ends. Under this
 computer's zero-network record (ADR-051 decision 8) `run_workspace_agent` refuses to start (exit
 2, one stderr line `zero_network_remote_selected: <ZERO_NETWORK_SUMMARY>. <directive>`, and the
 master closed), and a running `WorkspaceAgentLoop` (`zero_network=zero_network_reported`,

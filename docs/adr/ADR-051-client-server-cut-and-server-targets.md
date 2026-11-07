@@ -1333,7 +1333,9 @@ SSH (owner-equivalent, no key)
   agent. Client processes note each workspace they work in (an owner-only
   `yoetz.agent-workspace/1` record beneath the target root; the path never leaves the machine) and
   start the agent when none runs. It holds `<troot>/state/agent.lock` stamped with its pid,
-  registers each claimed workspace, long-polls its calls, answers them in worker threads, and
+  registers each claimed workspace, long-polls its calls, answers them in worker threads (each
+  bounded by the call's deadline: one not answered by then is `deadline_exceeded` at once, as a
+  local connection's worker answers it), and
   exits 15 minutes after its last workspace; `server disconnect`, and a `server use` that leaves
   the target (decision 8), ask it to stop through an owner-only request file
   (`<troot>/state/agent.stop`) and wait up to 10 seconds for its lock, never signalling a stamped

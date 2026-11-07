@@ -37,6 +37,9 @@ long-lived, pull-based client of the server's network API, one per target root:
   its signal handlers and the zero-network watch keep running meanwhile. It keeps that key for
   its life, so ``server login`` and ``server logout`` stop it (as ``server disconnect`` does): it
   never goes on with a key that was replaced or deleted.
+* Each call's answer is bounded by the call's own deadline, as a local connection's worker is:
+  one the handler has not given by then is answered ``deadline_exceeded`` at once, and the
+  handler's worker keeps its call slot until it ends.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file
@@ -85,7 +88,12 @@ from finishup.client.targets import (
 from finishup.config.paths import PathSafetyError, ensure_owner_only_dir
 from finishup.domain.values import JsonObject, freeze_json
 from finishup.observability.logging import record_bounded_event_without_raising
-from finishup.ports.control import WorkspaceCall, WorkspaceClaim, WorkspaceLocator
+from finishup.ports.control import (
+    WorkspaceCall,
+    WorkspaceClaim,
+    WorkspaceLocator,
+    WorkspaceReply,
+)
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 __all__ = [
@@ -824,6 +832,14 @@ class WorkspaceAgentLoop:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
+    async def _answer_in_slot(
+        self, handler: WorkspaceCallHandler, call: WorkspaceCall, handle: str
+    ) -> WorkspaceReply:
+        """The handler's reply, in a worker thread, holding one of the agent's call slots."""
+
+        async with self._calls:
+            return await asyncio.to_thread(handler.answer, call, workspace_handle=handle)
+
     async def _answer(
         self,
         api: _AgentApi,
@@ -836,8 +852,19 @@ class WorkspaceAgentLoop:
 
         # The server waits for this reply until the call's own deadline; so may delivering it.
         deadline = self._clock() + call.deadline_ms / 1_000
-        async with self._calls:
-            reply = await asyncio.to_thread(handler.answer, call, workspace_handle=handle)
+        work = asyncio.ensure_future(self._answer_in_slot(handler, call, handle))
+        try:
+            # Bounded by the call's deadline, as a local connection's worker is: an answer the
+            # handler has not given by then is ``deadline_exceeded`` at once (the server's read
+            # ends ``deadline``, not an unavailable agent), and its worker keeps its slot until
+            # it ends.
+            async with asyncio.timeout(call.deadline_ms / 1_000):
+                reply = await asyncio.shield(work)
+        except TimeoutError:
+            reply = _closed_reply(call, "deadline_exceeded")
+        except asyncio.CancelledError:
+            work.cancel()
+            raise
         body = canonical_encode(dict(workspace_reply_frame(reply)))
         delay = _REPLY_RETRY_FIRST_SECONDS
         while True:
@@ -860,6 +887,16 @@ class WorkspaceAgentLoop:
             if not delivered:
                 _record("workspace_agent_reply", "reply_refused")
             return
+
+
+def _closed_reply(call: WorkspaceCall, reason: str) -> WorkspaceReply:
+    """A non-``ok`` reply to ``call`` carrying the closed ``reason`` and no result."""
+
+    from finishup.ports.workspace_agent import outcome_for_reason
+
+    return WorkspaceReply(
+        "workspace_reply", "1.0", call.call_id, outcome_for_reason(reason), None, reason
+    )
 
 
 def _refusal_line(reason: str) -> str:

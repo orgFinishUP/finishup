@@ -645,3 +645,74 @@ async def test_the_agent_reads_its_api_key_off_the_event_loop(
     loop.stop()
     assert await asyncio.wait_for(loop.run(), 5) == 0
     assert len(openers) == 1 and openers[0] != threading.get_ident()
+
+
+class _RecordedReplies:
+    """The agent's reply channel, recording each reply body it sends."""
+
+    def __init__(self) -> None:
+        self.bodies: list[bytes] = []
+        self.sent = asyncio.Event()
+
+    async def reply(self, agent_id: str, body: bytes) -> bool:
+        del agent_id
+        self.bodies.append(body)
+        self.sent.set()
+        return True
+
+
+class _Stuck(_Handler):
+    """Never answers until ``release`` is set (a read stuck on a slow disk or a hung check)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def answer(self, call: WorkspaceCall, *, workspace_handle: str | None) -> WorkspaceReply:
+        self.release.wait(10)
+        return super().answer(call, workspace_handle=workspace_handle)
+
+
+@pytest.mark.anyio
+async def test_an_answer_past_the_calls_deadline_is_deadline_exceeded_at_once(
+    remote: tuple[ServerTarget, Path],
+) -> None:
+    """Parity with a local connection's worker (``service.client``): the agent answered a call
+    only once the handler returned, however long past the call's deadline, so the hub gave up
+    first and a reviewer read ended on the hub's own timer. A call the handler has not answered
+    by its deadline is answered ``deadline_exceeded`` at once; the stuck worker keeps its slot."""
+
+    import json
+
+    from finishup.protocol.ids import IdKind, new_id
+
+    record, root = remote
+    loop = _loop(root, record, None, "unused", workspace=None, handler=None)
+    handler = _Stuck()
+    replies = _RecordedReplies()
+    call = WorkspaceCall(
+        kind="workspace_call",
+        protocol_version="1.0",
+        call_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id="svc_00000000-0000-4000-8000-000000000001",
+        service_generation="1",
+        operation="capture",
+        arguments=JsonObject({}),
+        deadline_ms=200,
+    )
+    answering = asyncio.create_task(
+        loop._answer(replies, "agt_1", "client:0", handler, call)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+    )
+    try:
+        await asyncio.wait_for(replies.sent.wait(), 2)
+        (body,) = replies.bodies
+        sent = json.loads(body)
+        assert (sent["call_id"], sent["reason"], sent["result"]) == (
+            call.call_id,
+            "deadline_exceeded",
+            None,
+        )
+        assert sent["outcome"] != "ok"
+        await asyncio.wait_for(answering, 2)
+    finally:
+        handler.release.set()
