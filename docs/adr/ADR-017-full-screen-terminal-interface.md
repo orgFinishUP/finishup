@@ -103,6 +103,9 @@ authority at all.
    the transcript, a log line, a config file, an event payload, MCP context, or a test snapshot.
    Where the environment cannot suspend, the interface says so and names the command that runs
    the same ceremony directly; it does not fall back to typing a secret into the window.
+   However the ceremony ends, including Ctrl-C at its prompt, the interface resumes before the
+   outcome is reported. `App.suspend()` resumes only when its block exits normally, so
+   `hand_over_terminal` holds a ceremony's error until the block has exited (#1326).
 
 8. **Rendering is pure, and the vocabulary is fixed.** `src/finishup/tui/render.py` is a function
    from value objects to lines of text with no rendering-framework import, so safety-relevant

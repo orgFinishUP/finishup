@@ -348,7 +348,9 @@ When a credential or passphrase is needed, the interface explains what is about 
 for explicit consent. On approval it **suspends itself** and hands the terminal to the existing
 confidential ceremony, which opens the controlling terminal directly, turns off echo, and masks
 accepted input with `*`. Invalid or mismatched passphrases are overwritten and re-prompted; they
-are not accepted. What you type there goes straight into the local vault.
+are not accepted. What you type there goes straight into the local vault. Press Ctrl-C at the
+secure prompt to cancel it: nothing is sent, and the interface comes back and reports the step as
+cancelled. A step that fails for another reason also returns to the interface, which says why.
 
 No secret byte can reach the transcript, the interface's state, a log, a config file, an event
 payload, MCP context, or a screenshot — because no secret byte ever enters this process's UI at

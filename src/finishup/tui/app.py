@@ -1345,10 +1345,23 @@ class FinishUpTui(App[int]):
         which opens ``/dev/tty`` itself, checks that it really is the controlling
         terminal, and disables echo — so no key press ever reaches a widget and
         no secret byte can end up in the transcript, a log, or a snapshot.
+
+        A ceremony that fails or is cancelled (Ctrl-C at its prompt, #1326) still hands the
+        terminal back before its error reaches the caller. Textual's ``suspend`` resumes the
+        interface only when its block exits normally, so the error is held until then. Task
+        cancellation and interpreter exits are not held: the interface is shutting down.
         """
 
+        failure: Exception | None = None
+        result: Any = None
         with self.suspend():
-            return await operation()
+            try:
+                result = await operation()
+            except Exception as error:
+                failure = error
+        if failure is not None:
+            raise failure
+        return result
 
     async def _run_confidential(
         self,
