@@ -485,7 +485,14 @@ answers bounded `workspace_call`s on a connection that declared it.
   other reads as nothing in both modes, as locally, because no folder the owner lists and no
   mode would let it be read. Neither looks at content, so a declared test that is not text the
   local read returns (binary, empty, over 1 MiB) is still counted, and an empty task input
-  counts though it gives the review nothing: a known over-count, never a hidden omission. A named root beneath which the task names nothing is left unopened, and one that
+  counts though it gives the review nothing: a known over-count, never a hidden omission. Unlike
+  existence, that answer tells the server more than `lstat_candidates` does (a path's type,
+  permission bits and times): for a path it named that the owner did not list, one bit, whether a
+  local read would read it, which also depends on the file's link count and owner, on the owners
+  of the directories on the way, on the home directory's private trees and, for a directory, on
+  whether it holds at least one file the local read would read among those it lists. Never a
+  name, a size or content. A known limit, kept so that a count never sends the owner to a step
+  that would read nothing there. A named root beneath which the task names nothing is left unopened, and one that
   holds a listed folder is walked only to the values beneath that folder. Beneath the server's own
   roots the client's record narrows them in `listed` mode, and a folder narrower than the server's
   root admits what lies beneath that folder alone; a listed folder beneath none of the server's
