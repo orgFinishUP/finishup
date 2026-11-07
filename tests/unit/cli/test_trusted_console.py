@@ -135,6 +135,16 @@ def test_posix_hidden_input_renders_live_masks_and_erases_on_backspace() -> None
 _READ_DEADLINE_SECONDS = 10.0
 
 
+def _settings(attributes: list[object]) -> list[object]:
+    """``tcgetattr`` output without the kernel's own PENDIN state bit in the local flags."""
+
+    import termios
+
+    settings = list(attributes)
+    settings[3] = cast(int, settings[3]) & ~getattr(termios, "PENDIN", 0)
+    return settings
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
 @pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
 def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool) -> None:
@@ -189,7 +199,9 @@ def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool
     assert runner_handler is not signal.default_int_handler
     assert handler_after_read is runner_handler
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-    assert attributes_after == attributes_before
+    # The terminal's own settings are back. PENDIN is the kernel's state bit, not a setting:
+    # BSD and macOS set it themselves when a terminal returns to canonical mode.
+    assert _settings(attributes_after) == _settings(attributes_before)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
