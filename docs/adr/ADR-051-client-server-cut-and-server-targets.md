@@ -1223,7 +1223,9 @@ SSH (owner-equivalent, no key)
   none runs, with or without a workspace to note, an idle agent stays while the master it
   supervises still answers `-O check` (the master ends on its own after 15 idle minutes), and the
   agent closes the master through its control socket (`-O exit`) when it stops for the
-  zero-network record, so no master stays open under it.
+  zero-network record, so no master stays open under it. **Limit:** when no agent can run (its
+  lock is unsafe, or it could not be spawned), a master already open stays open until its own 15
+  idle minutes end; nothing is sent over it, because every connection asks the shared check first.
 
 **SSH forwards a socket to a socket.** The approach brief proposed forwarding to a loopback TCP
 port of the API. This pull request forwards to the owner-only `api.sock` instead: a request there
