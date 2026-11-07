@@ -608,6 +608,155 @@ def _warn_open_sessions() -> None:
     )
 
 
+_RELEASE: Final = re.compile(r"^[0-9][0-9A-Za-z.+-]{0,63}$", re.ASCII)
+_SSH_PROBE_SECONDS: Final = 180.0
+
+
+def _release_detail(server_release: object) -> str:
+    """Both releases for a lockstep refusal; a server value that is not a release is withheld."""
+
+    shown = (
+        server_release if type(server_release) is str and _RELEASE.match(server_release) else "?"
+    )
+    return f"client {__version__}, server {shown}"
+
+
+def _probe_ssh_endpoint(
+    user: str | None,
+    host: str,
+    port: int,
+    remote_root: str | None,
+    remote_launcher: str | None,
+) -> tuple[str, str]:
+    """Ask the server's own ``finishup service endpoint --json`` over one interactive ``ssh``.
+
+    OpenSSH asks the owner, on this terminal, to confirm a host key it does not know yet; that
+    confirmation is the host-key pin every later ``BatchMode`` connection checks. Returns the
+    server's absolute launcher (the one given, or the single absolute launcher the server
+    reports for itself, never a bare ``finishup``) and its control endpoint, after checking that
+    both sides run the same release. Nothing is written when this fails.
+    """
+
+    import json
+    import subprocess
+
+    from finishup.client.ssh_upstream import (
+        UpstreamUnavailable,
+        probe_argv,
+        remote_command_line,
+        resolve_ssh,
+    )
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    try:
+        ssh = resolve_ssh()
+    except UpstreamUnavailable as error:
+        raise ServerCommandRefused(error.reason) from None
+    command = remote_command_line(
+        remote_launcher or "finishup", remote_root, "service", "endpoint", "--json"
+    )
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv; the owner's own terminal
+            probe_argv(ssh, user=user, host=host, port=port, command=command),
+            stdout=subprocess.PIPE,
+            timeout=_SSH_PROBE_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ServerCommandRefused("remote_unreachable") from None
+    if completed.returncode != 0:
+        if completed.returncode == 127 and remote_launcher is None:
+            raise ServerCommandRefused("remote_launcher_unknown")
+        raise ServerCommandRefused("remote_unreachable")
+    try:
+        report = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ServerCommandRefused("remote_incompatible") from None
+    if not isinstance(report, dict):
+        raise ServerCommandRefused("remote_incompatible")
+    fields = cast(dict[str, object], report)
+    endpoint = fields.get("endpoint")
+    if (
+        fields.get("schema") != "yoetz.service-endpoint/1"
+        or type(endpoint) is not str
+        or not endpoint.startswith("/")
+    ):
+        raise ServerCommandRefused("remote_incompatible")
+    if fields.get("schema_manifest_digest") != schema_manifest_digest():
+        raise ServerCommandRefused(
+            "remote_incompatible", detail=_release_detail(fields.get("release"))
+        )
+    launcher = remote_launcher
+    if launcher is None:
+        reported = fields.get("launcher")
+        if (
+            not isinstance(reported, list)
+            or len(cast(list[object], reported)) != 1
+            or type(cast(list[object], reported)[0]) is not str
+            or not cast(str, cast(list[object], reported)[0]).startswith("/")
+        ):
+            raise ServerCommandRefused("remote_launcher_unknown")
+        launcher = cast(str, cast(list[object], reported)[0])
+    return launcher, endpoint
+
+
+# What ``server login`` says when the server's answer means the key must not be kept (ADR-051
+# decision 7, add and login parity): why, that nothing was stored, and the fix.
+_LOGIN_REFUSED: Final[Mapping[str, str]] = {
+    "remote_auth_failed": (
+        "the server refused this API key, so it was not stored; check the key with the server's "
+        "operator ('finishup service gateway key list' on the server shows its keys) and run "
+        "'finishup server login' again"
+    ),
+    "remote_identity_changed": (
+        "the server's certificate does not match the trust recorded for it, so the key was not "
+        "sent and not stored; verify the server another way, then remove and add it again"
+    ),
+    "remote_incompatible": (
+        "that server is not running this FinishUP release (or is not a FinishUP server), so the "
+        "key was not stored; install the same release on both, then run 'finishup server login' "
+        "again"
+    ),
+}
+
+
+def _check_https_key(record: ServerTarget, secret: str) -> str | None:
+    """``GET /v1/server`` with the new key before it is stored: authenticated, same release.
+
+    ``None`` when the server accepted the key; otherwise the closed reason it did not answer
+    with. A key the server refuses, a server whose certificate does not match the recorded trust,
+    or one on another release raises, naming why nothing was stored.
+    """
+
+    import asyncio
+
+    from finishup.client.https_upstream import HttpsUpstream
+    from finishup.client.ssh_upstream import UpstreamUnavailable
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    async def check() -> dict[str, JsonValue]:
+        upstream = HttpsUpstream(record, lambda: secret)
+        try:
+            return await upstream.server_info()
+        finally:
+            await upstream.aclose()
+
+    try:
+        info = asyncio.run(check())
+    except UpstreamUnavailable as error:
+        refused = _LOGIN_REFUSED.get(error.reason)
+        if refused is not None:
+            raise ServerCommandRefused(error.reason, message=refused) from None
+        return error.reason
+    if info.get("schema_manifest_digest") != schema_manifest_digest():
+        raise ServerCommandRefused(
+            "remote_incompatible",
+            detail=_release_detail(info["release"]),
+            message=_LOGIN_REFUSED["remote_incompatible"],
+        )
+    return None
+
+
 @server_app.command("add")
 @_cli
 def server_add(
@@ -1537,6 +1686,14 @@ def server_login(
         raise refusal
     try:
         secret = read_key_file(key_file) if key_file is not None else _read_secret_on_console()
+    except CredentialError as error:
+        raise ServerCommandRefused(error.reason)
+    # The key is checked against the server before it is kept: a refused key, a server whose
+    # identity does not match the recorded trust, or another release is never stored. A server
+    # that does not answer yet keeps the key, and says it is not verified yet (ADR-051 decision
+    # 7, add and login parity).
+    unanswered = _check_https_key(record, secret)
+    try:
         root = target_root(record.target_id)
         location = KeyringOrFileCredential(
             record.target_id, root, recorded=record.credential
@@ -1548,7 +1705,15 @@ def server_login(
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
-    typer.echo(f"Stored the API key for {record.target_id} in {where}.")
+    if unanswered is None:
+        typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
+        return
+    typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+    typer.echo(
+        f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
+        f"checked on the first connection; run 'finishup server test {record.name}' once the "
+        "server is up to check it now."
+    )
 
 
 @server_app.command("logout")
