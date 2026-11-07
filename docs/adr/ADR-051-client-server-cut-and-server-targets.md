@@ -934,8 +934,9 @@ answers bounded `workspace_call`s on a connection that declared it.
     any other remote target is `zero_network_in_force`, saying when this computer last reported
     the state and that its privacy policy must change first (`finishup privacy setup`), since
     switching would change nothing. `server login` refuses before it reads a key, `server connect`
-    before its connection, and `server status` and `server test` probe nothing (probe outcome `not_probed`
-    with that reason, "nothing was sent", never "did not answer"). A client-owned process
+    before its connection, and `server status` and `server test` probe nothing (probe outcome
+    `not_probed` with that reason and the time this computer reported the state,
+    `last_reported_at`, "nothing was sent", never "did not answer"). A client-owned process
     that holds connections to a remote target open, or connects again on its own, enforces the
     same marker itself, because it would otherwise keep sending after the change: it checks
     before every connection it opens or relays and at least once a second while it runs, and on
