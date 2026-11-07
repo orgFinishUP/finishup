@@ -343,8 +343,9 @@ with the check.
 
 `remove` applies from the server's next read on this computer; a read already under way may still
 return files from that folder, and a review the server already prepared may still send what it
-read there. `remove NAME --all` removes every folder for that server, and also
-clears a list FinishUP can no longer read: FinishUP then lets the server read no folder at all,
+read there. Copies of files there that FinishUP kept when a task started stop being sent from the
+next review on, as the files themselves do. `remove NAME --all` removes every folder for that
+server, and also clears a list FinishUP can no longer read: FinishUP then lets the server read no folder at all,
 in listed mode, until you choose local again. `list` and `server status` show the folders. You can
 list folders while a server is in local mode too: the files a task names there are read then as
 well, and in listed mode the folders are all it reads, as FinishUP says. The list and the mode stay on this computer and are never sent to the server, and they belong

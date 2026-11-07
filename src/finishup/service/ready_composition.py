@@ -5300,7 +5300,8 @@ async def _reviewer_read_roots(
     """The ``read_file`` roots a review may name (#1118): none where repository excerpts are
     withheld; else the workspace (Git-ignored paths refused) and, per owner-admitted outside root,
     the task-declared paths beneath it, current (``o``) and as kept at task start or first
-    admission (``s``). Never this service's own bundle or state, by path or identity."""
+    admission (``s``; a claim-bound task's only while its client's owner still lists them).
+    Never this service's own bundle or state, by path or identity."""
 
     if workspace_root is None or not _file_reads_offered(
         workspace_root, withheld, admitted_home_project
@@ -5395,6 +5396,12 @@ async def _reviewer_read_roots(
             )
         )
         kept = next((s for s in snapshots if any(f.path.startswith(prefix) for f in s.files)), None)
+        if kept is not None and reads is not None:
+            # ADR-051 decision 5: a claim-bound task's kept copy is offered only while its
+            # client's owner still lets this server read it, as the check-time read sends it.
+            kept = await asyncio.to_thread(
+                _copies_still_listed, reads, root, kept, (workspace_root, *protected)
+            )
         if kept is not None:
             roots.append(
                 ReadRoot(
@@ -5408,6 +5415,35 @@ async def _reviewer_read_roots(
                 )
             )
     return tuple(roots)
+
+
+def _copies_still_listed(
+    reads: ClientWorkspaceReads,
+    root: str,
+    kept: TaskInputSnapshotSet,
+    excluded: tuple[str, ...],
+) -> TaskInputSnapshotSet | None:
+    """A claim-bound task's copies kept beneath ``root`` that its reviewer may still read.
+
+    The agent is asked, reading no bytes, which of them its owner no longer lists for this
+    server (``unlisted``, ADR-051 decision 5): a folder removed, or ``local`` mode narrowed to
+    ``listed``, since the copy was kept. Those are left out, exactly as the check-time read leaves
+    them out (``CurrentInputsRead.unlisted``). ``None`` when none is left, or when the agent cannot
+    say: no copy is offered on the server's own word.
+    """
+
+    prefix = root.rstrip("/") + "/"
+    files = tuple(item for item in kept.files if item.path.startswith(prefix))
+    paths = tuple(item.path for item in files)
+    try:
+        answer = reads.outside_snapshots(
+            (root,), paths, limit=0, max_bytes=0, seconds=0.0, excluded=excluded
+        )
+    except Exception:  # noqa: BLE001 - an agent that cannot say offers no kept copy
+        return None
+    unlisted = {paths[index] for index in answer.unlisted if index < len(paths)}
+    still = tuple(item for item in files if item.path not in unlisted)
+    return replace(kept, files=still) if still else None
 
 
 def _file_reads_offered(
