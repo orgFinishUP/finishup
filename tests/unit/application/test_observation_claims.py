@@ -44,7 +44,7 @@ from finishup.domain.observation import (
 )
 from finishup.domain.values import JsonObject, Timestamp
 from finishup.ports.control import ControlError, ControlMethod, RepositoryPrivacyContext
-from finishup.ports.start_catalog import TaskRoute, TaskRouteState
+from finishup.ports.start_catalog import SessionBinding, TaskRoute, TaskRouteState
 from finishup.ports.workspace_agent import workspace_handle_for_claim
 from finishup.protocol.canonical import canonical_digest
 
@@ -105,10 +105,12 @@ def _request(
     )
 
 
-def _route(task: str = _TASK, commitment: str | None = _CLAIM) -> TaskRoute:
+def _route(
+    task: str = _TASK, commitment: str | None = _CLAIM, session: str = _SESSION
+) -> TaskRoute:
     return TaskRoute(
         task_id=task,
-        session_id=_SESSION,
+        session_id=session,
         bundle_relpath=f"tasks/{task}",
         route_generation=1,
         state=TaskRouteState.ACTIVE,
@@ -150,6 +152,9 @@ class _Harness:
     routes: dict[str, TaskRoute]
     coordinators: dict[str, _Coordinator] = field(default_factory=dict[str, _Coordinator])
     route_error: Exception | None = None
+    # The catalog's binding lookup: any session of a task, current or replaced, names the
+    # task's current session and writer.
+    bindings: dict[str, SessionBinding] = field(default_factory=dict[str, SessionBinding])
 
     def router(self, *, max_claims: int = 4) -> ClaimObservationRouter:
         def coordinator_for(handle: str, store: LocalObservationStore, state: Path) -> Any:  # noqa: ANN401
@@ -162,10 +167,14 @@ class _Harness:
                 raise self.route_error
             return self.routes.get(session_id)
 
+        async def binding(session_id: str) -> SessionBinding | None:
+            return self.bindings.get(session_id)
+
         return ClaimObservationRouter(
             state_root=self.state,
             coordinator_for=coordinator_for,
             resolve_route=resolve,
+            session_binding=binding,
             observation_enabled=True,
             max_claims=max_claims,
         )
@@ -347,6 +356,79 @@ async def test_a_route_the_service_followed_to_its_successor_is_kept(
     # A session the client no longer maps is unmapped for the claim too.
     await router.ingest(_context(), _request(_attestation(route=None)))
     assert load_mapping(_HOST_SESSION, _state=state) is None
+
+
+_SUCCESSOR = ObservationClientRoute(
+    _TASK,
+    "ses_00000000-0000-4000-8000-000000000c09",
+    "wri_00000000-0000-4000-8000-000000000c09",
+)
+
+
+def _superseded(harness: _Harness, *, commitment: str | None = _CLAIM) -> None:
+    """The task's route moved to its successor; as in the catalog, only that session resolves."""
+
+    harness.routes = {
+        _SUCCESSOR.session_id: _route(commitment=commitment, session=_SUCCESSOR.session_id)
+    }
+    current = SessionBinding(_TASK, _SUCCESSOR.session_id, _SUCCESSOR.writer_id)
+    harness.bindings = {_SESSION: current, _SUCCESSOR.session_id: current}
+
+
+async def test_a_row_naming_a_replaced_session_of_the_claims_task_reaches_the_coordinator(
+    harness: _Harness,
+) -> None:
+    """INTERFACES: the coordinator follows ``session_superseded`` for a claim as it does locally.
+
+    The client's mapping can still name the replaced session (a recovery start from another host
+    session, or the server's own lifecycle recovery). The row is the claim's: its task was opened
+    under this claim, so it is handed on, never refused as missing consent.
+    """
+
+    _superseded(harness)
+    router = harness.router()
+    result = await router.ingest(_context(), _request(_attestation()))
+    assert result.reason == "paused"  # the fake coordinator's answer: the row reached it
+    coordinator = harness.coordinators[_HANDLE]
+    (seen,) = coordinator.seen
+    assert seen.client_attestation is None
+    # The coordinator recorded the successor; the next row naming the replaced session keeps it.
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=_HOST_SESSION,
+            finishup_task_id=_TASK,
+            finishup_session_id=_SUCCESSOR.session_id,
+            finishup_writer_id=_SUCCESSOR.writer_id,
+            last_frontier=None,
+        ),
+        _state=coordinator.state,
+    )
+    again = await router.ingest(_context(), _request(_attestation()))
+    assert again.reason == "paused" and len(coordinator.seen) == 2
+    kept = load_mapping(_HOST_SESSION, _state=coordinator.state)
+    assert kept is not None
+    assert (kept.finishup_session_id, kept.finishup_writer_id) == (
+        _SUCCESSOR.session_id,
+        _SUCCESSOR.writer_id,
+    )
+
+
+@pytest.mark.parametrize("case", ["other_claim", "other_task", "unknown"])
+async def test_a_replaced_session_outside_the_claim_is_still_refused_before_any_write(
+    harness: _Harness, case: str
+) -> None:
+    _superseded(harness, commitment=_OTHER_CLAIM if case == "other_claim" else _CLAIM)
+    if case == "other_task":
+        other = "tsk_00000000-0000-4000-8000-000000000c02"
+        harness.routes = {_SUCCESSOR.session_id: _route(task=other, session=_SUCCESSOR.session_id)}
+        harness.bindings = {
+            _SESSION: SessionBinding(other, _SUCCESSOR.session_id, _SUCCESSOR.writer_id)
+        }
+    if case == "unknown":
+        harness.bindings = {}
+    result = await harness.router().ingest(_context(), _request(_attestation()))
+    assert result.reason == "consent_missing"
+    assert not (harness.state / CLAIM_OBSERVATION_DIRECTORY).exists()
 
 
 async def test_capacity_closes_an_idle_claim_and_refuses_when_all_are_busy(

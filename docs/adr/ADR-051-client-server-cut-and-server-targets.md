@@ -1090,7 +1090,11 @@ the rows were captured there. The server holds none of it and must not borrow it
 - **What the server still decides.** Only the connection's own claim is touched. The attested
   route must name a task whose route was opened on a connection carrying the same claim (its
   route commitment is the claim commitment); any other route is refused with `consent_missing`
-  before anything is written. The server's own observation switch and vault gate apply.
+  before anything is written. A route naming a session its task has since replaced (a recovery
+  `start` elsewhere, or the server's own lifecycle recovery, while the client's mapping still names
+  the old session) is judged by the task's current route, and the coordinator then follows
+  `session_superseded` to the successor and keeps it in the claim's mapping, as it does locally.
+  The server's own observation switch and vault gate apply.
   Verification opens the claimed workspace by its handle through the workspace agent (decision 5)
   and never through a stored locator.
 - **Refusals keep their closed reasons.** A claim-bound ingest without an attestation is refused
