@@ -267,11 +267,15 @@ def test_the_foreground_agent_admits_the_folders_of_the_target_it_serves(
         assert active_root() == selected_root
         workspace = _workspace(tmp_path)
         bindings: list[ClientWorkspaceBinding] = []
+        roots: list[Path | None] = []
 
         async def exercise() -> tuple[str, ...]:
             dialled = asyncio.Event()
 
             async def dial(binding: ClientWorkspaceBinding) -> _Connection:
+                # The agent's own context resolves the target it serves (SRV-7: an override
+                # holds for the context that entered it, never for this test's task).
+                roots.append(active_root())
                 bindings.append(binding)
                 dialled.set()
                 return _Connection()
@@ -282,7 +286,7 @@ def test_the_foreground_agent_admits_the_folders_of_the_target_it_serves(
             try:
                 async with asyncio.timeout(30.0):
                     await dialled.wait()
-                assert active_root() == served_root
+                assert roots == [served_root] and active_root() == selected_root
                 return _admitted(bindings[0])
             finally:
                 serving.cancel()
