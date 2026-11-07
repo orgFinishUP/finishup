@@ -191,10 +191,14 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "admitted only for a server on another machine, a port or the web",
         _USAGE,
     ),
+    # Exactly what ``admitted_root_from_path`` and ``folder_admissible`` refuse, no more.
     "folder_invalid": (
-        "give an existing folder by its full path (starting with /), with no link on the way and "
-        "no hidden or system folder; your home folder, a folder that holds it, and its private "
-        "folders cannot be admitted",
+        "give an existing folder by its full path (starting with /), with no link on the way, at "
+        "most 190 characters in at most 16 parts, each of letters, digits and . _ + @ - and none "
+        "starting with a dot; these cannot be admitted: the filesystem root, /boot, /dev, /etc, "
+        "/proc, /run, /sys, /var/run, /private/etc and /private/var/run and every folder inside "
+        "them, your home folder, a folder that holds it, and its private folders (Library, "
+        "AppData, snap)",
         _USAGE,
     ),
     "folder_limit": (
@@ -2417,7 +2421,8 @@ def server_folders_add(
     _require_selection_in_force()
     record = _remote_target_or_fail(name)
     # The rule the local service uses for an admitted input root: an existing directory named
-    # by its absolute, normalized path with no link on the way, never hidden or a system tree.
+    # by its absolute, normalized path with no link on the way, never hidden, the filesystem root
+    # or beneath one of ``SYSTEM_DIRECTORY_PREFIXES``.
     # Then the home rules 'add_folder' applies again under the lock, checked before the owner is
     # asked, so consent is never collected for a folder that would then be refused.
     canonical = admitted_root_from_path(folder)
