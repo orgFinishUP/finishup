@@ -656,6 +656,35 @@ def _authorize_remote(
     )
 
 
+def check_remote_hop() -> None:
+    """Refuse a remote hop in the zero-network state, as ``server use`` does before its prompt.
+
+    Asks this computer's FinishUP for its policy through its own event loop: call it off any
+    running loop (the terminal interface runs it in a worker thread).
+    """
+
+    if _zero_network_in_force():
+        raise ServerCommandRefused("zero_network_in_force")
+
+
+def confirm_use_on_this_thread(name: str, kind: str) -> None:
+    """``server use``'s disclosure and typed confirmation, read on the calling thread (SRV-6).
+
+    Call it on the main thread (the terminal interface's event loop thread, with the terminal
+    handed over): Ctrl-C then reaches the read and cancels the confirmation, as it does for the
+    zero-network choice, instead of a read in a worker thread that no interrupt reaches while
+    the event loop tears the interface down.
+    """
+
+    from finishup.cli.zero_network_selection import interrupt_answers_the_prompt
+
+    try:
+        with interrupt_answers_the_prompt():
+            _confirm_on_trusted_console(name, kind)
+    except KeyboardInterrupt:
+        raise ServerCommandRefused("authorization_declined") from None
+
+
 def _absolute_option(value: str | None) -> str | None:
     """An absolute remote path option, checked before it is used in any remote command."""
 
