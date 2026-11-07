@@ -264,15 +264,19 @@ class KeyringOrFileCredential:
         """Delete the key; True when one was deleted.
 
         The recorded location decides: when its store cannot be used, ``credential_store_unavailable``
-        is raised and the key stays there. The other location is only tidied, best effort (a
-        key an interrupted ``login`` left there): a store this target's key is not recorded in
-        (a locked platform store an SSH target or a key file never used) never blocks the delete.
+        is raised and the key stays there; a recorded platform store that cannot even be loaded
+        now (a Linux desktop reached over SSH, with no D-Bus session) is such a store. The other
+        location is only tidied, best effort (a key an interrupted ``login`` left there): a store
+        this target's key is not recorded in (a locked platform store an SSH target or a key file
+        never used) never blocks the delete.
         """
 
         removed = False
         locations: tuple[CredentialLocation, ...] = ("keyring", "file")
         for location in locations:
             if location == "keyring" and self._platform_store() is None:
+                if self._recorded == "keyring":
+                    raise CredentialError("credential_store_unavailable")
                 continue
             try:
                 removed = self._delete_from(location) or removed
