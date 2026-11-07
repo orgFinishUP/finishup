@@ -4760,8 +4760,21 @@ dials its own stream.
   `$HOME/.local/bin/finishup`, `/opt/homebrew/bin/finishup`, `/usr/local/bin/finishup`,
   `/usr/bin/finishup`; with neither a launcher nor `--remote-root` it is refused
   (`remote_service_not_running`).
+- `server add ssh://…` runs `direct_runtime.discover_ssh_endpoint(..., confirm_host_key=)`:
+  with `cli.server._trusted_console_present()` (standard input and error on a terminal, and
+  `/dev/tty`) its probes are `ssh -o StrictHostKeyChecking=ask -o ControlMaster=no -o
+  PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T …` with a 180 s bound, so OpenSSH asks the owner there to confirm a host key `known_hosts` does not hold
+  yet; otherwise `-o BatchMode=yes -o StrictHostKeyChecking=yes` with a 30 s bound. An exit of 255
+  whose diagnostics say the key is not known or was not verified (and not "REMOTE HOST
+  IDENTIFICATION HAS CHANGED") raises `TargetRuntimeError("remote_host_key_unconfirmed")`, which
+  `server add` refuses as `remote_host_key_unconfirmed` (exit 20, nothing added) with the fix for
+  its case (answer yes once the fingerprint is checked; or run `server add` in your own terminal,
+  or `ssh` once yourself).
 - `server login` checks the key with `GET /v1/server` before storing it; `remote_auth_failed`,
-  `remote_identity_changed` and `remote_incompatible` store nothing.
+  `remote_identity_changed` and `remote_incompatible` store nothing and say why, that nothing was
+  stored, and the fix (`_LOGIN_REFUSED`); any other phase stores it and prints "Stored the API key
+  for <id> in <where>, not verified yet." with the phase, that it is checked on the first
+  connection, and `finishup server test NAME`; an accepted key prints "…; the server accepted it."
 - `server connect NAME --agent` serves the current directory's workspace calls in the foreground
   (`finishup.client.agent_session.run_foreground_agent(root, locator, *, connect=None,
   binding_for=None)`, the target resolved as `root` through `config.paths.selection_override`)

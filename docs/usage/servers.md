@@ -187,6 +187,12 @@ environment variable, a settings file, a log, a message your agent can read, or 
 allows what your agents need while an `operator` key also allows management reads such as privacy
 status.
 
+`login` checks the key with the server before keeping it. If the server refuses the key, or runs
+another FinishUP release, or its certificate is not the one you trusted, nothing is stored and
+FinishUP says why and what to do. If the server cannot be reached right now, FinishUP stores the key
+and says it is not verified yet: it is checked on the first connection, and `finishup server test
+NAME` checks it as soon as the server is up.
+
 SSH servers need no FinishUP sign-in. Your SSH keys, `ssh-agent` and known hosts stay with SSH;
 FinishUP stores no SSH key and never asks for an SSH password.
 
@@ -505,12 +511,16 @@ Each FinishUP client on this computer — your agents' hooks and FinishUP tools,
 command and the terminal interface — connects to the server itself. Nothing else needs to run on
 this computer.
 
-**SSH servers.** FinishUP runs your own `ssh`, with your keys, `ssh-agent` and known hosts. It never
-asks a question and never accepts a host key it does not already know, so connect to the server
-once with `ssh` yourself before adding it. The first connection leaves a shared SSH connection open
-for 15 idle minutes; later calls only open a channel on it, which takes tens of milliseconds instead
-of a full SSH login. `finishup server connect` opens it ahead of time and `finishup server
-disconnect` closes it.
+**SSH servers.** FinishUP runs your own `ssh`, with your keys, `ssh-agent` and known hosts. When you
+add a server whose host key this computer does not know yet, `finishup server add` lets OpenSSH ask
+you once, in your terminal, to confirm it: compare the fingerprint with the server's own before you
+answer yes. Your answer goes into your known hosts, and every later connection checks it and never
+asks again; a host key that changed is refused, never asked about. Without your terminal to ask in
+(a script, say), FinishUP adds nothing and says so with `remote_host_key_unconfirmed`: run `finishup
+server add` in your own terminal, or connect once with `ssh` yourself, then add it again. The first
+connection leaves a shared SSH connection open for 15 idle minutes; later calls only open a channel
+on it, which takes tens of milliseconds instead of a full SSH login. `finishup server connect` opens
+it ahead of time and `finishup server disconnect` closes it.
 
 When you add an SSH server, FinishUP asks the FinishUP on the server where its service listens. It
 uses `--remote-launcher` when you give it, and otherwise looks in the usual install locations on
@@ -649,6 +659,7 @@ repeated safely.
 | `remote_unreachable` | The server could not be reached. | Run `finishup server test`. SSH: if the server's FinishUP service runs and this persists, the server's SSH daemon may refuse forwarding to it; it must allow `AllowStreamLocalForwarding` (OpenSSH's default) and must not set `DisableForwarding yes`. |
 | `remote_auth_failed` | The server did not accept you. | SSH: load your key (`ssh-add`) or check your SSH configuration. Web: run `finishup server login NAME`. |
 | `remote_identity_changed` | The server's host key or certificate is not the one you confirmed. | Confirm the server's identity another way, then remove and add the server again. |
+| `remote_host_key_unconfirmed` | When you added an SSH server, its host key was not confirmed: you declined OpenSSH's question, or there was no terminal of yours to ask in. Nothing was added. | Run `finishup server add` again in your own terminal and answer yes once you have checked the fingerprint, or connect once with `ssh` yourself first. |
 | `remote_service_not_running` | The server machine answered, but its FinishUP service is not running. | SSH: `ssh -t <server> finishup service start`. Web: ask the server's operator. |
 | `remote_incompatible` | The two machines run different FinishUP releases. | Install the same release on both. |
 | `service_draining` | The server answered that it is shutting down or restarting. | Wait a few seconds, then repeat the request. |

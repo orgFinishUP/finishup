@@ -13,10 +13,14 @@
   nothing to stop (the gateway expires idle sessions). ``probe`` is the same timed status probe.
 
 ``discover_ssh_endpoint`` is what ``server add ssh://…`` runs once the owner has authorized the
-target: the server's own ``finishup service endpoint --json``, over the same SSH trust options,
-through the recorded launcher (or one found at a fixed list of install paths, never a bare
-``finishup`` on the remote ``PATH``). It returns the remote control endpoint to record and checks
-that the server runs this client's schema manifest.
+target: the server's own ``finishup service endpoint --json`` through the recorded launcher (or
+one found at a fixed list of install paths, never a bare ``finishup`` on the remote ``PATH``). It
+returns the remote control endpoint to record and checks that the server runs this client's
+schema manifest. On the owner's trusted console it is the one interactive ``ssh`` of the
+topology: OpenSSH itself asks, on that terminal, to confirm a host key it does not know yet
+(``StrictHostKeyChecking=ask``), as approach A's ``server add`` does, and that confirmation is the
+pin every later ``BatchMode`` connection checks (``StrictHostKeyChecking=yes``). Without that
+console it never asks, and an unknown host key is ``remote_host_key_unconfirmed``.
 
 While this computer last reported a zero-network privacy policy (ADR-051 decision 8,
 ``client.everyday_policy``) ``ensure_ready`` starts nothing and sends nothing
@@ -62,6 +66,8 @@ type _Runner = Callable[..., subprocess.CompletedProcess[bytes]]
 _MASTER_SECONDS: Final = 30.0
 _CONTROL_SECONDS: Final = 10.0
 _PROBE_SECONDS: Final = 30.0
+# Room for the owner to read OpenSSH's host-key question and answer it (approach A's bound).
+_CONFIRM_PROBE_SECONDS: Final = 180.0
 _START_SECONDS: Final = 30.0
 _MAX_ENDPOINT_REPORT_BYTES: Final = 16_384
 _MAX_PATH_TEXT: Final = 1_024
@@ -124,6 +130,19 @@ def _run(runner: _Runner, argv: Sequence[str], seconds: float) -> tuple[int | No
 
 def _ssh_phase(code: int | None, stderr: bytes) -> str:
     return classify_ssh_failure(code, stderr) or "remote_unreachable"
+
+
+def _host_key_unconfirmed(stderr: bytes) -> bool:
+    """Whether OpenSSH refused a host key it does not know (not one that changed).
+
+    Strict checking says "No … host key is known for …"; a declined or unanswerable question
+    says only "Host key verification failed". A changed key says "REMOTE HOST IDENTIFICATION HAS
+    CHANGED" and stays ``remote_identity_changed``.
+    """
+
+    if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr:
+        return False
+    return b"host key is known" in stderr or b"Host key verification failed" in stderr
 
 
 def _command_phase(code: int | None, stderr: bytes) -> str:
@@ -314,15 +333,41 @@ def _absolute(value: object) -> str | None:
 
 
 def _probe_argv(
-    program: Sequence[str], user: str | None, host: str, port: int, command: str
+    program: Sequence[str],
+    user: str | None,
+    host: str,
+    port: int,
+    command: str,
+    *,
+    confirm_host_key: bool = False,
 ) -> tuple[str, ...]:
+    """The fixed ``server add`` probe argv; ``confirm_host_key`` lets OpenSSH ask on the console.
+
+    Interactive, it is approach A's probe: ``StrictHostKeyChecking=ask`` and no master, with
+    OpenSSH's own question on the owner's terminal; password and keyboard-interactive login stay
+    off, so the only question is the host key and the add proves the key authentication every
+    later ``BatchMode`` connection needs. Otherwise ``BatchMode`` with strict checking: nothing is
+    asked and an unknown host key is refused.
+    """
+
     destination = host if user is None else f"{user}@{host}"
+    trust = (
+        (
+            "-o",
+            "StrictHostKeyChecking=ask",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=no",
+        )
+        if confirm_host_key
+        else ("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes")
+    )
     return (
         *program,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
+        *trust,
         "-T",
         "-p",
         str(port),
@@ -341,6 +386,7 @@ def discover_ssh_endpoint(
     remote_launcher: str | None,
     program: Sequence[str] = ("ssh",),
     runner: _Runner = subprocess.run,
+    confirm_host_key: bool = False,
 ) -> SshEndpoint:
     """Ask the server, over SSH, where its control endpoint is (after the owner authorized it).
 
@@ -349,6 +395,11 @@ def discover_ssh_endpoint(
     must be this client's (``remote_incompatible``). With no launcher but a remote root, the
     endpoint is ``<remote root>/run/control.sock`` and nothing runs remotely. With neither, the
     target cannot be reached: ``remote_service_not_running``.
+
+    ``confirm_host_key`` (the owner's trusted console is present) lets OpenSSH ask, on that
+    terminal, to confirm a host key it does not know yet. A host key that was not confirmed (no
+    console to ask on, or the owner declined) is ``TargetRuntimeError("remote_host_key_unconfirmed")``;
+    a changed one stays ``remote_identity_changed``.
     """
 
     import shlex
@@ -356,11 +407,18 @@ def discover_ssh_endpoint(
     from finishup.config.paths import ISOLATED_ROOT_ENV
     from finishup.protocol.schemas import schema_manifest_digest
 
+    seconds = _CONFIRM_PROBE_SECONDS if confirm_host_key else _PROBE_SECONDS
+
+    def probe(command: str) -> tuple[int | None, bytes, bytes]:
+        argv = _probe_argv(program, user, host, port, command, confirm_host_key=confirm_host_key)
+        code, stdout, stderr = _run(runner, argv, seconds)
+        if code == 255 and _host_key_unconfirmed(stderr):
+            raise TargetRuntimeError("remote_host_key_unconfirmed")
+        return code, stdout, stderr
+
     launcher = remote_launcher
     if launcher is None:
-        code, stdout, stderr = _run(
-            runner, _probe_argv(program, user, host, port, _LAUNCHER_PROBE), _PROBE_SECONDS
-        )
+        code, stdout, stderr = probe(_LAUNCHER_PROBE)
         if code == 0:
             launcher = _absolute(stdout.decode("utf-8", "replace").strip())
         elif code != 3:
@@ -373,9 +431,7 @@ def discover_ssh_endpoint(
     if remote_root is not None:
         words = ["env", f"{ISOLATED_ROOT_ENV}={remote_root}", *words]
     command = " ".join(shlex.quote(word) for word in words)
-    code, stdout, stderr = _run(
-        runner, _probe_argv(program, user, host, port, command), _PROBE_SECONDS
-    )
+    code, stdout, stderr = probe(command)
     if code != 0:
         # A launcher the remote shell cannot run (126, 127) is not this release's FinishUP.
         raise TargetRuntimeError("service_unavailable", phase=_command_phase(code, stderr))

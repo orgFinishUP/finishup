@@ -453,8 +453,11 @@ real-environment runs, and a cell is claimed only from that evidence.
   from the server's absolute launcher; `finishup service start` is the idempotent on-demand start.
 - **sshd.** The SSH user must be the account that runs the service: the service's peer check
   admits only that UID, and FinishUP adds no other identity. Use key authentication; FinishUP runs
-  OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, so the client's `known_hosts` must
-  already hold the server's host key and no password prompt is ever answered. Approaches that
+  OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, so no password prompt is ever
+  answered. The one exception is `finishup server add` on the owner's own terminal: its probe lets
+  OpenSSH ask once to confirm a host key the client's `known_hosts` does not hold yet
+  (`StrictHostKeyChecking=ask`); without that terminal the key must already be known
+  (`remote_host_key_unconfirmed` otherwise). Approaches that
   forward to the server's Unix-domain control endpoint need sshd to permit stream-local forwarding
   (`AllowStreamLocalForwarding` `yes`, `all` or `local`; OpenSSH's default is `yes`) and must not
   set `DisableForwarding yes`; on the client, OpenSSH 6.7 or later is needed for Unix-socket

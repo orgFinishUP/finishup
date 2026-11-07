@@ -1606,6 +1606,8 @@ def test_ssh_add_records_what_the_server_reports_after_authorization(
             "port": 2222,
             "remote_root": None,
             "remote_launcher": None,
+            # No owner's console under test: OpenSSH is not let ask.
+            "confirm_host_key": False,
         }
     ]
     (record,) = targets.list_targets()
@@ -1640,7 +1642,9 @@ def test_a_relative_remote_path_is_refused_before_any_consent(
     assert authorized == []
 
 
-@pytest.mark.parametrize("phase", ["remote_auth_failed", "remote_identity_changed"])
+@pytest.mark.parametrize(
+    "phase", ["remote_auth_failed", "remote_identity_changed", "remote_incompatible"]
+)
 def test_login_keeps_no_key_the_server_refuses(
     home: Path,
     authorized: list[tuple[str, str]],
@@ -1661,6 +1665,10 @@ def test_login_keeps_no_key_the_server_refuses(
     result = _invoke("login", "fu", "--key-file", str(key_file))
     assert result.exit_code == 20
     assert result.stderr.startswith(f"{phase}:")
+    # Why, and that nothing was kept (ADR-051, server add and login parity).
+    assert "not stored" in result.stderr
+    if phase == "remote_auth_failed":
+        assert "the server refused this API key" in result.stderr
     assert _KEY not in result.output
     assert not (targets.target_root(record.target_id) / "config" / "credential").exists()
     assert targets.list_targets()[0].credential is None
@@ -1683,8 +1691,87 @@ def test_login_keeps_a_key_while_the_server_is_down_and_says_so(
     key_file.chmod(0o600)
     result = _invoke("login", "fu", "--key-file", str(key_file))
     assert result.exit_code == 0, result.output
+    assert "not verified yet" in result.stdout
     assert "did not answer yet (remote_unreachable)" in result.stdout
+    assert "It is checked on the first connection" in result.stdout
+    assert "'finishup server test fu'" in result.stdout
     assert targets.list_targets()[0].credential == "file"
+
+
+def test_login_says_the_server_accepted_the_key(
+    home: Path, authorized: list[tuple[str, str]], no_platform_store: None
+) -> None:
+    assert _invoke("add", "fu", "https://fu.example").exit_code == 0
+    key_file = home / "key"
+    key_file.write_text(_KEY, encoding="ascii")
+    key_file.chmod(0o600)
+    result = _invoke("login", "fu", "--key-file", str(key_file))
+    assert result.exit_code == 0, result.output
+    assert "the server accepted it" in result.stdout
+    assert "not verified" not in result.stdout
+
+
+@pytest.mark.parametrize("console", [True, False])
+def test_ssh_add_lets_openssh_confirm_a_new_host_key_only_on_the_owners_console(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    console: bool,
+) -> None:
+    """ADR-051, server add parity: on the trusted console the add's one probe lets OpenSSH ask,
+    there, to confirm a host key this computer does not know yet, as the edge relay's add does;
+    a first add no longer needs the owner to run ssh by hand. Without the console nothing is
+    asked."""
+
+    from finishup.client import direct_runtime
+
+    asked: list[object] = []
+
+    def discover(**arguments: object) -> object:
+        asked.append(arguments["confirm_host_key"])
+        return direct_runtime.SshEndpoint("/run/user/1000/control.sock", None, False)
+
+    monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
+    monkeypatch.setattr(server_cli, "_trusted_console_present", lambda: console)
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code == 0, result.output
+    assert asked == [console]
+    assert ("OpenSSH asks you to confirm it here" in result.stdout) is console
+
+
+@pytest.mark.parametrize(
+    ("console", "fix"),
+    [
+        (True, "answer yes to OpenSSH's question once you have checked the fingerprint"),
+        (False, "run 'finishup server add' in your own terminal, or connect once with 'ssh'"),
+    ],
+)
+def test_ssh_add_refuses_a_host_key_that_was_not_confirmed_and_names_the_fix(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    console: bool,
+    fix: str,
+) -> None:
+    from finishup.client import direct_runtime
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    def unconfirmed(**_arguments: object) -> object:
+        raise TargetRuntimeError("remote_host_key_unconfirmed")
+
+    monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", unconfirmed)
+    monkeypatch.setattr(server_cli, "_trusted_console_present", lambda: console)
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code == 20, result.output
+    assert result.stderr.startswith("remote_host_key_unconfirmed: ")
+    assert "nothing was added" in result.stderr
+    assert fix in result.stderr
+    assert "lab.example" not in result.stderr
+    assert targets.list_targets() == ()
 
 
 def test_the_foreground_agent_is_only_for_remote_targets(home: Path) -> None:

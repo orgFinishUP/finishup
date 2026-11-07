@@ -252,7 +252,15 @@ def test_no_launcher_falls_back_to_the_recorded_root_or_refuses() -> None:
         ((0, b"not json", b""), "remote_incompatible"),
         ((0, _report(endpoint="relative/control.sock"), b""), "remote_incompatible"),
         ((127, b"", b"sh: 1: /opt/fu/bin/finishup: not found\n"), "remote_incompatible"),
-        ((255, b"", b"Host key verification failed.\r\n"), "remote_identity_changed"),
+        (
+            (
+                255,
+                b"",
+                b"@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\r\n"
+                b"Host key verification failed.\r\n",
+            ),
+            "remote_identity_changed",
+        ),
         (
             (255, b"", b"ssh: connect to host lab.example port 2222: Connection refused\r\n"),
             "remote_unreachable",
@@ -263,3 +271,61 @@ def test_discovery_failures_are_closed_phases(answer: tuple[int, bytes, bytes], 
     with pytest.raises(TargetRuntimeError) as raised:
         _discover(_Runner(answer))
     assert (raised.value.reason, raised.value.phase) == ("service_unavailable", phase)
+
+
+# --- the host key at 'server add': asked once on the owner's console, never without it -----------
+
+
+@pytest.mark.parametrize("confirm_host_key", [True, False])
+def test_discovery_lets_openssh_ask_only_on_the_owners_console(confirm_host_key: bool) -> None:
+    """ADR-051 (server add parity with the edge relay): on the trusted console OpenSSH asks, on
+    that terminal, to confirm a host key it does not know yet (``StrictHostKeyChecking=ask``, no
+    master); without it nothing is asked and strict checking refuses an unknown key."""
+
+    seconds: list[float] = []
+
+    class _Timed(_Runner):
+        def __call__(
+            self, argv: Sequence[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            seconds.append(kwargs["timeout"])
+            return super().__call__(argv, **kwargs)
+
+    runner = _Timed((0, b"/srv/owner/.local/bin/finishup\n", b""), (0, _report(), b""))
+    _discover(runner, remote_launcher=None, confirm_host_key=confirm_host_key)
+
+    for argv in runner.calls:
+        options = argv[1 : argv.index("-T")]
+        if confirm_host_key:
+            assert options == [
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "-o",
+                "ControlMaster=no",
+                # The only question is the host key: FinishUP never has a password asked for.
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+            ]
+        else:
+            assert options == ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    # Room for the owner to read the fingerprint and answer.
+    assert seconds == ([180.0, 180.0] if confirm_host_key else [30.0, 30.0])
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        b"No ED25519 host key is known for lab.example and you have requested strict checking.\r\n"
+        b"Host key verification failed.\r\n",
+        b"Host key verification failed.\r\n",
+    ],
+)
+@pytest.mark.parametrize("confirm_host_key", [True, False])
+def test_a_host_key_that_was_not_confirmed_is_its_own_refusal(
+    stderr: bytes, confirm_host_key: bool
+) -> None:
+    with pytest.raises(TargetRuntimeError) as raised:
+        _discover(_Runner((255, b"", stderr)), confirm_host_key=confirm_host_key)
+    assert (raised.value.reason, raised.value.phase) == ("remote_host_key_unconfirmed", None)

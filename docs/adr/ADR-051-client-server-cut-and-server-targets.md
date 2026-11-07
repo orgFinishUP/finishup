@@ -719,7 +719,31 @@ answers bounded `workspace_call`s on a connection that declared it.
 - The credential never appears in argv, the environment, `target.json`, a host registration, a
   log, hook output, an MCP frame or JSON output.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks
-  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`.
+  for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, except
+  for the one probe of `server add` below.
+- **`server add` and `server login` behave alike for every kind** (maintainer decision of
+  2026-11-07: the three approaches and the three remote kinds behave the same and work without
+  friction once set up; refusal is the last resort; say what happened, why, and the fix).
+  - *SSH add.* After the owner's typed confirmation on the trusted console, `server add
+    ssh://…` asks the server where its service listens over one `ssh` that lets OpenSSH ask, on
+    that same terminal, to confirm a host key this computer does not know yet
+    (`StrictHostKeyChecking=ask`, no master, no `BatchMode`), so a first add no longer fails until
+    the owner has run `ssh` by hand. Password and keyboard-interactive login stay off for that
+    probe, so the host key is the only question and the add proves the key authentication every
+    later connection needs (approach A's probe leaves them to the owner's `ssh` configuration). The owner's answer is OpenSSH's own `known_hosts` entry, the
+    pin every later connection checks with `StrictHostKeyChecking=yes`; a key that changed is
+    never asked about (`remote_identity_changed`). The command says beforehand that OpenSSH may
+    ask and to compare the fingerprint with the server's own. Without that console nothing is
+    asked: an unknown key is refused (`remote_host_key_unconfirmed`), nothing is added, and the
+    message names the fix (run `server add` in your own terminal, or `ssh` once yourself); a
+    declined key is refused the same way, naming the question to answer.
+  - *Login.* `server login` checks the key with the server before storing it. A key the server
+    refuses (`remote_auth_failed`), a server whose identity does not match the recorded trust
+    (`remote_identity_changed`, refused inside the TLS handshake before the key is sent) or that
+    runs another release (`remote_incompatible`) stores nothing, and the message says why, that
+    nothing was stored, and the fix. A server that cannot be reached keeps the key, and the
+    command says it is not verified yet, that it is checked on the first connection, and that
+    `server test NAME` checks it once the server is up.
 - Which client process reads the credential is part of each approach's topology. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.
@@ -1063,7 +1087,8 @@ HTTPS and LOCALHOST PORT
   for 15 idle minutes, so a later hook pays one channel open: on loopback a cold hello plus status
   took 234 ms and a warm one 16 ms p50 and 22.5 ms p95, inside the 0.65 s startup gate and the
   1.0 s hook connect. `server add ssh://…` asks the server's own `finishup service endpoint
-  --json` once the owner has authorized the target, through `--remote-launcher` or a launcher
+  --json` once the owner has authorized the target, over the one `ssh` that lets OpenSSH ask the
+  owner to confirm a host key it does not know yet (decision 7), through `--remote-launcher` or a launcher
   found at a fixed list of install paths (never a bare `finishup` on the remote `PATH`), records
   the endpoint and refuses another release. A stopped remote service is started once through the
   recorded launcher (`<launcher> service start`, pinned to `--remote-root`) inside the caller's
@@ -1098,7 +1123,8 @@ HTTPS and LOCALHOST PORT
   TLS trusts the recorded CA file or the `sha256:` pin of the leaf certificate, checked inside the
   handshake before any request (and so the key) is sent; environment proxies and `.netrc` are
   ignored. `server login` checks the key against `GET /v1/server`, which must list binding `1.0`
-  and this release's schema-manifest digest, before storing it. The binding's names and bounds are
+  and this release's schema-manifest digest, before storing it (decision 7: a refused key stores
+  nothing; an unreachable server keeps it, reported as not verified yet). The binding's names and bounds are
   checked against the gateway's own (`tests/unit/client/test_https_binding_gateway.py`).
 - **Failures.** Every remote failure is a retryable `service_unavailable` whose `phase` is one of
   the five remote phases, classified from OpenSSH's fixed diagnostics or the binding's status and

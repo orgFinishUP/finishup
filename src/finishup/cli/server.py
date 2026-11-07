@@ -270,6 +270,11 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "~/.ssh/config, for HTTPS run 'finishup server login'",
         _UNAVAILABLE,
     ),
+    "remote_host_key_unconfirmed": (
+        "the server's SSH host key was not confirmed on this computer, so nothing was added; run "
+        "'finishup server add' in your own terminal and confirm the key when OpenSSH asks",
+        _UNAVAILABLE,
+    ),
     "remote_identity_changed": (
         "the server's identity could not be verified (an unknown or changed SSH host key, or a "
         "certificate that does not match the recorded trust); verify it another way, then add "
@@ -663,10 +668,23 @@ def _discover_ssh_endpoint(
     remote_root: str | None,
     remote_launcher: str | None,
 ) -> tuple[str, str | None]:
-    """Ask the authorized server over SSH where its endpoint is: ``(endpoint, launcher)``."""
+    """Ask the authorized server over SSH where its endpoint is: ``(endpoint, launcher)``.
+
+    On the owner's trusted console OpenSSH may ask, once, to confirm a host key this computer does
+    not know yet (``StrictHostKeyChecking=ask``, as approach A's ``server add`` does); that answer
+    is the pin every later connection checks. Without that console nothing is asked, and an
+    unknown host key is refused with the fix (ADR-051, server add and login parity).
+    """
 
     from finishup.client import direct_runtime
 
+    console = _trusted_console_present()
+    if console:
+        typer.echo(
+            "Asking the server where its FinishUP service listens. If this computer does not know "
+            "its SSH host key yet, OpenSSH asks you to confirm it here: compare the fingerprint "
+            "with the server's own before you answer yes."
+        )
     try:
         found = direct_runtime.discover_ssh_endpoint(
             user=user,
@@ -674,8 +692,14 @@ def _discover_ssh_endpoint(
             port=port,
             remote_root=remote_root,
             remote_launcher=remote_launcher,
+            confirm_host_key=console,
         )
     except TargetRuntimeError as error:
+        if error.reason == "remote_host_key_unconfirmed":
+            raise ServerCommandRefused(
+                "remote_host_key_unconfirmed",
+                message=_HOST_KEY_DECLINED if console else _HOST_KEY_NO_CONSOLE,
+            ) from None
         _runtime_failure(error)
     if found.session_bound:
         typer.echo(
@@ -683,6 +707,54 @@ def _discover_ssh_endpoint(
             "disappears at its last logout; enable linger for that account or give --remote-root."
         )
     return found.endpoint, found.launcher
+
+
+_HOST_KEY_DECLINED: Final = (
+    "the server's SSH host key was not confirmed, so nothing was added; run 'finishup server add' "
+    "again and answer yes to OpenSSH's question once you have checked the fingerprint with the "
+    "server's own"
+)
+_HOST_KEY_NO_CONSOLE: Final = (
+    "this computer does not know the server's SSH host key yet, and there is no terminal of yours "
+    "here for OpenSSH to ask you to confirm it, so nothing was added; run 'finishup server add' in "
+    "your own terminal, or connect once with 'ssh' yourself, then add it again"
+)
+
+
+# ``server login``: why the server's answer keeps the key from being stored, and the fix.
+_LOGIN_REFUSED: Final[Mapping[str, str]] = {
+    "remote_auth_failed": (
+        "the server refused this API key, so it was not stored; check the key with the server's "
+        "operator ('finishup service gateway key list' on the server shows its keys) and run "
+        "'finishup server login' again"
+    ),
+    "remote_identity_changed": (
+        "the server's certificate does not match the trust recorded for it, so the key was not "
+        "sent and not stored; verify the server another way, then remove and add it again"
+    ),
+    "remote_incompatible": (
+        "that server is not running this FinishUP release (or is not a FinishUP server), so the "
+        "key was not stored; install the same release on both, then run 'finishup server login' "
+        "again"
+    ),
+}
+
+
+def _trusted_console_present() -> bool:
+    """Whether this command runs on the owner's terminal, where OpenSSH can ask its question.
+
+    ``server add`` of a remote kind has just required the owner's trusted foreground console for
+    the typed confirmation (``_confirm_on_trusted_console``), which fails closed without it; this
+    checks, without opening it again, that the probe that follows still has that terminal
+    (standard input and error on a terminal, and ``/dev/tty``), as OpenSSH needs to ask.
+    """
+
+    import os
+
+    try:
+        return os.isatty(0) and os.isatty(2) and os.path.exists("/dev/tty")
+    except OSError:
+        return False
 
 
 def _check_gateway(record: ServerTarget, secret: str) -> str | None:
@@ -1666,10 +1738,12 @@ def server_login(
         raise ServerCommandRefused(error.reason)
     # The key is checked against the server before it is kept: a refused key, a server whose
     # identity does not match the recorded trust, or another release is never stored. A server
-    # that does not answer yet keeps the key, and says so.
+    # that does not answer yet keeps the key, and says it is not verified yet (ADR-051, server
+    # add and login parity).
     unanswered = _check_gateway(record, secret)
-    if unanswered in {"remote_auth_failed", "remote_identity_changed", "remote_incompatible"}:
-        raise ServerCommandRefused(unanswered)
+    refused = _LOGIN_REFUSED.get(unanswered or "")
+    if refused is not None:
+        raise ServerCommandRefused(cast(str, unanswered), message=refused)
     try:
         root = target_root(record.target_id)
         location = KeyringOrFileCredential(
@@ -1682,12 +1756,15 @@ def server_login(
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
-    typer.echo(f"Stored the API key for {record.target_id} in {where}.")
-    if unanswered is not None:
-        typer.echo(
-            f"The server did not answer yet ({unanswered}); run 'finishup server test "
-            f"{record.name}' once it is up."
-        )
+    if unanswered is None:
+        typer.echo(f"Stored the API key for {record.target_id} in {where}; the server accepted it.")
+        return
+    typer.echo(f"Stored the API key for {record.target_id} in {where}, not verified yet.")
+    typer.echo(
+        f"The server did not answer yet ({unanswered}), so it could not check the key. It is "
+        f"checked on the first connection; run 'finishup server test {record.name}' once the "
+        "server is up to check it now."
+    )
 
 
 @server_app.command("logout")
