@@ -77,8 +77,10 @@ from finishup.adapters.git_subject_state import (
 from finishup.adapters.home_project_reads import home_private_path
 from finishup.adapters.task_input_read import (
     ReadDeadline,
+    declared_test_readable,
     declared_test_top,
     list_beneath,
+    outside_inputs_readable,
     outside_read_window,
     read_declared_test,
     read_outside_inputs,
@@ -540,9 +542,10 @@ class WorkspaceAgentHandler:
         could open, as ``read_outside_inputs`` locates it) is read only when it lies inside the
         claimed worktree, which the read never enters, or at or beneath a listed folder; any
         other is left unread, and its index is reported (``unlisted``) when it names something
-        that exists (``_exists_visibly``), so the server can say so and keep the rest of what it
-        asked for. A value that names nothing is not reported: a local read would find nothing
-        there either. A named root beneath which the task names nothing is never opened and is
+        that exists (``_exists_visibly``) and that a local read would read
+        (``outside_inputs_readable``), so the server can say so and keep the rest of what it
+        asked for. A value that names nothing, or only what a local read would not read, is not
+        reported: a local read would find nothing there either. A named root beneath which the task names nothing is never opened and is
         left out; one that holds a listed folder is walked only to the values beneath that
         folder, so beneath the server's own roots the record narrows them and never widens them.
         """
@@ -560,7 +563,7 @@ class WorkspaceAgentHandler:
         if outside.mode == "local":
             return every, tuple(values), (), listed
         kept: list[str] = []
-        unlisted: list[int] = []
+        unread: list[int] = []
         looked = outside_read_window(every, tuple(values), excluded=excluded, space_cut=space_cut)
         for index in looked:
             value = values[index]
@@ -575,7 +578,13 @@ class WorkspaceAgentHandler:
             ):
                 kept.append(value)
             elif self._exists_visibly(path):
-                unlisted.append(index)
+                unread.append(index)
+        # Only what a local read would read there is counted as kept back: the rest reads as
+        # nothing in both modes, and no folder the owner lists would let it be read.
+        readable = outside_inputs_readable(
+            tuple(roots), tuple(values[index] for index in unread), excluded=excluded
+        )
+        unlisted = [index for position, index in enumerate(unread) if position in readable]
         walked = tuple(
             root
             for root in every
@@ -830,9 +839,10 @@ class WorkspaceAgentHandler:
         excluded, and no other rule. In ``listed`` mode, strictly beneath the claimed root (named
         by its handle or its absolute path) Git must answer that the file is not ignored, and
         elsewhere it must lie at or beneath a folder this client's owner listed for the server;
-        an existing file that meets neither is ``root_not_admitted``, never read on the server's
-        word, so the server can say what was not offered (``_exists_visibly``), and one that does
-        not exist reads as nothing, as it does locally. In ``listed`` mode both comparisons are
+        an existing file that meets neither and that the local read would open
+        (``_exists_visibly``, ``declared_test_readable``) is ``root_not_admitted``, never read on
+        the server's word, so the server can say what was not offered, and any other reads as
+        nothing, as it does locally. In ``listed`` mode both comparisons are
         made on the spelling the local read walks too: a first component that is a link root
         owns (``/tmp`` on macOS) counts as its target. They are exact otherwise: a differently
         cased spelling is refused, never let in. One let in outside the workspace is an outside
@@ -861,7 +871,13 @@ class WorkspaceAgentHandler:
         else:
             admitted = any(folder_covers(spelling, outside.folders) for spelling in spellings)
         if not admitted:
-            if any(self._exists_visibly(spelling) for spelling in spellings):
+            # Refused only where a local read would open the file (its fences and trust tests):
+            # any other test reads as nothing, as locally, and no step of the owner's reads it.
+            if any(self._exists_visibly(spelling) for spelling in spellings) and (
+                declared_test_readable(
+                    location, excluded=self._excluded(arguments.excluded, call, outside=False)
+                )
+            ):
                 raise _Outcome("root_not_admitted")
             return None  # names nothing: read as a test that could not be read, as locally
         return read_declared_test(

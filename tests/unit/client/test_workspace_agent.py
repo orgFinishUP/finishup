@@ -674,7 +674,17 @@ def test_a_declared_test_outside_the_claimed_workspace_is_refused(
     sibling.mkdir()
     (sibling / "test_x.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
     upper = f"{repository.parent}/{repository.name.upper()}/tests/test_app.py"
-    for location in (outside, f"{sibling}/test_x.py", upper, os.fspath(repository)):
+    # The claimed root itself is a directory, which a local read never returns as a test: read
+    # as nothing, as locally, never refused as something the owner could let in.
+    assert (
+        _ok(
+            handler,
+            WorkspaceOperation.READ_DECLARED_TEST,
+            ReadDeclaredTestArguments(os.fspath(repository)),
+        )
+        is None
+    )
+    for location in (outside, f"{sibling}/test_x.py", upper):
         if not os.path.lexists(location):
             # Another case on a case-sensitive volume names nothing: read as nothing, as locally.
             assert location == upper
@@ -1012,6 +1022,94 @@ def test_listed_mode_never_reads_past_the_local_reads_window(
     )
     # The late value lies beneath the listed folder, though past the window it is not read.
     assert answer == OutsideInputsRead((), tuple(range(16)), (16,))
+
+
+def test_listed_mode_counts_only_what_a_local_read_would_read(
+    repository: Path, protected: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listed mode reports a task input it left unread only where a local read would read a file
+    (ADR-051 decision 5): a hard-linked file, one others may write, a directory holding only such
+    files, and a home directory's private tree read as nothing in both modes, so they are never
+    counted as kept back, and listing their folder would read nothing there either."""
+
+    home = (tmp_path / "home").resolve()
+    (home / "snap" / "app").mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / "snap" / "app" / "notes.txt").write_text("HOME_PRIVATE\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", os.fspath(home))
+    data = (tmp_path / "data").resolve()
+    (data / "linked-only").mkdir(parents=True, mode=0o700)
+    data.chmod(0o700)
+    (data / "linked.md").write_text("LINKED\n", encoding="utf-8")
+    os.link(data / "linked.md", data / "linked-only" / "same.md")
+    (data / "open.md").write_text("OPEN\n", encoding="utf-8")
+    (data / "open.md").chmod(0o666)
+    (data / "plain.md").write_text("PLAIN\n", encoding="utf-8")
+    roots = (os.fspath(data), os.fspath(home))
+    values = (
+        f"{data}/linked.md",
+        f"{data}/open.md",
+        f"{data}/linked-only/",
+        f"{home}/snap/app/notes.txt",
+        f"{data}/plain.md",
+    )
+    arguments = ReadOutsideInputsArguments(roots, values, limit=4)
+    local = _ok(
+        _handler(repository, protected, mode="local"),
+        WorkspaceOperation.READ_OUTSIDE_INPUTS,
+        arguments,
+    )
+    assert [item.path for item in local.inputs] == [values[4]]
+    listed = _handler(repository, protected)
+    assert _ok(listed, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).unlisted == (4,)
+    snapshot = SnapshotOutsideInputsArguments(
+        roots, values, limit=5, max_bytes=65_536, budget_ms=5_000
+    )
+    assert _ok(listed, WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS, snapshot).unlisted == (4,)
+    # Listing the folder reads exactly what the local read reads, and nothing is left counted.
+    after = _ok(
+        _handler(repository, protected, folders=(data,)),
+        WorkspaceOperation.READ_OUTSIDE_INPUTS,
+        arguments,
+    )
+    assert ([item.path for item in after.inputs], after.unlisted) == ([values[4]], ())
+
+
+def test_listed_mode_refuses_a_declared_test_only_where_a_local_read_would_read_it(
+    repository: Path, protected: Path, tmp_path: Path
+) -> None:
+    """A declared test the local read would never return (hard-linked, writable by others, a
+    directory) reads as nothing in listed mode too, never ``root_not_admitted``: the owner has no
+    step that would let it be read (ADR-051 decision 5). One it would read is still refused."""
+
+    outside = (tmp_path / "tests-outside").resolve()
+    outside.mkdir(mode=0o700)
+    (outside / "test_plain.py").write_text("def test_plain():\n    pass\n", encoding="utf-8")
+    (outside / "test_linked.py").write_text("def test_linked():\n    pass\n", encoding="utf-8")
+    os.link(outside / "test_linked.py", outside / "test_linked_twin.py")
+    (outside / "test_open.py").write_text("def test_open():\n    pass\n", encoding="utf-8")
+    (outside / "test_open.py").chmod(0o666)
+    (outside / "test_dir").mkdir()
+    excluded = (os.fspath(protected),)
+    local = _handler(repository, protected, mode="local")
+    listed = _handler(repository, protected)
+    for name in ("test_linked.py", "test_open.py", "test_dir"):
+        location = f"{outside}/{name}"
+        assert read_declared_test(location, excluded=excluded) is None
+        for handler in (local, listed):
+            assert (
+                _ok(
+                    handler,
+                    WorkspaceOperation.READ_DECLARED_TEST,
+                    ReadDeclaredTestArguments(location),
+                )
+                is None
+            ), (location, handler is listed)
+    assert _refused(
+        listed,
+        WorkspaceOperation.READ_DECLARED_TEST,
+        ReadDeclaredTestArguments(f"{outside}/test_plain.py"),
+    ) == ("refused", "root_not_admitted")
 
 
 def test_listed_mode_refuses_a_reviewer_read_only_where_something_exists(
