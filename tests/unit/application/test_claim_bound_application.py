@@ -247,7 +247,9 @@ def test_files_listed_mode_kept_from_review_name_both_ways_out_with_their_argume
         assert "client machine" in text
         assert "/" not in text and not any(character.isdigit() for character in text)
     assert "the computer that holds the project" in sentence
-    assert "listed mode" in sentence and "An agent cannot." in sentence
+    assert "listed mode" in sentence
+    # Every way out is the owner's, never an agent's, though one is an edit in the project.
+    assert sentence.endswith("These are the owner's steps, not an agent's.")
     assert "Checking again" in sentence
     # Listing a folder never admits a test in the project Git ignores: each way out says which
     # files it covers, so the owner is never sent to a command that cannot help.
@@ -255,7 +257,13 @@ def test_files_listed_mode_kept_from_review_name_both_ways_out_with_their_argume
     assert "For a test in the project, listing a folder does not help" in sentence
     assert "stop Git ignoring it" in sentence
     assert "for a file outside the project" in OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE
-    assert "a test in the project that Git ignores" in OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE
+    # The short form, which a bounded MCP summary may show alone, names the same two ways out
+    # for such a test as the full sentence and ADR-051 decision 5, never local mode alone.
+    assert (
+        "for a test in the project that Git ignores, only local mode or no longer ignoring the"
+        " test helps" in OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE
+    )
+    assert "the only way" not in OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE
 
 
 def test_remedy_sentences_name_the_computer_they_concern() -> None:
