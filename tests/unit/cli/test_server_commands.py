@@ -772,6 +772,12 @@ def test_the_golden_status_vector_carries_a_remote_targets_outside_reads() -> No
     validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, payload))
     ServerTargetStatusContract.model_validate(payload)
     target = cast(dict[str, JsonValue], payload["target"])
+    # The vector shows a state the code produces: ``current`` is whether the confirmed
+    # disclosure is this release's (``TargetRecord.needs_reauthorization``).
+    from finishup.client.targets import DISCLOSURE_VERSION
+
+    authorization = cast(dict[str, JsonValue], target["authorization"])
+    assert authorization["current"] is (authorization["disclosure_version"] == DISCLOSURE_VERSION)
     assert target["outside_reads"] == {
         "folders": ["/srv/team-specs"],
         "mode": "listed",
