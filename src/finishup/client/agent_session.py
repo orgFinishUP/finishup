@@ -82,6 +82,8 @@ _STABLE_CONNECTION_SECONDS: Final = 10.0
 # A held agent connection reads this computer's last reported policy at least this often.
 ZERO_NETWORK_CHECK_SECONDS: Final = 1.0
 _ZERO_NETWORK: Final = "zero_network_remote_selected"
+# The bridge's target was removed (``server remove``): its background work stops for good.
+_TARGET_REMOVED: Final = "target_removed"
 _COMPONENT: Final = "client.agent_session"
 
 
@@ -289,7 +291,8 @@ class BackgroundPass:
     """What one background pass did: whether an agent connection is held, and any delivery.
 
     ``refused`` names why the pass held and delivered nothing, a closed reason
-    (``zero_network_remote_selected``), or is ``None``.
+    (``zero_network_remote_selected``, or ``target_removed`` once the bridge's target was removed
+    and the work has stopped for good), or is ``None``.
     """
 
     connected: bool
@@ -319,6 +322,10 @@ class BridgeBackgroundWork:
     nothing and delivers nothing: it closes its connection and the drain, asks the SSH master of
     ``root`` (the bridge's target) to exit, records ``zero_network_remote_selected`` once, and
     each pass reports it as ``refused`` until the record says otherwise (ADR-051 decision 8).
+
+    Once the record of ``root`` is gone or can no longer be read (``finishup server remove``), the
+    work closes what it holds and stops for good: it never dials or delivers to a removed target,
+    and the bridge's own connection reports the removal (``isolation_root_invalid``).
     """
 
     __slots__ = (
@@ -399,7 +406,8 @@ class BridgeBackgroundWork:
         try:
             while True:
                 try:
-                    await self.run_pass()
+                    if (await self.run_pass()).refused == _TARGET_REMOVED:
+                        return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -449,9 +457,25 @@ class BridgeBackgroundWork:
             await _close_master(self._root)
         return True
 
+    def _target_removed(self) -> bool:
+        """Whether the record of the bridge's target is gone or unreadable (a file read only)."""
+
+        if self._root is None:
+            return False
+        from finishup.client.targets import TargetError, read_target
+
+        try:
+            return read_target(self._root) is None
+        except TargetError:
+            return True
+
     async def run_pass(self) -> BackgroundPass:
         """One pass: keep or release the agent connection, and deliver what waits."""
 
+        if self._target_removed():
+            # Removed under the bridge (A-REMOVE-RACE): nothing is dialled or sent to it again.
+            await self.aclose()
+            return BackgroundPass(False, refused=_TARGET_REMOVED)
         if await self._enforce_zero_network():
             return BackgroundPass(False, refused=_ZERO_NETWORK)
         workspace = self._workspace

@@ -606,10 +606,11 @@ def _background(
 
 
 def test_the_background_work_dials_nothing_while_zero_network(
-    masters_closed: _Closed, tmp_path: Path
+    home: Path, masters_closed: _Closed
 ) -> None:
+    _record, root = _ssh_target(select=False)
     dialled: list[_Connection] = []
-    work = _background(dialled, pending=True, root=tmp_path)
+    work = _background(dialled, pending=True, root=root)
     _zero_network()
 
     async def exercise() -> list[object]:
@@ -625,11 +626,11 @@ def test_the_background_work_dials_nothing_while_zero_network(
     assert held is None
     assert dialled == []
     # The target's SSH master is asked to exit once for the change, not on every pass.
-    assert masters_closed == [(tmp_path,)]
+    assert masters_closed == [(root,)]
 
 
 def test_a_held_background_connection_closes_within_a_second_and_delivers_nothing(
-    monkeypatch: pytest.MonkeyPatch, masters_closed: _Closed, tmp_path: Path
+    home: Path, monkeypatch: pytest.MonkeyPatch, masters_closed: _Closed
 ) -> None:
     from finishup.client import observation_outbox
 
@@ -649,7 +650,8 @@ def test_a_held_background_connection_closes_within_a_second_and_delivers_nothin
     monkeypatch.setattr(observation_outbox, "ClientObservationDrain", _Drain)
     dialled: list[_Connection] = []
     # Nothing waits, so the pass only keeps the connection for the lease.
-    work = _background(dialled, pending=False, root=tmp_path)
+    _record, root = _ssh_target(select=False)
+    work = _background(dialled, pending=False, root=root)
 
     async def exercise() -> float:
         loop = asyncio.create_task(work.run())
@@ -671,7 +673,7 @@ def test_a_held_background_connection_closes_within_a_second_and_delivers_nothin
     assert asyncio.run(exercise()) < _CLOSE_BOUND_SECONDS
     assert dialled[0].closed_by_owner
     assert len(dialled) == 1
-    assert masters_closed == [(tmp_path,)]
+    assert masters_closed == [(root,)]
 
 
 def test_captured_rows_are_never_delivered_while_zero_network(

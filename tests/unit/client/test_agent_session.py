@@ -511,6 +511,57 @@ def test_a_server_that_is_away_is_dialled_again_only_after_a_back_off() -> None:
     assert len(dialled) == 1
 
 
+def test_the_bridges_background_work_stops_for_good_once_its_target_is_removed(
+    remote: Path,
+) -> None:
+    """A-REMOVE-RACE: once ``server remove`` deleted the bridge's target, its background work
+    closes what it holds and stops for good. It never dials the removed target again, and no
+    pass fails on the missing folder every drain interval."""
+
+    import shutil
+
+    clock = _Clock()
+    dialled: list[_Connection] = []
+    probed: list[WorkspaceLocator] = []
+
+    async def bind(_workspace: WorkspaceLocator) -> ClientWorkspaceBinding:
+        return _BINDING
+
+    async def dial(_binding: ClientWorkspaceBinding) -> _Connection:
+        connection = _Connection()
+        dialled.append(connection)
+        return connection
+
+    def pending(workspace: WorkspaceLocator) -> bool:
+        probed.append(workspace)
+        return False
+
+    work = BridgeBackgroundWork(
+        lease_seconds=60.0,
+        drain_interval=30.0,
+        connect=dial,
+        binding_for=bind,
+        pending=pending,
+        clock=clock,
+        root=remote,
+    )
+
+    async def exercise() -> tuple[BackgroundPass, BackgroundPass]:
+        work.note_activity(WorkspaceLocator("/w/repo"))
+        held = await work.run_pass()
+        shutil.rmtree(remote)  # what ``server remove`` does with the folder
+        work.note_activity(WorkspaceLocator("/w/repo"))
+        removed = await work.run_pass()
+        async with asyncio.timeout(5):
+            await work.run()  # returns at once: the work stopped for good
+        return held, removed
+
+    held, removed = asyncio.run(exercise())
+    assert held.connected and removed == BackgroundPass(False, refused="target_removed")
+    assert len(dialled) == 1 and dialled[0].closed_by_owner
+    assert len(probed) == 1 and work.connection is None
+
+
 def test_only_a_remote_root_starts_the_bridges_background_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

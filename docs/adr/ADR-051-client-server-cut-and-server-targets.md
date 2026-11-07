@@ -1182,7 +1182,9 @@ HTTPS and LOCALHOST PORT
     session it opens, for this connection as for every other). Over the same connection it
     delivers what hooks captured and could not deliver themselves (`ClientObservationDrain`),
     after a read-only probe of the client's store, so an idle bridge opens no connection to
-    deliver nothing.
+    deliver nothing. Once `server remove` deleted the bridge's target, the work closes what it
+    holds and stops for good; the bridge's own connection then refuses with
+    `isolation_root_invalid` until the session restarts.
   - *CLI-only use.* `finishup server connect NAME --agent` serves that target's workspace calls
     in the foreground (the target resolved as the root whatever is selected) until interrupted,
     and reconnects after the server closes the connection; while it runs the server counts it as

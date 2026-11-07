@@ -4816,7 +4816,9 @@ dials its own stream.
   root=None, zero_network_check=1.0)`: the MCP bridge's background agent connection
   (`connect_service`, never on demand) and drain; `note_activity(locator)` (each bridge service
   call) renews the lease, `run_pass() -> BackgroundPass(connected, drained, refused)`, `run()`,
-  `aclose()`. `start_remote_background_work() ->
+  `aclose()`. Once `root`'s `target.json` is gone or unreadable (`server remove`), `run_pass`
+  closes what the work holds and returns `refused="target_removed"`, and `run` returns: it never
+  dials a removed target again. `start_remote_background_work() ->
   (work, task) | None` starts it for a remote root only; the bridge keeps it in its client slot
   (`_ClientSlot.remote_background`). The drain probe is
   `client.observation_outbox.capture_pending(workspace, *, state=None) -> bool` (read-only).
