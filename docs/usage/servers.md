@@ -259,8 +259,9 @@ switches back to the default first. If the connection to that server does not cl
 `remove` changes nothing and asks you to run it again. If your system's credential store holds
 the server's API key but cannot be used right now (for example, it is locked), `remove` still
 removes the server and tells you which entry to delete there yourself. Removing a local server
-deletes its tasks and vault; removing a server on another machine leaves that server untouched. An agent session
-that was still using the removed server stops reaching FinishUP and says so until you restart it.
+deletes its tasks and vault; removing a server on another machine leaves that server untouched.
+An agent session that was still using the removed server stops reaching FinishUP and says so until
+you restart it.
 
 If adding or removing a server was interrupted, `list` may name a leftover folder (`t_` and eight
 characters) that holds no server. FinishUP does not use it; `finishup server remove` with that
