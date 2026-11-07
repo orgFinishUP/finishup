@@ -1171,6 +1171,36 @@ def test_a_name_already_taken_is_refused_before_any_confirmation(
     assert authorized == []
 
 
+@pytest.mark.parametrize(
+    "option",
+    [
+        ("--remote-root", "srv/finishup"),
+        ("--remote-launcher", "bin/finishup"),
+        ("--remote-root", "/srv/\x1bfinishup"),
+    ],
+)
+def test_a_relative_remote_path_is_refused_before_any_consent_or_remote_command(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    option: tuple[str, str],
+) -> None:
+    """SRV-11: a relative --remote-root or --remote-launcher was checked only when the record
+    was built, after the typed consent and after the SSH probe had already run it on the server,
+    and was then reported as remote_unreachable."""
+
+    def never(*_arguments: object) -> tuple[str, str]:
+        raise AssertionError("nothing runs on the server for a relative path")
+
+    monkeypatch.setattr(server_cli, "_probe_ssh_endpoint", never)
+    result = _invoke("add", "lab", "ssh://owner@lab.example", *option)
+    assert result.exit_code == 2
+    assert result.stderr == (
+        "target_path_invalid: give absolute paths for remote and certificate files\n"
+    )
+    assert authorized == [] and targets.list_targets() == ()
+
+
 def test_login_and_logout_with_an_owner_only_key_file(
     home: Path, authorized: list[tuple[str, str]], no_platform_store: None
 ) -> None:
