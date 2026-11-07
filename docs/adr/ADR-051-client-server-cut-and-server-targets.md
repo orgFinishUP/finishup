@@ -768,14 +768,21 @@ answers bounded `workspace_call`s on a connection that declared it.
     `zero_network_local_server_required`, so the CLI, MCP, hooks and the terminal interface say
     why and the remedy for a process whose selection predates the change, and no connection or
     workspace agent is started for it. The check reads the marker only, never the service, so
-    hooks keep their budgets. `server login` refuses the same way before it reads a key. A
-    client-owned process that holds connections to a remote target open, or connects again on its
-    own, enforces the same marker itself, because it would otherwise keep sending after the
-    change: it checks before every connection it opens or relays and at least once a second while
-    it runs, and on finding the marker it closes what it holds, sends nothing more (no last
-    delivery of captured observations), and names `zero_network_remote_selected`. Each approach
-    names its own such processes in its topology below (approach C: the workspace agent of
-    `finishup agent run --root`, its observation drain, and an SSH target's master).
+    hooks keep their budgets. A command that acts on one remote target names the refusal for that target
+    (`cli.server.zero_network_connection_refusal`): the selected target, or any target while the
+    selection cannot be read, is `zero_network_remote_selected` with `finishup server use local`;
+    any other remote target is `zero_network_in_force`, saying when this computer last reported
+    the state and that its privacy policy must change first (`finishup privacy setup`), since
+    switching would change nothing. `server login` refuses before it reads a key, `server connect`
+    before its connection, and `server status` and `server test` probe nothing (probe outcome `not_probed`
+    with that reason, "nothing was sent", never "did not answer"). A client-owned process
+    that holds connections to a remote target open, or connects again on its own, enforces the
+    same marker itself, because it would otherwise keep sending after the change: it checks
+    before every connection it opens or relays and at least once a second while it runs, and on
+    finding the marker it closes what it holds, sends nothing more (no last delivery of captured
+    observations), and names `zero_network_remote_selected`. Each approach names its own such
+    processes in its topology below (approach C: the workspace agent of `finishup agent run
+    --root`, its observation drain, and an SSH target's master).
 
   **Where the choice can arise.** While a remote target is selected, a fresh process does not
   set this computer's policy: every `server_host` privacy command (the privacy ceremonies,
