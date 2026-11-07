@@ -140,7 +140,10 @@ typed outcomes when the client side cannot be reached.
   then the ADR-028 runtime pin, then the selection file, else ambient. `isolated_root()` keeps
   meaning "explicitly isolated" (variable or pin). Every root that follows the target — state,
   runtime, config, log, cache, bundle — derives from `active_root()`; registrations and launch
-  lines stay on `isolated_root()`. An AST test locks the classification of every call site, so a
+  lines stay on `isolated_root()`, and so does the bookkeeping that guards them: the
+  host-configuration lock and its project-membership record live in
+  `installation_state_dir()` (the explicit root's state, else the everyday one), never in a
+  selected target's. An AST test locks the classification of every call site, so a
   selected root is never stamped into a host registration and connecting a host while a target is
   selected does not freeze it onto that target. `isolation_binding()` gains the value
   `selection`, carried by isolation report 1.1.0.

@@ -4657,8 +4657,9 @@ fails closed with `isolation_root_invalid` as a fresh read would, so no path hel
 folder. `isolated_root()` is
 unchanged and keeps meaning "explicitly isolated". State, runtime, config, log, cache and bundle
 roots derive from `active_root()`; registrations, launch lines, the Codex RECORD proof and the
-upgrade guard stay on `isolated_root()`, and an AST test locks that classification of every call
-site. `isolation_binding()` is the closed set
+upgrade guard stay on `isolated_root()`, the host-configuration lock and project-membership record
+on `installation_state_dir()` (the explicit root's state, else the everyday one), and an AST
+test locks that classification of every call site. `isolation_binding()` is the closed set
 `ambient|environment|runtime_pin|environment_and_pin|selection`; isolation report schema
 `service/isolation-report-1.1.0` adds `selection` to `binding`. A selection naming a missing or
 unsafe root fails with `isolation_root_invalid` and never resolves to ambient; `finishup server`
