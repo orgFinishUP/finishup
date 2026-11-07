@@ -540,6 +540,10 @@ process to the default service.
   with `claude-code-ordinary-observation-v1` enabled, the prompt, message and tool input and
   output chunks reach the server unchanged, as a local service receives them; without the profile
   none is sent. The server disclosure (disclosure 2) names this before the owner types the name.
+- **Service attribution in MCP results.** Host decision: supported. Claude Code reads the MCP
+  text channel, which ends with the fixed "read on the client machine" line and the line naming
+  the answering service and transport on `status` and receipts (ADR-051); a paged receipt's every
+  page names the service. The structured result never carries them.
 - **Receipt provenance.** When the server cannot read the task's opening record, a receipt is
   still made and never refused for it (ADR-051, decision D4): instead of the `client_attested`
   line it ends with the fixed provenance-unknown section (what happened, why it matters, and
