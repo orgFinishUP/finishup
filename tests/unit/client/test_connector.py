@@ -419,6 +419,28 @@ def test_the_connector_command_serves_only_a_remote_targets_own_root(
     assert run_connector(root) == 2
 
 
+def test_the_connector_process_resolves_its_root_on_every_thread(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outbox and spool reads run on executor threads, which no context-local override
+    reaches: ``connector run`` binds its root for the whole process (SRV-7)."""
+
+    from finishup.client import connector as connector_module
+    from finishup.config.paths import active_root
+
+    _record, root = _ssh_target(home)
+    seen: list[Path | None] = []
+
+    async def serve(target: Path, _record: targets.ServerTarget) -> int:
+        seen.append(await asyncio.get_running_loop().run_in_executor(None, active_root))
+        seen.append(target)
+        return 0
+
+    monkeypatch.setattr(connector_module, "run_connector_process", serve)
+    assert run_connector(root) == 0
+    assert seen == [root, root]
+
+
 def test_a_background_agent_still_opening_is_held_and_ended_when_the_connector_stops(
     home: Path,
 ) -> None:

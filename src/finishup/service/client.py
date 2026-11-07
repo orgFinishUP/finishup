@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import shutil
 import signal
@@ -1362,7 +1363,14 @@ class ServiceClient(ControlClientPort):
         self._agent_busy += 1
         work.add_done_callback(self._release_workspace_slot)
         try:
-            threading.Thread(target=run, name="finishup-workspace-agent", daemon=True).start()
+            # The answer runs in this connection's context, as ``asyncio.to_thread`` would: a
+            # ``selection_override`` of the root that opened it holds there too.
+            threading.Thread(
+                target=contextvars.copy_context().run,
+                args=(run,),
+                name="finishup-workspace-agent",
+                daemon=True,
+            ).start()
         except RuntimeError:
             # No thread could be started (a process thread limit): nothing runs, the slot frees.
             work.set_result(_encoded_workspace_reply(call.call_id, "agent_busy"))

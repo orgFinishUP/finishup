@@ -4640,7 +4640,11 @@ kind except `local` is a remote kind.
 
 **Root resolution.** `config.paths.active_root()` resolves `FINISHUP_ISOLATED_ROOT` (or
 `YOETZ_ISOLATED_ROOT`), then the ADR-028 runtime pin, then the selection file, else `None`
-(ambient). It is memoized once per process and imports only `json` and `os`. `isolated_root()` is
+(ambient). It is memoized once per process and imports only `json` and `os`.
+`selection_override(root)` resolves one root for the calling context only (a `contextvars`
+variable that `asyncio.to_thread` workers inherit), so a probe in one thread is never seen by
+another and never changes the process's memo; `select_root_for_process(root)` binds the whole
+process (`finishup connector run`). `isolated_root()` is
 unchanged and keeps meaning "explicitly isolated". State, runtime, config, log, cache and bundle
 roots derive from `active_root()`; registrations, launch lines, the Codex RECORD proof and the
 upgrade guard stay on `isolated_root()`, and an AST test locks that classification of every call

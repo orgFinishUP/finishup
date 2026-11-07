@@ -646,7 +646,7 @@ def run_connector(root: Path) -> int:
     """
 
     from finishup.client.targets import TargetError, read_target, target_root
-    from finishup.config.paths import PathSafetyError, isolated_root, selection_override
+    from finishup.config.paths import PathSafetyError, isolated_root, select_root_for_process
 
     if not root.is_absolute():
         return 2
@@ -659,5 +659,7 @@ def run_connector(root: Path) -> int:
         return 2
     if explicit is not None and explicit != root:
         return 2
-    with selection_override(root):
-        return asyncio.run(run_connector_process(root, record))
+    # For the whole process: the outbox and spool reads run on executor threads, which no
+    # context-local ``selection_override`` reaches.
+    select_root_for_process(root)
+    return asyncio.run(run_connector_process(root, record))

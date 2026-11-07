@@ -213,6 +213,9 @@ async def open_connector_agent(
         return None
     if binding is None or binding.claim != claim or binding.agent is None:
         return None
-    agent = ConnectorAgent(binding, ClientObservationDrain(workspace), dial, root=root)
+    # The root's own state, named: the drain's store reads run on executor threads, which a
+    # context-local ``selection_override`` of ``root`` does not reach.
+    drain = ClientObservationDrain(workspace, state=root / "state")
+    agent = ConnectorAgent(binding, drain, dial, root=root)
     agent.start()
     return agent
