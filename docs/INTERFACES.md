@@ -5669,7 +5669,9 @@ the unchanged coordinator over it with `client_workspace_handle` set. The handle
 worktree, so linked worktrees of one repository never share consent, revocation, content fence or
 approved-check trust here either. A route whose task was not opened under
 the same claim, and a claim-bound row without an attestation, are refused `consent_missing` before
-any write; an attestation on a connection without a claim is `frame_invalid`. Text and markdown
+any write. A route naming a session its task has since replaced is judged by the task's current
+route (`StartCatalog.session_binding`), and the coordinator then follows `session_superseded` to
+the successor as it does locally; an attestation on a connection without a claim is `frame_invalid`. Text and markdown
 receipts of a claim-bound task with hook-observed evidence add `CLIENT_ATTESTED_OBSERVATION_LINE`
 after the workspace-evidence line. A claim-bound `check` with `await_observations` reports the
 wait `unavailable`.
