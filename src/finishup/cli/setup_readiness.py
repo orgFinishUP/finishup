@@ -267,6 +267,13 @@ def _setup_next(
     elif operation == "connection":
         reason = "host_selection_required"
         arguments = ["setup", "status"]
+    next_command = None if arguments is None else continuation(arguments, project=project)
+    if zero_network is not None:
+        # ADR-051 decision 8: until the owner switches, hooks, commands and agent sessions are
+        # refused before anything is sent to the selected server, so every other step (a service
+        # restart the refused connection seemed to call for, a host connection) waits for the
+        # switch. The fact names it; the top-level step is the same command.
+        next_command = cast(str, zero_network["next_command"])
     report = SetupReadiness(
         # Frozen legacy identifier (ADR-048): machine-readable report tag agents parse.
         schema="yoetz.setup-readiness/1",
@@ -274,7 +281,7 @@ def _setup_next(
         reason=reason,
         project=str(project),
         inspected_config_root=selected_home,
-        next_command=None if arguments is None else continuation(arguments, project=project),
+        next_command=next_command,
         facts=facts,
     )
     from finishup.cli.provider_status import background_advice_human_line
