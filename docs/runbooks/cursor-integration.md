@@ -678,6 +678,10 @@ default service.
   with `cursor-ordinary-observation-v1` enabled, the prompt, message and tool input and output
   chunks reach the server unchanged, as a local service receives them; without the profile none
   is sent. The server disclosure (disclosure 2) names this before the owner types the name.
+- **Service attribution in MCP results.** Host decision: supported. Cursor reads the canonical
+  text copy, which ends with the fixed "read on the client machine" line and the line naming the
+  answering service and transport on `status` and receipts (ADR-051); a paged receipt's every page
+  names the service. The structured result never carries them.
 - **Zero-network and a remote target are never in force together** (maintainer decision, 2026-11-07,
   replacing 2026-11-06; ADR-051 decision 8). Adding or selecting a remote target is refused while
   this computer's privacy policy is zero-network, live or as this computer last reported it. A

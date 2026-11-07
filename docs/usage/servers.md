@@ -442,12 +442,15 @@ and repository permissions, exactly as on one computer. Receipts and task status
 another machine end with a line saying that workspace evidence was read on your computer by the
 FinishUP workspace agent and attested over the connection, and a line naming the FinishUP service
 that answered by its id (such as `svc_…`) and how this computer reached it (for example `ssh` or
-`https`). This holds in the `finishup` command, in what your agent reads, and in the terminal
-interface; JSON output does not carry these lines. A text or markdown receipt says where the
-evidence was read in its own workspace evidence section and never leaves that section out, even
-when a long receipt has its other sections shortened to fit. When your agent receives a long
-receipt in pages, every page names the service, and the receipt's workspace evidence section, on
-one of those pages, is the only place it says where the evidence was read. A receipt is never
+`https`). This holds in the `finishup` command, in the terminal interface, and in what Claude
+Code and Cursor agents read; JSON output does not carry these lines. Codex shows its agent the
+JSON result (outside its code mode), so a Codex agent does not see these two lines; the
+`finishup` command and the terminal interface still show them to you. A text or markdown receipt
+says where the evidence was read in its own workspace evidence section and never leaves that
+section out, even when a long receipt has its other sections shortened to fit; a Codex agent sees
+that section too. When a Claude Code or Cursor agent receives a long receipt in pages, every page
+names the service, and the receipt's workspace evidence section, on one of those pages, is the
+only place it says where the evidence was read. A receipt is never
 refused because the server cannot tell where the evidence was read. If the server cannot read the
 record of how the task's session was opened, the receipt is still made and says so, in three
 lines: what happened (that record could not be read from the server's ledger), why it matters

@@ -708,7 +708,14 @@ answers bounded `workspace_call`s on a connection that declared it.
     service's local control endpoint), `connector` (a local relay that carries the connection on),
     `ssh` (an SSH channel the client process opened) or `https` (HTTPS the client process speaks).
     The connection's lines never enter the MCP structured result, CLI JSON output or a local
-    connection's output.
+    connection's output. Per host, that decides who sees them: Claude Code reads the text
+    channel and Cursor the text copy, so their agents do; Codex outside code mode hands its model
+    only the serialized structured result, so a Codex agent sees neither line on `status` or a
+    receipt, and no page of a paged receipt names the service (a text or markdown receipt's own
+    workspace-evidence section in `human_text` still says where the evidence was read). That gap
+    is accepted rather than closed with a structured member: the lines are connection facts the
+    service's result does not carry, and the owner's own `finishup` views show them. Recorded per
+    host in the integration runbooks.
 - **Typed gaps when no agent is reachable.** An operation that ends `workspace_agent_unavailable`
   fires the existing gap for what it would have read, and the new reason
   `workspace_agent_unavailable` joins the check-time change unavailable reasons
