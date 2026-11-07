@@ -90,7 +90,10 @@ and FinishUP tools, the `finishup` command and the terminal interface all follow
 If your privacy policy forbids all network use (the zero-network setting), FinishUP never uses a
 server on another machine, a port or the web: it refuses to add or choose one. It also refuses
 while the FinishUP set up on this computer cannot tell it its policy, because its service is
-stopped or locked: start it with `finishup service start`, unlock it if needed, and try again. If
+stopped or locked: start it with `finishup service start`, unlock it if needed, and try again.
+While a server on another machine is chosen, those two commands are refused here, so start it
+with `finishup server connect local` instead; if its vault is locked, run `finishup server use
+local`, then `finishup service unlock`, then choose the server again. If
 this computer last told FinishUP that the setting is on, the refusal says so, with when. A
 computer whose own FinishUP was never set up has no privacy policy of its own and can use a
 server; the server's policy then governs your work.

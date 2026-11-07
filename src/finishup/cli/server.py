@@ -60,6 +60,7 @@ from finishup.client.targets import (
     ServerTarget,
     TargetError,
     TargetKind,
+    active_target_is_remote,
     active_target_record,
     clear_selection,
     find_target,
@@ -487,8 +488,21 @@ def _zero_network_in_force() -> bool:
                     "the privacy policy on this computer first, with 'finishup privacy setup'"
                 ),
             )
-        raise ServerCommandRefused("network_policy_unreadable")
+        # While a server elsewhere is selected, 'service start' and 'service unlock' are refused
+        # here (requires_server_host): name the way that works from this state (SRV-3).
+        raise ServerCommandRefused(
+            "network_policy_unreadable",
+            message=_POLICY_UNREADABLE_WHILE_REMOTE if active_target_is_remote() else None,
+        )
     return state == "zero_network"
+
+
+_POLICY_UNREADABLE_WHILE_REMOTE: Final = (
+    "this computer's FinishUP has its own privacy policy, which could not be read (its service "
+    "is stopped, locked, or did not answer), so a server on another machine is refused; start "
+    "it with 'finishup server connect local' and retry, or, if its vault is locked, run "
+    "'finishup server use local', then 'finishup service unlock', then choose the server again"
+)
 
 
 def _selected_or_unknown(record: ServerTarget) -> bool:
