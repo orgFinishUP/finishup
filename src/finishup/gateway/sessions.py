@@ -25,6 +25,12 @@ idle stop still work), or on ``DELETE``. A session whose hello declared a worksp
 ends once no ``GET …/frames`` long-poll has begun for ``AGENT_POLL_GRACE_SECONDS``: its client
 keeps one going while it lives, so a client that died without ``DELETE`` stops being the agent
 the daemon routes workspace calls to well before the idle bound.
+
+Server frames are delivered at most once. A long-poll whose client went away (a connection reset
+mid-wait, while its retry already polls) never takes a frame, and a frame taken in the instant its
+client was found gone is kept first in line for the next poll. A frame whose answer was written
+and then lost in transit is not delivered again: the daemon's workspace call then ends as a
+workspace-agent gap.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from finishup.protocol.rest_binding import (
     MAX_SESSIONS_PER_KEY,
@@ -70,9 +76,10 @@ _DELIVERED_MEMORY: Final = 1_024
 # whose answer was lost in transit can fetch it by polling instead of posting the call again.
 _RETAIN_SECONDS: Final = 60.0
 _RETAIN_BYTES: Final = 8 * 1_048_576
-# A live agent client begins a frames long-poll at least every ``MAX_WAIT_MS``; this adds room for
-# a slow round trip and a fresh TLS connection.
-AGENT_POLL_GRACE_SECONDS: Final = MAX_WAIT_MS / 1_000 + 15.0
+# A live agent client begins a frames long-poll at least every ``MAX_WAIT_MS``. It reads an answer
+# for at most that wait plus 15 seconds, so when one answer is lost in transit its next poll begins
+# after that read timeout, a short back-off and a fresh TLS connection: the grace outlasts that.
+AGENT_POLL_GRACE_SECONDS: Final = MAX_WAIT_MS / 1_000 + 30.0
 # The daemon answers a hello within this, as a client's own handshake budget expects (5 seconds,
 # like ``service.client``'s connect handshake and the daemon's own handshake deadline). A daemon
 # that accepted the connection and never answers must not hold the request and its session slot.
@@ -120,6 +127,8 @@ class GatewaySession:
     _frames: asyncio.Queue[bytes] = field(
         default_factory=lambda: asyncio.Queue[bytes](maxsize=_FRAME_QUEUE)
     )
+    # Frames taken by a poll whose client was gone, first in line for the next poll.
+    _returned: deque[bytes] = field(default_factory=deque[bytes])
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _reader: asyncio.Task[None] | None = None
 
@@ -258,25 +267,41 @@ class GatewaySession:
                 closed.cancel()
         return self.take(rpc_id)
 
-    async def next_frame(self, seconds: float) -> bytes | None:
-        """The next server frame (``workspace_call``), or ``None`` after ``seconds``."""
+    async def next_frame(
+        self, seconds: float, *, client_left: asyncio.Future[None] | None = None
+    ) -> bytes | None:
+        """The next server frame (``workspace_call``), or ``None`` after ``seconds``.
+
+        ``client_left`` completes once the poll's client is gone: the wait then ends without
+        taking a frame, so the client's next poll gets it.
+        """
 
         self.poll_started = time.monotonic()
+        if self._returned:
+            return self._returned.popleft()
         with contextlib.suppress(asyncio.QueueEmpty):
             return self._frames.get_nowait()
         getter = asyncio.ensure_future(self._frames.get())
         closed = asyncio.ensure_future(self.closed.wait())
+        waiting: tuple[asyncio.Future[Any], ...] = (getter, closed)
+        if client_left is not None:
+            waiting = (*waiting, client_left)
         try:
-            await asyncio.wait(
-                (getter, closed), timeout=seconds, return_when=asyncio.FIRST_COMPLETED
-            )
+            await asyncio.wait(waiting, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
         finally:
             closed.cancel()
         if not getter.done():
             # A cancelled ``Queue.get`` leaves its item queued for the next poll.
             getter.cancel()
             await asyncio.gather(getter, return_exceptions=True)
-        return None if getter.cancelled() else getter.result()
+        if getter.cancelled():
+            return None
+        frame = getter.result()
+        if client_left is not None and client_left.done():
+            # Taken in the instant its client was found gone: first in line for the next poll.
+            self._returned.appendleft(frame)
+            return None
+        return frame
 
     async def close(self) -> None:
         self.closed.set()

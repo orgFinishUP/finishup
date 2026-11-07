@@ -5733,9 +5733,14 @@ A session id is 32 random bytes bound to its key and holds one upstream control 
 expires after 120 seconds idle, and one key holds at most 64 sessions. An open whose hello the
 daemon has not answered within 5 seconds (`HELLO_RESULT_SECONDS`) is refused with `503`
 `service_unavailable`; its upstream is closed and the key's place given back. A session whose hello
-declared `workspace_agent` also ends once no `GET …/frames` long-poll has begun for 40 seconds
-(`AGENT_POLL_GRACE_SECONDS`, the 25-second wait plus a margin), so a client that died without
-`DELETE` stops being the agent the daemon routes workspace calls to. The gateway starts an
+declared `workspace_agent` also ends once no `GET …/frames` long-poll has begun for 55 seconds
+(`AGENT_POLL_GRACE_SECONDS`, the 25-second wait plus a margin that outlasts a client's read
+timeout of the wait plus 15 seconds, its retry and a fresh connection, so one answer lost in
+transit does not end the session), so a client that died without `DELETE` stops being the agent
+the daemon routes workspace calls to. Server frames are delivered at most once: a long-poll whose
+client went away while it waited never takes a frame (one taken in that instant is kept first in
+line for the next poll), but a frame whose answer was written and then lost in transit is not
+sent again, and the daemon's workspace call ends as a workspace-agent gap. The gateway starts an
 idle-stopped service while it holds `POST /v1/sessions`; when the client left before that answer,
 the session is closed at once instead of being kept, and sessions still being opened count
 against the key's bound. A `POST /v1/sessions` carrying `FinishUP-Service-Start: never`

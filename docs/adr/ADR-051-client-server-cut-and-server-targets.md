@@ -1165,8 +1165,13 @@ HTTPS and LOCALHOST PORT
   `workspace_reply` `POST …/frames`; `workspace_call`s arrive through the `GET …/frames`
   long-poll, run only for a session whose hello declared the agent, which also keeps that session
   out of the gateway's 120 s idle expiry; the gateway closes an agent session in which no such
-  long-poll began for 40 s, so a client process that died without its `DELETE` stops being the
-  agent the daemon routes workspace calls to, and a closing agent connection sends its `DELETE`
+  long-poll began for 55 s (the 25 s wait plus a margin that outlasts this client's read of the
+  wait plus 15 s, its retry and a fresh connection, so one answer lost in transit does not end the
+  session), so a client process that died without its `DELETE` stops being the agent the daemon
+  routes workspace calls to. A long-poll whose client went away while it waited never takes a
+  server frame (one taken in that instant is kept first in line for the next poll), but a frame
+  whose answer was written and then lost in transit is not sent again. A closing agent connection
+  sends its `DELETE`
   before it stops polling and waits up to 1.5 s for it, never once this computer reported
   zero-network (decision 8). A session idle past 90 s is checked
   before a call, so an expired session fails the write and the caller's reconnect-once replays

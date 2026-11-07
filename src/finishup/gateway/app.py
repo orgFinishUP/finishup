@@ -156,6 +156,13 @@ def _frame(payload: bytes) -> ControlFrame:
         ) from None
 
 
+async def _client_left(request: Request) -> None:
+    """Return once the request's client is gone (``http.disconnect``)."""
+
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
 def _wait_seconds(request: Request) -> float:
     raw = request.query_params.get("wait_ms", "0")
     if not raw.isdigit() or len(raw) > 6:
@@ -481,7 +488,14 @@ class GatewayApp:
     async def next_frame(self, request: Request, key: GatewayKey) -> _Answer:
         session = self._session(request, key)
         seconds = _wait_seconds(request)
-        frame = await session.next_frame(seconds)
+        # A poll whose connection was reset while it waits must not take the next frame and
+        # write it to nobody: the client's retry is already polling for it.
+        left = asyncio.ensure_future(_client_left(request))
+        try:
+            frame = await session.next_frame(seconds, client_left=left)
+        finally:
+            left.cancel()
+            await asyncio.gather(left, return_exceptions=True)
         session.touch()
         if frame is not None:
             return _Answer(200, frame)

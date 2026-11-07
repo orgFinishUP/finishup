@@ -816,3 +816,93 @@ async def test_a_session_asking_never_to_start_the_service_reaches_a_running_one
         await client.aclose()
         await state.sessions.close_all()
         await asyncio.gather(*served, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_a_frames_poll_whose_client_left_never_takes_the_next_frame(
+    gateway: _Gateway,
+) -> None:
+    """A client whose long-poll connection was reset polls again at once; the gateway's handler
+    for the lost poll is still waiting. It must not take the next server frame and write it to a
+    connection that is gone: the client's retry gets it."""
+
+    sid = await _open(gateway, agent=True)
+    gone = asyncio.Event()
+    requested = [False]
+    answered: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        if not requested[0]:
+            requested[0] = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        answered.append(message)
+
+    headers = [
+        (name.lower().encode("ascii"), value.encode("ascii"))
+        for name, value in gateway.headers().items()
+    ]
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "https",
+        "path": f"/v1/sessions/{sid}/frames",
+        "raw_path": f"/v1/sessions/{sid}/frames".encode("ascii"),
+        "query_string": b"wait_ms=5000",
+        "root_path": "",
+        "headers": [(b"host", b"gw.example"), *headers],
+        "client": ("127.0.0.1", 50_000),
+        "server": ("gw.example", 443),
+    }
+    app = cast(Any, gateway.app)
+    held = gateway.state.sessions.get(sid, gateway.agent_key.split("_")[1])
+    assert held is not None
+    before = held.poll_started
+    lost = asyncio.create_task(app(scope, receive, send))
+    try:
+        async with asyncio.timeout(5):
+            while held.poll_started == before:  # the lost poll is waiting for a frame
+                await asyncio.sleep(0.01)
+        gone.set()  # its connection was reset while it waited
+        await asyncio.wait({lost}, timeout=1.0)
+        called = await gateway.client.post(
+            f"/v1/sessions/{sid}/calls?wait_ms=5000", content=_call(4), headers=gateway.headers()
+        )
+        assert called.status_code == 200
+        retried = await gateway.client.get(
+            f"/v1/sessions/{sid}/frames?wait_ms=2000", headers=gateway.headers()
+        )
+        assert retried.status_code == 200
+        assert json.loads(retried.content)["kind"] == "workspace_call"
+    finally:
+        async with asyncio.timeout(10):
+            await lost
+    assert not any(b"workspace_call" in message.get("body", b"") for message in answered)
+
+
+@pytest.mark.anyio
+async def test_one_lost_long_poll_answer_does_not_end_an_agent_session(gateway: _Gateway) -> None:
+    """A client reads a long-poll answer for at most the 25-second wait plus 15 seconds, then
+    polls again after a short back-off on a fresh connection. An agent session must outlast
+    that, or one answer lost in transit would end the relayed connection."""
+
+    from finishup.gateway.sessions import AGENT_POLL_GRACE_SECONDS
+    from finishup.protocol.rest_binding import MAX_WAIT_MS
+
+    key_id = gateway.agent_key.split("_")[1]
+    sid = await _open(gateway, agent=True)
+    held = gateway.state.sessions.get(sid, key_id)
+    assert held is not None
+    # The poll whose answer was lost began this long ago: a read timeout, the first retry's
+    # half-second back-off, and a few seconds for a fresh TLS connection.
+    held.poll_started -= MAX_WAIT_MS / 1_000 + 15.0 + 0.5 + 5.0
+    await gateway.state.sweep()
+    assert gateway.state.sessions.get(sid, key_id) is not None
+    held.poll_started -= AGENT_POLL_GRACE_SECONDS
+    await gateway.state.sweep()
+    assert gateway.state.sessions.get(sid, key_id) is None
