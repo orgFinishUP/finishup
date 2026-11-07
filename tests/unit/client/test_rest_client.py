@@ -555,3 +555,37 @@ async def test_refusals_name_what_the_server_said_not_a_stopped_service(
         await client.close()
     assert status.state is ServiceState.READY
     assert calls == ["admit", "admit", "admit"]
+
+
+@pytest.mark.anyio
+async def test_the_stored_api_key_is_read_off_the_event_loop(
+    keys: ApiKeyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-KEYRING-LOOP: a platform credential store can block (a locked collection, a prompt). The
+    key was read on the event loop of every connection, the workspace agent's delivery and the
+    MCP bridge included, stalling all their other work meanwhile; it is read in a worker thread."""
+
+    import threading
+
+    from finishup.client.credentials import KeyringOrFileCredential
+
+    api = make_api(FakeService(), keys)
+    _record, token = keys.create("laptop", "operator")
+    readers: list[int] = []
+
+    def read(_self: KeyringOrFileCredential) -> str:
+        readers.append(threading.get_ident())
+        return token
+
+    monkeypatch.setattr(KeyringOrFileCredential, "read", read)
+    client = await connect_rest_service(
+        ControlClientKind.CLI,
+        record=_RECORD,
+        root=Path("/nonexistent"),
+        _transport=httpx.ASGITransport(app=api.asgi("https")),  # type: ignore[arg-type]
+    )
+    try:
+        assert client.hello_service_status is not None
+    finally:
+        await client.close()
+    assert len(readers) == 1 and readers[0] != threading.get_ident()

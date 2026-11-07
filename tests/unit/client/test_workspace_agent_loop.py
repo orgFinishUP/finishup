@@ -619,3 +619,29 @@ async def test_a_stop_never_waits_on_an_unanswered_registration_end(
         await api.close()
     assert transport.deletes == 1
     assert elapsed < 3.0
+
+
+@pytest.mark.anyio
+async def test_the_agent_reads_its_api_key_off_the_event_loop(
+    remote: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-KEYRING-LOOP: the agent opened its HTTP client, reading the stored key, on its event loop,
+    where a blocking platform credential store held up its signal handlers and the zero-network
+    watch. It is opened in a worker thread."""
+
+    import threading
+
+    from finishup.client import rest_client
+
+    record, root = remote
+    openers: list[int] = []
+
+    def open_rest_http(_record: ServerTarget, _root: Path) -> tuple[Any, dict[str, str]]:
+        openers.append(threading.get_ident())
+        return httpx.AsyncClient(base_url="https://lab.example"), {}
+
+    monkeypatch.setattr(rest_client, "open_rest_http", open_rest_http)
+    loop = WorkspaceAgentLoop(root, record, scan_seconds=0.02)
+    loop.stop()
+    assert await asyncio.wait_for(loop.run(), 5) == 0
+    assert len(openers) == 1 and openers[0] != threading.get_ident()

@@ -915,7 +915,10 @@ async def connect_rest_service(
     if claim is not None and type(claim) is not WorkspaceClaim:
         raise TypeError("workspace_claim_invalid")
     require_connection_allowed(record)
-    endpoint = _endpoint or rest_endpoint_for(record, root)
+    # The stored API key may come from a platform credential store, which can block (a locked
+    # Secret Service collection, a keychain prompt): it is read off the event loop, so a
+    # long-lived holder's other work (the workspace agent's polls, the MCP bridge) keeps running.
+    endpoint = _endpoint or await asyncio.to_thread(rest_endpoint_for, record, root)
     http = _client(endpoint, transport=_transport)
     try:
         info = await read_server_info(http, endpoint, claim)

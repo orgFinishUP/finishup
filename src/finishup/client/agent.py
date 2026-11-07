@@ -33,6 +33,8 @@ long-lived, pull-based client of the server's network API, one per target root:
   target's folder either. Ending a registration is a courtesy bounded at one second
   (``_END_SECONDS``): the server ends one whose polls stop, so a stop never waits on a
   black-holed network.
+* It reads the target's API key off its event loop (a platform credential store can block), so
+  its signal handlers and the zero-network watch keep running meanwhile.
 * It holds ``<target root>/state/agent.lock`` (an exclusive lock stamped with its pid, for
   display), ends a workspace 15 minutes after its last note, and exits after 15 minutes without
   workspaces, on ``SIGTERM``, or when ``stop_agent`` asks it to through an owner-only request file
@@ -616,11 +618,15 @@ class WorkspaceAgentLoop:
             if self._zero_network():
                 return
 
-    def _open(self) -> _AgentApi:
+    async def _open(self) -> _AgentApi:
         if self._http is None or self._headers is None:
             from finishup.client.rest_client import open_rest_http
 
-            self._http, self._headers = open_rest_http(self._record, self._root)
+            # The API key may come from a platform credential store, which can block: off the
+            # event loop, so the signal handlers and the zero-network watch keep running.
+            self._http, self._headers = await asyncio.to_thread(
+                open_rest_http, self._record, self._root
+            )
         return _AgentApi(self._http, self._headers)
 
     async def run(self) -> int:
@@ -629,7 +635,7 @@ class WorkspaceAgentLoop:
             with contextlib.suppress(Exception):
                 await self._transport_closer(self._record, self._root)
             return 0
-        api = self._open()
+        api = await self._open()
         watch = asyncio.create_task(self._watch_marker())
         idle_since = self._clock()
         try:

@@ -5786,8 +5786,12 @@ process that still remembered it started), it stops for good (`workspace_agent_e
 `target_removed`), sending nothing more, not even `DELETE /v1/agents/{id}`, and never restores
 the transport, which would recreate the removed folder. Ending a registration
 (`DELETE /v1/agents/{id}`) is a courtesy bounded at one second (`_END_SECONDS`; the server ends
-one whose polls stop), so a stop never outlasts `stop_agent`'s wait on a black-holed network. An
-idle agent exits only once `transport_alive` answers false.
+one whose polls stop), so a stop never outlasts `stop_agent`'s wait on a black-holed network.
+The agent opens its HTTP client (`open_rest_http`, which reads the stored API key) in a worker
+thread, and `connect_rest_service` reads the key there too (`rest_endpoint_for` through
+`asyncio.to_thread`): a platform credential store can block, and the event loop of a long-lived
+holder (the agent, its deliveries, the MCP bridge) keeps running meanwhile. An idle agent exits
+only once `transport_alive` answers false.
 
 **Hooks and drains.** On a remote root a hook pass's drains connect with the hook's workspace
 locator (the foundation's `cli.observe_hooks._drain_connector`; without a workspace nothing is
