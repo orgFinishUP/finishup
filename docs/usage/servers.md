@@ -329,10 +329,14 @@ finishup server folders remove devbox /srv/team-specs
 `add` shows you which server may then read which folder, and what a server that does not follow
 FinishUP's rules could read and list there, and asks you to type the server's name, in a terminal
 you are typing in; an agent cannot do this. Give the folder's full path, starting with `/`. It
-must exist, with no link on the way and no hidden or system folder in it (on macOS, give
-`/private/tmp/...` rather than `/tmp/...`). Your home folder, a folder that holds it, and its
-private folders such as `Library` cannot be added: add the folder inside it that you mean. A
-server may read up to 32 such folders.
+must exist, with no link on the way (on macOS, give `/private/tmp/...` rather than `/tmp/...`),
+in at most 16 parts and 190 characters, each part made of letters, digits and `.`, `_`, `+`, `@`
+and `-`, and no part starting with a dot (a hidden folder). These cannot be added: the
+filesystem root; `/boot`, `/dev`, `/etc`, `/proc`, `/run`, `/sys` and `/var/run` (and on macOS
+`/private/etc` and `/private/var/run`) and every folder inside them; your home folder and a
+folder that holds it; and its private folders `Library`, `AppData` and `snap`: add the folder
+inside your home folder that you mean. Any other folder can be added, `/usr/lib` or `/opt/...`
+included. A server may read up to 32 such folders.
 
 Once a folder is added, that server's checks and reviews may read files beneath it: input files a
 task names there, files its reviewer asks to read there, and test files your agent declared
@@ -717,7 +721,7 @@ repeated safely.
 | `workspace_ref_not_portable` | A task on a server elsewhere was started with a full folder path or another value the server cannot use. | FinishUP's own tools send the right value; a hand-written client must send the workspace handle the server gave it, or name no project. |
 | `workspace_binding_conflict` | A request named the project in a form its connection cannot use: a server-elsewhere `client:` handle sent to this computer's FinishUP, or a folder path and a server-elsewhere claim together. | Name the project by its folder path through FinishUP's own tools; a hand-written client must not send a `client:` handle to a local server. |
 | `task_input_outside_not_admitted` | A task names a file or folder outside your project that review may not read: no folder you listed for that server covers it, nor does the server's own privacy policy. The rest of the work was checked. | On this computer, in your own terminal: `finishup server folders add NAME FOLDER` with that file's folder, in either mode. Then check again. |
-| `folder_invalid` | `server folders add` was given a folder it cannot admit: not a full path, missing, reached through a link, hidden, a system folder, or your home folder, a folder that holds it or one of its private folders. | Give the full path of the existing folder you mean, inside your home folder if it is there. |
+| `folder_invalid` | `server folders add` was given a folder it cannot admit: not a full path, missing, reached through a link, too long or with other characters than letters, digits and `. _ + @ -`, hidden (a part starting with a dot), the filesystem root, in `/boot`, `/dev`, `/etc`, `/proc`, `/run`, `/sys` or `/var/run` (or `/private/etc`, `/private/var/run`), or your home folder, a folder that holds it or one of its private folders (`Library`, `AppData`, `snap`). Nothing else is refused. | Give the full path of the existing folder you mean, inside your home folder if it is there. |
 | `folders_record_invalid`, `folders_record_unsafe` | The record of what a server may read outside your projects on this computer is damaged or not private to you, so that server reads no folder outside them, in listed mode, whatever mode you chose. `server status`, `server folders list` and `/server` say so too. | On this computer, run `finishup server folders remove NAME --all`; then add the folders again (`finishup server folders add NAME FOLDER`), or choose local mode again (`finishup server folders mode NAME local`). |
 | `outside_read_mode_invalid` | `server folders mode` or `server add --outside-reads` was given something other than `local` or `listed`. | Give `local` or `listed`. |
 | `outside_reads_not_chosen` | `server add` asked what the server may read outside your projects, and no answer chose: Enter alone or another word three times, end of input, or Ctrl-C. Nothing was added. | Run the command again and type `local` or `listed` when asked, or add `--outside-reads local` or `--outside-reads listed`. |
