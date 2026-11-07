@@ -5225,10 +5225,15 @@ default), and `RoutedApprovedCheckRunner` runs approved checks. An absolute-path
 the unchanged local adapter; a `client:<16 hex>` handle (`client_bound(value)`) goes to the hub, and
 no local adapter is ever handed it. An agent answer that carries a change-capture reason raises the
 same `ChangeCaptureUnavailable` a local read would. A reviewer's agent reads (`list_beneath`,
-`read_text_beneath`) and its ignored-path rule are bounded by the reviewer's own per-read budget
-(`LOCAL_READ_SECONDS` plus 1 s), so a slow agent ends the review `deadline` as a slow local read
-does; `ClientWorkspaceReads.refused_paths(paths)` answers that rule for a whole listing in
-batches of 64 (`ReadRoot.refuse_many`), and the broker checks the read's stop before probing. The reviewer broker's file reads (and its
+`read_text_beneath`, `read_declared_test`) and its ignored-path rule wait no longer than the
+read's own stop leaves, within the reviewer's per-read budget (`LOCAL_READ_SECONDS` plus 1 s):
+the loop hands every read an `application.reviewer_loop.ReadStop`, the `expired` callable whose
+`seconds_left()` is the time until that stop. A read whose stop has passed sends nothing and
+raises `ReadDeadline` (a declared test reads as not visible, as locally), so a slow agent ends the
+review `deadline` as a slow local read does and never runs into the final judgment's reserve.
+`ClientWorkspaceReads.refused_paths(paths, expired)` answers that rule for a whole listing in
+batches of 64 (`ReadRoot.refuse_many(paths, expired)`, asked in place of `refuse` for the read
+path too), checking the stop before every batch; the broker checks it before probing. The reviewer broker's file reads (and its
 refusal probe), declared-test pinning, the observation verification steps and the post-run hash
 now run in `asyncio.to_thread`. `build_ready_application_factory(..., workspace_hub=)` and
 `provide_service_ready_context(..., workspace_hub=)` take the composition's one hub; without one, a

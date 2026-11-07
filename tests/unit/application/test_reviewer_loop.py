@@ -38,7 +38,9 @@ from finishup.application.reviewer_broker import ReadElement, ReadRoot, Reviewer
 from finishup.application.reviewer_loop import (
     FINAL_FORMAT_ERROR,
     FINAL_PHASE,
+    LOCAL_READ_SECONDS,
     READ_NOT_SERVED,
+    ReadStop,
     ReviewerLoop,
     ReviewerModelError,
     Turn,
@@ -1024,13 +1026,15 @@ async def test_a_listing_asks_a_batched_refusal_once_for_all_its_children(tmp_pa
         (tmp_path / name).write_text("a")
     asked: list[tuple[str, ...]] = []
     single: list[str] = []
+    stops: list[Callable[[], bool]] = []
 
     def per_path(path: str) -> bool:
-        single.append(path)  # the listed directory itself, never one of its entries
+        single.append(path)  # never asked: the batched rule answers for this root
         return False
 
-    def batched(paths: tuple[str, ...]) -> frozenset[str]:
+    def batched(paths: tuple[str, ...], expired: Callable[[], bool]) -> frozenset[str]:
         asked.append(paths)
+        stops.append(expired)
         return frozenset(path for path in paths if path == "ignored.txt")
 
     root = ReadRoot("w1", str(tmp_path.resolve()), refuse=per_path, refuse_many=batched)
@@ -1041,8 +1045,13 @@ async def test_a_listing_asks_a_batched_refusal_once_for_all_its_children(tmp_pa
         {"name": "ordinary.txt", "kind": "file"},
         {"name": "other.txt", "kind": "file"},
     ]
-    assert asked == [("ignored.txt", "ordinary.txt", "other.txt")]
-    assert single == [""]
+    # The listed directory itself, then every entry at once: never one probe per entry.
+    assert asked == [("",), ("ignored.txt", "ordinary.txt", "other.txt")]
+    assert single == []
+    # Each probe is bounded by the read's own stop, which knows the time it leaves (ADR-051).
+    assert len(stops) == 2 and stops[0] is stops[1]
+    stop = stops[0]
+    assert isinstance(stop, ReadStop) and 0 < stop.seconds_left() <= LOCAL_READ_SECONDS
 
 
 @pytest.mark.anyio
