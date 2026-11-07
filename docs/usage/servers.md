@@ -488,7 +488,8 @@ FinishUP's own rules could ask it for any file in your project folder, or in a f
 server read, that passes these safety checks, not only the files a task names. In local mode that
 means any such file on this computer, as FinishUP on this computer could read. It could also see
 the names of the files in those folders, ignored ones included, and learn whether a file exists
-elsewhere on this computer, and its size and dates, but never its contents.
+elsewhere on this computer, its size and dates, and whether FinishUP would read it there (for a
+folder, whether it holds a file FinishUP would read), but never its contents.
 Use a server you trust with your project, choose local mode only for a server you trust as you
 trust FinishUP on this computer, and otherwise list only folders you would let it see.
 

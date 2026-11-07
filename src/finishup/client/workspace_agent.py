@@ -547,7 +547,10 @@ class WorkspaceAgentHandler:
         that exists (``_exists_visibly``) and that a local read would read
         (``outside_inputs_readable``), so the server can say so and keep the rest of what it
         asked for. A value that names nothing, or only what a local read would not read, is not
-        reported: a local read would find nothing there either. A named root beneath which the
+        reported: a local read would find nothing there either. Unlike existence, that bit tells
+        the server more than ``lstat_candidates`` does (a file's link count and owner, its
+        directories' owners, whether a directory holds a file the read would read), as ADR-051
+        decision 5 records; never a name or content. A named root beneath which the
         task names nothing is never opened and is left out; one that holds a listed folder is
         walked only to the values beneath that folder, so beneath the server's own roots the
         record narrows them and never widens them.
@@ -855,14 +858,15 @@ class WorkspaceAgentHandler:
         elsewhere it must lie at or beneath a folder this client's owner listed for the server;
         an existing file that meets neither and that the local read would open
         (``_exists_visibly``, ``declared_test_readable``) is ``root_not_admitted``, never read on
-        the server's word, so the server can say what was not offered, and any other reads as
-        nothing, as it does locally. In ``listed`` mode both comparisons are
-        made on the spelling the local read walks too: a first component that is a link root
-        owns (``/tmp`` on macOS) counts as its target. They are exact otherwise: a differently
-        cased spelling is refused, never let in. One let in outside the workspace is an outside
-        read, so it never enters the claimed workspace under another spelling (another case on a
-        case-insensitive volume, a bind mount), by case-folded path or by device and inode, where
-        Git's ignore rule would not be asked.
+        the server's word, so the server can say what was not offered (a refusal that, like
+        ``unlisted``, tells it whether the file's link count and owners let the local read open
+        it, ADR-051 decision 5), and any other reads as nothing, as it does locally. In
+        ``listed`` mode both comparisons are made on the spelling the local read walks too: a
+        first component that is a link root owns (``/tmp`` on macOS) counts as its target. They
+        are exact otherwise: a differently cased spelling is refused, never let in. One let in
+        outside the workspace is an outside read, so it never enters the claimed workspace under
+        another spelling (another case on a case-insensitive volume, a bind mount), by
+        case-folded path or by device and inode, where Git's ignore rule would not be asked.
         """
 
         location = self._location(arguments.location, call)
