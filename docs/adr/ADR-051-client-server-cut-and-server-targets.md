@@ -1146,7 +1146,9 @@ through the same relay; human-control and secret channels never leave the server
   only polls its result. Polls, cancels and workspace replies, which are safe to repeat, are retried
   after a transient failure (up to three in a row), so one network blip does not end a relayed
   connection and every call on it. When the hello declared a workspace agent, server frames arrive through
-  the `GET …/frames` long-poll and replies go out with `POST …/frames`. A relay that ends deletes
+  the `GET …/frames` long-poll and replies go out with `POST …/frames`. A background agent's
+  session carries `FinishUP-Service-Start: never`, so, as over SSH, it never has the gateway
+  start a service the owner stopped; a client's own session may. A relay that ends deletes
   its session within one second at most and never once this computer reported zero-network: the
   gateway forgets an unused session on its own, so a stop never waits on a black-holed network
   for it. TLS uses the target's CA
@@ -1163,7 +1165,8 @@ through the same relay; human-control and secret channels never leave the server
   (`yoetz.gateway-keys/1`), compared in constant time; expiry and rotation are supported, and a
   revoked key fails its next request and its sessions close. Each session holds one control
   connection to the daemon (started on demand through `service.client.ensure_service_running()`,
-  no handshake of its own) and forwards the client's hello byte for byte. It refuses `Origin`
+  except for a session sent with `FinishUP-Service-Start: never`, which reaches a running service
+  only; no handshake of its own) and forwards the client's hello byte for byte. It refuses `Origin`
   headers and locator hellos, enforces the key's scope (decision 9) by answering an out-of-scope
   call with a synthesized `method_forbidden` control-result that is never forwarded, keeps results
   per `(sid, rpc_id)` until fetched and readable for 60 seconds after (8 MiB per session), expires

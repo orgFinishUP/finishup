@@ -2,7 +2,9 @@
 
 One local control connection becomes one gateway session (ADR-051, approach A; design section 4):
 
-* the client's hello frame is ``POST /v1/sessions``; the hello-result is written back;
+* the client's hello frame is ``POST /v1/sessions``; the hello-result is written back. A
+  background agent's session carries ``FinishUP-Service-Start: never``, so the gateway never
+  starts a service the owner stopped for it (a client's own connection may);
 * each ``call`` is ``POST /v1/sessions/{sid}/calls?wait_ms=``; a ``202`` is followed by long-polls
   of ``GET …/results/{rpc_id}``. A call is never posted twice: after an ambiguous failure the
   connector only polls for its result (at most once);
@@ -41,6 +43,8 @@ from finishup.protocol.rest_binding import (
     BINDING_HEADER,
     BINDING_VERSION,
     MAX_WAIT_MS,
+    SERVICE_START_HEADER,
+    SERVICE_START_NEVER,
     SESSION_ID_PATTERN,
 )
 from finishup.service.control_protocol import (
@@ -239,12 +243,21 @@ class HttpsUpstream:
         }
 
     async def request(
-        self, method: str, path: str, *, body: bytes | None = None, wait_ms: int | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None = None,
+        wait_ms: int | None = None,
+        start_service: bool = True,
     ) -> httpx.Response:
         params = None if wait_ms is None else {"wait_ms": str(wait_ms)}
+        headers = self._headers()
+        if not start_service:
+            headers[SERVICE_START_HEADER] = SERVICE_START_NEVER
         try:
             response = await self._client.request(
-                method, f"{self._base}{path}", content=body, params=params, headers=self._headers()
+                method, f"{self._base}{path}", content=body, params=params, headers=headers
             )
         except httpx.HTTPError as error:
             raise _unreachable(error) from None
@@ -289,11 +302,14 @@ class _Relay:
         upstream: HttpsUpstream,
         on_unavailable: Callable[[str], Awaitable[None]],
         may_send: Callable[[], bool],
+        *,
+        start_service: bool,
     ) -> None:
         self._local = local
         self._upstream = upstream
         self._on_unavailable = on_unavailable
         self._may_send = may_send
+        self._start_service = start_service
         self._write_lock = asyncio.Lock()
         self._sid: str | None = None
         self._tasks: set[asyncio.Task[object]] = set()
@@ -330,7 +346,9 @@ class _Relay:
         return f"/v1/sessions/{self._sid}{suffix}"
 
     async def open(self, hello_payload: bytes) -> bool:
-        response = await self._upstream.request("POST", "/v1/sessions", body=hello_payload)
+        response = await self._upstream.request(
+            "POST", "/v1/sessions", body=hello_payload, start_service=self._start_service
+        )
         if response.status_code == 409:
             # The server answered with its own hello-result on a manifest mismatch; the client
             # decodes it and names the mismatch.
@@ -482,14 +500,17 @@ async def relay_https_connection(
     on_unavailable: Callable[[str], Awaitable[None]],
     on_ready: Callable[[], Awaitable[None]],
     may_send: Callable[[], bool],
+    start_service: bool = True,
 ) -> None:
     """Serve one local connection whose hello frame the connector already read and checked.
 
     ``may_send`` answers whether anything may still be sent upstream; the closing ``DELETE`` is
     skipped when it does not (the connector stops because this computer reported zero-network).
+    ``start_service`` false (a background agent's connection) asks the gateway never to start a
+    service that is not running; the session is then refused as ``remote_service_not_running``.
     """
 
-    relay = _Relay(local, upstream, on_unavailable, may_send)
+    relay = _Relay(local, upstream, on_unavailable, may_send, start_service=start_service)
     try:
         if not await relay.open(hello_payload):
             return

@@ -28,8 +28,10 @@ client's ``workspace_reply`` frames pass through both relays unchanged.
 The connector is started on demand by ``finishup.service.client`` and by ``finishup server
 connect``; it never starts, stops or supersedes a FinishUP service, except that for an SSH
 target it may run the server's own ``<launcher> service start`` once when a client's connection
-finds the remote endpoint missing (an idle-stopped service). Its own background agents never
-start the remote service: a service the owner stopped stays stopped until a client asks.
+finds the remote endpoint missing (an idle-stopped service), and a client's gateway session lets
+the gateway start one. Its own background agents never start the remote service, over SSH or
+HTTPS (their gateway sessions carry ``FinishUP-Service-Start: never``): a service the owner
+stopped stays stopped until a client asks.
 """
 
 from __future__ import annotations
@@ -436,6 +438,8 @@ class Connector:
                     on_unavailable=self._unavailable,
                     on_ready=self._ready,
                     may_send=self._may_send,
+                    # Only a client's own connection is demand for the remote service.
+                    start_service=not own,
                 )
         except Exception:
             # A relay fault ends this connection only; the client sees its stream close.

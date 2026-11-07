@@ -5635,8 +5635,10 @@ session's `service_instance_id` and `service_generation`, never forwarded).
   opens `open_background_agent(root: Path, claim: WorkspaceClaim, dial: Dial) ->
   BackgroundAgent | None` (a `BackgroundAgent` has `alive`, `drain()` and `aclose()`; `Dial` is
   `Callable[[], Awaitable[AuthenticatedUnixStream]]`, a connection the connector relays over a
-  socket pair without passing its endpoint, which counts as no client activity and renews no
-  lease), kept for `AGENT_LEASE_SECONDS` (900) after that workspace's last client hello, or
+  socket pair without passing its endpoint, which counts as no client activity, renews no
+  lease and never starts the remote service: no `service start` over SSH, and its gateway
+  session carries `FinishUP-Service-Start: never`), kept for `AGENT_LEASE_SECONDS` (900) after
+  that workspace's last client hello, or
   until the connector stops (`server disconnect`, a `server use` that leaves the target, the idle
   exit). Every
   `DRAIN_INTERVAL_SECONDS` (30), and once more as it stops before closing the agents, it calls

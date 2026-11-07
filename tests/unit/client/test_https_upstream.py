@@ -619,3 +619,77 @@ def test_a_key_stored_after_the_connector_started_is_read_where_it_now_lives(
 
     with selection_override(root):
         asyncio.run(exercise())
+
+
+def test_a_background_agent_never_has_the_gateway_start_a_stopped_service(home: Path) -> None:
+    """As over SSH: the owner stopped the server's service, and only a client's connection may
+    have it started again. A background agent's session asks the gateway never to start it."""
+
+    from finishup.ports.control import ControlError
+
+    with targets.registry_lock():
+        record, root = targets.new_remote_target("gw", "https", base_url="https://gw.example")
+    keys = home / "gateway"
+    _key_record, key = create_key(keys, label="client", scope="agent")
+    daemon = ScriptedDaemon()
+    running = [False]
+    started: list[str] = []
+
+    def serve() -> object:
+        client, server = memory_pair()
+        asyncio.get_running_loop().create_task(daemon.serve(server))
+        return client
+
+    async def start_and_connect() -> object:
+        if not running[0]:
+            started.append("service start")
+            running[0] = True
+        return serve()
+
+    async def reach_running() -> object:
+        if not running[0]:
+            raise ControlError("service_unavailable", retryable=True)
+        return serve()
+
+    _state, app = build_gateway_app(
+        keys_directory=keys,
+        connect_upstream=start_and_connect,  # type: ignore[arg-type]
+        reach_upstream=reach_running,  # type: ignore[arg-type]
+        audit=_Audit(),
+    )
+    connector = Connector(
+        root, record, https_transport=httpx.ASGITransport(app=app), credential=lambda: key
+    )
+    hello = encode_control_frame(
+        {
+            "protocol_version": "1.0",
+            "client_kind": "cli",
+            "client_version": "0.1.0",
+            "connection_nonce": "3d" * 32,
+            "schema_manifest_digest": load_schema_catalog().manifest_digest,
+        }
+    )
+
+    async def exercise() -> None:
+        # The connector's own background agent reconnects: nothing is started.
+        agent = await connector._dial_own()  # pyright: ignore[reportPrivateUsage]
+        await agent.send_all(hello)
+        async with asyncio.timeout(5):
+            assert await agent.receive(65_536) == b""
+        await agent.aclose()
+        assert started == [] and daemon.connections == 0
+        status = read_connector_status(root)
+        assert status is not None
+        assert (status.phase, status.reason) == ("unavailable", "remote_service_not_running")
+        # A client's connection is demand: the gateway starts the service and relays.
+        client, local = _pair()
+        relay = asyncio.create_task(connector._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        async with asyncio.timeout(10):
+            received = await run_scripted_session(client, agent=False)
+            await client.shutdown_write()
+            await relay
+        assert started == ["service start"]
+        assert len(received) == 9
+
+    with selection_override(root):
+        asyncio.run(exercise())
