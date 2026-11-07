@@ -294,7 +294,8 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     # ADR-051 decision 7 (server add parity, 2026-11-07): an SSH host key nobody confirmed.
     "remote_host_key_unconfirmed": (
         "the server's SSH host key was not confirmed on this computer, so nothing was added; run "
-        "'finishup server add' in your own terminal and confirm the key when OpenSSH asks",
+        "'finishup server add' again and answer yes when OpenSSH asks, once you have checked the "
+        "fingerprint with the server's own",
         _UNAVAILABLE,
     ),
     "remote_service_not_running": (
@@ -763,24 +764,24 @@ def _discover_ssh_endpoint(
 ) -> SshEndpointFacts:
     """Where an SSH server's API socket is, through one SSH command (ADR-051).
 
-    On the owner's trusted console OpenSSH may ask, once, to confirm a host key this computer does
-    not know yet (``StrictHostKeyChecking=ask``, as approach A's and approach B's ``server add``
-    do); that answer is the pin every later connection checks. Without that console nothing is
-    asked, and an unknown host key is refused with the fix (decision 7, server add and login
-    parity). A server whose FinishUP does not offer its API socket is refused with the exact
-    setting to change there.
+    ``server add`` has just required the owner's trusted foreground console for the typed
+    confirmation (``_confirm_on_trusted_console``), and refused as ``trusted_console_required``
+    without it, so this runs on the owner's terminal: OpenSSH may ask there, once, to confirm a host
+    key this computer does not know yet (``StrictHostKeyChecking=ask``, as approach A's and
+    approach B's ``server add`` do), and that answer is the pin every later connection checks. A
+    key the owner declined or did not answer in time is refused with the fix (decision 7, server
+    add and login parity). A server whose FinishUP does not offer its API socket is refused with
+    the exact setting to change there.
     """
 
     from finishup.client.rest_runtime import discover_ssh_endpoint
 
-    console = _trusted_console_present()
-    if console:
-        typer.echo(
-            "Asking the server where its FinishUP network API is (its config.toml needs "
-            "'api_socket = true' under [network]). If this computer does not know its SSH host "
-            "key yet, OpenSSH asks you to confirm it here: compare the fingerprint with the "
-            "server's own before you answer yes."
-        )
+    typer.echo(
+        "Asking the server where its FinishUP network API is (its config.toml needs "
+        "'api_socket = true' under [network]). If this computer does not know its SSH host key "
+        "yet, OpenSSH asks you to confirm it here: compare the fingerprint with the server's own "
+        "before you answer yes."
+    )
     try:
         return discover_ssh_endpoint(
             user=user,
@@ -788,13 +789,12 @@ def _discover_ssh_endpoint(
             port=port,
             remote_root=remote_root,
             remote_launcher=remote_launcher,
-            confirm_host_key=console,
+            confirm_host_key=True,
         )
     except TargetRuntimeError as error:
         if error.reason == "remote_host_key_unconfirmed":
             raise ServerCommandRefused(
-                "remote_host_key_unconfirmed",
-                message=_HOST_KEY_DECLINED if console else _HOST_KEY_NO_CONSOLE,
+                "remote_host_key_unconfirmed", message=_HOST_KEY_DECLINED
             ) from None
         if error.reason == "remote_incompatible" and error.phase == "api_socket_unconfigured":
             raise ServerCommandRefused(
@@ -806,14 +806,9 @@ def _discover_ssh_endpoint(
 
 
 _HOST_KEY_DECLINED: Final = (
-    "the server's SSH host key was not confirmed, so nothing was added; run 'finishup server add' "
-    "again and answer yes to OpenSSH's question once you have checked the fingerprint with the "
-    "server's own"
-)
-_HOST_KEY_NO_CONSOLE: Final = (
-    "this computer does not know the server's SSH host key yet, and there is no terminal of yours "
-    "here for OpenSSH to ask you to confirm it, so nothing was added; run 'finishup server add' in "
-    "your own terminal, or connect once with 'ssh' yourself, then add it again"
+    "the server's SSH host key was not confirmed (OpenSSH's question was declined or not "
+    "answered), so nothing was added; run 'finishup server add' again and answer yes to OpenSSH's "
+    "question once you have checked the fingerprint with the server's own"
 )
 # Approach C's SSH kind reaches the server's own owner-only API socket (decision 9).
 _NO_API_SOCKET: Final = (
@@ -821,23 +816,6 @@ _NO_API_SOCKET: Final = (
     "the server, add 'api_socket = true' under [network] in its config.toml and run 'finishup "
     "service restart' there, then run 'finishup server add' again"
 )
-
-
-def _trusted_console_present() -> bool:
-    """Whether this command runs on the owner's terminal, where OpenSSH can ask its question.
-
-    ``server add`` of a remote kind has just required the owner's trusted foreground console for
-    the typed confirmation (``_confirm_on_trusted_console``), which fails closed without it; this
-    checks, without opening it again, that the probe that follows still has that terminal
-    (standard input and error on a terminal, and ``/dev/tty``), as OpenSSH needs to ask.
-    """
-
-    import os
-
-    try:
-        return os.isatty(0) and os.isatty(2) and os.path.exists("/dev/tty")
-    except OSError:
-        return False
 
 
 # ``server login``: why the server's answer keeps the key from being stored, and the fix.

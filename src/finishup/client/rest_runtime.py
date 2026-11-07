@@ -324,16 +324,17 @@ def discover_ssh_endpoint(
     ``[network] api_socket = true`` is refused with ``remote_incompatible`` (phase
     ``api_socket_unconfigured``).
 
-    ``confirm_host_key`` (``server add`` on the owner's trusted console) makes this the one
-    interactive ``ssh`` of the topology, as approach A's and approach B's ``server add`` are:
-    ``StrictHostKeyChecking=ask`` with no master and no ``BatchMode``, so OpenSSH itself asks, on
-    that terminal, to confirm a host key it does not know yet, and that answer is the
-    ``known_hosts`` pin every later ``BatchMode`` connection checks. Password and
-    keyboard-interactive login stay off, so the host key is the only question and the add proves
-    the key authentication later connections need. Without it nothing is asked
-    (``StrictHostKeyChecking=yes``). An unknown host key that was not confirmed (no console, or the
-    owner declined) raises ``TargetRuntimeError("remote_host_key_unconfirmed")``; a changed one
-    stays ``remote_identity_changed``.
+    ``server add`` runs this only after the owner's typed confirmation on the trusted console,
+    with ``confirm_host_key``: it is the one interactive ``ssh`` of the topology, as approach A's
+    and approach B's ``server add`` are: ``StrictHostKeyChecking=ask`` with no master and no
+    ``BatchMode``, so OpenSSH itself asks, on that terminal, to confirm a host key it does not know
+    yet, and that answer is the ``known_hosts`` pin every later ``BatchMode`` connection checks.
+    Password and keyboard-interactive login stay off, so the host key is the only question and the
+    add proves the key authentication later connections need. Without ``confirm_host_key``
+    nothing is asked (``StrictHostKeyChecking=yes``). Either way an unknown host key that was not
+    confirmed (the owner declined OpenSSH's question or did not answer it in time) raises
+    ``TargetRuntimeError("remote_host_key_unconfirmed")``; a changed one stays
+    ``remote_identity_changed``.
     """
 
     launcher = remote_launcher

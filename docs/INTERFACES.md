@@ -5758,10 +5758,14 @@ sent). Remote failures are `service_unavailable` with phase `remote_unreachable`
 `<troot>/run/m` forwarding `<troot>/run/api.sock` to the server's `api.sock` (`remote_endpoint` in
 `target.json`), learned by `server add` from `service endpoint --json`
 (`discover_ssh_endpoint(*, user, host, port, remote_root, remote_launcher, confirm_host_key=False)`;
-`cli.server` passes `confirm_host_key=_trusted_console_present()`, which runs `ssh -o
-StrictHostKeyChecking=ask -o ControlMaster=no -o PasswordAuthentication=no -o
-KbdInteractiveAuthentication=no -T` within 180 s; an unknown host key not confirmed raises
-`TargetRuntimeError("remote_host_key_unconfirmed")`, a changed one `remote_identity_changed`;
+`cli.server` passes `confirm_host_key=True` after the owner's typed confirmation on the trusted
+foreground console (without that console the add is refused as `trusted_console_required` before
+any `ssh` runs), which runs `ssh -o StrictHostKeyChecking=ask -o ControlMaster=no -o
+PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T` within 180 s; an unknown host key
+the owner declined or did not confirm in time raises
+`TargetRuntimeError("remote_host_key_unconfirmed")`, which `server add` refuses (exit 20, nothing
+added) with the fix, add again and answer yes once the fingerprint is checked; a changed one is
+never asked about and stays `remote_identity_changed`;
 `api_socket_unconfigured` is refused with the `api_socket = true` line). `server login` checks
 the key first with `rest_client.check_api_key(record, root, secret) -> KeyCheck` (`GET
 /v1/server`, the shared check first; `"accepted"`, or `"server_keys_unusable"` when the server

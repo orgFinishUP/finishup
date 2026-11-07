@@ -799,10 +799,10 @@ answers bounded `workspace_call`s on a connection that declared it.
     OpenSSH's own `known_hosts` entry, the pin every later connection checks with
     `StrictHostKeyChecking=yes`; a key that changed is never asked about
     (`remote_identity_changed`). The command says beforehand that OpenSSH may ask and to compare
-    the fingerprint with the server's own. Without that console nothing is asked: an unknown key
-    is refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the fix
-    (run `server add` in your own terminal, or `ssh` once yourself); a declined key is refused the
-    same way, naming the question to answer. Approach C's SSH kind reaches the server's own
+    the fingerprint with the server's own. A key the owner declines, or does not confirm in time,
+    is refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the
+    question to answer. Without that console the add never gets this far: the typed confirmation
+    before it is refused as `trusted_console_required`, before any `ssh` runs. Approach C's SSH kind reaches the server's own
     owner-only API socket, so the server's `config.toml` needs `api_socket = true` under
     `[network]` (inherent to this approach); the add says so before it asks, and a server without
     it is refused (`remote_incompatible`, phase `api_socket_unconfigured`) with that exact line and
