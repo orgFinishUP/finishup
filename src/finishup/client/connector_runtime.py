@@ -5,9 +5,10 @@
 
 * ``ensure_ready`` starts the target root's connector when none runs and waits for its status to
   say ``ready``; a closed remote phase (``remote_unreachable``, ``remote_auth_failed``, …) is
-  reported as it is. A connector that was already running brings its upstream up only as it
-  starts, so a phase it recorded then (an outage since repaired) is checked again with one
-  connection through it, and what that connection finds is reported;
+  reported as it is. A connector that was already running records a phase only when it starts or
+  relays a connection, so what it last recorded (``ready`` before an outage, or an outage since
+  repaired) may be old: it is checked again with one connection through it, and what that
+  connection finds is reported;
 * ``stop`` signals only the pid stamped in the connector's held lock, and for an SSH target asks
   the master to exit through its control socket (``ssh -O exit``) — never by process pattern;
 * ``probe`` connects through the connector like any client, makes one untimed ``service_status``
@@ -81,27 +82,25 @@ class ConnectorTargetRuntime:
         )
 
         target = _remote_root(root)
-        started = False
-        if connector_holder(target) is None:
-            try:
-                spawn_connector(target)
-            except OSError:
-                raise TargetRuntimeError("service_unavailable", phase="connector_start") from None
-            started = True
+        if connector_holder(target) is not None:
+            # What a running connector last recorded may be old (``ready`` from before an
+            # outage, or an outage since repaired): one connection through it now is the answer.
+            _connect_once(target)
+            return
+        try:
+            spawn_connector(target)
+        except OSError:
+            raise TargetRuntimeError("service_unavailable", phase="connector_start") from None
         deadline = time.monotonic() + _READY_SECONDS
         while time.monotonic() < deadline:
             holder = connector_holder(target)
             status = read_connector_status(target)
             if holder is not None and status is not None and status.pid == holder.pid:
+                # The connector this call started brings its upstream up as it starts: fresh.
                 if status.phase == "ready":
                     return
                 if status.phase == "unavailable" and status.reason is not None:
-                    if started:
-                        raise TargetRuntimeError(status.reason)
-                    # Recorded before this call, perhaps during an outage since repaired: what
-                    # one connection through the connector finds now is the answer.
-                    _connect_once(target)
-                    return
+                    raise TargetRuntimeError(status.reason)
             time.sleep(_POLL_SECONDS)
         raise TargetRuntimeError("service_unavailable", phase="timeout")
 

@@ -547,11 +547,11 @@ per server. Your agent's hooks, the FinishUP tools in your agent, the CLI and th
 interface all talk to that helper exactly as they talk to FinishUP on your own computer. The
 helper starts by itself when it is first needed, keeps the connection to the server open so each
 call is quick, and stops after 15 minutes without use. `finishup server connect NAME` starts it
-now, or, when it already runs, connects through it once and reports what it finds then (so after
-a network outage it tells you whether the connection works again), and
-`finishup server disconnect NAME` stops it, and so does switching away from that server
-with `finishup server use`; `finishup server status NAME` shows whether it is connected and, if
-not, why.
+now, or, when it already runs, connects through it once and reports what it finds, so it always
+tells you whether the connection works now, whether a network outage has ended or one has begun
+since the helper last connected. `finishup server disconnect NAME` stops it, and so does
+switching away from that server with `finishup server use`; `finishup server status NAME` shows
+whether it is connected and, if not, why.
 
 **SSH servers.** The helper uses your own OpenSSH setup: your keys, your SSH agent, your
 `~/.ssh/config` and your `known_hosts`. FinishUP never stores an SSH key and never asks for a

@@ -193,12 +193,23 @@ def test_the_docs_name_the_api_key_entry_that_outlives_a_deleted_folder() -> Non
     assert "removes every client-side artifact of that target except an API key" in adr
 
 
-@pytest.mark.parametrize("now", ["repaired", "auth_refused"])
-def test_connect_checks_again_instead_of_repeating_an_earlier_outage(
-    monkeypatch: pytest.MonkeyPatch, now: str
+@pytest.mark.parametrize(
+    ("earlier", "now"),
+    [
+        # An outage recorded during a Wi-Fi drop that has since been repaired.
+        ("remote_unreachable", None),
+        ("remote_unreachable", "remote_auth_failed"),
+        # ``ready`` recorded before the network went down, with no client relayed since.
+        (None, None),
+        (None, "remote_unreachable"),
+    ],
+)
+def test_connect_checks_again_instead_of_repeating_what_the_connector_last_recorded(
+    monkeypatch: pytest.MonkeyPatch, earlier: str | None, now: str | None
 ) -> None:
-    """A running connector warms its upstream once; the phase it recorded during an outage
-    stays in its status until a client happens to be relayed. ``server connect`` checks again
+    """A running connector records a phase only when it starts or relays a connection, so what
+    it last recorded stays in its status until a client happens to be relayed: an outage since
+    repaired, or ``ready`` from before the network went down. ``server connect`` checks again
     through it, once, and reports what that connection finds, never the earlier phase."""
 
     from builders.server_targets import ambient_home
@@ -223,8 +234,8 @@ def test_connect_checks_again_instead_of_repeating_an_earlier_outage(
 
     async def on_demand(*_args: object, **_kwargs: object) -> _Client:
         connects.append("connect")
-        if now == "auth_refused":
-            raise ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
+        if now is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=now)
         return _Client()
 
     monkeypatch.setattr(service_client, "connect_service_on_demand", on_demand)
@@ -236,16 +247,21 @@ def test_connect_checks_again_instead_of_repeating_an_earlier_outage(
         lock = ConnectorLock(root)
         lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
         try:
-            # The phase recorded during a Wi-Fi drop that has since been repaired.
             write_connector_status(
-                root, new_status(None, "unavailable", "remote_unreachable", started_at=now_stamp())
+                root,
+                new_status(
+                    None,
+                    "ready" if earlier is None else "unavailable",
+                    earlier,
+                    started_at=now_stamp(),
+                ),
             )
-            if now == "repaired":
+            if now is None:
                 ConnectorTargetRuntime().ensure_ready(root)
             else:
                 with pytest.raises(TargetRuntimeError) as raised:
                     ConnectorTargetRuntime().ensure_ready(root)
-                assert raised.value.reason == "remote_auth_failed"
+                assert raised.value.reason == now
         finally:
             lock.release()
     assert connects == ["connect"]
