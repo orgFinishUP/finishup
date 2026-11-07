@@ -262,6 +262,44 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "give exactly one of --local, --port PORT, or an ssh:// or https:// address",
         _USAGE,
     ),
+    "remote_unreachable": (
+        "the server could not be reached; check the address and your network, then retry",
+        _UNAVAILABLE,
+    ),
+    "remote_auth_failed": (
+        "the server refused this login: load your SSH key (ssh-add) for an SSH server, or give "
+        "a valid API key for an HTTPS server",
+        _UNAVAILABLE,
+    ),
+    "remote_identity_changed": (
+        "the server's host key or certificate was not accepted; verify it another way first",
+        _UNAVAILABLE,
+    ),
+    "remote_incompatible": (
+        "this client and the server run different FinishUP releases; install the same release "
+        "on both",
+        _UNAVAILABLE,
+    ),
+    "remote_service_not_running": (
+        "the server's FinishUP gateway answers but its service does not; its operator starts it",
+        _UNAVAILABLE,
+    ),
+    "target_still_connected": (
+        "the connection this client runs for that target did not stop in time, so nothing was "
+        "removed; run the same command again",
+        _UNAVAILABLE,
+    ),
+    "target_partly_removed": (
+        "the target's folder changed while it was being deleted, so only part of it was removed; "
+        "run the same command again, or, if 'finishup server list' names a leftover folder "
+        "instead, 'finishup server remove' with that folder's id",
+        _UNAVAILABLE,
+    ),
+    "remote_launcher_unknown": (
+        "no absolute finishup launcher could be found on the server; pass --remote-launcher "
+        "with the absolute path of the server's finishup",
+        _USAGE,
+    ),
 }
 
 DISCLOSURE_LINES: Final = (
@@ -1786,30 +1824,48 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
     folder is never deleted under a connection still serving it. A first stop that does not
     finish removes nothing (the caller says that a selection it cleared stays cleared). A second
     one keeps the folder; a key already deleted stays deleted, the record says it holds none, and
-    the refusal says so.
+    the refusal says so. A folder that something changed while it was deleted is only partly
+    removed: the refusal says so, and how to finish (the same command, or the leftover's id).
     """
 
     from finishup.client.targets import remove_target_root
 
     _stop_for_remove(record, root)
     key_left = _delete_key_for_remove(record, root)
+    key_deleted = record.credential is not None and not key_left
     try:
         _stop_for_remove(record, root)
     except ServerCommandRefused:
-        key_deleted = record.credential is not None and not key_left
-        if key_deleted:
-            # ``server status`` must not report a key that is gone (the lock is held); a record
-            # that cannot be rewritten still gets the refusal that says the key went.
-            with contextlib.suppress(TargetError):
-                current = read_target(root)
-                if current is not None:
-                    write_target(root, replace(current, credential=None))
+        _record_no_key(root, key_deleted)
         raise ServerCommandRefused(
             "target_still_connected",
             message=_STARTED_AGAIN_KEY_DELETED if key_deleted else _STARTED_AGAIN,
         ) from None
-    remove_target_root(record)
+    try:
+        remove_target_root(record)
+    except OSError:
+        # Something changed the folder while it was deleted (A-REMOVE-RACE): what is left is
+        # either still this target or a leftover folder, and either is removed by running again.
+        _record_no_key(root, key_deleted)
+        raise ServerCommandRefused(
+            "target_partly_removed", message=_PARTLY_REMOVED_KEY_DELETED if key_deleted else None
+        ) from None
     return key_left
+
+
+def _record_no_key(root: Path, key_deleted: bool) -> None:
+    """After a remove that did not finish, record that a key it already deleted is gone.
+
+    ``server status`` must not report a key that no longer exists. The registry lock is held. A
+    record that is gone or cannot be rewritten still gets the refusal that says the key went.
+    """
+
+    if not key_deleted:
+        return
+    with contextlib.suppress(TargetError, OSError):
+        current = read_target(root)
+        if current is not None:
+            write_target(root, replace(current, credential=None))
 
 
 _STARTED_AGAIN: Final = (
@@ -1820,6 +1876,11 @@ _STARTED_AGAIN_KEY_DELETED: Final = (
     "the connection this client runs for that target started again and did not stop in time, so "
     "its folder was kept, but its API key was already deleted; run the same command again, or "
     "'finishup server login' to keep using that server"
+)
+_PARTLY_REMOVED_KEY_DELETED: Final = (
+    "the target's folder changed while it was being deleted, so only part of it was removed, and "
+    "its API key was already deleted; run the same command again, or, if 'finishup server list' "
+    "names a leftover folder instead, 'finishup server remove' with that folder's id"
 )
 
 
