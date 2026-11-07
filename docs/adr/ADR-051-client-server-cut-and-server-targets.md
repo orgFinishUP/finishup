@@ -957,7 +957,7 @@ answers bounded `workspace_call`s on a connection that declared it.
   The item stays visible while the state lasts: `server status` (stderr, and with `--json` also
   the document's `zero_network_selection`, from the same policy read) and `server list`, `setup
   status` (stderr), `setup status --next` (a `server_selection` fact with its pinned
-  continuation), the setup wizard's next steps, the menu home, and the terminal interface's header
+  continuation, which is then also the top-level next step), the setup wizard's next steps, the menu home, and the terminal interface's header
   and `/server` (read at start, after a privacy ceremony, and on `/server`; the header drops it
   once the selection file changes). They read the live policy first and, while it cannot be read,
   the marker, worded "this computer last reported", with when. A selection that cannot be read is

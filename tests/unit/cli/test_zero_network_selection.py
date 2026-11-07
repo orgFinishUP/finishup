@@ -2352,6 +2352,57 @@ def test_setup_readiness_names_the_item_with_its_continuation(
         assert f"last reported, at {_STAMP}" in line
 
 
+@pytest.mark.parametrize("operation", ["local", "review", "connection"])
+@pytest.mark.parametrize("json_output", [True, False])
+def test_setup_next_puts_the_switch_first_while_the_selected_server_is_refused(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    json_output: bool,
+) -> None:
+    """RE-2: the readiness probe of a refused server reads as an unreachable service.
+
+    Restarting a service cannot fix a selection this computer refuses before anything is sent;
+    the top-level next step is the switch the ``server_selection`` fact names, on both outputs.
+    """
+
+    from finishup.cli import setup_readiness
+
+    _remote()
+    record_reported_policy(zero_network=True, now=_AT)
+    _policy(monkeypatch, "unreadable")
+
+    async def unreachable(_project: Path, _operation: str) -> dict[str, JsonValue]:
+        return {
+            "reason": "service_unavailable",
+            "arguments": ["service", "restart"],
+            "service": {"reachable": False, "state": None, "vault_mode": None},
+        }
+
+    monkeypatch.setattr(setup_readiness, "installation_readiness", unreachable)
+    code = setup_readiness._setup_next(  # pyright: ignore[reportPrivateUsage]
+        operation=operation,  # pyright: ignore[reportArgumentType]
+        host=None,
+        executable=None,
+        config_root=None,
+        project=home,
+        route=None,
+        json_output=json_output,
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    if json_output:
+        report = json.loads(out)
+        switch = report["facts"]["server_selection"]["next_command"]
+        assert switch.endswith("server use local")
+        assert report["next_command"] == switch
+    else:
+        next_line = next(line for line in out.splitlines() if line.startswith("Next: "))
+        assert next_line.endswith("server use local")
+        assert "service restart" not in out
+
+
 def test_setup_status_puts_the_item_on_stderr(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
