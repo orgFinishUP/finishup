@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import ctypes
 import json
 import os
@@ -447,6 +448,12 @@ def isolated_root(*, _probe: _PathProbe | None = None) -> Path | None:
 # reads the selection once per process, so it never switches servers mid-session; a hook is a
 # fresh process and follows a new selection at once.
 _SELECTION_MEMO: dict[str, Path | None] = {}
+# ``selection_override``'s answer, ``(selection file path, root)``, for the context that entered
+# it only: a worker thread started by ``asyncio.to_thread`` (or anyio's) sees its caller's, and no
+# other thread or task ever does. The process memo above is never changed by an override.
+_SELECTION_OVERRIDE: contextvars.ContextVar[tuple[str, Path | None] | None] = (
+    contextvars.ContextVar("finishup_selection_override", default=None)
+)
 
 
 def reset_selection_memo() -> None:
@@ -562,6 +569,9 @@ def _selected_root(probe: _PathProbe) -> Path | None:
     dirs = probe.platform_dirs
     path = Path(dirs.user_config_dir) / SERVER_SELECTION_NAME
     key = str(path)
+    override = _SELECTION_OVERRIDE.get()
+    if override is not None and override[0] == key:
+        return override[1]
     if key in _SELECTION_MEMO:
         return _SELECTION_MEMO[key]
     target_id = _read_selection(path, probe)
@@ -623,20 +633,23 @@ def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -
     own selection names another; the block ends with the previous answer restored. It changes
     nothing on disk and never outranks the isolation variable or the runtime pin. ``root`` must
     be a validated target root.
+
+    The answer holds for this context only (a ``contextvars`` variable): the code inside the
+    block, an event loop it runs (``asyncio.run``/``anyio.run`` copy the context) and the worker
+    threads that loop starts through ``asyncio.to_thread``. Another thread, a terminal
+    interface's event loop or a concurrent block in another worker never sees it, and blocks
+    that end out of order never leave this process resolving another block's root. A thread
+    started without the context (``threading.Thread``, ``run_in_executor``) resolves this
+    process's own selection.
     """
 
     probe = _probe_or_default(_probe)
     key = str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)
-    missing = object()
-    previous: object = _SELECTION_MEMO.get(key, missing)
-    _SELECTION_MEMO[key] = root
+    token = _SELECTION_OVERRIDE.set((key, root))
     try:
         yield
     finally:
-        if previous is missing:
-            _SELECTION_MEMO.pop(key, None)
-        else:
-            _SELECTION_MEMO[key] = cast(Path | None, previous)
+        _SELECTION_OVERRIDE.reset(token)
 
 
 def active_root(*, _probe: _PathProbe | None = None) -> Path | None:

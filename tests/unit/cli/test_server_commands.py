@@ -886,6 +886,33 @@ def test_the_everyday_policy_decides_the_zero_network_state(
     assert client.requests == [_MACHINE_SCOPE]
 
 
+def test_the_everyday_policy_is_asked_of_the_everyday_server_while_a_target_is_selected(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read runs in a fresh context, which the caller's context-local override does not
+    reach (SRV-7): it must still connect to this computer's server, never the selected one."""
+
+    _everyday_installation(home)
+    with targets.registry_lock():
+        record, _root = targets.new_remote_target("alpha", "https", base_url="https://a.example")
+    targets.write_selection(record)
+    assert active_root() is not None
+    from finishup.ports.control import ControlClientKind
+    from finishup.service import client as service_client
+
+    clients = _serve_policy(monkeypatch, _policy(True))
+    connect = service_client.connect_service
+    roots: list[Path | None] = []
+
+    async def recording(kind: ControlClientKind, *, workspace_locator: None = None) -> object:
+        roots.append(active_root())
+        return await connect(kind, workspace_locator=workspace_locator)
+
+    monkeypatch.setattr(service_client, "connect_service", recording)
+    assert server_cli._zero_network_in_force() is False  # pyright: ignore[reportPrivateUsage]
+    assert roots == [None] and len(clients) == 1
+
+
 def test_an_installation_whose_identity_cannot_be_read_refuses_the_hop(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
