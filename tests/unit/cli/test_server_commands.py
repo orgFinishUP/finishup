@@ -1320,8 +1320,11 @@ def test_login_and_logout_stop_an_agent_that_kept_the_earlier_key(
         if stuck:
             raise TargetRuntimeError("service_unavailable", phase="agent_stop")
 
+    def accepted(_record: targets.ServerTarget, _secret: str) -> None:
+        return None
+
     monkeypatch.setattr(RestTargetRuntime, "stop", stop)
-    monkeypatch.setattr(server_cli, "_check_api_key", lambda _record, _secret: None)
+    monkeypatch.setattr(server_cli, "_check_api_key", accepted)
     key_file = home / "key"
     key_file.write_text(_KEY, encoding="ascii")
     key_file.chmod(0o600)
