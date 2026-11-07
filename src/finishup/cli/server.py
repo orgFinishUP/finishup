@@ -1689,12 +1689,9 @@ def server_remove(
             runtime_for(record.kind).stop(root)
         except TargetRuntimeError:
             pass
-        from finishup.client.credentials import CredentialError, KeyringOrFileCredential
-
-        try:
-            KeyringOrFileCredential(record.target_id, root, recorded=record.credential).delete()
-        except CredentialError as error:
-            raise ServerCommandRefused(error.reason)
+        key_left = _delete_key_for_remove(record, root)
+    else:
+        key_left = False
     try:
         with registry_lock():
             if selected == record.target_id or unreadable_selection:
@@ -1721,9 +1718,37 @@ def server_remove(
         typer.echo(f"{error.reason_code}: the target folder is unsafe to remove", err=True)
         raise typer.Exit(_UNSAFE) from None
     typer.echo(f"Removed server target {record.name} ({record.target_id}).")
+    if key_left:
+        from finishup.client.credentials import SERVER_CREDENTIAL_SERVICE
+
+        typer.echo(
+            f"Its API key stays in the platform credential store, which could not be used now "
+            f"(it may be locked): unlock it, then delete the entry '{SERVER_CREDENTIAL_SERVICE}' "
+            f"for {record.target_id} with your system's credential tool.",
+            err=True,
+        )
     if selected == record.target_id or unreadable_selection:
         typer.echo("Using this computer's everyday FinishUP server.")
         _warn_open_sessions()
+
+
+def _delete_key_for_remove(record: ServerTarget, root: Path) -> bool:
+    """Delete a removed target's API key; True when one stays behind (SRV-4).
+
+    An SSH target never holds a key (OpenSSH authenticates), so no credential store is asked. A
+    store the key is recorded in that cannot be used now (a locked platform store) never keeps
+    the target from being removed: the caller says which entry stays, by generated id only.
+    """
+
+    from finishup.client.credentials import CredentialError, KeyringOrFileCredential
+
+    if record.kind == "ssh":
+        return False
+    try:
+        KeyringOrFileCredential(record.target_id, root, recorded=record.credential).delete()
+    except CredentialError:
+        return record.credential == "keyring"
+    return False
 
 
 # A target id (``t_`` and 8 hex digits): never a target name, which has no underscore.
