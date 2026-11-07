@@ -410,7 +410,9 @@ def _runtime_failure(error: TargetRuntimeError) -> NoReturn:
     from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
     if error.phase in REMOTE_CONNECTION_PHASES:
-        raise ServerCommandRefused(error.phase, detail=error.reason)
+        # The phase is the reason; the connection's own ``service_unavailable`` adds nothing the
+        # owner can act on (RE-7), so it is not printed beside it.
+        raise ServerCommandRefused(error.phase)
     if error.phase == "runtime_unavailable":
         raise ServerCommandRefused(
             "runtime_unavailable", detail=f"{error.reason}, phase {error.phase}"
@@ -780,16 +782,21 @@ def _discover_ssh_endpoint(
     so this runs on the owner's terminal: OpenSSH may ask there, once, to confirm a host key this
     computer does not know yet (``StrictHostKeyChecking=ask``, as approach A's ``server add``
     does), and that answer is the pin every later connection checks. A key the owner declined or
-    did not answer in time is refused with the fix (ADR-051, server add and login parity).
+    did not answer in time is refused with the fix (ADR-051, server add and login parity). The
+    line that OpenSSH asks is printed only when it will: a strict first attempt found the host key
+    unknown (RE-7), never for a known or a changed key.
     """
 
     from finishup.client import direct_runtime
 
-    typer.echo(
-        "Asking the server where its FinishUP service listens. If this computer does not know "
-        "its SSH host key yet, OpenSSH asks you to confirm it here: compare the fingerprint "
-        "with the server's own before you answer yes."
-    )
+    typer.echo("Asking the server where its FinishUP service listens.")
+
+    def before_question() -> None:
+        typer.echo(
+            "This computer does not know the server's SSH host key yet, so OpenSSH asks you to "
+            "confirm it here: compare the fingerprint with the server's own before you answer yes."
+        )
+
     try:
         found = direct_runtime.discover_ssh_endpoint(
             user=user,
@@ -798,6 +805,7 @@ def _discover_ssh_endpoint(
             remote_root=remote_root,
             remote_launcher=remote_launcher,
             confirm_host_key=True,
+            before_question=before_question,
         )
     except TargetRuntimeError as error:
         if error.reason == "remote_host_key_unconfirmed":

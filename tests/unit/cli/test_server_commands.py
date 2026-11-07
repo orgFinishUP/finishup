@@ -1812,7 +1812,7 @@ def test_a_stopped_remote_service_is_named_alike_for_every_kind(
     assert result.exit_code != 0
     assert result.stderr == (
         "remote_service_not_running: the server answered but its FinishUP service is not "
-        "running; start it there with 'finishup service start' (service_unavailable)\n"
+        "running; start it there with 'finishup service start'\n"
     )
 
 
@@ -2270,6 +2270,8 @@ def test_ssh_add_records_what_the_server_reports_after_authorization(
     monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
     added = _invoke("add", "lab", "ssh://owner@lab.example:2222")
     assert added.exit_code == 0, added.output
+    # Called only when OpenSSH will ask (RE-7); its words are checked below.
+    assert all(callable(arguments.pop("before_question")) for arguments in asked)
     assert asked == [
         {
             "user": "owner",
@@ -2399,6 +2401,10 @@ def test_ssh_add_lets_openssh_confirm_a_new_host_key_on_the_owners_console(
 
     def discover(**arguments: object) -> object:
         asked.append(arguments["confirm_host_key"])
+        # The probe found the host key unknown, so OpenSSH asks: the add says so just before.
+        before_question = arguments["before_question"]
+        assert callable(before_question)
+        before_question()
         return direct_runtime.SshEndpoint("/run/user/1000/control.sock", None, False)
 
     monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
@@ -2408,7 +2414,47 @@ def test_ssh_add_lets_openssh_confirm_a_new_host_key_on_the_owners_console(
     assert result.exit_code == 0, result.output
     assert authorized == [("lab", "ssh")]
     assert asked == [True]
-    assert "OpenSSH asks you to confirm it here" in result.stdout
+    assert "This computer does not know the server's SSH host key yet, so OpenSSH asks you to " in (
+        result.stdout
+    )
+    assert "compare the fingerprint with the server's own" in result.stdout
+
+
+@pytest.mark.parametrize("changed", [True, False])
+def test_ssh_add_never_says_openssh_asks_when_it_does_not(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    changed: bool,
+) -> None:
+    """RE-7: a known host key is not asked about, and a changed one is refused without a question,
+    so the add never says OpenSSH asks; a refused add names the phase alone, without the
+    connection's own ``(service_unavailable)``."""
+
+    from finishup.client import direct_runtime
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    def discover(**_arguments: object) -> object:
+        # The probe never calls ``before_question``: OpenSSH asked nothing.
+        if changed:
+            raise TargetRuntimeError("service_unavailable", phase="remote_identity_changed")
+        return direct_runtime.SshEndpoint("/run/user/1000/control.sock", None, False)
+
+    monkeypatch.setattr(direct_runtime, "discover_ssh_endpoint", discover)
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert "Asking the server where its FinishUP service listens." in result.stdout
+    for text in (result.stdout, result.stderr):
+        assert "OpenSSH asks" not in text
+        assert "(service_unavailable)" not in text
+    if changed:
+        assert result.exit_code == 20
+        assert result.stderr.startswith("remote_identity_changed: ")
+        assert result.stderr.rstrip().endswith("then add the target again")
+        assert targets.list_targets() == ()
+    else:
+        assert result.exit_code == 0, result.output
 
 
 def test_ssh_add_refuses_a_host_key_that_was_not_confirmed_and_names_the_fix(

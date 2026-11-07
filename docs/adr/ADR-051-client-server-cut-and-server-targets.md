@@ -806,7 +806,9 @@ answers bounded `workspace_call`s on a connection that declared it.
     later connection needs (approach A's probe leaves them to the owner's `ssh` configuration). The owner's answer is OpenSSH's own `known_hosts` entry, the
     pin every later connection checks with `StrictHostKeyChecking=yes`; a key that changed is
     never asked about (`remote_identity_changed`). The command says beforehand that OpenSSH may
-    ask and to compare the fingerprint with the server's own. A key the owner declines, or does
+    ask and to compare the fingerprint with the server's own. In approach B a strict first
+    attempt tells whether OpenSSH will ask at all, so that line is printed only for a host key
+    this computer does not know yet, never for a known or a changed one. A key the owner declines, or does
     not confirm in time, is refused (`remote_host_key_unconfirmed`), nothing is added, and the
     message names the question to answer. Without that console the add never gets this far: the
     typed confirmation before it is refused as `trusted_console_required`, before any `ssh` runs.

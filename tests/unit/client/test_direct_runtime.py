@@ -276,56 +276,115 @@ def test_discovery_failures_are_closed_phases(answer: tuple[int, bytes, bytes], 
 # --- the host key at 'server add': asked once on the owner's console, never without it -----------
 
 
+_STRICT = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+_ASK = [
+    "-o",
+    "StrictHostKeyChecking=ask",
+    "-o",
+    "ControlMaster=no",
+    # The only question is the host key: FinishUP never has a password asked for.
+    "-o",
+    "PasswordAuthentication=no",
+    "-o",
+    "KbdInteractiveAuthentication=no",
+]
+_UNKNOWN_KEY = (
+    b"No ED25519 host key is known for lab.example and you have requested strict checking.\r\n"
+    b"Host key verification failed.\r\n"
+)
+_CHANGED_KEY = (
+    b"@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\r\n"
+    b"Host key verification failed.\r\n"
+)
+
+
+class _Timed(_Runner):
+    """A ``_Runner`` that also records each probe's time bound."""
+
+    def __init__(self, *answers: tuple[int, bytes, bytes]) -> None:
+        super().__init__(*answers)
+        self.seconds: list[float] = []
+
+    def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        self.seconds.append(kwargs["timeout"])
+        return super().__call__(argv, **kwargs)
+
+
+def _options(argv: list[str]) -> list[str]:
+    return argv[1 : argv.index("-T")]
+
+
 @pytest.mark.parametrize("confirm_host_key", [True, False])
-def test_discovery_lets_openssh_ask_only_on_the_owners_console(confirm_host_key: bool) -> None:
+def test_a_known_host_key_is_never_asked_about(confirm_host_key: bool) -> None:
+    """RE-7: a host key this computer already knows is checked strictly and never asked about,
+    so nothing says OpenSSH asks; that holds on the owner's console too."""
+
+    questions: list[str] = []
+    runner = _Timed((0, b"/srv/owner/.local/bin/finishup\n", b""), (0, _report(), b""))
+    _discover(
+        runner,
+        remote_launcher=None,
+        confirm_host_key=confirm_host_key,
+        before_question=lambda: questions.append("asked"),
+    )
+    assert [_options(argv) for argv in runner.calls] == [_STRICT, _STRICT]
+    assert runner.seconds == [30.0, 30.0]
+    assert questions == []
+
+
+def test_an_unknown_host_key_is_asked_about_on_the_owners_console_once() -> None:
     """ADR-051 (server add parity with the edge relay): on the trusted console OpenSSH asks, on
     that terminal, to confirm a host key it does not know yet (``StrictHostKeyChecking=ask``, no
-    master); without it nothing is asked and strict checking refuses an unknown key."""
+    master), and ``before_question`` runs just before, once."""
 
-    seconds: list[float] = []
-
-    class _Timed(_Runner):
-        def __call__(
-            self, argv: Sequence[str], **kwargs: Any
-        ) -> subprocess.CompletedProcess[bytes]:
-            seconds.append(kwargs["timeout"])
-            return super().__call__(argv, **kwargs)
-
-    runner = _Timed((0, b"/srv/owner/.local/bin/finishup\n", b""), (0, _report(), b""))
-    _discover(runner, remote_launcher=None, confirm_host_key=confirm_host_key)
-
-    for argv in runner.calls:
-        options = argv[1 : argv.index("-T")]
-        if confirm_host_key:
-            assert options == [
-                "-o",
-                "StrictHostKeyChecking=ask",
-                "-o",
-                "ControlMaster=no",
-                # The only question is the host key: FinishUP never has a password asked for.
-                "-o",
-                "PasswordAuthentication=no",
-                "-o",
-                "KbdInteractiveAuthentication=no",
-            ]
-        else:
-            assert options == ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    questions: list[str] = []
+    runner = _Timed(
+        (255, b"", _UNKNOWN_KEY),
+        (0, b"/srv/owner/.local/bin/finishup\n", b""),
+        (0, _report(), b""),
+    )
+    _discover(
+        runner,
+        remote_launcher=None,
+        confirm_host_key=True,
+        before_question=lambda: questions.append("asked"),
+    )
+    assert [_options(argv) for argv in runner.calls] == [_STRICT, _ASK, _ASK]
     # Room for the owner to read the fingerprint and answer.
-    assert seconds == ([180.0, 180.0] if confirm_host_key else [30.0, 30.0])
+    assert runner.seconds == [30.0, 180.0, 180.0]
+    assert questions == ["asked"]
+
+
+def test_a_changed_host_key_is_refused_without_a_question() -> None:
+    """RE-7: OpenSSH never asks about a changed key, so ``server add`` never says it does."""
+
+    questions: list[str] = []
+    runner = _Timed((255, b"", _CHANGED_KEY))
+    with pytest.raises(TargetRuntimeError) as raised:
+        _discover(runner, confirm_host_key=True, before_question=lambda: questions.append("x"))
+    assert (raised.value.reason, raised.value.phase) == (
+        "service_unavailable",
+        "remote_identity_changed",
+    )
+    assert [_options(argv) for argv in runner.calls] == [_STRICT]
+    assert questions == []
 
 
 @pytest.mark.parametrize(
-    "stderr",
-    [
-        b"No ED25519 host key is known for lab.example and you have requested strict checking.\r\n"
-        b"Host key verification failed.\r\n",
-        b"Host key verification failed.\r\n",
-    ],
+    "declined",
+    [_UNKNOWN_KEY, b"Host key verification failed.\r\n"],
 )
-@pytest.mark.parametrize("confirm_host_key", [True, False])
-def test_a_host_key_that_was_not_confirmed_is_its_own_refusal(
-    stderr: bytes, confirm_host_key: bool
-) -> None:
+def test_a_host_key_that_was_not_confirmed_is_its_own_refusal(declined: bytes) -> None:
+    # On the owner's console: OpenSSH was asked and the owner declined or did not answer.
+    questions: list[str] = []
+    runner = _Runner((255, b"", _UNKNOWN_KEY), (255, b"", declined))
     with pytest.raises(TargetRuntimeError) as raised:
-        _discover(_Runner((255, b"", stderr)), confirm_host_key=confirm_host_key)
+        _discover(runner, confirm_host_key=True, before_question=lambda: questions.append("x"))
     assert (raised.value.reason, raised.value.phase) == ("remote_host_key_unconfirmed", None)
+    assert questions == ["x"]
+    # Without the console nothing is asked: strict checking refuses the unknown key at once.
+    runner = _Runner((255, b"", declined))
+    with pytest.raises(TargetRuntimeError) as raised:
+        _discover(runner, confirm_host_key=False)
+    assert (raised.value.reason, raised.value.phase) == ("remote_host_key_unconfirmed", None)
+    assert len(runner.calls) == 1

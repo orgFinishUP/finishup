@@ -570,8 +570,9 @@ this computer.
 
 **SSH servers.** FinishUP runs your own `ssh`, with your keys, `ssh-agent` and known hosts. When you
 add a server whose host key this computer does not know yet, `finishup server add` lets OpenSSH ask
-you once, in your terminal, to confirm it: compare the fingerprint with the server's own before you
-answer yes. Your answer goes into your known hosts, and every later connection checks it and never
+you once, in your terminal, to confirm it: FinishUP says so just before OpenSSH asks, so compare the
+fingerprint with the server's own before you answer yes. For a host key this computer already knows,
+nothing is asked and FinishUP says nothing about a question. Your answer goes into your known hosts, and every later connection checks it and never
 asks again; a host key that changed is refused, never asked about. If you decline OpenSSH's question
 or do not answer it in time, FinishUP adds nothing and says so with `remote_host_key_unconfirmed`:
 run `finishup server add` again and answer yes once you have checked the fingerprint. Adding a

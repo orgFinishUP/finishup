@@ -400,6 +400,7 @@ def discover_ssh_endpoint(
     program: Sequence[str] = ("ssh",),
     runner: _Runner = subprocess.run,
     confirm_host_key: bool = False,
+    before_question: Callable[[], None] | None = None,
 ) -> SshEndpoint:
     """Ask the server, over SSH, where its control endpoint is (after the owner authorized it).
 
@@ -410,9 +411,13 @@ def discover_ssh_endpoint(
     target cannot be reached: ``remote_service_not_running``.
 
     ``confirm_host_key`` (the owner's trusted console is present) lets OpenSSH ask, on that
-    terminal, to confirm a host key it does not know yet. A host key that was not confirmed (no
-    console to ask on, or the owner declined) is ``TargetRuntimeError("remote_host_key_unconfirmed")``;
-    a changed one stays ``remote_identity_changed``.
+    terminal, to confirm a host key it does not know yet. Every probe first runs with strict
+    checking and nothing asked; only when OpenSSH says it does not know the host key does
+    ``before_question`` run (``server add`` says there that OpenSSH asks, and to compare the
+    fingerprint) and the probe run again letting OpenSSH ask. A known key is never asked about,
+    and a changed one is refused at once as ``remote_identity_changed`` (RE-7: nothing claims a
+    question that never comes). A host key that was not confirmed (no console to ask on, or the
+    owner declined) is ``TargetRuntimeError("remote_host_key_unconfirmed")``.
     """
 
     import shlex
@@ -420,14 +425,23 @@ def discover_ssh_endpoint(
     from finishup.config.paths import ISOLATED_ROOT_ENV
     from finishup.protocol.schemas import schema_manifest_digest
 
-    seconds = _CONFIRM_PROBE_SECONDS if confirm_host_key else _PROBE_SECONDS
+    ask = False
 
     def probe(command: str) -> tuple[int | None, bytes, bytes]:
-        argv = _probe_argv(program, user, host, port, command, confirm_host_key=confirm_host_key)
-        code, stdout, stderr = _run(runner, argv, seconds)
-        if code == 255 and _host_key_unconfirmed(stderr):
-            raise TargetRuntimeError("remote_host_key_unconfirmed")
-        return code, stdout, stderr
+        nonlocal ask
+        while True:
+            argv = _probe_argv(program, user, host, port, command, confirm_host_key=ask)
+            code, stdout, stderr = _run(
+                runner, argv, _CONFIRM_PROBE_SECONDS if ask else _PROBE_SECONDS
+            )
+            if code != 255 or not _host_key_unconfirmed(stderr):
+                return code, stdout, stderr
+            if ask or not confirm_host_key:
+                raise TargetRuntimeError("remote_host_key_unconfirmed")
+            # OpenSSH does not know this host key: it asks the owner on the trusted console.
+            ask = True
+            if before_question is not None:
+                before_question()
 
     launcher = remote_launcher
     if launcher is None:
