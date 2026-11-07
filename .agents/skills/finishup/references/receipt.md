@@ -88,8 +88,9 @@ run on the computer the FinishUP service runs on, or, for a remote server, `fini
 folders add NAME FOLDER`, run on the computer that holds the project. For
 `outside_reads_not_listed`, the owner kept those files from that server on their computer: name
 `finishup server folders add NAME FOLDER` for a file outside the project, or, for a server they
-trust, `finishup server folders mode NAME local`, the only step for a test in the project that Git
-ignores; both run in the owner's own terminal on the computer that holds the project.
+trust, `finishup server folders mode NAME local`; both run in the owner's own terminal on the
+computer that holds the project. For a test in the project that Git ignores, only that mode or the
+owner no longer ignoring the test helps; do not change what Git ignores yourself.
 
 Do not save the receipt as a file in the task workspace or in any output directory: the ledger
 keeps it, and a stray file can break a grader that lists an output directory. Put its conclusion
