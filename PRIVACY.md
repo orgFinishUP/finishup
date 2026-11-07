@@ -342,8 +342,11 @@ the LLM profiles and the four non-LLM channels above, and enabling it enables no
   server. The server keeps them as FinishUP on your machine would. The confirmation you give when
   adding or choosing a server says so first (disclosure 2); a server confirmed under an earlier
   disclosure is used again only after you confirm the current one. To keep this content on your
-  machine, leave content capture off (`finishup observe content-disable`) or do not give
-  observation consent for that project.
+  machine: for Claude Code and Cursor, leave content capture off (`finishup observe
+  content-disable`) or do not give observation consent for that project. Codex hook content comes
+  with observation consent itself, so turning content capture off does not stop it: only
+  withholding that consent for the project keeps it here, and revoking it (`finishup observe
+  revoke`) stops further capture.
 - **What does not:** the project folder's path as its name (a path can still appear inside what
   your agents write and inside hook observations, above), your vault passphrase, the server's API
   key, and the unlock, consent, and owner-view prompts, which run only on the server's own
