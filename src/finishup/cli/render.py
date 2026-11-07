@@ -430,12 +430,14 @@ def _render_overall_next(
 
 
 # ADR-051 decision 12: over a claim-bound connection a check that asked to await observations
-# reports the wait ``unavailable`` because the rows wait in this computer's outbox, which the
-# server cannot read; this computer's own outbox is fine. Fixed words: what happened, why, the fix.
+# always reports the wait ``unavailable`` because the rows wait in this computer's outbox, which
+# the server cannot read; this computer's own outbox is fine. Fixed words: what happened, why, and
+# the fix that clears it: deliver the rows, then check without asking the server to wait, since a
+# check that asks again reports the same state.
 CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE: Final = (
-    "Hook observations awaited: unavailable (the server cannot see observations still waiting on "
+    "Hook observations awaited: unavailable (the server cannot wait for observations still on "
     "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
-    "the project folder, then check again)"
+    "the project folder first, then check again without --await-observations)"
 )
 
 
