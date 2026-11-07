@@ -102,6 +102,8 @@ class FakeService:
     generation: str = "7"
     delay: float = 0.0
     seen: list[_Dispatched] = field(default_factory=lambda: list[_Dispatched]())
+    # Per dispatched call: whether it carried a claim the service could not key.
+    unkeyed: list[bool] = field(default_factory=lambda: list[bool]())
     active: int = 0
     gate: asyncio.Event | None = None
 
@@ -113,8 +115,10 @@ class FakeService:
         client_kind: ControlClientKind,
         request: ControlCallRequest,
         context: RepositoryPrivacyContext | None,
+        claim_unkeyed: bool = False,
     ) -> ControlResult:
         self.seen.append((client_kind, request, context))
+        self.unkeyed.append(claim_unkeyed)
         if request.service_generation != self.generation:
             body: object = ControlError("service_generation_changed", retryable=True)
             outcome = "error"

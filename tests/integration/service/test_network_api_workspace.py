@@ -1055,3 +1055,66 @@ async def test_an_ssh_target_runs_the_workflow_over_the_forwarded_api_socket(
     finally:
         await ssh_remote.stop_agent()
         await server.close()
+
+
+async def test_a_claim_the_network_api_could_not_key_is_answered_vault_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-051, as on a claim-bound connection whose hello could not key its claim: a request
+    whose claim met a vault that was not ready is never served as an unbound one, even when the
+    vault is ready by the time its call is dispatched. Its call answers the retryable
+    ``vault_locked``, and the client's next request, keyed, is served under its claim."""
+
+    from builders.network_api import claim
+    from finishup.service.http_api import NetworkApi
+    from finishup.service.network_protocol import HEADER_CLAIM, encode_claim_header
+    from integration.service import test_daemon_clients as clients
+
+    daemon, application, vault, _listener = clients._daemon()  # pyright: ignore[reportPrivateUsage]
+
+    def installation_mac_handle(_purpose: object) -> object:
+        return clients._InstallationMac()  # pyright: ignore[reportPrivateUsage]
+
+    # The installation key a ready vault keys a claim with.
+    monkeypatch.setattr(vault, "installation_mac_handle", installation_mac_handle, raising=False)
+    await daemon.start()
+    resolve = daemon._resolve_claim_context  # pyright: ignore[reportPrivateUsage]
+    not_ready_once = [True]
+
+    async def resolving(workspace_claim: Any) -> Any:  # noqa: ANN401
+        if not not_ready_once:
+            return await resolve(workspace_claim)
+        not_ready_once.clear()
+        vault.ready = False  # the claim meets a vault that is not ready: it is not keyed
+        try:
+            return await resolve(workspace_claim)
+        finally:
+            vault.ready = True  # and the vault is ready again before the call is dispatched
+
+    monkeypatch.setattr(daemon, "_resolve_claim_context", resolving)
+    keys_dir = tmp_path / "network-keys"
+    keys_dir.mkdir(mode=0o700)
+    keys = ApiKeyStore(keys_dir)
+    _key, token = keys.create("laptop", "agent")
+    api = NetworkApi(daemon._network_api_bindings(), keys)  # pyright: ignore[reportPrivateUsage]
+    headers = {
+        "authorization": f"Bearer {token}",
+        HEADER_CLAIM: encode_claim_header(claim("repo")),
+    }
+    body = clients._check_body().model_dump_json(exclude_none=True).encode()  # pyright: ignore[reportPrivateUsage]
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=api.asgi("https")),  # type: ignore[arg-type]
+            base_url="https://api.test",
+        ) as http:
+            refused = await http.post("/v1/check", headers=headers, content=body)
+            answer = json.loads(refused.content)
+            assert (answer["code"], answer["retryable"]) == ("vault_locked", True), answer
+            assert "finishup-workspace-handle" not in refused.headers
+            assert application.check_requests == []
+            # Asked again, the claim is keyed: the call is served under it.
+            served = await http.post("/v1/check", headers=headers, content=body)
+            assert served.headers["finishup-workspace-handle"].startswith("client:")
+            assert len(application.check_requests) == 1
+    finally:
+        await daemon.close()

@@ -626,6 +626,62 @@ async def test_a_network_start_never_names_a_path_and_a_keyed_one_carries_its_cl
 
 
 @pytest.mark.anyio
+async def test_a_claim_the_service_could_not_key_is_dispatched_as_one(keys: ApiKeyStore) -> None:
+    """ADR-051: a request whose claim the service could not key now (its vault was not ready)
+    is never dispatched as an unbound one. The daemon is told, and answers it ``vault_locked``;
+    a claim-only method and a start naming the request's own handle reach it as well, while a
+    start naming a path is still refused at the edge."""
+
+    service = FakeService()
+
+    async def not_ready(_claim: object) -> None:
+        return None
+
+    api = NetworkApi(
+        NetworkApiBindings(
+            status=service.status,
+            dispatch=service.dispatch,
+            activity=service.activity,
+            claim_resolver=not_ready,
+        ),
+        keys,
+    )
+    _record, token = keys.create("laptop", "agent")
+    claimed = {**_bearer(token), "x-finishup-workspace-claim": encode_claim_header(claim("repo"))}
+    handle = context_for(claim("repo")).workspace_handle
+    async with _client(api) as client:
+        status = await client.post("/v1/service_status", headers=claimed, content=_STATUS_BODY)
+        assert status.status_code == 200
+        assert "finishup-workspace-handle" not in status.headers
+        started = await client.post(
+            "/v1/start",
+            headers=claimed,
+            content=_start_body(workspace_ref=handle, external_ref="x"),
+        )
+        assert started.status_code == 200
+        path = await client.post(
+            "/v1/start",
+            headers=claimed,
+            content=_start_body(workspace_ref="/srv/server/proj", external_ref="x"),
+        )
+        assert (path.status_code, _reason(path)) == (400, "frame_invalid")
+        ingest = await client.post("/v1/observation_ingest", headers=claimed, content=b"{}")
+        # Past the claim-only method gate: the (empty) body itself is what is refused now.
+        assert (ingest.status_code, _reason(ingest)) == (400, "frame_invalid")
+        unclaimed = await client.post(
+            "/v1/service_status", headers=_bearer(token), content=_STATUS_BODY
+        )
+        assert unclaimed.status_code == 200
+    assert [request.method.value for _kind, request, _context in service.seen] == [
+        "service_status",
+        "start",
+        "service_status",
+    ]
+    assert [context for _kind, _request, context in service.seen] == [None, None, None]
+    assert service.unkeyed == [True, True, False]
+
+
+@pytest.mark.anyio
 async def test_one_operation_id_sent_twice_at_once_is_dispatched_once(
     keys: ApiKeyStore,
 ) -> None:

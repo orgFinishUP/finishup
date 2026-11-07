@@ -1130,8 +1130,14 @@ SSH (owner-equivalent, no key)
   ‖ principal ‖ 0x00 ‖ digest)`), so two principals never reach each other's repositories, keeps
   the worktree digest, so each linked worktree of one repository gets its own handle and its own
   agent route, and never resolves a path.
+  A claim the service cannot key when the request arrives (its vault is not ready) is never served
+  as an unbound request: as on a claim-bound connection whose hello could not key it, every call
+  that needs the ready service answers `vault_locked` (retryable unless a hard lock holds), and
+  the client's next request, keyed then, is served under its claim.
   A `start` over the network may name no workspace but the request's own `client:` handle: a path,
-  or any other handle, is refused `frame_invalid` before dispatch, with or without a claim. A keyed
+  or any other handle, is refused `frame_invalid` before dispatch, with or without a claim (while
+  a claim cannot be keyed its handle is not known, so a start naming a handle answers
+  `vault_locked` with the rest). A keyed
   `start` must also carry its claim (`workspace_claim_required` otherwise), so its task is keyed by
   its principal's commitment and it can neither create nor attach to a task bound to another
   principal's repository, the server owner's included; only the owner's `api.sock` (SSH) may start

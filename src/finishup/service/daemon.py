@@ -1293,14 +1293,18 @@ class ServiceDaemon:
             client_kind: ControlClientKind,
             request: ControlCallRequest,
             context: RepositoryPrivacyContext | None,
+            claim_unkeyed: bool,
         ) -> ControlResult:
             # Presentation facts never come from the network: the fail-safe machine-readable
-            # projection, exactly as a hello without a presentation context gets.
+            # projection, exactly as a hello without a presentation context gets. A claim the
+            # request carried that could not be keyed is answered as on a claim-bound
+            # connection whose hello could not key it: ``vault_locked``, never served unbound.
             with live_call_scope():
                 return await self.dispatch(
                     client_kind,
                     request,
                     repository_privacy_context=context,
+                    claim_unkeyed=claim_unkeyed,
                     _defer_stop=True,
                 )
 

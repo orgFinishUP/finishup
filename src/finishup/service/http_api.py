@@ -82,7 +82,7 @@ from finishup.ports.control import (
     WorkspaceClaim,
     WorkspaceReply,
 )
-from finishup.ports.workspace_agent import MAX_WORKSPACE_FRAME_BYTES
+from finishup.ports.workspace_agent import MAX_WORKSPACE_FRAME_BYTES, workspace_handle_valid
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.ids import IdKind, new_id, validate_id
 from finishup.protocol.schemas import schema_manifest_digest
@@ -221,8 +221,11 @@ class WorkspaceAgentRegistry(Protocol):
     async def unregister(self, channel: Any) -> None: ...
 
 
+# The daemon's dispatch: the call, its claim's repository context, and whether the request
+# carried a claim this service could not key (its vault was not ready), which the daemon answers
+# ``vault_locked`` rather than serving it as an unbound request (ADR-051).
 type _Dispatch = Callable[
-    [ControlClientKind, ControlCallRequest, RepositoryPrivacyContext | None],
+    [ControlClientKind, ControlCallRequest, RepositoryPrivacyContext | None, bool],
     Awaitable[ControlResult],
 ]
 type _ClaimResolver = Callable[[WorkspaceClaim], Awaitable[RepositoryPrivacyContext | None]]
@@ -703,9 +706,12 @@ class NetworkApi:
 
         binding, context = await self._claim(request, caller)
         handle = None if context is None else context.workspace_handle
+        # A claim this service could not key now names no workspace, and is never served as an
+        # unbound request: the daemon answers its call ``vault_locked`` (ADR-051).
+        unkeyed = binding == "client_claim" and context is None
         addressed = self._generation(request)
         rpc_id = operation_id or new_id(IdKind.CONTROL_RPC)
-        if not method_allowed(caller.scope, method, claim_bound=context is not None):
+        if not method_allowed(caller.scope, method, claim_bound=binding == "client_claim"):
             # The key's scope, not the client's own word, bounds its methods. The answer is the
             # control protocol's own refusal, before any body is read or dispatched.
             _audit(
@@ -729,7 +735,7 @@ class NetworkApi:
         )
         if pending >= MAX_PENDING_OPERATIONS_PER_KEY:
             raise _Refusal("operation_limit")
-        task = asyncio.create_task(self._dispatch(client_kind, call, context))
+        task = asyncio.create_task(self._dispatch(client_kind, call, context, unkeyed))
         operation = _Operation(call.rpc_id, caller.owner_key, task, call, handle)
         task.add_done_callback(lambda _task: self._finished(operation))
         self._operations[call.rpc_id] = operation
@@ -754,7 +760,14 @@ class NetworkApi:
         """
 
         reference = body.get("workspace_ref")
-        if reference is not None and (handle is None or reference != handle):
+        unkeyed = binding == "client_claim" and handle is None
+        if (
+            reference is not None
+            and reference != handle
+            # A claim not keyed now still names its own handle, never a path: the daemon answers
+            # it ``vault_locked``, as every other call of a claim this service could not key.
+            and not (unkeyed and workspace_handle_valid(reference))
+        ):
             _audit("network_call", "workspace_ref_not_portable", {"control_method": "start"})
             raise _Refusal("frame_invalid")
         if caller.key_id is not None and binding == "none":
@@ -766,11 +779,12 @@ class NetworkApi:
         client_kind: ControlClientKind,
         call: ControlCallRequest,
         context: RepositoryPrivacyContext | None,
+        claim_unkeyed: bool,
     ) -> ControlResult:
         started = time.monotonic()
         try:
             async with self._bindings.activity():
-                result = await self._bindings.dispatch(client_kind, call, context)
+                result = await self._bindings.dispatch(client_kind, call, context, claim_unkeyed)
         except asyncio.CancelledError:
             result = self._call_error(call, ControlError("request_cancelled", retryable=True))
         except Exception as exc:

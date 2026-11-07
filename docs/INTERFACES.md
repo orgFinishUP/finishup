@@ -5630,7 +5630,12 @@ configuration cannot be read; `server add` then refuses with `remote_incompatibl
 `status`, a `dispatch` that runs `ServiceDaemon.dispatch` inside
 `service.workspace_hub.live_call_scope()` with the machine-readable projection, the idle-hold
 `activity`, `claim_resolver=ServiceDaemon._resolve_claim_context` (the installation MAC under
-`yoetz/repository-claim/v1`, applied after the principal keying) and
+`yoetz/repository-claim/v1`, applied after the principal keying; a claim it cannot key because the
+vault is not ready reaches the bindings' `dispatch` with its fourth argument, `claim_unkeyed`,
+true, and `ServiceDaemon.dispatch(..., claim_unkeyed=True)` answers `vault_locked` as on an unkeyed
+claim-bound connection; such a request passes the claim-only method gate, and a `start` of it that
+names a handle passes the portable-start check, so that answer, never `method_forbidden` or
+`frame_invalid`, reaches the client) and
 `agent_hub=ServiceComposition.workspace_hub`, the same hub claim-bound socket connections and the
 ready application's workspace routing use. A `POST /v1/agents` registration is one
 `WorkspaceAgentHub.register(..., worktree=<the claim's worktree digest>)` channel whose writer
