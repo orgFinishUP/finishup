@@ -11,6 +11,7 @@ missing or stale, on the everyday root or while a server elsewhere is selected.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import subprocess
 from collections.abc import Iterator
@@ -306,10 +307,13 @@ def live(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
 
     asked: list[tuple[str, float]] = []
 
-    async def read(locator: str, *, budget_seconds: float, lock_wait_seconds: float) -> object:
-        asked.append((locator, budget_seconds))
-        key = await repository_key_for(locator)
-        assert key is not None
+    async def read(
+        locator: str, *, budget_seconds: float, lock_wait_seconds: float, key: str | None
+    ) -> object:
+        # The key the session start already derived is passed on, never derived again.
+        assert key is not None and key == await repository_key_for(locator)
+        # What is left of the half second (or the hook's budget) once the key was derived.
+        asked.append((locator, math.ceil(budget_seconds * 10) / 10))
         # Now, not a fixed time: a report older than a day is asked about again.
         record_repository_report(key, locator, no_network=True)
         return EverydayReads("network_permitted", "no_network")
