@@ -4997,8 +4997,10 @@ beside `--json` also the document's `zero_network_selection` above), `server lis
 terminal interface's header indicator and `/server` (`FinishUpRuntime.zero_network_heading()`), and
 `setup status --next`, whose `yoetz.setup-readiness/1` `facts` gain `server_selection`: `{reason,
 target_id, kind, detail, policy_read, last_reported_at, next_command}` (`next_command` is the
-pinned continuation of `server use local`). Every field is a generated id, a closed token or a
-fixed-shape time; no owner-typed name.
+pinned continuation of `server use local`), and whose top-level `next_command` is then that same
+continuation, whatever the operation: every other step waits for the switch, and a readiness probe
+the refusal stopped reads as an unavailable service a restart would not fix. Every field is a
+generated id, a closed token or a fixed-shape time; no owner-typed name.
 
 **Which server's policy a command changes** (ADR-051 decision 8). `cli/policy_server.py` owns it.
 `selected_policy_server() -> PolicyServer | None` reads `targets.active_target_record()` (the
