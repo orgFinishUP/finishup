@@ -4893,7 +4893,8 @@ The test suite points `_location` at a per-test folder (`tests/conftest.py`).
 
 *Reads.* `everyday_network_state()` answers `zero_network|network_permitted|no_policy|unreadable`
 from the everyday installation's effective machine-scope policy, in a fresh `contextvars.Context`
-(`asyncio.to_thread` copies a context naming the running async library under `anyio.run`).
+(`asyncio.to_thread` copies a context naming the running async library under `anyio.run`), which
+enters `selection_override(None)` again itself.
 `server add|use` refuse `zero_network_in_force` from it; when it is `unreadable` a marker that says
 zero-network refuses `zero_network_in_force` with the fixed sentence naming `reported_at`, and
 anything else refuses `network_policy_unreadable` (while a remote target is selected its text
