@@ -256,6 +256,82 @@ def test_add_use_and_their_reverses_for_a_named_local_server(home: Path, quiet_p
     assert targets.list_targets() == ()
 
 
+def test_a_process_still_using_a_removed_target_never_recreates_its_folder(
+    home: Path, authorized: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SRV-1: an MCP bridge remembers the target it started with. After ``use local`` and
+    ``remove`` elsewhere, its next on-demand connection refuses with the selection's own
+    path-safety token instead of reading the missing folder as a local root, spawning a service
+    there and recreating the folder, which then broke every ``finishup server`` command."""
+
+    import asyncio
+
+    from finishup.config.paths import PathSafetyError, select_root_for_process
+    from finishup.ports.control import ControlClientKind
+    from finishup.service import client as service_client
+
+    class _Stopped:
+        def stop(self, _target: Path | None) -> None:
+            return None
+
+    monkeypatch.setattr(server_cli, "runtime_for", lambda _kind: _Stopped())
+    assert _invoke("add", "devbox", "https://devbox.example").exit_code == 0
+    assert _invoke("use", "devbox").exit_code == 0
+    reset_selection_memo()
+    bridge = active_root()  # what the bridge resolved when it started
+    assert bridge is not None
+    assert _invoke("use", "local").exit_code == 0
+    assert _invoke("remove", "devbox").exit_code == 0
+    assert not bridge.exists()
+
+    select_root_for_process(bridge)  # back in the bridge: its memo still names the folder
+    with pytest.raises(PathSafetyError):
+        service_client._open_service_stderr_log()  # pyright: ignore[reportPrivateUsage]
+
+    async def bridge_connects() -> None:
+        await service_client.connect_service_on_demand(
+            ControlClientKind.MCP_BRIDGE, timeout_seconds=2.0
+        )
+
+    with pytest.raises(Exception) as refused:  # noqa: PT011 - the refusal type is private
+        asyncio.run(bridge_connects())
+    assert service_client.path_refusal_reason(refused.value) == "isolation_root_invalid"
+    assert not bridge.exists()
+    listed = _invoke("list")
+    assert listed.exit_code == 0, listed.output
+    assert _invoke("add", "lab", "--local").exit_code == 0
+
+
+def test_a_leftover_folder_is_reported_and_removed_by_its_id(home: Path) -> None:
+    """A registry folder with no record (an add or remove that was interrupted) never keeps the
+    registry from being read: ``list`` names it, and ``remove ID`` is its supported repair."""
+
+    assert _invoke("add", "work", "--local").exit_code == 0
+    leftover = targets.servers_dir() / "t_0badf00d"
+    leftover.mkdir(mode=0o700)
+    (leftover / "log").mkdir(mode=0o700)
+
+    listed = _invoke("list")
+    assert listed.exit_code == 0, listed.output
+    assert "work" in listed.stdout
+    assert (
+        "Folder t_0badf00d holds no server target record: adding or removing a server was "
+        "interrupted, and FinishUP does not use it. Delete it with 'finishup server remove "
+        "t_0badf00d'."
+    ) in listed.stdout
+    (record,) = targets.list_targets()
+    target = _invoke("remove", record.target_id)  # a target's folder goes by its name only
+    assert target.exit_code == 2 and target.stderr.startswith("target_unknown:")
+    assert targets.target_root(record.target_id).is_dir()
+    assert _invoke("remove", "t_00000001").stderr.startswith("target_unknown:")
+
+    removed = _invoke("remove", "t_0badf00d")
+    assert removed.exit_code == 0, removed.output
+    assert removed.stdout == "Removed the leftover server folder t_0badf00d.\n"
+    assert not leftover.exists()
+    assert "no server target record" not in _invoke("list").stdout
+
+
 def test_remove_select_local_switches_back_first(home: Path) -> None:
     assert _invoke("add", "work", "--local").exit_code == 0
     assert _invoke("use", "work").exit_code == 0

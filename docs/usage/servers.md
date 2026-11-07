@@ -249,8 +249,14 @@ finishup server remove devbox --select-local
 
 `remove` disconnects, deletes the stored key and removes everything FinishUP kept on this computer
 for that server. It refuses the server you are using unless you add `--select-local`, which
-switches back to the default first. Removing a local server deletes its tasks and vault; removing
-a server on another machine leaves that server untouched.
+switches back to the default first. If the connection to that server does not close in time,
+`remove` changes nothing and asks you to run it again. Removing a local server deletes its tasks
+and vault; removing a server on another machine leaves that server untouched. An agent session
+that was still using the removed server stops reaching FinishUP and says so until you restart it.
+
+If adding or removing a server was interrupted, `list` may name a leftover folder (`t_` and eight
+characters) that holds no server. FinishUP does not use it; `finishup server remove` with that
+name deletes it.
 
 ## Choose what a server may read outside your project
 
@@ -644,7 +650,7 @@ repeated safely.
 | `requires_server_host` | That command belongs to the server. | Run it on the server, as shown above. |
 | `method_forbidden` | The API key's scope does not allow that call. | Use an `operator` key for management commands. |
 | `selection_overridden` | An isolation setting or a pinned test copy decides which FinishUP is used, so `server use` cannot. | Unset `FINISHUP_ISOLATED_ROOT`, or run the command from your everyday installation. |
-| `isolation_root_invalid` | The server in use has a missing or unsafe folder on this computer. | Run `finishup server use local`, then remove the server and add it again. |
+| `isolation_root_invalid` | The server in use has a missing or unsafe folder on this computer, or an agent session that was open when you removed its server still uses it. | Run `finishup server use local` (or choose another server) and restart open agent sessions. For a damaged folder, also remove the server and add it again. |
 | `zero_network_remote_selected` | This computer forbids all network use, or last said so, and a server on another machine, a port or the web is chosen: nothing is sent to it, and a privacy change that would leave both on is refused when FinishUP cannot ask you. | Run `finishup server use local`, then restart open agent sessions, and make the change again if one was refused. |
 | `zero_network_in_force` | This computer forbids all network use, or last said so (with when), so FinishUP adds, chooses, logs in to, connects to and probes no server on another machine, a port or the web. Nothing was sent. | Change this computer's privacy policy with `finishup privacy setup`, then run the command again. |
 | `zero_network_selection_unreadable` | This computer forbids all network use, or last said so, and the saved server choice cannot be read, so FinishUP cannot tell whether a server elsewhere is still chosen. | Run `finishup server use local`; it clears the choice even when it cannot be read. Then restart open agent sessions. |
