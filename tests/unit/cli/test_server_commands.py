@@ -2482,3 +2482,58 @@ def test_ambiguous_everyday_folders_are_a_bounded_refusal(home: Path) -> None:
         assert result.exit_code == 20, result.output
         assert result.stderr.startswith("installation_root_ambiguous:")
         assert "Traceback" not in result.output
+
+
+def _ready_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from finishup.client.target_runtime import ProbeResult
+
+    def ready(_self: object, _root: Path | None) -> object:
+        return ProbeResult(
+            "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=5, samples=5
+        )
+
+    monkeypatch.setattr("finishup.client.rest_runtime.RestTargetRuntime.probe", ready)
+    monkeypatch.setattr("finishup.client.target_runtime.LocalTargetRuntime.probe", ready)
+
+
+@pytest.mark.parametrize("selected", ["lab", None])
+def test_chosen_by_is_shown_only_for_the_server_in_use(
+    home: Path, monkeypatch: pytest.MonkeyPatch, selected: str | None
+) -> None:
+    """RE-5: what chose the server this process uses is not said of another target.
+
+    ``server status NAME``, ``server test NAME`` and the terminal interface's ``/server`` status
+    show ``chosen by`` for the server in use only; a target named that is not in use says so.
+    """
+
+    with targets.registry_lock():
+        lab, _root = targets.new_remote_target(
+            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+        )
+        web, _root = targets.new_remote_target(
+            "web", "https", base_url="https://web.example:8443", tls_pin="sha256:" + "a" * 64
+        )
+        if selected is not None:
+            targets.write_selection(lab)
+    reset_selection_memo()
+    _ready_probe(monkeypatch)
+    in_use = {"lab": selected == "lab", "web": False, "local": selected is None}
+    source = "selection" if selected is not None else "ambient"
+    for name, used in in_use.items():
+        tested = _invoke("test", name)
+        assert tested.exit_code == 0, tested.output
+        heading = tested.stdout.splitlines()[0]
+        shown = server_cli.status_lines(
+            server_cli.build_status_document(name, zero_network=lambda: None),
+            in_use=server_cli.target_in_use(name),
+        )
+        for line in (heading, shown[0]):
+            assert line.startswith(f"Server: {name} (")
+            if used:
+                assert line.endswith(f"; chosen by: {source}")
+            else:
+                assert line.endswith("; not the server in use")
+                assert "chosen by" not in line
+    del web
+    # Without a name the lines describe this process's own server, which is in use.
+    assert server_cli.target_in_use(None) is True

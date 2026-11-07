@@ -1575,7 +1575,12 @@ class FinishUpRuntime:
 
         import asyncio
 
-        from finishup.cli.server import ServerCommandRefused, build_status_document, status_lines
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            build_status_document,
+            status_lines,
+            target_in_use,
+        )
         from finishup.cli.zero_network_selection import still_selected
         from finishup.client.targets import TargetError
         from finishup.config.paths import PathSafetyError
@@ -1590,9 +1595,10 @@ class FinishUpRuntime:
             document = await asyncio.to_thread(
                 build_status_document, name, zero_network=zero_network
             )
+            in_use = await asyncio.to_thread(target_in_use, name)
         except (ServerCommandRefused, TargetError, PathSafetyError) as error:
             raise _server_failure(error) from None
-        return status_lines(document)
+        return status_lines(document, in_use=in_use)
 
     async def use_server(self, name: str) -> ServerSwitch:
         """Select ``name`` (``local``: the everyday server), as ``finishup server use`` does.

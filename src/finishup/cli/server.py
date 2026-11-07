@@ -102,6 +102,7 @@ __all__ = [
     "render_target_rows",
     "server_app",
     "status_lines",
+    "target_in_use",
     "target_rows",
     "use_target",
     "zero_network_connection_refusal",
@@ -1605,14 +1606,46 @@ _NOT_PROBED_LINES: Final[Mapping[str, str]] = {
 }
 
 
-def status_lines(document: dict[str, JsonValue]) -> tuple[str, ...]:
-    """The owner display of a status document, a remote target's outside reads included."""
+def target_in_use(name: str | None) -> bool:
+    """Whether ``server status NAME`` describes the server this process uses.
+
+    Without ``name`` the document is this process's own root: always. ``local`` is in use while
+    this process uses the everyday server (no selection, no isolation root); any other name while
+    its target is this process's root. Never raises: a root that cannot be read is not in use.
+    """
+
+    if name is None:
+        return True
+    try:
+        active = active_target_record()
+    except TargetError:
+        return False
+    if name == "local":
+        if active is not None:
+            return False
+        from finishup.config.paths import active_root
+
+        try:
+            return active_root() is None
+        except PathSafetyError:
+            return False
+    return active is not None and active.name == name
+
+
+def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
+    """The owner display of a status document, a remote target's outside reads included.
+
+    ``chosen by`` (the document's ``source``) says what decided the server this process uses, so
+    it is shown only for that server (``in_use``, from ``target_in_use``); a target shown by name
+    that is not in use says so instead.
+    """
 
     target = cast(dict[str, JsonValue], document["target"])
     probe = cast(dict[str, JsonValue], document["probe"])
     name = target["name"] or "this process's isolated root"
     identity = "" if target["target_id"] is None else f"{target['target_id']}, "
-    lines = [f"Server: {name} ({identity}{target['kind']}); chosen by: {document['source']}"]
+    use = f"chosen by: {document['source']}" if in_use else "not the server in use"
+    lines = [f"Server: {name} ({identity}{target['kind']}); {use}"]
     if target["location"] is not None:
         lines.append(f"Address: {target['location']}")
     if target["credential"] != "not_applicable":
@@ -1730,7 +1763,7 @@ def server_status(
         sys.stdout.buffer.write(canonical_encode(cast(JsonValue, document)) + b"\n")
         sys.stdout.flush()
         return
-    _emit(status_lines(document))
+    _emit(status_lines(document, in_use=target_in_use(name)))
 
 
 @server_app.command("test")
@@ -1744,7 +1777,7 @@ def server_test(
     # These lines never show the zero-network item (``status`` and ``list`` do), so this
     # computer's service is not asked for its policy.
     document = build_status_document(name, zero_network=lambda: None)
-    _emit(status_lines(document))
+    _emit(status_lines(document, in_use=target_in_use(name)))
     probe = cast(dict[str, JsonValue], document["probe"])
     if probe["outcome"] == "not_probed" or probe["reason"] in _SHARED_CHECK_REFUSALS:
         # The shared connection check refused, so nothing was sent and the target was never
