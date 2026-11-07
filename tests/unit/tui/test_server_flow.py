@@ -441,11 +441,12 @@ async def test_the_real_runtime_stops_the_remote_server_it_switches_away_from(
         switch = await runtime.use_server("local")
 
         assert stops == [root]
+        # No SSH master was running for it: the switch says none was closed.
         assert switch == ServerSwitch(
             "everyday",
             (
-                f"Closed this computer's connection to the server {record.target_id} (ssh): its "
-                "shared SSH connection, and every FinishUP connection made through it, ended.",
+                f"This computer had no open SSH connection to the server {record.target_id} "
+                "(ssh), so none was closed; new FinishUP connections no longer go to it.",
                 "Open agent sessions and a running 'finishup server connect --agent' keep that "
                 "server and connect to it again until you restart or stop them.",
             ),

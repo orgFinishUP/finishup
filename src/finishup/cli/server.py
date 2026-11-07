@@ -1129,11 +1129,14 @@ class TargetSwitch:
     every connection any process of this client made through it; an HTTPS or localhost-port
     target has nothing on this computer to stop. ``left_open`` says the stop did not finish
     (ADR-051 decision 8: the way out of a remote selection under zero-network stops its traffic).
+    ``left_master`` says an SSH target's master was there to close: after its 15 idle minutes it
+    is usually gone, and then nothing was closed.
     """
 
     record: ServerTarget | None
     left: ServerTarget | None = None
     left_open: bool = False
+    left_master: bool = False
 
     def left_lines(self) -> tuple[str, ...]:
         """What became of the left server's connection, by generated id and closed kind only."""
@@ -1147,13 +1150,21 @@ class TargetSwitch:
                 "answer that server's requests for your files. Run 'finishup server disconnect' "
                 "with that server's name ('finishup server list' shows it).",
             )
-        closed = (
-            f"Closed this computer's connection to the server {server}: its shared SSH "
-            "connection, and every FinishUP connection made through it, ended."
-            if self.left.kind == "ssh"
-            else f"This computer keeps no connection of its own to the server {server}: each "
-            "FinishUP process connected to it by itself, and new ones no longer do."
-        )
+        if self.left.kind != "ssh":
+            closed = (
+                f"This computer keeps no connection of its own to the server {server}: each "
+                "FinishUP process connected to it by itself, and new ones no longer do."
+            )
+        elif self.left_master:
+            closed = (
+                f"Closed this computer's connection to the server {server}: its shared SSH "
+                "connection, and every FinishUP connection made through it, ended."
+            )
+        else:
+            closed = (
+                f"This computer had no open SSH connection to the server {server}, so none was "
+                "closed; new FinishUP connections no longer go to it."
+            )
         return (
             closed,
             "Open agent sessions and a running 'finishup server connect --agent' keep that "
@@ -1189,16 +1200,21 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
 
     import subprocess
 
+    from finishup.client.direct_runtime import ssh_master_present
+
     if previous is None or (record is not None and record.target_id == previous.target_id):
         return TargetSwitch(record)
     try:
-        runtime_for(previous.kind).stop(target_root(previous.target_id))
+        root = target_root(previous.target_id)
+        # Read before the stop, which removes it: whether there was a master to close at all.
+        master = previous.kind == "ssh" and ssh_master_present(root)
+        runtime_for(previous.kind).stop(root)
     except TargetRuntimeError as error:
         # No runtime for that kind: this client runs nothing for it.
         return TargetSwitch(record, previous, left_open=error.phase != "runtime_unavailable")
     except (TargetError, PathSafetyError, OSError, subprocess.SubprocessError):
         return TargetSwitch(record, previous, left_open=True)
-    return TargetSwitch(record, previous)
+    return TargetSwitch(record, previous, left_master=master)
 
 
 def use_target(name: str, *, authorize: Callable[[str, str], None] | None = None) -> TargetSwitch:

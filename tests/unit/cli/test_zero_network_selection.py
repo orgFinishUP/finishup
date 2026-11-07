@@ -796,6 +796,10 @@ def test_choosing_1_switches_to_the_everyday_server_then_the_change_goes_ahead(
         stops.append(target)
 
     monkeypatch.setattr(SshTargetRuntime, "stop", stop)
+    # This client holds that server's shared SSH connection: its master's control socket.
+    master = targets.target_root(record.target_id) / "run" / "m"
+    master.parent.mkdir(mode=0o700, exist_ok=True)
+    master.touch(mode=0o600)
 
     assert _guard() == "switched"
 
@@ -1674,9 +1678,12 @@ def test_a_process_on_this_computers_server_with_a_remote_selected_meanwhile(
         )
         assert targets.read_selected_target_id() is None
         assert "Using this computer's everyday FinishUP server." in result.stdout
-        # The real stop of what this client ran for it (no SSH master was running here).
+        # The real stop of what this client ran for it: no SSH master was running here, so the
+        # switch says that none was closed instead of claiming it closed one.
+        assert "Closed this computer's connection" not in result.stdout
         assert (
-            f"Closed this computer's connection to the server {record.target_id} (ssh)"
+            f"This computer had no open SSH connection to the server {record.target_id} (ssh), "
+            "so none was closed"
         ) in result.stdout
         # The change was made on this computer: its policy is read again and remembered.
         assert policy_reads == [_MACHINE_SCOPE]

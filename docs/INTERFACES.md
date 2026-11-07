@@ -4925,14 +4925,17 @@ tighten|propose` reach the target.
 
 *Switching.* `cli.server.use_target(name, *, authorize=None) -> TargetSwitch` (`record`, the
 target now selected or `None`; `left`, the remote target the selection named before when the
-switch moved away from it; `left_open`; `left_lines()`) stops `left` through
+switch moved away from it; `left_open`; `left_master`; `left_lines()`) stops `left` through
 `runtime_for(left.kind).stop(target_root(left.target_id))` after the selection changed, as `server
-disconnect` does. `server use`, the choice `1` and the terminal interface's `use_server`
+disconnect` does; `left_master` is `direct_runtime.ssh_master_present(root)` (the master's control
+socket `<root>/run/m`, which OpenSSH removes when the master exits) read just before that stop. `server use`, the choice `1` and the terminal interface's `use_server`
 (`tui.models.ServerSwitch`: `indicator`, `left_lines`, `left_open`) print its lines, and a stop
 that did not finish goes to stderr (UNPROVEN in the terminal interface) with `finishup server
-disconnect` while the switch stands. In direct dial `left_lines()` says, for an SSH target, that
-its shared SSH connection and every FinishUP connection made through it ended (the master exited
-by `ssh -O exit`), for an HTTPS or localhost-port target that this computer keeps no connection of
+disconnect` while the switch stands. In direct dial `left_lines()` says, for an SSH target with
+`left_master`, that its shared SSH connection and every FinishUP connection made through it ended
+(the master exited by `ssh -O exit`), for one without (its master already exited, as after its 15
+idle minutes) that this computer had no open SSH connection to it, so none was closed, for an
+HTTPS or localhost-port target that this computer keeps no connection of
 its own to it, and in both cases that open agent sessions and a running `finishup server connect
 --agent` keep that server and connect to it again until restarted or stopped.
 

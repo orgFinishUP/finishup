@@ -1147,6 +1147,9 @@ def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
     assert _invoke("use", "lab").exit_code == 0
     assert stops() == []
 
+    # Its shared SSH connection is open: the master's control socket is there.
+    (lab_root / "run").mkdir(mode=0o700, exist_ok=True)
+    (lab_root / "run" / "m").touch(mode=0o600)
     back = _invoke("use", "local")
     assert back.exit_code == 0, back.output
     assert stops() == [lab_root]
@@ -1176,6 +1179,37 @@ def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
     assert stops() == [lab_root, fu_root]
     assert local_stops == []
     assert "connection to the server" not in plain.output
+
+
+def test_leaving_an_ssh_target_whose_connection_already_ended_says_nothing_was_closed(
+    home: Path,
+    authorized: list[tuple[str, str]],
+    quiet_probe: None,
+    offline_remote: list[tuple[str, Path | None]],
+) -> None:
+    """After its 15 idle minutes the shared SSH connection is usually gone: leaving the server
+    still asks its runtime to stop (nothing is found by pattern) but never says it closed one."""
+
+    assert _invoke("add", "lab", "ssh://owner@lab.example").exit_code == 0
+    assert _invoke("use", "lab").exit_code == 0
+    lab = targets.find_target("lab")
+
+    back = _invoke("use", "local")
+
+    assert back.exit_code == 0, back.output
+    assert [root for action, root in offline_remote if action == "stop"] == [
+        targets.target_root(lab.target_id)
+    ]
+    assert "Closed this computer's connection" not in back.output
+    assert (
+        f"This computer had no open SSH connection to the server {lab.target_id} (ssh), so none "
+        "was closed; new FinishUP connections no longer go to it."
+    ) in back.stdout
+    assert (
+        "Open agent sessions and a running 'finishup server connect --agent' keep that server "
+        "and connect to it again until you restart or stop them."
+    ) in back.stdout
+    assert back.stderr == ""
 
 
 def test_a_switch_whose_left_connection_did_not_stop_still_switches_and_says_how_to_finish(

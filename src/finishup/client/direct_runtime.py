@@ -61,6 +61,7 @@ __all__ = [
     "SshTargetRuntime",
     "close_ssh_masters",
     "discover_ssh_endpoint",
+    "ssh_master_present",
 ]
 
 type _Runner = Callable[..., subprocess.CompletedProcess[bytes]]
@@ -159,6 +160,16 @@ def _command_phase(code: int | None, stderr: bytes) -> str:
     return "remote_incompatible"
 
 
+def ssh_master_present(root: Path) -> bool:
+    """Whether this client holds an OpenSSH master for the SSH target at ``root``.
+
+    The master's control socket at ``<root>/run/m`` is there while it runs: OpenSSH removes it
+    when the master exits, after its 15 idle minutes included. Nothing is run or signalled.
+    """
+
+    return (root / "run" / "m").exists()
+
+
 class SshTargetRuntime:
     """An SSH target: its persistent OpenSSH master, and the remote service behind it."""
 
@@ -187,7 +198,7 @@ class SshTargetRuntime:
 
     def stop(self, root: Path | None) -> None:
         record, target_root = _remote_record(root, frozenset({"ssh"}))
-        if not (target_root / "run" / "m").exists():
+        if not ssh_master_present(target_root):
             return
         code, _stdout, stderr = _run(
             self._runner,
@@ -278,7 +289,7 @@ def close_ssh_masters(
             record = read_target(root)
         except (TargetError, OSError, PathSafetyError):
             continue
-        if record is None or record.kind != "ssh" or not (root / "run" / "m").exists():
+        if record is None or record.kind != "ssh" or not ssh_master_present(root):
             continue
         try:
             stopper.stop(root)

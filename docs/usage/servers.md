@@ -116,9 +116,10 @@ relays), FinishUP refuses the change before making it and says why, with
 Switching, whichever way you do it, also closes this computer's SSH connection to that server, as
 `finishup server disconnect` does, and with it every FinishUP connection made through it. Work the
 server had already started for you, such as a review still running, can then no longer read your
-files through those connections. Nothing your agents' hooks recorded is sent on the way out. A
-server on the web or on a port has no connection of its own on this computer to close, and
-FinishUP says so. If the connection does not close in time, FinishUP still switches and tells you
+files through those connections. Nothing your agents' hooks recorded is sent on the way out. When
+that SSH connection had already ended (it closes itself after 15 idle minutes), FinishUP says that
+there was none to close. A server on the web or on a port has no connection of its own on this
+computer to close, and FinishUP says so. If the connection does not close in time, FinishUP still switches and tells you
 to run `finishup server disconnect` with that server's name.
 
 After switching, restart open agent sessions, and stop a running `finishup server connect NAME
