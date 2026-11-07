@@ -59,6 +59,8 @@ from finishup.protocol.rest_binding import (
     REST_ERROR_SCHEMA_VERSION,
     REST_ERROR_STATUS,
     SERVER_INFO_SCHEMA_VERSION,
+    SERVICE_START_HEADER,
+    SERVICE_START_NEVER,
     SESSION_ID_PATTERN,
     method_allowed,
 )
@@ -188,13 +190,16 @@ class GatewayApp:
         manifest_digest: str,
         on_stale: Callable[[], None] | None = None,
         idle_seconds: float | None = None,
+        reach_upstream: Callable[[], Awaitable[UpstreamStream]] | None = None,
     ) -> None:
         self._keys_directory = keys_directory
         self.keys = KeyRing(keys_directory)
         self.sessions = (
-            SessionRegistry(connect_upstream)
+            SessionRegistry(connect_upstream, reach_upstream=reach_upstream)
             if idle_seconds is None
-            else SessionRegistry(connect_upstream, idle_seconds=idle_seconds)
+            else SessionRegistry(
+                connect_upstream, reach_upstream=reach_upstream, idle_seconds=idle_seconds
+            )
         )
         self._audit = audit
         self._digest = manifest_digest
@@ -378,6 +383,9 @@ class GatewayApp:
             raise _Refused("frame_invalid")
         if hello.get("workspace_locator") is not None:
             raise _Refused("workspace_locator_forbidden")
+        start = request.headers.get(SERVICE_START_HEADER.lower())
+        if start is not None and start != SERVICE_START_NEVER:
+            raise _Refused("frame_invalid")
         try:
             opened = await self.sessions.open(
                 key_id=key.key_id,
@@ -385,6 +393,8 @@ class GatewayApp:
                 hello=hello,
                 hello_payload=payload,
                 manifest_digest=self._digest,
+                # A client's background agent never starts a service the owner stopped.
+                start_service=start is None,
             )
         except SessionLimit:
             raise _Refused("session_limit") from None
@@ -523,8 +533,14 @@ def build_gateway_app(
     audit: AuditSink,
     on_stale: Callable[[], None] | None = None,
     idle_seconds: float | None = None,
+    reach_upstream: Callable[[], Awaitable[UpstreamStream]] | None = None,
 ) -> tuple[GatewayApp, Starlette]:
-    """The gateway state and its ASGI application."""
+    """The gateway state and its ASGI application.
+
+    ``connect_upstream`` reaches the daemon and starts it when it is not running;
+    ``reach_upstream`` reaches a running daemon only, for a session whose client sent
+    ``FinishUP-Service-Start: never`` (``None``: ``connect_upstream`` never starts one).
+    """
 
     from finishup.protocol.schemas import schema_manifest_digest
 
@@ -535,5 +551,6 @@ def build_gateway_app(
         manifest_digest=schema_manifest_digest(),
         on_stale=on_stale,
         idle_seconds=idle_seconds,
+        reach_upstream=reach_upstream,
     )
     return state, state.application()

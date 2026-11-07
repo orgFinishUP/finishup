@@ -750,3 +750,69 @@ async def test_a_daemon_that_never_answers_the_hello_is_service_unavailable(home
         assert len(built.state.sessions) == 0 and len(wedged) == 2
     finally:
         await built.client.aclose()
+
+
+@pytest.mark.anyio
+async def test_a_session_asking_never_to_start_the_service_reaches_a_running_one_only(
+    home: Path,
+) -> None:
+    """A client's background agent sends ``FinishUP-Service-Start: never``: the gateway then only
+    reaches a service that already runs, so one the owner stopped stays stopped until a client
+    asks. Without the header the gateway starts it, as any local client would."""
+
+    keys = home / "gateway"
+    _agent, key = create_key(keys, label="agent", scope="agent")
+    daemon = ScriptedDaemon()
+    served: list[asyncio.Task[None]] = []
+    running = [False]
+    started: list[str] = []
+
+    def serve() -> object:
+        client, server = memory_pair()
+        served.append(asyncio.create_task(daemon.serve(server)))
+        return client
+
+    async def start_and_connect() -> object:
+        if not running[0]:
+            started.append("started")
+            running[0] = True
+        return serve()
+
+    async def reach_running() -> object:
+        from finishup.ports.control import ControlError
+
+        if not running[0]:
+            raise ControlError("service_unavailable", retryable=True)
+        return serve()
+
+    state, app = build_gateway_app(
+        keys_directory=keys,
+        connect_upstream=start_and_connect,  # type: ignore[arg-type]
+        reach_upstream=reach_running,  # type: ignore[arg-type]
+        audit=_Audit(),
+    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=_BASE)
+    headers = {"Authorization": f"Bearer {key}", "FinishUP-Binding": "1.0"}
+    never = {**headers, "FinishUP-Service-Start": "never"}
+    try:
+        stopped = await client.post("/v1/sessions", content=_hello(agent=True), headers=never)
+        assert stopped.status_code == 503 and _reason(stopped) == "service_unavailable"
+        assert started == [] and daemon.connections == 0
+        odd = await client.post(
+            "/v1/sessions", content=_hello(), headers={**headers, "FinishUP-Service-Start": "no"}
+        )
+        assert odd.status_code == 400 and _reason(odd) == "frame_invalid"
+        assert started == [] and daemon.connections == 0
+        # A client's own connection is demand: the service is started for it.
+        assert (
+            await client.post("/v1/sessions", content=_hello(), headers=headers)
+        ).status_code == 201
+        assert started == ["started"]
+        # Once it runs, the background agent reaches it.
+        reached = await client.post("/v1/sessions", content=_hello(agent=True), headers=never)
+        assert reached.status_code == 201
+        assert started == ["started"] and daemon.connections == 2
+    finally:
+        await client.aclose()
+        await state.sessions.close_all()
+        await asyncio.gather(*served, return_exceptions=True)

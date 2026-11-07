@@ -424,6 +424,43 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
     assert spawned == 1
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("start", [True, False])
+async def test_the_gateways_raw_connect_starts_a_service_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, start: bool
+) -> None:
+    """``ensure_service_running(start=False)`` is the gateway's connection for a session whose
+    client must never start a service (its background agent): nothing is spawned for it."""
+
+    import finishup.service.client as client_module
+    from finishup.adapters.control.unix_socket import LocalControlTransportError
+    from finishup.service.client import ensure_service_running
+
+    expected = object()
+    spawned: list[str] = []
+
+    async def connect() -> object:
+        if not spawned:
+            raise LocalControlTransportError("endpoint_missing")
+        return expected
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    class _LocalRoot:
+        target = None
+
+    monkeypatch.setattr(client_module, "_control_transport", _LocalRoot)
+    monkeypatch.setattr(client_module, "service_holder_identity", lambda: None)
+    monkeypatch.setattr(client_module, "_spawn_service_process", lambda: spawned.append("spawn"))
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
+    if start:
+        assert await ensure_service_running(timeout_seconds=0.5) is expected
+        assert spawned == ["spawn"]
+    else:
+        with pytest.raises(ControlError, match="service_unavailable"):
+            await ensure_service_running(timeout_seconds=0.5, start=False)
+        assert spawned == []
+
+
 class _ExitedProcess:
     """A spawned service that has already exited (``poll`` returns its code)."""
 

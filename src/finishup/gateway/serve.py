@@ -7,7 +7,9 @@ that session), sends no ``Server`` header, and trusts no forwarded-for header.
 
 The gateway reaches the daemon through ``finishup.service.client.ensure_service_running``: the
 same owner-only control endpoint, peer-UID authentication and on-demand start as any local client,
-without a handshake of its own — each session forwards its client's hello.
+without a handshake of its own — each session forwards its client's hello. A session whose client
+sent ``FinishUP-Service-Start: never`` (a client's background agent) reaches a running service
+only, so a service the owner stopped stays stopped until a client asks.
 """
 
 from __future__ import annotations
@@ -136,6 +138,8 @@ def run_gateway(
         except (OSError, ssl.SSLError):
             raise GatewayConfigError("gateway_tls_invalid") from None
 
+    from functools import partial
+
     import uvicorn
 
     from finishup.config.paths import log_dir, state_dir
@@ -155,6 +159,7 @@ def run_gateway(
     state, application = build_gateway_app(
         keys_directory=state_dir() / GATEWAY_DIR_NAME,
         connect_upstream=ensure_service_running,
+        reach_upstream=partial(ensure_service_running, start=False),
         audit=FileAuditSink(log_dir() / "gateway-audit.jsonl"),
         on_stale=on_stale,
     )
