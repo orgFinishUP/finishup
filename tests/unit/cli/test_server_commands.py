@@ -1754,7 +1754,7 @@ def test_a_slow_use_or_login_keeps_what_another_command_changed_meanwhile(
             assert stored is not None
             targets.write_target(root, replace(stored, authorized_at=stale))
 
-    monkeypatch.setattr(server_cli, "_check_https_key", use_meanwhile)
+    monkeypatch.setattr(server_cli, "_check_gateway", use_meanwhile)
     key_file = home / "key"
     key_file.write_text(_KEY, encoding="ascii")
     key_file.chmod(0o600)
@@ -1788,7 +1788,7 @@ def test_a_target_removed_during_a_slow_use_or_login_stays_removed(
     assert _invoke("add", "team", "https://team.example").exit_code == 0
     (record,) = targets.list_targets()
     root = targets.target_root(record.target_id)
-    monkeypatch.setattr(server_cli, "_check_https_key", removed_meanwhile)
+    monkeypatch.setattr(server_cli, "_check_gateway", removed_meanwhile)
     key_file = home / "key"
     key_file.write_text(_KEY, encoding="ascii")
     key_file.chmod(0o600)
