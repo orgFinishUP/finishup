@@ -179,3 +179,33 @@ def test_a_mapped_session_start_names_the_zero_network_refusal_without_dialling(
 
     _names_the_refusal(context)
     assert nothing_dialled == []
+
+
+@pytest.mark.parametrize("source", _SOURCES)
+def test_a_session_start_whose_server_refused_the_key_says_it_answered(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: ObservationSource
+) -> None:
+    """RE-6: a server that answered and refused the key is never "could not be reached"."""
+
+    from finishup.ports.control import ControlError
+
+    with targets.registry_lock():
+        record, _root = targets.new_remote_target(
+            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+        )
+        targets.write_selection(record)
+    reset_selection_memo()
+
+    async def refused(*_args: object, **_kwargs: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
+
+    monkeypatch.setattr(observe_hooks_module, "_connect_attachment_service", refused)
+    monkeypatch.setattr(service_client, "connect_service", refused)
+    _store, locator = _consented(tmp_path)
+
+    context = _session_start(source, "key-refused", locator, tmp_path, start="startup")
+
+    assert "(remote_auth_failed)" in context
+    assert "answered and refused this client's key" in context
+    assert "Continuation: remote_credential_repair." in context
+    assert "could not be reached" not in context

@@ -204,6 +204,13 @@ def unavailable_context(phase: str | None) -> str:
         return remote_refusal_context(phase).rstrip()
     if phase not in REMOTE_CONNECTION_PHASES:
         return _UNAVAILABLE_CONTEXT
+    if phase == "remote_auth_failed":
+        # The server was reached: it answered and refused the key.
+        return (
+            "The selected FinishUP server answered and refused this client's key for this mapped "
+            f"session ({phase}); no live receipt can be promised."
+            + render_hook_recovery_suffix(phase)
+        )
     return (
         f"The selected FinishUP server is unavailable for this mapped session ({phase}); no "
         "live receipt can be promised." + render_hook_recovery_suffix(phase)
