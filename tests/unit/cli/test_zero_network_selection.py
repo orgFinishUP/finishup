@@ -2659,3 +2659,199 @@ def test_the_ceremonys_setup_read_remembers_this_repositorys_policy(
     assert asyncio.run(privacy_setup.get_privacy_setup_snapshot(Path(worktree))) is setup
     report = repository_report(_repository_key(worktree))
     assert report is not None and report.no_network
+
+
+# --- a repository held from, or kept here for, a server elsewhere (round 4) ---------------------
+
+
+def _held_here(folder: Path, *, at: datetime = _AT) -> str:
+    """Record that this computer's FinishUP said the repository of ``folder`` allows no network."""
+
+    from finishup.client.everyday_policy import record_repository_report
+    from finishup.client.everyday_repository import repository_key_for
+
+    key = asyncio.run(repository_key_for(os.fspath(folder)))
+    assert key is not None
+    assert record_repository_report(key, os.fspath(folder), no_network=True, now=at)
+    return key
+
+
+def _project(home: Path) -> Path:
+    project = home / "work" / "project"
+    project.mkdir(parents=True)
+    return project.resolve()
+
+
+@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+def test_the_hold_item_says_held_kept_and_grant_changed_in_one_shape(home: Path, kind: str) -> None:
+    from finishup.client.everyday_policy import record_repository_report, repository_report
+    from finishup.client.repository_hold import add_kept, add_override
+
+    record = _remote(kind)
+    project = _project(home)
+    assert zero_network.find_repository_hold(project) is None
+    key = _held_here(project)
+
+    held = zero_network.find_repository_hold(project)
+    assert held is not None
+    assert (held.reason, held.target_id, held.kind, held.cause) == (
+        "repository_egress_held",
+        record.target_id,
+        kind,
+        "not_allowed",
+    )
+    assert held.policy_read == "last_reported" and held.reported_at == _STAMP
+    assert held.lines()[0] == (
+        f"This repository's privacy policy on this computer allows no network use, as this "
+        f"computer last reported at {_STAMP}, so FinishUP sends nothing from it to {kind} "
+        f"{record.target_id}."
+    )
+    assert held.line().startswith("repository_egress_held: ")
+    assert "'finishup server repositories add'" in held.next_step()
+    assert "'finishup server repositories keep'" in held.next_step()
+    assert held.fact()["reason"] == "repository_egress_held"
+    assert held.indicator_suffix() == " · this repository held"
+    assert zero_network.still_holds(held)
+
+    report = repository_report(key)
+    assert report is not None and report.no_network_since is not None
+    root = targets.target_root(record.target_id)
+    with targets.registry_lock():
+        add_kept(root, record.target_id, key, os.fspath(project), report.no_network_since)
+    kept = zero_network.find_repository_hold(project)
+    assert kept is not None and kept.reason == "repository_egress_kept"
+    assert "does not ask again" in kept.lines()[0]
+    assert kept.heading() == "This repository's work is kept on this computer"
+    # The cached held item no longer applies.
+    assert not zero_network.still_holds(held) and zero_network.still_holds(kept)
+
+    # Allowed: nothing to show.
+    with targets.registry_lock():
+        add_override(root, record.target_id, key, os.fspath(project), report.no_network_since)
+    assert zero_network.find_repository_hold(project) is None
+
+    # Its policy here allowed network use and forbids it again: FinishUP asks again.
+    assert record_repository_report(key, os.fspath(project), no_network=False)
+    assert record_repository_report(key, os.fspath(project), no_network=True)
+    again = zero_network.find_repository_hold(project)
+    assert again is not None and again.cause == "grant_changed"
+    assert any("changed since, so FinishUP asks again" in line for line in again.lines())
+    for item in (held, kept, again):
+        text = " ".join(item.lines()) + item.next_step() + json.dumps(item.fact())
+        assert os.fspath(project) not in text and record.name not in text
+
+
+def test_the_hold_item_needs_a_server_elsewhere_selected(home: Path) -> None:
+    project = _project(home)
+    _held_here(project)
+    assert zero_network.find_repository_hold(project) is None
+    with targets.registry_lock():
+        local, _root = targets.new_local_target("work")
+        targets.write_selection(local)
+    assert zero_network.find_repository_hold(project) is None
+    record = _remote("https")
+    item = zero_network.find_repository_hold(project)
+    assert item is not None and item.target_id == record.target_id
+    with targets.registry_lock():
+        targets.clear_selection()
+    assert not zero_network.still_holds(item)
+
+
+def test_setup_readiness_names_a_held_repository_with_its_continuation(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from finishup.cli import setup_readiness
+
+    record = _remote()
+    _policy(monkeypatch, "network_permitted")
+    project = _project(home)
+    _held_here(project)
+
+    def readiness(json_output: bool) -> str:
+        code = setup_readiness._setup_next(  # pyright: ignore[reportPrivateUsage]
+            operation="connection",
+            host=None,
+            executable=None,
+            config_root=None,
+            project=project,
+            route=None,
+            json_output=json_output,
+        )
+        assert code == 0
+        return capsys.readouterr().out
+
+    report = json.loads(readiness(True))
+    assert "server_selection" not in report["facts"]
+    fact = report["facts"]["repository_hold"]
+    assert {key: fact[key] for key in ("reason", "target_id", "kind", "cause")} == {
+        "reason": "repository_egress_held",
+        "target_id": record.target_id,
+        "kind": "ssh",
+        "cause": "not_allowed",
+    }
+    assert fact["next_command"].endswith("server repositories add")
+
+    human = readiness(False)
+    line = next(line for line in human.splitlines() if line.startswith("Server: "))
+    assert line.startswith("Server: repository_egress_held: This repository's privacy policy")
+    assert record.target_id in line and _NAME not in line
+
+
+def test_setup_status_puts_a_held_repository_on_stderr(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import finishup.cli.host_connection as host_connection
+    from finishup.cli import setup
+
+    _remote()
+    _policy(monkeypatch, "network_permitted")
+    project = _project(home)
+    _held_here(project)
+    monkeypatch.chdir(project)
+
+    async def observed() -> tuple[dict[str, object], None]:
+        return {"reachable": False}, None
+
+    def no_layers(*_args: object) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(setup, "discover_codex_binaries", tuple)
+    monkeypatch.setattr(setup, "_service_reachability_observed", observed)
+    monkeypatch.setattr(setup, "_integration_layers", no_layers)
+    monkeypatch.setattr(setup, "_platform_diagnostics", dict)
+    monkeypatch.setattr(host_connection, "installation_rows", list)
+
+    assert asyncio.run(setup.setup_status(json_output=True)) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["schema"] == "yoetz.setup-status/2"
+    assert captured.err.startswith("repository_egress_held: ")
+
+
+def test_the_menu_home_shows_a_held_repository(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from finishup.cli import menu
+
+    record = _remote("local_port")
+    _policy(monkeypatch, "network_permitted")
+    project = _project(home)
+    _held_here(project)
+    monkeypatch.chdir(project)
+
+    async def service() -> str:
+        return "reachable"
+
+    async def harness() -> tuple[str, ...]:
+        return ()
+
+    monkeypatch.setattr(menu, "_service_summary", service)
+    monkeypatch.setattr(menu, "_harness_summary", harness)
+    monkeypatch.setattr("finishup.cli.setup.setup_marker_present", lambda: True)
+
+    menu._print_home(menu._gather_overview())  # pyright: ignore[reportPrivateUsage]
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if "Server" in line]
+    assert lines and all(line.startswith("  Server     ") for line in lines)
+    assert any(f"local_port {record.target_id}" in line for line in lines)
+    assert any("finishup server repositories add" in line for line in lines)
