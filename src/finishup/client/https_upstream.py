@@ -10,8 +10,10 @@ One local control connection becomes one gateway session (ADR-051, approach A; d
   ``POST …/frames``;
 * when the hello declared a workspace agent, server frames (``workspace_call``) arrive through a
   long-poll of ``GET …/frames`` and are written to the local stream as they come;
-* local end of stream is ``DELETE /v1/sessions/{sid}``; ``session_unknown`` closes the local
-  stream before anything is dispatched again, so the client's reconnect re-handshakes.
+* local end of stream is ``DELETE /v1/sessions/{sid}``, bounded by ``_CLOSE_SECONDS`` and never
+  sent once the connector may send nothing (this computer reported zero-network): the gateway
+  forgets an unused session on its own; ``session_unknown`` closes the local stream before
+  anything is dispatched again, so the client's reconnect re-handshakes.
 
 Bodies are the exact canonical frame payloads. TLS uses the target's CA file, or its
 ``sha256:`` pin of the leaf certificate, checked right after the handshake and before any request
@@ -63,6 +65,9 @@ _CONNECT_SECONDS: Final = 10.0
 _READ_SECONDS: Final = MAX_WAIT_MS / 1000 + 15.0
 _AMBIGUOUS_POLLS: Final = 3
 _AMBIGUOUS_BACKOFF_SECONDS: Final = 0.5
+# Ending a session is a courtesy: the gateway closes one left unused after its idle bound (and an
+# agent session once its polls stop), so a stop never waits long on a black-holed network for it.
+_CLOSE_SECONDS: Final = 1.0
 # Phases a retry cannot repair: the relay ends at once and names them.
 _TERMINAL_PHASES: Final = frozenset({"remote_auth_failed", "remote_service_not_running"})
 _JSON: Final = "application/json"
@@ -283,10 +288,12 @@ class _Relay:
         local: ControlStream,
         upstream: HttpsUpstream,
         on_unavailable: Callable[[str], Awaitable[None]],
+        may_send: Callable[[], bool],
     ) -> None:
         self._local = local
         self._upstream = upstream
         self._on_unavailable = on_unavailable
+        self._may_send = may_send
         self._write_lock = asyncio.Lock()
         self._sid: str | None = None
         self._tasks: set[asyncio.Task[object]] = set()
@@ -460,9 +467,10 @@ class _Relay:
             for task in everything:
                 task.cancel()
             await asyncio.gather(*everything, return_exceptions=True)
-            if self._sid is not None:
-                with contextlib.suppress(UpstreamUnavailable):
-                    await self._upstream.request("DELETE", self._session_path())
+            if self._sid is not None and self._may_send():
+                with contextlib.suppress(UpstreamUnavailable, TimeoutError):
+                    async with asyncio.timeout(_CLOSE_SECONDS):
+                        await self._upstream.request("DELETE", self._session_path())
 
 
 async def relay_https_connection(
@@ -473,10 +481,15 @@ async def relay_https_connection(
     *,
     on_unavailable: Callable[[str], Awaitable[None]],
     on_ready: Callable[[], Awaitable[None]],
+    may_send: Callable[[], bool],
 ) -> None:
-    """Serve one local connection whose hello frame the connector already read and checked."""
+    """Serve one local connection whose hello frame the connector already read and checked.
 
-    relay = _Relay(local, upstream, on_unavailable)
+    ``may_send`` answers whether anything may still be sent upstream; the closing ``DELETE`` is
+    skipped when it does not (the connector stops because this computer reported zero-network).
+    """
+
+    relay = _Relay(local, upstream, on_unavailable, may_send)
     try:
         if not await relay.open(hello_payload):
             return

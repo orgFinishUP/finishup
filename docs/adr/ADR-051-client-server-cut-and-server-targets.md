@@ -1142,7 +1142,10 @@ through the same relay; human-control and secret channels never leave the server
   only polls its result. Polls, cancels and workspace replies, which are safe to repeat, are retried
   after a transient failure (up to three in a row), so one network blip does not end a relayed
   connection and every call on it. When the hello declared a workspace agent, server frames arrive through
-  the `GET …/frames` long-poll and replies go out with `POST …/frames`. TLS uses the target's CA
+  the `GET …/frames` long-poll and replies go out with `POST …/frames`. A relay that ends deletes
+  its session within one second at most and never once this computer reported zero-network: the
+  gateway forgets an unused session on its own, so a stop never waits on a black-holed network
+  for it. TLS uses the target's CA
   file, or its `sha256:` pin of the leaf certificate, checked right after the handshake and before
   any request byte. Only the connector reads the API key, and it rereads it after a refusal so a
   key rotated with `server login` takes effect without a restart.

@@ -481,3 +481,73 @@ def test_unusable_tls_material_is_named_not_left_starting(home: Path, material: 
 
     with selection_override(root):
         asyncio.run(exercise())
+
+
+class _UnansweredDelete(httpx.AsyncBaseTransport):
+    """Forwards every request but holds each ``DELETE`` unanswered, as a black-holed network."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self.inner = inner
+        self.deletes: list[float] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            import time
+
+            self.deletes.append(time.monotonic())
+            await asyncio.Event().wait()
+        return await self.inner.handle_async_request(request)
+
+
+@pytest.mark.parametrize("zero_network", [True, False])
+def test_a_stop_never_waits_on_the_closing_delete(home: Path, zero_network: bool) -> None:
+    """A relayed connection's session is deleted as the relay ends, but the gateway forgets an
+    unused session on its own: the stop never waits on that request past a short bound (``server
+    disconnect`` waits 5 seconds), and once this computer reports zero-network it is not sent."""
+
+    import time
+
+    from finishup.adapters.control.unix_socket import bind_control_listener, connect_control
+    from finishup.client import everyday_policy
+
+    _state, connector, _daemon, _key, root, transport = _setup(
+        home, transport_wrapper=_UnansweredDelete
+    )
+    assert isinstance(transport, _UnansweredDelete)
+
+    async def exercise() -> tuple[str, float, float]:
+        listener = await bind_control_listener()
+        serving = asyncio.create_task(connector.serve(listener))
+        client = await connect_control()
+        await client.send_all(
+            encode_control_frame(
+                {
+                    "protocol_version": "1.0",
+                    "client_kind": "cli",
+                    "client_version": "0.1.0",
+                    "connection_nonce": "9a" * 32,
+                    "schema_manifest_digest": load_schema_catalog().manifest_digest,
+                }
+            )
+        )
+        async with asyncio.timeout(5):
+            await read_control_frame(client)  # the session is open
+        if zero_network:
+            assert everyday_policy.record_reported_policy(zero_network=True) is True
+        else:
+            connector.request_stop()
+        asked = time.monotonic()
+        async with asyncio.timeout(5):
+            reason = await serving
+        await client.aclose()
+        return reason, asked, time.monotonic()
+
+    with selection_override(root):
+        reason, asked, stopped = asyncio.run(exercise())
+    assert stopped - asked < 3.5
+    if zero_network:
+        assert reason == "zero_network_remote_selected"
+        assert transport.deletes == []
+    else:
+        assert reason == "stop_requested"
+        assert len(transport.deletes) == 1

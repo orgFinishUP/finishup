@@ -278,6 +278,16 @@ class Connector:
             self.request_stop(_ZERO_NETWORK)
         return True
 
+    def _may_send(self) -> bool:
+        """Whether anything may still be sent upstream: never once this computer last reported
+        a zero-network policy, including the courtesy close of a relay that is ending."""
+
+        if self._stop.is_set() and self._stop_reason == _ZERO_NETWORK:
+            return False
+        from finishup.client.everyday_policy import last_reported_zero_network
+
+        return last_reported_zero_network() is None
+
     # -- upstream ---------------------------------------------------------------------------
 
     def _stored_credential(self) -> str:
@@ -414,6 +424,7 @@ class Connector:
                     encoded[4:],
                     on_unavailable=self._unavailable,
                     on_ready=self._ready,
+                    may_send=self._may_send,
                 )
         except Exception:
             # A relay fault ends this connection only; the client sees its stream close.
