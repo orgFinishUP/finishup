@@ -29,6 +29,15 @@ def test_review_guidance_forbids_copying_a_file_review_could_not_read() -> None:
         " not copy, move or restate those files into the workspace" in review
     )
     assert "(receipt.md#final-prose)" in review
+    # Which owner step admits an outside file depends on where the service runs (on a remote
+    # target `privacy input-roots` is refused on the client, and a folder listed there admits it,
+    # ADR-051 decision 5, 2026-11-07): review.md names none and leaves both, each with where it
+    # runs, to the receipt's final prose it links, so it never names one step alone.
+    assert (
+        "A file outside the workspace reaches the reviewer only beneath a directory the owner"
+        " admitted; you cannot admit one." in review
+    )
+    assert "finishup privacy input-roots" not in review
 
 
 def test_final_prose_names_each_owner_step_and_where_it_runs() -> None:
