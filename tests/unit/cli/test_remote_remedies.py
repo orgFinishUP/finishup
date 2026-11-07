@@ -449,20 +449,23 @@ def test_the_hook_contexts_say_this_computer_refused(home: Path) -> None:
         remote_reason=hooks_module._remote_reason(_phase_error(_ZERO)),  # pyright: ignore[reportPrivateUsage]
     )
     context = hooks_module.unavailable_context(outcome)
-    assert context.startswith("This computer's FinishUP is set to make no network connections")
+    # RE-1: the same words as the auto-attach, MCP ``start`` and the CLI: the closed reason, the
+    # registry directive with the owner's fix, and the continuation.
+    assert context.startswith(
+        f"FinishUP refused the selected server's connection before anything was sent ({_ZERO})."
+    )
+    assert "set to make no network connections" in context
+    assert "'finishup server use local'" in context
     assert "nothing was sent" in context and "could not serve" not in context
     assert context.endswith(" Continuation: zero_network_local_server_required.")
     assert len(context.encode()) <= 512
     attached = _auto_attach(_phase_error(_ZERO))
+    # The diagnostic names the refusal itself, not an unavailable service.
+    assert (attached.reason, attached.remote_phase) == (_ZERO, None)
     attach = observe_hooks._attachment_recovery_context(  # pyright: ignore[reportPrivateUsage]
         attached.reason, remote_phase=attached.remote_phase
     )
-    assert attach.startswith(
-        f"FinishUP attachment pending: {_ZERO}. This computer's FinishUP is set to make no "
-        "network connections, so nothing was sent"
-    )
-    assert "could not serve" not in attach
-    assert attach.endswith(" Continuation: zero_network_local_server_required. ")
+    assert attach == context + " "
     _assert_remote_words(context + attach)
 
 

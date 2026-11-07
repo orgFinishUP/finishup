@@ -627,21 +627,25 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 def _attachment_recovery_context(reason: str, *, remote_phase: str | None = None) -> str:
     """Render only trusted classifications, never host/error payload text."""
 
+    from finishup.client.targets import PRE_DIAL_REFUSALS
+
+    refused = reason if reason in PRE_DIAL_REFUSALS else remote_phase
+    if refused in PRE_DIAL_REFUSALS:
+        # ADR-051 decision 8: this computer refused the selected server before anything was sent
+        # (zero-network, or an older disclosure). Name the reason and the owner's fix, as MCP
+        # ``start`` and the CLI do; the server was never asked, so no budget was spent on it.
+        from finishup.cli.hooks import remote_refusal_context
+
+        return remote_refusal_context(refused)
     if remote_phase is not None:
         # ADR-051: no service of this machine serves a remote root, so no startup or restart
         # advice applies; the closed phase and its continuation say what to do instead.
         from finishup.cli.render import render_hook_recovery_suffix
 
-        why = (
-            # ADR-051 decision 8: this computer refused to connect, so nothing was sent.
-            "This computer's FinishUP is set to make no network connections, so nothing was sent "
-            "to the selected FinishUP server and no task is mapped"
-            if remote_phase == "zero_network_remote_selected"
-            else "The selected FinishUP server could not serve the attachment, so no task is mapped"
-        )
         return (
-            f"FinishUP attachment pending: {remote_phase}. {why}; never fall back to another "
-            "server or a local service." + render_hook_recovery_suffix(remote_phase) + " "
+            f"FinishUP attachment pending: {remote_phase}. The selected FinishUP server could not "
+            "serve the attachment, so no task is mapped; never fall back to another server or a "
+            "local service." + render_hook_recovery_suffix(remote_phase) + " "
         )
     if reason == "service_incompatible":
         return (
@@ -3502,6 +3506,14 @@ async def _try_auto_start(
 
     if workspace_locator is None:
         return AutoAttachOutcome(None, "auto_attach_workspace_unbound")
+    from finishup.client.targets import active_remote_refusal
+
+    refusal = active_remote_refusal()
+    if refusal is not None:
+        # The connect seams refuse this before any dial (ADR-051 decision 8); naming it here sends
+        # nothing, starts no workspace agent and keeps the closed reason for the context and
+        # diagnostics.
+        return AutoAttachOutcome(None, refusal)
 
     from pydantic import ValidationError
 
@@ -3574,9 +3586,13 @@ async def _try_auto_start(
         # ordinary create attempt would now succeed and strand predecessor work.
     except ControlError as error:
         from finishup.client.remote_remedy import remote_remedy
+        from finishup.client.targets import PRE_DIAL_REFUSALS
         from finishup.service.client import handshake_failure
 
         remedy = remote_remedy(error)
+        if remedy is not None and remedy.reason in PRE_DIAL_REFUSALS:
+            # A selection that changed after the check above: the connect seam refused it.
+            return AutoAttachOutcome(None, remedy.reason)
         if remedy is not None and remedy.directive is not None:
             return AutoAttachOutcome(None, "service_unavailable", remote_phase=remedy.reason)
         if handshake_failure(error) is not None:
