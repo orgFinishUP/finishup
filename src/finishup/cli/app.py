@@ -932,7 +932,7 @@ async def _call_workflow(
         elif isinstance(branch, OperationFailureModel):
             _stderr(render_human_error(branch.error))
         elif isinstance(branch, CheckSuccessModel):
-            typer.echo(render_human_check(branch))
+            typer.echo(render_human_check(branch, claim_bound=attribution is not None))
         elif isinstance(branch, CheckAwaitingHumanModel):
             typer.echo(render_human_awaiting_human(branch))
         elif isinstance(branch, CheckInspectionModel):

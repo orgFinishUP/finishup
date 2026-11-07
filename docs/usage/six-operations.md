@@ -172,7 +172,10 @@ observations that are still being delivered before it checks, and the result's
 (`bounded_timeout`, with how many), or the wait could not see them (`unavailable`). On Codex the
 wait also delivers session-log entries FinishUP was still holding to match with their hook reports,
 marked as unmatched, so they count before the check rather than after it. The wait never fails the
-check; without the option nothing changes.
+check; without the option nothing changes. With a [FinishUP server](servers.md) on another
+machine, observations still waiting on your computer are out of the server's sight, so the wait is
+always `unavailable`; `finishup check` says so and names the fix: run `finishup observe drain` in
+the project folder, then check again.
 
 #### Inspecting what is left
 

@@ -429,8 +429,22 @@ def _render_overall_next(
     return f"Overall next [{next_step.status}]: {action}{targets}{endpoint}.{predicted}"
 
 
-def render_human_check(result: CheckSuccessModel) -> str:
-    """Render an exact check verdict and bounded AI-powered review status."""
+# ADR-051 decision 12: over a claim-bound connection a check that asked to await observations
+# reports the wait ``unavailable`` because the rows wait in this computer's outbox, which the
+# server cannot read; this computer's own outbox is fine. Fixed words: what happened, why, the fix.
+CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE: Final = (
+    "Hook observations awaited: unavailable (the server cannot see observations still waiting on "
+    "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
+    "the project folder, then check again)"
+)
+
+
+def render_human_check(result: CheckSuccessModel, *, claim_bound: bool = False) -> str:
+    """Render an exact check verdict and bounded AI-powered review status.
+
+    ``claim_bound`` is True when the check went over a connection to a server on another machine
+    (``workspace_binding == "client_claim"``), so an unavailable observation wait names that cause.
+    """
 
     if type(result) is not CheckSuccessModel:
         raise TypeError("check_result_invalid")
@@ -491,6 +505,8 @@ def render_human_check(result: CheckSuccessModel) -> str:
                 f"Hook observations awaited: bounded_timeout ({int(awaited.pending_count)} "
                 "still pending; the check used the record as it stood)"
                 if awaited.state == "bounded_timeout"
+                else CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE
+                if claim_bound
                 else "Hook observations awaited: unavailable (local outbox not readable)"
             ),
         )
