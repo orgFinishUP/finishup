@@ -594,8 +594,9 @@ TASK_INPUT_OUTSIDE_NOT_ADMITTED_SHORT_SENTENCE: Final = (
 OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE: Final = (
     "Review lacked files outside the folders the owner listed for this server; only the owner can"
     " allow them, on the client machine: `finishup server folders add NAME FOLDER` for a file"
-    " outside the project, or `finishup server folders mode NAME local` for a server they trust,"
-    " the only way for a test in the project that Git ignores."
+    " outside the project, or `finishup server folders mode NAME local` for a server they trust;"
+    " for a test in the project that Git ignores, only local mode or no longer ignoring the test"
+    " helps."
 )
 # The most files of either kind one check says listed mode kept back (ADR-051 decision 5, open
 # question 2 closed 2026-11-07): well above the 16 task-input values and four kept copies one
@@ -731,7 +732,8 @@ def check_time_change_gap_sentence(code: str) -> str | None:
             " in the project, listing a folder does not help: stop Git ignoring it, or switch the"
             " server to local mode, which also reads every file above, with `finishup server"
             " folders mode NAME local`, only for a server they trust as they trust FinishUP on"
-            " that computer. Checking again then reads them. An agent cannot."
+            " that computer. Checking again then reads them. These are the owner's steps, not an"
+            " agent's."
         )
     if code == TASK_INPUT_BASELINE_UNAVAILABLE_GAP:
         return (

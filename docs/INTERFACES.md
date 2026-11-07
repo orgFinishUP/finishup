@@ -1980,10 +1980,13 @@ its `-part-NN` parts, not the source file; renderings say "of the captured item"
   answer for it). Only those files are missing; the rest of the check-time change reaches review
   (ADR-051 decision 5, amended 2026-11-07). Its fixed sentence names both of the owner's ways out
   with their full arguments and where to run them: `finishup server folders add NAME FOLDER`, or,
-  for a server they trust, `finishup server folders mode NAME local`, on the client machine; an
-  agent cannot. It says which fits which file: listing a folder covers a file outside the
-  project, while a declared test in the project that Git ignores is read only in `local` mode (or
-  once Git no longer ignores it), whatever folder is listed, the project's own included. A closed
+  for a server they trust, `finishup server folders mode NAME local`, on the client machine; every
+  way out is the owner's, never an agent's ("These are the owner's steps, not an agent's."). It
+  says which fits which file: listing a folder covers a file outside the project, while a
+  declared test in the project that Git ignores is read only in `local` mode or once Git no longer
+  ignores it, whatever folder is listed, the project's own included. Its MCP short form
+  (`OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE`) and the shipped guidance (`receipt.md#final-prose`)
+  name the same two ways for such a test, never `local` mode alone. A closed
   disclosure code with no path. How many were kept back travels as bounded counts, never which
   file (ADR-051 open question 2, closed 2026-11-07): `FinalSemanticEvaluation.
   outside_reads_kept_back` (`domain.receipts.OutsideReadsKeptBack`: `task_inputs` and
