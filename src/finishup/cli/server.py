@@ -656,6 +656,18 @@ def _authorize_remote(
     )
 
 
+def _absolute_option(value: str | None) -> str | None:
+    """An absolute remote path option, checked before it is used in any remote command."""
+
+    if value is not None and (
+        not value.startswith("/")
+        or len(value) > 1_024
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ServerCommandRefused("target_path_invalid")
+    return value
+
+
 def _discover_ssh_endpoint(
     *,
     user: str | None,
@@ -901,6 +913,9 @@ def server_add(
         raise ServerCommandRefused(error.reason)
     if taken:
         raise ServerCommandRefused("target_name_taken")
+    # Checked before the consent and before the SSH probe runs either on the server (SRV-11).
+    remote_root = _absolute_option(remote_root)
+    remote_launcher = _absolute_option(remote_launcher)
     # What it may read outside your projects here (ADR-051 decision 5): the same question for
     # every remote kind, asked as part of the typed confirmation unless --outside-reads answered
     # it, and never for an official FinishUP endpoint, which is 'local' as FinishUP here is.
