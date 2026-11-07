@@ -5562,7 +5562,8 @@ the MCP text) adds it after the connection's workspace-evidence line when the re
 provenance; raw JSON output carries none. A claim-bound `check` with `await_observations` reports
 the wait `unavailable`; `render_human_check(..., claim_bound=True)` (the CLI, when the connection
 is claim-bound) renders it as `cli.render.CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE`, naming
-`finishup observe drain` on the client, instead of "local outbox not readable".
+`finishup observe drain` on the client and then a check without `--await-observations` (an awaited
+claim-bound check is `unavailable` again), instead of "local outbox not readable".
 
 **Closed tokens** (`protocol/errors.py` protocol reason codes, each with an ADR-030 directive in
 `protocol/recovery.py` or, for the two workspace-agent reasons, a recorded exemption):

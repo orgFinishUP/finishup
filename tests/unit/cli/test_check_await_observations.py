@@ -146,9 +146,9 @@ def test_mcp_check_tool_advertises_the_optional_flag() -> None:
 
 
 _CLAIM_BOUND_UNAVAILABLE = (
-    "Hook observations awaited: unavailable (the server cannot see observations still waiting on "
+    "Hook observations awaited: unavailable (the server cannot wait for observations still on "
     "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
-    "the project folder, then check again)"
+    "the project folder first, then check again without --await-observations)"
 )
 
 
@@ -162,6 +162,9 @@ def test_a_claim_bound_unavailable_wait_names_the_real_cause_and_the_fix() -> No
     claimed = render_human_check(success, claim_bound=True)
     assert _CLAIM_BOUND_UNAVAILABLE in claimed
     assert "local outbox not readable" not in claimed
+    # A claim-bound wait is always unavailable, so the fix must not send the owner back to a
+    # check that waits: after the drain, the check that clears the line is one without the flag.
+    assert "then check again without --await-observations)" in claimed
     # A local connection's unavailable wait keeps its own cause.
     assert "unavailable (local outbox not readable)" in render_human_check(success)
     # Other states read the same either way.

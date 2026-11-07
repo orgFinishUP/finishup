@@ -175,7 +175,8 @@ marked as unmatched, so they count before the check rather than after it. The wa
 check; without the option nothing changes. With a [FinishUP server](servers.md) on another
 machine, observations still waiting on your computer are out of the server's sight, so the wait is
 always `unavailable`; `finishup check` says so and names the fix: run `finishup observe drain` in
-the project folder, then check again.
+the project folder first, then check again without `--await-observations` (a check that asks to
+wait reports `unavailable` again).
 
 #### Inspecting what is left
 
