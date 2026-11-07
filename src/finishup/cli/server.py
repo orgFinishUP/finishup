@@ -1620,22 +1620,16 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
-    if record.is_remote:
-        try:
-            runtime_for(record.kind).stop(root)
-        except TargetRuntimeError as error:
-            if error.phase != "runtime_unavailable":
-                # Never delete a root under a connector still serving it: its endpoint, status,
-                # lock and SSH master would go while it runs.
-                raise ServerCommandRefused("target_still_connected") from None
-        key_left = _delete_key_for_remove(record, root)
-    else:
-        key_left = False
+    key_left = False
     try:
         with registry_lock():
+            # The selection goes first, so a new hook or command can no longer dial the target
+            # while its connection is stopped (as ``use_target`` does).
             if selected == record.target_id or unreadable_selection:
                 clear_selection()
-            if record.kind == "local":
+            if record.is_remote:
+                key_left = _remove_remote(record, root)
+            else:
                 from finishup.cli.instance import dispose_instance
                 from finishup.config.installation import InstanceIdentityError
 
@@ -1647,10 +1641,6 @@ def server_remove(
                         err=True,
                     )
                     raise typer.Exit(_UNSAFE) from None
-            else:
-                from finishup.client.targets import remove_target_root
-
-                remove_target_root(record)
     except TargetError as error:
         raise ServerCommandRefused(error.reason)
     except PathSafetyError as error:
@@ -1669,6 +1659,46 @@ def server_remove(
     if selected == record.target_id or unreadable_selection:
         typer.echo("Using this computer's everyday FinishUP server.")
         _warn_open_sessions()
+
+
+def _stop_for_remove(record: ServerTarget, root: Path) -> None:
+    """Stop what this client runs for ``record``; refuse while it does not stop."""
+
+    try:
+        runtime_for(record.kind).stop(root)
+    except TargetRuntimeError as error:
+        if error.phase != "runtime_unavailable":
+            # Never delete a root under a connection still serving it: its endpoint, status, lock
+            # and SSH master would go while it runs.
+            raise ServerCommandRefused("target_still_connected") from None
+
+
+def _remove_remote(record: ServerTarget, root: Path) -> bool:
+    """Remove remote ``record`` under the registry lock; True when its API key stays behind.
+
+    The caller already cleared a selection that named it. Its connection is stopped, its key
+    deleted, and its connection stopped once more right before the folder goes (SRV-2): a process
+    that still remembers the target, an MCP bridge, may have started it again meanwhile, and a
+    folder is never deleted under a connection still serving it. A first stop that does not
+    finish changes nothing; a second one keeps the folder.
+    """
+
+    from finishup.client.targets import remove_target_root
+
+    _stop_for_remove(record, root)
+    key_left = _delete_key_for_remove(record, root)
+    try:
+        _stop_for_remove(record, root)
+    except ServerCommandRefused:
+        raise ServerCommandRefused(
+            "target_still_connected",
+            message=(
+                "the connection this client runs for that target started again and did not stop "
+                "in time, so its folder was kept; run the same command again"
+            ),
+        ) from None
+    remove_target_root(record)
+    return key_left
 
 
 def _delete_key_for_remove(record: ServerTarget, root: Path) -> bool:
