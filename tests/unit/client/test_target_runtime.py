@@ -93,3 +93,32 @@ def test_runtime_errors_carry_only_closed_tokens() -> None:
 )
 def test_p95_is_nearest_rank(samples: list[float], expected: int) -> None:
     assert target_runtime._p95(samples) == expected  # pyright: ignore[reportPrivateUsage]
+
+
+def test_disconnecting_a_server_on_this_computer_stops_its_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SRV-9: ``server disconnect`` of the everyday or a named local server stops its FinishUP
+    service (``SERVICE_STOP``, as ``finishup service stop`` does); servers.md says so."""
+
+    import finishup.service.client as service_client
+
+    stopped: list[bool] = []
+
+    class _Client:
+        async def stop(self) -> None:
+            stopped.append(True)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(*_args: object, **_kwargs: object) -> _Client:
+        return _Client()
+
+    monkeypatch.setattr(service_client, "connect_service", connect)
+    LocalTargetRuntime().stop(None)
+    assert stopped == [True]
+    usage = Path(__file__).parents[3] / "docs" / "usage"
+    servers = " ".join((usage / "servers.md").read_text(encoding="utf-8").split())
+    assert "Neither stops the FinishUP service on the server." not in servers
+    assert "`disconnect` stops it, as `finishup service stop` does" in servers
