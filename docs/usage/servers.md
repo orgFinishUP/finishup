@@ -277,11 +277,15 @@ finishup server remove devbox --select-local
 
 `remove` disconnects, deletes the stored key and removes everything FinishUP kept on this computer
 for that server. It refuses the server you are using unless you add `--select-local`, which
-switches back to the default first. If your system's credential store holds the server's API
-key but cannot be used right now (for example, it is locked), `remove` still removes the server
-and tells you which entry to delete there yourself. Removing a local server deletes its tasks and
-vault; removing a server on another machine leaves that server untouched. An agent session that
-was still using the removed server stops reaching FinishUP and says so until you restart it.
+switches back to the default first. If the workspace agent FinishUP runs for that server does not
+stop in time, `remove` keeps the server and asks you to run it again. The switch back to the
+default stays, and `remove` says so. If the agent started again after the key was deleted, the
+key stays deleted, and the refusal says so: run `remove` again, or `finishup server login` to keep
+the server. If your system's credential store holds the server's API key but cannot be used right
+now (for example, it is locked), `remove` still removes the server and tells you which entry to
+delete there yourself. Removing a local server deletes its tasks and vault; removing a server on
+another machine leaves that server untouched. An agent session that was still using the removed
+server stops reaching FinishUP and says so until you restart it.
 
 If adding or removing a server was interrupted, `list` may name a leftover folder (`t_` and eight
 characters) that holds no server. FinishUP does not use it; `finishup server remove` with that

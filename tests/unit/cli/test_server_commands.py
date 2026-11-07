@@ -1282,17 +1282,28 @@ def test_remove_never_deletes_a_target_whose_agent_did_not_stop(
     assert stops == [root, root, root]
 
 
-@pytest.mark.parametrize("second_stop", ["stops", "stuck"])
+_SWITCHED_BACK: Final = (
+    "Using this computer's everyday FinishUP server.\n"
+    "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP MCP "
+    "bridge keeps the server it started with.\n"
+)
+
+
+@pytest.mark.parametrize("stuck_stop", [None, 1, 2])
 def test_remove_clears_the_selection_first_and_stops_again_right_before_the_folder_goes(
     home: Path,
     authorized: list[tuple[str, str]],
     monkeypatch: pytest.MonkeyPatch,
-    second_stop: str,
+    stuck_stop: int | None,
 ) -> None:
     """SRV-2: ``remove`` stopped the connection while the selection still named the target, then
     deleted the key, so a fresh hook could start the connection again and the folder was deleted
     under it. Now the selection goes first, and the connection is stopped once more after the key
-    is deleted, right before the folder goes; one that then does not stop keeps the folder."""
+    is deleted, right before the folder goes; one that then does not stop keeps the folder.
+
+    A remove refused at either stop says what it already did: the switch to this computer's
+    server stays and is printed, and a key deleted before the second stop is recorded as gone
+    (``server status`` never reports a key that no longer exists) and named in the refusal."""
 
     from finishup.client.target_runtime import TargetRuntimeError
 
@@ -1304,7 +1315,7 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
         def stop(self, target: Path | None) -> None:
             assert target is not None
             seen.append((targets.read_selected_target_id(), bool(keyring.entries), target.is_dir()))
-            if second_stop == "stuck" and len(seen) == 2:
+            if len(seen) == stuck_stop:
                 raise TargetRuntimeError("service_unavailable", phase="agent_stop")
 
     def runtime_for(_kind: str) -> _Runtime:
@@ -1318,22 +1329,37 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
     assert _invoke("login", "fu", "--key-file", str(key_file)).exit_code == 0
     assert _invoke("use", "fu").exit_code == 0
     (record,) = targets.list_targets()
+    assert record.credential == "keyring"
     root = targets.target_root(record.target_id)
 
     result = _invoke("remove", "fu", "--select-local")
 
-    assert seen == [(None, True, True), (None, False, True)]
+    assert seen == [(None, True, True), (None, False, True)][: stuck_stop or 2]
     assert targets.read_selected_target_id() is None
-    if second_stop == "stops":
+    if stuck_stop is None:
         assert result.exit_code == 0, result.output
         assert not root.exists() and targets.list_targets() == ()
+        assert result.stdout == f"Removed server target fu ({record.target_id}).\n{_SWITCHED_BACK}"
+        return
+    assert result.exit_code == 20
+    assert result.stdout == _SWITCHED_BACK
+    assert root.is_dir()
+    (kept,) = targets.list_targets()
+    if stuck_stop == 1:
+        assert result.stderr == (
+            "target_still_connected: the workspace agent this client runs for that target did "
+            "not stop in time, so nothing was removed; run the same command again\n"
+        )
+        assert (kept.credential, len(keyring.entries)) == ("keyring", 1)
     else:
         assert result.stderr == (
             "target_still_connected: the workspace agent this client runs for that target "
-            "started again and did not stop in time, so its folder was kept; run the same command "
-            "again\n"
+            "started again and did not stop in time, so its folder was kept, but its API key was "
+            "already deleted; run the same command again, or 'finishup server login' to keep "
+            "using that server\n"
         )
-        assert root.is_dir() and [target.name for target in targets.list_targets()] == ["fu"]
+        # ``server status`` reports the record's credential: "none", not a key that is gone.
+        assert (kept.credential, len(keyring.entries)) == (None, 0)
 
 
 def test_switching_away_from_a_remote_target_stops_what_this_client_runs_for_it(
