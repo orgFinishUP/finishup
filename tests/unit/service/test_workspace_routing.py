@@ -264,6 +264,84 @@ def test_reviewer_reads_are_bounded_by_the_reviewers_own_read_budget() -> None:
     assert [call[3] for call in hub.calls] == [LOCAL_READ_SECONDS + 1.0] * 3
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_reviewer_read_waits_no_longer_than_its_own_stop_leaves() -> None:
+    """With 0.4 s left before the read's stop, the agent is given 0.4 s, not the whole budget:
+    a remote read never runs into the time the final judgment keeps, as a local one never does."""
+
+    from finishup.application.reviewer_loop import ReadStop
+    from finishup.ports.change_capture import RequestedPathProbe
+
+    clock = _Clock()
+    stop = ReadStop(clock, clock.now + 0.4)
+    hub = _Hub(answer=None)
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), _HANDLE)
+    reads.list_beneath(_HANDLE, "", excluded=(), expired=stop)
+    reads.read_text_beneath(_HANDLE, "a.py", excluded=(), expired=stop)
+    reads.read_declared_test(_HANDLE + "/tests/test_a.py", excluded=(), expired=stop)
+    hub.answer = (RequestedPathProbe("inside", "a.py", True, False),)
+    reads.refused_paths(("a.py",), stop)
+    assert [call[3] for call in hub.calls] == [pytest.approx(0.4)] * 4
+
+
+def test_a_reviewer_read_past_its_stop_sends_nothing() -> None:
+    from finishup.application.reviewer_loop import ReadStop
+
+    clock = _Clock()
+    stop = ReadStop(clock, clock.now)
+    hub = _Hub(answer=None)
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), _HANDLE)
+    with pytest.raises(ReadDeadline):
+        reads.list_beneath(_HANDLE, "", excluded=(), expired=stop)
+    with pytest.raises(ReadDeadline):
+        reads.read_text_beneath(_HANDLE, "a.py", excluded=(), expired=stop)
+    with pytest.raises(ReadDeadline):
+        reads.refused_paths(("a.py",), stop)
+    # As the local declared-test read: past its stop, the test is not visible.
+    assert reads.read_declared_test(_HANDLE + "/tests/test_a.py", excluded=(), expired=stop) is None
+    assert hub.calls == []
+
+
+def test_a_listings_probe_batches_stop_at_the_reads_stop() -> None:
+    """A batch that would start past the read's stop is never sent: the review ends ``deadline``
+    instead of running further probes into the time its final judgment keeps."""
+
+    from finishup.application.reviewer_loop import ReadStop
+    from finishup.ports.change_capture import RequestedPathProbe
+    from finishup.ports.workspace_agent import ProbeRequestedPathsArguments
+
+    clock = _Clock()
+    stop = ReadStop(clock, clock.now + 3.0)
+
+    class _SlowProbes(_Hub):
+        def call_blocking(
+            self,
+            handle: str,
+            operation: WorkspaceOperation,
+            arguments: object,
+            *,
+            timeout_seconds: float,
+        ) -> object:
+            self.calls.append((handle, operation, arguments, timeout_seconds))
+            clock.now += 3.5  # the agent took its time: the read's stop has passed meanwhile
+            values = cast(ProbeRequestedPathsArguments, arguments).values
+            return tuple(RequestedPathProbe("inside", value, True, False) for value in values)
+
+    hub = _SlowProbes()
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), _HANDLE)
+    with pytest.raises(ReadDeadline):
+        reads.refused_paths(tuple(f"src/f{index}.py" for index in range(100)), stop)
+    assert len(hub.calls) == 1
+    assert hub.calls[0][3] == pytest.approx(3.0)
+
+
 def test_a_listings_ignored_paths_are_probed_in_batches() -> None:
     """One round trip per 64 entries, never one per listed entry (ADR-051)."""
 
