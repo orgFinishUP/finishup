@@ -39,7 +39,7 @@ from finishup.application.observation_workspace import (
     LocalObservationWorkspace,
     ObservationWorkspaceAccess,
 )
-from finishup.application.reviewer_loop import LOCAL_READ_SECONDS
+from finishup.application.reviewer_loop import LOCAL_READ_SECONDS, ReadStop
 from finishup.domain.receipts import CLIENT_ATTESTED
 from finishup.ports.approved_checks import ApprovedCheckApproval, ApprovedCheckResult
 from finishup.ports.change_capture import (
@@ -115,7 +115,10 @@ _READ_SECONDS: Final = 15.0
 _SNAPSHOT_GRACE_SECONDS: Final = 5.0
 # A reviewer's read (and its ignored-path probe) stops at the reviewer's own per-read budget, so
 # a slow agent ends the review ``deadline`` as a slow local read does, never past its reserve.
+# Within it, each call waits no longer than the read's own stop (``ReadStop``) leaves.
 _REVIEWER_READ_SECONDS: Final = LOCAL_READ_SECONDS + 1.0
+# Less time than this before a read's stop is no time at all: nothing is sent.
+_MIN_READ_SECONDS: Final = 0.001
 # Paths one ignored-path probe carries (the change capture's own requested-path bound).
 _PROBE_BATCH: Final = 64
 # The agent's answers that its read ran out of the time it was given: its own read stop, or the
@@ -127,6 +130,23 @@ def _reviewer_read_deadline(exc: WorkspaceAgentUnavailable) -> bool:
     """Whether the agent answered a reviewer read with its read's stop (``ReadDeadline``)."""
 
     return exc.reason == "agent_unavailable" and exc.agent_reason in _AGENT_READ_DEADLINES
+
+
+def _until_stop(expired: Callable[[], bool], bound: float) -> float:
+    """``bound``, but no longer than the read's own stop leaves; ``ReadDeadline`` once it passed.
+
+    The reviewer loop's ``ReadStop`` knows the time left, so the agent is given exactly what a
+    local read would still run for; any other ``expired`` is only asked whether it has passed.
+    """
+
+    left = expired.seconds_left() if isinstance(expired, ReadStop) else bound
+    if left < _MIN_READ_SECONDS or expired():
+        raise ReadDeadline("reviewer_read_deadline")
+    return min(bound, left)
+
+
+def _never() -> bool:
+    return False
 
 
 def client_bound(workspace: object) -> bool:
@@ -384,12 +404,15 @@ class ClientWorkspaceReads:
                 return None
             raise
 
-    def refused_paths(self, paths: tuple[str, ...]) -> frozenset[str]:
+    def refused_paths(
+        self, paths: tuple[str, ...], expired: Callable[[], bool] = _never
+    ) -> frozenset[str]:
         """The workspace-relative ``paths`` a reviewer may not read: Git-ignored, or unanswerable.
 
         The reviewer's ignored-path rule for this workspace, asked of the agent in batches of
-        ``probe_requested_paths`` within the reviewer's own read budget, rather than once per
-        listed entry. As the per-path rule: an empty path (the root) is never refused, and a path
+        ``probe_requested_paths`` within the reviewer's own read budget and the read's stop
+        (``expired``, checked before every batch), rather than once per listed entry. As the
+        per-path rule: an empty path (the root) is never refused, and a path
         Git cannot answer for (the agent refused the probe, or answered with one of change
         capture's own reasons) is refused. A probe that ran out of its time raises
         ``ReadDeadline``; an agent that is gone, busy or failed raises
@@ -401,6 +424,7 @@ class ClientWorkspaceReads:
         refused: set[str] = set()
         for start in range(0, len(wanted), _PROBE_BATCH):
             batch = wanted[start : start + _PROBE_BATCH]
+            seconds = _until_stop(expired, _REVIEWER_READ_SECONDS)
             try:
                 found = cast(
                     tuple[RequestedPathProbe, ...],
@@ -409,7 +433,7 @@ class ClientWorkspaceReads:
                         self._handle,
                         WorkspaceOperation.PROBE_REQUESTED_PATHS,
                         ProbeRequestedPathsArguments(self._handle, batch),
-                        _REVIEWER_READ_SECONDS,
+                        seconds,
                     ),
                 )
             except WorkspaceAgentUnavailable as exc:
@@ -440,26 +464,24 @@ class ClientWorkspaceReads:
         expired: Callable[[], bool],
         inspect: int = 128,
     ) -> tuple[tuple[tuple[str, bool], ...], bool] | None:
-        del expired  # the reviewer's read budget bounds the call; the caller checks its stop
         return cast(
             tuple[tuple[tuple[str, bool], ...], bool] | None,
             self._read(
                 WorkspaceOperation.LIST_BENEATH,
                 ListBeneathArguments(root, relative, tuple(excluded), inspect),
-                _REVIEWER_READ_SECONDS,
+                _until_stop(expired, _REVIEWER_READ_SECONDS),
             ),
         )
 
     def read_text_beneath(
         self, root: str, relative: str, *, excluded: tuple[str, ...], expired: Callable[[], bool]
     ) -> tuple[bytes, int] | None:
-        del expired
         return cast(
             tuple[bytes, int] | None,
             self._read(
                 WorkspaceOperation.READ_TEXT_BENEATH,
                 ReadTextBeneathArguments(root, relative, tuple(excluded)),
-                _REVIEWER_READ_SECONDS,
+                _until_stop(expired, _REVIEWER_READ_SECONDS),
             ),
         )
 
@@ -468,15 +490,15 @@ class ClientWorkspaceReads:
         location: str,
         *,
         excluded: tuple[str, ...],
-        expired: Callable[[], bool] = lambda: False,
+        expired: Callable[[], bool] = _never,
     ) -> bytes | None:
-        del expired
         try:
             return cast(
                 bytes | None,
                 self._read(
                     WorkspaceOperation.READ_DECLARED_TEST,
                     ReadDeclaredTestArguments(location, tuple(excluded)),
+                    _until_stop(expired, _READ_SECONDS),
                 ),
             )
         except ReadDeadline:

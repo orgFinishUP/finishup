@@ -202,9 +202,10 @@ class ReadRoot:
     ``path`` is the directory read beneath; ``input_root`` the owner-admitted outside root it
     binds (E2E-2), with ``declared`` the task-declared paths beneath it. A ``snapshot`` serves the
     files FinishUP kept instead of current ones. ``refuse`` is the service's ignored-path rule;
-    ``refuse_many``, when set, is the same rule asked once for every entry of a listing (the
-    paths it refuses), so a listing answered by a workspace agent costs one round trip per batch
-    rather than one per entry.
+    ``refuse_many``, when set, is the same rule asked for many paths at once (the paths it
+    refuses) within the read's stop (the read's ``expired``), and is asked in its place: a
+    listing answered by a workspace agent costs one round trip per batch rather than one per
+    entry, and no probe runs past the read's own stop.
     """
 
     alias: str
@@ -215,7 +216,7 @@ class ReadRoot:
     subject_refs: tuple[str, ...] = ()
     snapshot: TaskInputSnapshotSet | None = None
     refuse: Callable[[str], bool] | None = None
-    refuse_many: Callable[[tuple[str, ...]], frozenset[str]] | None = None
+    refuse_many: Callable[[tuple[str, ...], Callable[[], bool]], frozenset[str]] | None = None
     # #1220: ``(ref, absolute path, pinned digest, criterion ref)`` of each declared test this
     # root serves; a read is citable for its criterion ref when the case lets it be cited.
     pinned: tuple[tuple[str, str, str, str], ...] = ()
@@ -731,16 +732,30 @@ class ReviewerBroker:
         inside = any(d == "" or path == d or path.startswith(f"{d}/") for d in root.declared)
         return "outside_scope" if root.declared and not inside else None
 
+    @staticmethod
+    def _ignored(root: ReadRoot, path: str, expired: Callable[[], bool]) -> bool | None:
+        """A batched root's answer for ``path`` within the read's stop; None asks ``refuse``."""
+
+        if root.refuse_many is None:
+            return None
+        return path in root.refuse_many((path,), expired)
+
     @classmethod
     def _listed(
-        cls, root: ReadRoot, below: str, listed: Sequence[tuple[str, bool]]
+        cls,
+        root: ReadRoot,
+        below: str,
+        listed: Sequence[tuple[str, bool]],
+        expired: Callable[[], bool],
     ) -> list[tuple[str, bool]]:
         """The listed entries this root may show; one batched refusal probe when it has one."""
 
         if root.refuse_many is None:
             return [(n, d) for n, d in listed if not cls._refused(root, below + n)]
         refused: frozenset[str] = (
-            root.refuse_many(tuple(below + n for n, _ in listed)) if listed else frozenset()
+            root.refuse_many(tuple(below + n for n, _ in listed), expired)
+            if listed
+            else frozenset()
         )
         return [
             (n, d)
@@ -759,7 +774,7 @@ class ReviewerBroker:
             return ("denied", "forbidden_path")
         if root.pinned:
             return self._declared(root, args, path, expired, tool_ref)
-        refused = self._refused(root, path)
+        refused = self._refused(root, path, ignored=self._ignored(root, path, expired))
         if refused is not None:
             return ("denied", refused)
         prefix, snap = root.path.rstrip("/") + "/", root.snapshot
@@ -789,7 +804,7 @@ class ReviewerBroker:
             if expired():
                 # Past the read's stop: no refusal probe is spent on a listing nobody receives.
                 raise ReadDeadline("reviewer_read_deadline")
-            children = self._listed(root, below, tuple(listed or ()))
+            children = self._listed(root, below, tuple(listed or ()), expired)
             selector = f"{root.alias}\x00{path}"
             version = canonical_digest([[[n, d] for n, d in children], truncated])
             start = self._page(selector, version, args.cursor)
