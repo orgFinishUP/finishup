@@ -286,6 +286,10 @@ such server has one of two modes, the same two for every kind:
 - **listed**: it reads outside your project only beneath folders you list for it, one at a time.
   Inside your project it reads a test your agent declared only when Git does not ignore it.
 
+The mode limits only what the server reads. It does not limit the hook observations your agent's
+hooks send: in either mode they reach the server unchanged, even when they name or hold files
+outside the folders you list (see [What leaves this computer](#what-leaves-this-computer)).
+
 You choose when you add the server (above). An official FinishUP service is in local mode without
 being asked, because the official service gets the same access as FinishUP on this computer; no
 official service exists yet. A server whose choice could not be saved is in listed mode until you
@@ -397,9 +401,11 @@ When you use a server on another machine, a port or the web, these travel to it:
   or Cursor once you turn on content capture for a project, these can hold your prompts, your
   agent's messages, and its tool inputs and outputs, which can name file paths on this computer
   and hold the contents of files your agent read, even outside your project or the folders you
-  list for that server. The server keeps them as FinishUP on this computer would. The
-  confirmation you type when you add or choose a server says so; a server you confirmed before
-  it said so asks you to confirm again (`finishup server use NAME`) before anything is sent;
+  list for that server. They go unchanged to every such server, whichever mode you chose for it:
+  a server in listed mode receives them too, even when they name or hold files outside its listed
+  folders. The server keeps them as FinishUP on this computer would. The confirmation you type
+  when you add or choose a server says so; a server you confirmed before it said so asks you to
+  confirm again (`finishup server use NAME`) before anything is sent;
 - a fingerprint of your project folder (a keyed digest, not its path);
 - what the server asks your workspace agent for (below): the change since the task started,
   facts about files the task names, files the reviewer asks to read, task input files, declared
@@ -410,7 +416,7 @@ When you use a server on another machine, a port or the web, these travel to it:
 These do not leave: your project folder's full path as its name (a path can still appear inside
 what your agents write and inside hook observations), your API key, your vault passphrase, and
 the secure unlock and consent prompts, which only ever run on the server's own machine. A
-server's mode limits what it reads outside your project, not what your hooks deliver. To keep
+server's mode limits only what it reads outside your project, not what your hooks deliver. To keep
 your agent's content on this computer with Claude Code or Cursor, leave content capture off for
 that project, or do not give it observation consent. Codex hook content comes with observation
 consent itself, so turning content capture off does not stop it: only withholding that consent
