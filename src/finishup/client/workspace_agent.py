@@ -35,6 +35,16 @@ These confinements hold on top of the adapters':
   none, are ``listed`` with no folder. In both modes outside reads never enter the claimed
   workspace through an outside root, or this client's own FinishUP directories at all, whatever
   the server lists as excluded.
+* **Held repositories are fenced.** A repository whose privacy policy on this computer allows no
+  network use, held from this connection's server or kept on this computer (ADR-051 decision 8,
+  maintainer decision of 2026-11-07, round 4; ``client.repository_hold``), is fenced from every
+  other repository's reads exactly like FinishUP's own directories: the worktrees this computer
+  recorded for it (``held_roots``, read on every call) are excluded from outside reads, listed
+  folders, outside read roots and ``lstat_candidates``. A held worktree that is, or contains, the
+  claimed workspace is not fenced (that would silently empty the workspace's own reads), and one
+  nested inside it is governed by the claimed repository's own grant, as a local service's
+  capture of a nested repository is. An agent whose own repository is held or kept answers every
+  call ``workspace_unavailable`` (``own_hold``).
 * **Ignore rules on the agent.** A reviewer's file read inside the claimed workspace returns bytes
   only where Git answers that the file is not ignored, as the server's own broker asks first and
   requires, locally too: a server that skips that question never receives an ignored file's
@@ -65,7 +75,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol, cast
 
 from finishup.adapters.approved_checks import ApprovedCheckCommand, ApprovedCheckRunner
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
@@ -262,12 +272,21 @@ def _folded_within(path: str, directories: Iterable[str]) -> bool:
     return False
 
 
+class _SendHold(Protocol):
+    """Whether this agent's own repository may not be sent now (``repository_hold.SendHold``)."""
+
+    def held(self) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _Call:
-    """What one call may use: the session's workspace handle and the call's own deadline."""
+    """What one call may use: the session's workspace handle, the call's own deadline, and the
+    directories it never reads (FinishUP's own, then the held repositories', read once per call).
+    """
 
     handle: str | None
     deadline: float
+    fence: tuple[str, ...] = ()
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
@@ -283,12 +302,14 @@ class WorkspaceAgentHandler:
         "_capture",
         "_check_policy_trust",
         "_declaration",
+        "_held_roots",
         "_inspect",
         "_opened",
         "_opened_guard",
         "_opened_key",
         "_operations",
         "_outside_reads",
+        "_own_hold",
         "_protected",
         "_root",
         "_sandbox",
@@ -307,6 +328,8 @@ class WorkspaceAgentHandler:
         opened_handle_key: bytes | None = None,
         check_policy_trust: Callable[[str], bool] | None = None,
         outside_reads: Callable[[], OutsideReads] | None = None,
+        held_roots: Callable[[], tuple[str, ...]] | None = None,
+        own_hold: _SendHold | None = None,
     ) -> None:
         """``workspace`` is the locator the connection's claim was computed from; never the
         filesystem root, which no claim names (``workspace_locator_path_invalid``).
@@ -334,6 +357,13 @@ class WorkspaceAgentHandler:
         guesses the target from this process's selection, which may name another server, nor
         takes the mode of the target in use. An answer that fails is ``listed`` with no folder
         too.
+
+        ``held_roots`` answers, on each call, the recorded worktrees of every repository held from
+        that same target or kept on this computer (``repository_hold.held_worktrees``); they are
+        fenced like FinishUP's own directories, except one that is, contains or lies inside the
+        claimed workspace. An answer that fails fences nothing more (unknown is not held).
+        ``own_hold`` is this workspace's own send hold: while it holds, every call is answered
+        ``workspace_unavailable``.
         """
 
         if type(workspace) is not WorkspaceLocator:
@@ -373,6 +403,10 @@ class WorkspaceAgentHandler:
         # mode and folders 'server folders' records for the target its caller bound here; 'listed'
         # with no folder when the caller bound no record.
         self._outside_reads = _listed_nothing if outside_reads is None else outside_reads
+        # Repositories held from that target, or kept on this computer (ADR-051 decision 8), and
+        # this workspace's own hold.
+        self._held_roots = held_roots
+        self._own_hold = own_hold
         self._opened: OrderedDict[str, LocalWorkspaceHandle] = OrderedDict()
         self._opened_guard = threading.Lock()
         self._table: dict[WorkspaceOperation, Callable[[Any, _Call], object]] = {
@@ -411,6 +445,10 @@ class WorkspaceAgentHandler:
 
         if type(call) is not WorkspaceCall:
             raise TypeError("workspace_call_invalid")
+        if self._held():
+            # This workspace's own repository is held from the server, or kept on this computer:
+            # nothing of it is read for the server (ADR-051 decision 8).
+            return workspace_reply(call.call_id, "workspace_unavailable")
         reason: str
         try:
             return workspace_reply(call.call_id, None, self._run(call, workspace_handle))
@@ -447,6 +485,7 @@ class WorkspaceAgentHandler:
         context = _Call(
             handle if workspace_handle_valid(handle) else None,
             time.monotonic() + call.deadline_ms / 1_000,
+            self._fence(),
         )
         value = self._table[spec.operation](arguments, context)
         try:
@@ -457,6 +496,45 @@ class WorkspaceAgentHandler:
             raise
 
     # --- confinement ------------------------------------------------------------------------
+
+    def _held(self) -> bool:
+        hold = self._own_hold
+        if hold is None:
+            return False
+        try:
+            return hold.held() is True
+        except Exception:  # noqa: BLE001 - a check that cannot be made holds nothing new
+            return False
+
+    def _fence(self) -> tuple[str, ...]:
+        """FinishUP's own directories, then every other held repository's recorded worktrees.
+
+        Read once per call. A held worktree that is, contains or lies inside the claimed
+        workspace is left out: fencing it would silently empty the workspace's own reads, and a
+        repository nested in the claimed one is governed by the claimed repository's grant, as
+        a local capture of it is. An answer that fails fences nothing more.
+        """
+
+        reader = self._held_roots
+        if reader is None:
+            return self._protected
+        try:
+            found = reader()
+        except Exception:  # noqa: BLE001 - unknown is not held: nothing more is fenced
+            return self._protected
+        if type(found) is not tuple:
+            return self._protected
+        root = self._root.rstrip("/") + "/"
+        held = tuple(
+            path
+            for path in cast(tuple[object, ...], found)
+            if type(path) is str
+            and path.startswith("/")
+            and posixpath.normpath(path) == path
+            and not self._inside_claimed(path)
+            and not root.startswith(path.rstrip("/") + "/")
+        )
+        return (*self._protected, *held) if held else self._protected
 
     def _workspace(self, named: str, call: _Call) -> str:
         """The claimed root, when ``named`` is this connection's own workspace handle."""
@@ -482,7 +560,7 @@ class WorkspaceAgentHandler:
         directories, and for an outside read never the claimed workspace either."""
 
         resolved = tuple(self._location(value, call) for value in named)
-        own = (self._root, *self._protected) if outside else self._protected
+        own = (self._root, *call.fence) if outside else call.fence
         return tuple(dict.fromkeys((*filter(_examinable, resolved), *own)))
 
     def _outside(self) -> OutsideReads:
@@ -518,6 +596,7 @@ class WorkspaceAgentHandler:
         values: Sequence[str],
         *,
         excluded: tuple[str, ...],
+        fence: tuple[str, ...],
         space_cut: frozenset[str] = frozenset(),
         copies: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
@@ -568,7 +647,7 @@ class WorkspaceAgentHandler:
         outside = self._outside()
         folders = outside.folders
         listed = tuple(
-            index for index, value in enumerate(values) if self._listed_input(value, folders)
+            index for index, value in enumerate(values) if self._listed_input(value, folders, fence)
         )
         # The server's roots first: an input beneath one of them keeps that root (its policy's
         # own binding), and only one beneath a listed folder alone is bound to that folder.
@@ -590,7 +669,7 @@ class WorkspaceAgentHandler:
                 or folder_covers(path, folders)
             ):
                 kept.append(value)
-            elif not copies and self._exists_visibly(path):
+            elif not copies and self._exists_visibly(path, fence):
                 unread.append(index)
         walked = tuple(
             root
@@ -609,7 +688,7 @@ class WorkspaceAgentHandler:
         unlisted = [index for position, index in enumerate(unread) if position in readable]
         return walked, tuple(kept), tuple(unlisted), listed
 
-    def _listed_input(self, value: str, folders: Sequence[str]) -> bool:
+    def _listed_input(self, value: str, folders: Sequence[str], fence: Sequence[str]) -> bool:
         """Whether a server-named task-input ``value`` lies at or beneath a listed folder.
 
         Only a value the local outside-input candidate rule would look at (no hidden component,
@@ -625,11 +704,11 @@ class WorkspaceAgentHandler:
         return (
             folder_covers(path, folders)
             and not self._inside_claimed(path)
-            and not _folded_within(path, self._protected)
+            and not _folded_within(path, fence)
             and _outside_candidate(path)
         )
 
-    def _exists_visibly(self, path: str) -> bool:
+    def _exists_visibly(self, path: str, fence: Sequence[str]) -> bool:
         """Whether normalized absolute ``path`` exists and is one a local read could look at.
 
         Listed mode refuses or skips only what exists (ADR-051 decision 5): a path the task
@@ -640,7 +719,7 @@ class WorkspaceAgentHandler:
         already tells it.
         """
 
-        if _folded_within(path, self._protected) or not _outside_candidate(path):
+        if _folded_within(path, fence) or not _outside_candidate(path):
             return False
         try:
             os.lstat(path)
@@ -707,7 +786,7 @@ class WorkspaceAgentHandler:
             raise _Outcome("root_not_admitted")
         outside = self._outside()
         if outside.mode != "local":
-            if _folded_within(root, self._protected):
+            if _folded_within(root, call.fence):
                 raise _Outcome("root_not_admitted")
             folders = outside.folders
             reached = posixpath.normpath(posixpath.join(root, relative)) if relative else root
@@ -716,7 +795,7 @@ class WorkspaceAgentHandler:
                 or folder_covers(root, folders)
                 or folder_covers(reached, folders)
             ):
-                if self._exists_visibly(reached):
+                if self._exists_visibly(reached, call.fence):
                     raise _Outcome("root_not_admitted")
                 raise _NothingThere  # names nothing: read as nothing, as it is locally
         return root, self._excluded(excluded, call, outside=True)
@@ -817,7 +896,11 @@ class WorkspaceAgentHandler:
 
         excluded = self._excluded(arguments.excluded, call, outside=True)
         roots, values, unlisted, listed = self._input_scope(
-            arguments.roots, arguments.values, excluded=excluded, space_cut=arguments.space_cut
+            arguments.roots,
+            arguments.values,
+            excluded=excluded,
+            fence=call.fence,
+            space_cut=arguments.space_cut,
         )
         inputs = read_outside_inputs(
             roots, values, limit=arguments.limit, excluded=excluded, space_cut=arguments.space_cut
@@ -831,7 +914,7 @@ class WorkspaceAgentHandler:
         # ``unlisted`` names the values whose kept copies the server may not send (``copies``),
         # never narrowed by what is there now (ADR-051 decision 5).
         roots, values, unlisted, listed = self._input_scope(
-            arguments.roots, arguments.values, excluded=excluded, copies=True
+            arguments.roots, arguments.values, excluded=excluded, fence=call.fence, copies=True
         )
         reads = snapshot_outside_inputs(
             roots,
@@ -891,7 +974,7 @@ class WorkspaceAgentHandler:
         if not admitted:
             # Refused only where a local read would open the file (its fences and trust tests):
             # any other test reads as nothing, as locally, and no step of the owner's reads it.
-            if any(self._exists_visibly(spelling) for spelling in spellings) and (
+            if any(self._exists_visibly(spelling, call.fence) for spelling in spellings) and (
                 declared_test_readable(
                     location, excluded=self._excluded(arguments.excluded, call, outside=False)
                 )
@@ -949,13 +1032,13 @@ class WorkspaceAgentHandler:
             raise _Outcome("read_deadline") from None
 
     def _lstat_candidates(self, arguments: LstatCandidatesArguments, call: _Call) -> object:
-        """Metadata only. A candidate inside the claimed workspace or FinishUP's own directories,
-        not in normal form, or one the local outside-input rule would never look at (hidden,
+        """Metadata only. A candidate inside the claimed workspace, FinishUP's own directories or
+        a held repository's recorded worktrees (the call's fence), not in normal form, or one the local outside-input rule would never look at (hidden,
         credential-named, a system directory, beneath no path an owner may admit) is reported
         as not found: it is never an outside input, and the server learns nothing of it."""
 
         facts: list[LstatFacts | None] = []
-        fenced = (self._root, *self._protected)
+        fenced = (self._root, *call.fence)
         for path in arguments.paths:
             if call.expired():
                 raise _Outcome("read_deadline")

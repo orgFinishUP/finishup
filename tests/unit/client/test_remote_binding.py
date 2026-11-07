@@ -12,7 +12,7 @@ import base64
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -501,3 +501,64 @@ async def test_the_root_is_resolved_once_and_the_binding_carries_a_live_hold(
     await _report_no_network(workspace)
     assert binding.hold.held() is True
     assert binding.hold.phase() == "repository_egress_held"
+
+
+@pytest.mark.anyio
+async def test_the_agent_fences_other_held_repositories_of_its_own_target_and_its_own_hold(
+    home: Path, workspace: WorkspaceLocator, tmp_path: Path
+) -> None:
+    """The agent a remote binding builds reads, on every call, which other repositories are held
+    from its own target (whatever this process selects later), and answers nothing of its own
+    repository once that is held (ADR-051 decision 8, round 4)."""
+
+    from finishup.ports.control import WorkspaceCall
+    from finishup.ports.workspace_agent import (
+        LstatCandidatesArguments,
+        WorkspaceOnlyArguments,
+        WorkspaceOperation,
+        operation_spec,
+    )
+    from finishup.protocol.ids import IdKind, new_id
+
+    record = _remote("ssh")
+    _select(record)
+    other = (tmp_path / "other").resolve()
+    other.mkdir()
+    (other / "notes.md").write_text("OTHER\n", encoding="utf-8")
+    binding = await binding_for_active_root(workspace, serve_workspace=True)
+    assert binding is not None and binding.agent is not None and binding.hold is not None
+
+    def answer(operation: WorkspaceOperation, arguments: object) -> object:
+        spec = operation_spec(operation)
+        assert spec is not None
+        call = WorkspaceCall(
+            kind="workspace_call",
+            protocol_version="1.0",
+            call_id=new_id(IdKind.CONTROL_RPC),
+            service_instance_id="svc_00000000-0000-4000-8000-000000000001",
+            service_generation="1",
+            operation=operation.value,
+            arguments=cast(Any, spec.encode_arguments(arguments)),
+            deadline_ms=30_000,
+        )
+        assert binding is not None and binding.agent is not None
+        return binding.agent.answer(call, workspace_handle="client:0123456789abcdef")
+
+    candidate = LstatCandidatesArguments((os.fspath(other / "notes.md"),))
+    seen = cast(Any, answer(WorkspaceOperation.LSTAT_CANDIDATES, candidate))
+    assert seen.outcome == "ok" and seen.result != (None,)
+    # Another repository is reported to allow no network use: fenced from this agent's reads,
+    # even while another server is selected.
+    await _report_no_network(WorkspaceLocator(os.fspath(other)))
+    _select(_remote("https"))
+    fenced = cast(Any, answer(WorkspaceOperation.LSTAT_CANDIDATES, candidate))
+    assert (fenced.outcome, fenced.result) == ("ok", (None,))
+    # Its own repository is reported so too: nothing of it is answered.
+    await _report_no_network(workspace)
+    own = cast(
+        Any,
+        answer(
+            WorkspaceOperation.READ_TASK_BASE, WorkspaceOnlyArguments("client:0123456789abcdef")
+        ),
+    )
+    assert (own.outcome, own.reason) == ("unavailable", "workspace_unavailable")
