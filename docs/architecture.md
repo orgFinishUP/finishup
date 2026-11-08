@@ -9,9 +9,9 @@ signatures — live in [`docs/INTERFACES.md`](INTERFACES.md).
 
 A persistent local service owns the keys, the decrypted state, the writers, the privacy authority,
 and all outbound access; the CLI, the MCP bridge, and any future UI are clients that ask it to do
-things. By default that service runs on your own machine; the owner may instead select a FinishUP
-server they run elsewhere, which then holds the same authority on its host (see
-[Client and server](#client-and-server)).
+things. That service runs on your own machine: the everyday one by default, or a named local
+server the owner added, each with its own vault and ledger. FinishUP servers on another machine
+are designed but not yet open (see [Client and server](#client-and-server)).
 
 ## Trust topology
 
@@ -49,10 +49,10 @@ privacy authority.
 Secret material never travels over an ordinary CLI argument, environment variable, config file,
 log, trace, transcript, or LLM context. Credentials are provisioned through a confidential terminal
 ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
-[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). The API key for a FinishUP server on
-another machine is entered at a masked prompt (or read once from an owner-only key file) and kept
-in the OS credential store or, where none is usable, an owner-only credential file
-([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md)).
+[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). When FinishUP servers on another
+machine open, their API key will be entered at a masked prompt (or read once from an owner-only
+key file) and kept in the OS credential store or, where none is usable, an owner-only credential
+file ([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md)); this release stores none.
 
 The terminal interface sits on the human-CLI leg and is bound by the same rule. It has no
 credential path of its own: when a secret is needed it suspends itself and hands the controlling
@@ -112,29 +112,37 @@ service's observation store still shares.
 | **WORKSPACE** (imports WORKSPACE and SHARED only; CLIENT and SERVER may import it) | The workspace readers, which run wherever the workspace is: in the local service for a local root, and in the client's workspace agent for a remote one. `adapters.git_change_capture`, `task_input_read`, `approved_checks`, `check_sandbox`, `workspace_inspect`, `home_project_reads`, `input_summary`, `git_subject_state`, `git_rev_parse`, `git_version`; `adapters.workspace_root` (the one rule for "which directory is this workspace"); and `application.observation_check_policy` (the repository's own `checks.toml`). None of them reaches storage, the vault, providers, the service or a client surface. |
 | **CLIENT** | `cli`, `mcp`, `tui`, the new `client` package, `service.client`, `service.confidential_client`, the host integration adapters under `adapters.integrations` (except the observation store), `adapters.workspace_binding`, `workspace_fingerprint`, `mcp_stdio`, `process_lifetime`, `release_runtime`, `package_upgrade`, and the client-side application modules `harness_mcp`, `host_connection`, `codex_plugin`, `applied_mcp_route`, `upgrade`, `package_update`, `observation_drain`. |
 | **SERVER** | The rest of `service`, `application`, `kernel` and `adapters`: storage, the vault, providers, privacy and the runtime. |
-| **GATEWAY** (server host) | `gateway`: a same-user control client of the service, used only by the approaches that run one. It imports SHARED modules and `service.client`, never a workspace reader, and never touches the vault or storage. |
+| **GATEWAY** (server host; reserved) | `gateway`: the gateway server edge, a same-user control client of the service that a later layer adds. It may import SHARED modules and `service.client`, never a workspace reader, and never touches the vault or storage. No module carries this side in layer 1. |
 
 Commands carry a scope too. Each CLI and terminal-interface command is `any`, `server_host` (vault
 setup and unlock, provider and privacy configuration, backup, restore, migrate, observation store
 administration) or `client_only` (host registration and `finishup server …`). A `server_host`
 command is refused while a remote target is active, with `requires_server_host`.
 
-**Targets.** The client talks to one *target*: the ambient local service by default, a named local
-service (its own isolated root, vault and ledger, started on demand), or a FinishUP service the
-same owner runs on another machine. The owner adds targets with `finishup server add` and picks
-one with `finishup server use`, which writes an owner-only selection file. That file is the
-lowest-precedence root source: the isolation variable and a runtime pin always win, a selection
-that names a missing root fails closed instead of falling back, and no host registration records
-it.
+**Targets.** The client talks to one *target*: the ambient local service by default, or a named
+local service (its own isolated root, vault and ledger, started on demand). The owner adds targets
+with `finishup server add NAME --local` and picks one with `finishup server use`, which writes an
+owner-only selection file. That file is the lowest-precedence root source: the isolation variable
+and a runtime pin always win, a selection that names a missing root fails closed instead of
+falling back, and no host registration records it. The target record also knows the remote kinds
+(`local_port`, `ssh`, `https`: a FinishUP service the same owner runs elsewhere), but layer 1
+keeps them closed: `server add` and `server use` refuse them with `remote_kind_unavailable`, and a
+connection to a remote root is refused before any dial (`target_root_is_remote`).
 
 **The workspace agent.** The service reads the agent's working tree for the task base, the
 check-time change, requested-output facts, task inputs, declared tests, reviewer file reads,
 observation verification and approved checks. A server on another machine cannot. For a remote
 target the client sends a keyed workspace *claim* instead of a path, and a client-side workspace
-agent answers the server's bounded `workspace_call`s with the same adapters and fences the local
-service uses. Evidence obtained that way is labelled `client_attested`, and every non-local receipt
-rendering says so in one fixed line. When no agent can be reached the receipt carries a typed gap;
-nothing passes silently.
+agent (`client/workspace_agent.py`, eighteen bounded operations cataloged in
+`ports/workspace_agent.py`) answers the server's `workspace_call`s with the same adapters and
+fences the local service uses. On the server, `service/workspace_hub.py` keeps the live agent
+channels keyed by workspace handle and correlates each call with its reply, and
+`service/workspace_routing.py` wraps every workspace port the service composes: an absolute path
+goes to the local adapter unchanged, a `client:` handle goes to the hub, and no local adapter is
+ever handed a handle. Evidence obtained that way is labelled `client_attested`, and every
+non-local receipt rendering says so in one fixed line. When no agent can be reached the receipt
+carries a typed gap; nothing passes silently. Layer 1 ships all of this and tests it in process;
+no network reaches it until a remote kind opens.
 
 ### Topology by target
 
@@ -146,14 +154,21 @@ NAMED LOCAL (each an ADR-028 persistent instance root)
   selected "work" ──► <state>/servers/t_1a2b3c4d/run/control.sock ──► service #2 (own vault, ledger)
   selected "lab"  ──► <state>/servers/t_9f8e7d6c/run/control.sock ──► service #3
 
-REMOTE (local_port, ssh, https; the owner's own server)
+REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1
   client host                                           server host (same owner)
-  hook / MCP / CLI / TUI ═══ control frames, route per approach ═══► service (vault, ledger)
+  hook / MCP / CLI / TUI ═══ control frames (later layer) ═══► service (vault, ledger)
   workspace agent ◄═════════ workspace_call / workspace_reply ══════ workspace hub
   human-control and secret channels: never leave the server host
 ```
 
-<!-- APPROACH-TOPOLOGY -->
+The remote path follows ADR-051's unified model, delivered in later layers: a *level* says where
+the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
+review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of
+the code), a *connection style* says how this computer reaches the server (`unix` for local and
+named local servers; relay through one background helper per server; direct from each process),
+and a *server edge* says how the server is reached (ssh, a separate gateway process, or a native
+listener). The server offers; the client decides within the owner's consent and this computer's
+privacy policy.
 
 ## The six operations
 
