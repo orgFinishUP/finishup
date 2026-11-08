@@ -566,6 +566,36 @@ def test_a_refused_remote_root_names_its_continuation_never_a_local_service(phas
     assert "service run" not in json.dumps(result.structuredContent) + text
 
 
+@pytest.mark.parametrize("phase", ["target_root_is_remote", "target_reauthorization_required"])
+def test_a_bridge_whose_root_an_isolation_variable_names_points_to_that_override(
+    phase: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """'finishup server use local' cannot change a root an isolation variable names (it answers
+    selection_overridden), so the bridge names the override's way back instead."""
+
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+    from finishup.protocol.recovery import directive_for
+
+    monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(tmp_path))
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    error = _error_of(result)
+    assert error["safe_details"] == {
+        "continuation": "remote_root_override_clear",
+        "phase": phase,
+        "reason_code": "service_unavailable",
+    }
+    directive = directive_for("remote_root_override_clear")
+    assert directive is not None
+    text = cast(str, getattr(result.content[0], "text"))
+    assert f" Reason: service_unavailable (phase: {phase})." in text
+    assert f"Continuation: remote_root_override_clear. {directive.directive}" in text
+    assert "Ask the owner to run 'finishup server use local'" not in text
+
+
 def test_only_the_remote_root_phases_are_admitted_among_the_remote_phases() -> None:
     """A remote connection phase outside the three refusals stays out of the details."""
 

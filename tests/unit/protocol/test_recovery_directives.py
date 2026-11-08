@@ -688,3 +688,79 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert tokens <= CONTINUATION_TOKENS
         assert len(tokens) == len(self._EXPECTED)
         assert tokens <= set(REASON_CODE_CONTINUATIONS.values())
+
+    def test_a_selected_remote_root_points_to_this_computer_and_a_new_session(self) -> None:
+        # Layer 1 reaches no server elsewhere. The way back from a selection is 'finishup server
+        # use local'; an open agent session's MCP bridge keeps the root it started with, so the
+        # owner starts a new one. A stale disclosure cannot be confirmed with 'finishup server use
+        # NAME' while the remote kinds are closed (it answers remote_kind_unavailable).
+        for token in ("remote_target_no_local_service", "server_reauthorization_required"):
+            entry = directive_for(token)
+            assert entry is not None
+            assert "Ask the owner to run 'finishup server use local'" in entry.directive
+            assert entry.directive.endswith("then start a new agent session.")
+            assert "with its name" not in entry.directive
+            assert "server use NAME" not in entry.directive
+        stale = directive_for("server_reauthorization_required")
+        assert stale is not None
+        assert "older disclosure" in stale.directive
+        assert "only a later release can authorize it again" in stale.directive
+
+    def test_a_remote_root_an_override_names_points_to_the_override(self) -> None:
+        # With an isolation variable or a pinned launcher naming the root, 'finishup server use
+        # local' answers selection_overridden: the way back is to clear that override. The token
+        # is attached by the client that knows its root's source, never through a reason code.
+        from finishup.client.targets import REMOTE_ROOT_OVERRIDE_CONTINUATION
+
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION == "remote_root_override_clear"
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION in CONTINUATION_TOKENS
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION not in set(REASON_CODE_CONTINUATIONS.values())
+        entry = directive_for(REMOTE_ROOT_OVERRIDE_CONTINUATION)
+        assert entry is not None
+        assert entry.directive.startswith("FINISHUP_ISOLATED_ROOT or a pinned launcher names")
+        assert "nothing was sent or started" in entry.directive
+        assert "unset it or use an unpinned launcher" in entry.directive
+        assert entry.directive.endswith("then start a new agent session.")
+        assert "Ask the owner to run 'finishup server use local'" not in entry.directive
+        assert entry.nudge is not None
+        assert "YOETZ_ISOLATED_ROOT" in entry.nudge
+        assert "'finishup server use local' cannot override" in entry.nudge
+
+    @pytest.mark.parametrize(
+        "phase",
+        [
+            "target_root_is_remote",
+            "target_reauthorization_required",
+            "zero_network_remote_selected",
+        ],
+    )
+    def test_a_remote_root_refusal_resolves_by_what_named_the_root(
+        self, phase: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import finishup.config.paths as paths
+        from finishup.client.targets import remote_root_continuation
+        from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+        for name in ISOLATED_ROOT_ENV_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: None)
+        # The saved selection (or nothing explicit): the phase's own registry continuation.
+        assert remote_root_continuation(phase) == REASON_CODE_CONTINUATIONS[phase]
+        # A pinned launcher, then an isolation variable under either spelling.
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: object())
+        assert remote_root_continuation(phase) == "remote_root_override_clear"
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: None)
+        for name in ISOLATED_ROOT_ENV_NAMES:
+            monkeypatch.setenv(name, "/srv/finishup-root")
+            assert remote_root_continuation(phase) == "remote_root_override_clear"
+            monkeypatch.delenv(name)
+
+    def test_any_other_reason_resolves_as_the_registry_does_whatever_named_the_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finishup.client.targets import remote_root_continuation
+        from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+        monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], "/srv/finishup-root")
+        for reason in ("remote_unreachable", "selection_overridden", "request_timeout"):
+            assert remote_root_continuation(reason) == continuation_for_reason(reason)

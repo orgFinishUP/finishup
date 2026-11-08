@@ -777,22 +777,43 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
     ),
+    # A root that names a server elsewhere, chosen by the saved selection: 'finishup server use
+    # local' switches new processes, and an open agent session (its MCP bridge) keeps the root it
+    # started with until a new one starts.
     RecoveryDirective(
         token="remote_target_no_local_service",
         directive=(
             "The selected FinishUP server is elsewhere (another machine, the web or a port), which "
             "this release does not reach, so nothing was sent or started. Ask the owner to run "
-            "'finishup server use local', then repeat this request."
+            "'finishup server use local', then start a new agent session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select a FinishUP server for the owner, or start a service for this.",
     ),
+    # The same root named by an isolation variable or a pinned launcher, which outranks the
+    # selection: 'finishup server use local' answers ``selection_overridden`` there.
+    RecoveryDirective(
+        token="remote_root_override_clear",
+        directive=(
+            "FINISHUP_ISOLATED_ROOT or a pinned launcher names a FinishUP server elsewhere, which "
+            "this release does not reach, so nothing was sent or started. Ask the owner to unset "
+            "it or use an unpinned launcher, then start a new agent session."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "YOETZ_ISOLATED_ROOT counts too; 'finishup server use local' cannot override either. "
+            "Never change them for the owner."
+        ),
+    ),
+    # The remote kinds are closed in this release, so 'finishup server use NAME' cannot confirm
+    # the current disclosure (it answers ``remote_kind_unavailable``): the way on is a server on
+    # this computer, and a later release can authorize that server again.
     RecoveryDirective(
         token="server_reauthorization_required",
         directive=(
             "The selected FinishUP server was authorized under an older disclosure, so nothing "
-            "was sent to it. Ask the owner to run 'finishup server use' with its name in their "
-            "own terminal, then repeat this request."
+            "was sent to it; only a later release can authorize it again. Ask the owner to run "
+            "'finishup server use local', then start a new agent session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select or authorize a FinishUP server for the owner.",

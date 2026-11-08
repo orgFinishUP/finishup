@@ -225,9 +225,10 @@ async def _service_summary() -> str:
         phase = _remote_refusal_phase(error)
         if phase is None:
             return "not reachable — start it with 'finishup service run'"
-        from finishup.protocol.recovery import continuation_for_reason, directive_for
+        from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.recovery import directive_for
 
-        directive = directive_for(continuation_for_reason(phase))
+        directive = directive_for(remote_root_continuation(phase))
         assert directive is not None
         return f"refused before anything was sent ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"

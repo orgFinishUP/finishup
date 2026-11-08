@@ -43,6 +43,13 @@ _HEAD = (
 class _Refused:
     phase: str
     continuation: str
+    # What the owner does about it: 'finishup server use local' when the selection names the
+    # root; clearing the override when an isolation variable names it, which outranks the
+    # selection ('finishup server use local' answers selection_overridden there).
+    way_back: str = "Ask the owner to run 'finishup server use local'"
+
+
+_OVERRIDE_WAY_BACK = "Ask the owner to unset it or use an unpinned launcher"
 
 
 @pytest.fixture
@@ -54,13 +61,13 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         yield root
 
 
-@pytest.fixture(params=["selection", "zero_network", "isolation"])
+@pytest.fixture(params=["selection", "zero_network", "stale_disclosure", "isolation"])
 def refused(
     home: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> _Refused:
     """A remote root this process inherits: a selection another build left (authorized under the
-    current disclosure, or with this computer's last report of zero-network), or an isolation
-    variable naming a remote target's root."""
+    current disclosure, with this computer's last report of zero-network, or under an older
+    disclosure), or an isolation variable naming a remote target's root."""
 
     with targets.registry_lock():
         record, root = targets.new_remote_target("lab", "https", base_url="https://lab.example")
@@ -73,6 +80,12 @@ def refused(
     if request.param == "zero_network":
         everyday_policy.record_reported_policy(zero_network=True, now=_AT)
         return _Refused("zero_network_remote_selected", "zero_network_local_server_required")
+    if request.param == "stale_disclosure":
+        # A later release shows a newer disclosure than the one the owner confirmed.
+        monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION + 1)
+        return _Refused("target_reauthorization_required", "server_reauthorization_required")
+    if request.param == "isolation":
+        return _Refused("target_root_is_remote", "remote_root_override_clear", _OVERRIDE_WAY_BACK)
     return _Refused("target_root_is_remote", "remote_target_no_local_service")
 
 
@@ -150,7 +163,8 @@ def test_setup_run_refuses_a_remote_root_before_it_looks_asks_or_writes(
     assert result.exit_code == 20, result.output
     assert result.stdout == ""
     assert result.stderr.startswith(_refusal(refused))
-    assert "'finishup server use local'" in result.stderr
+    assert refused.way_back in result.stderr
+    assert "server use NAME" not in result.stderr and "with its name" not in result.stderr
     assert "service run" not in result.stderr
     assert "lab.example" not in result.stderr
     assert _tree(home) == before
@@ -240,6 +254,10 @@ async def test_the_terminal_interface_first_run_asks_and_writes_nothing_live(
         shown = "\n".join("\n".join((event.title, *event.body)) for event in app.transcript.events)
 
     assert "Setup did not start" in shown
+    directive = directive_for(refused.continuation)
+    assert directive is not None
+    assert directive.directive in shown
+    assert refused.way_back in shown
     assert "Setup stopped. Nothing was changed." in shown
     assert "Welcome to FinishUP" not in shown
     assert asked == []

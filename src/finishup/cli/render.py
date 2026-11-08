@@ -1498,15 +1498,19 @@ def render_recovery_directive_lines(
 
 def render_remote_refusal(phase: str, *, head: str) -> str:
     """A remote root refused before anything was sent (ADR-051): ``<phase>: <head>``, then the
-    phase's registry directive lines, as every CLI error surface shows a directive.
+    directive lines of its way back, as every CLI error surface shows a directive.
 
-    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code, so its directive
-    resolves through the protocol vocabulary (``target_root_is_remote`` names 'finishup server use
-    local'); ``head`` is the caller's fixed sentence about what stopped.
+    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code. Its directive
+    follows what named the root (``targets.remote_root_continuation``): 'finishup server use
+    local' for the selection, unsetting the variable or using an unpinned launcher for an
+    isolation variable or a pinned launcher. ``head`` is the caller's fixed sentence about what
+    stopped.
     """
 
+    from finishup.client.targets import remote_root_continuation
+
     lines = [f"{phase}: {head}"]
-    directive = directive_for(continuation_for_reason(phase))
+    directive = directive_for(remote_root_continuation(phase))
     if directive is not None:
         lines.extend(render_recovery_directive_lines(directive))
     return "\n".join(lines)

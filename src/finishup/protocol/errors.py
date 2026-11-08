@@ -665,6 +665,10 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "remote_credential_repair",
         "remote_identity_verify",
         "remote_release_mismatch",
+        # A remote-root refusal while an isolation variable or a pinned launcher names the root,
+        # where 'finishup server use local' cannot help. Attached by the client that knows its
+        # root's source (``targets.remote_root_continuation``), never through a reason code.
+        "remote_root_override_clear",
         "remote_server_test",
         "remote_service_start_required",
         "remote_target_no_local_service",

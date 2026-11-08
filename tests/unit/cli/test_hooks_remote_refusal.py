@@ -11,8 +11,12 @@ server; the record here is one another build left selected.)
 A remote target authorized under the current disclosure, with no zero-network policy, is refused
 the same way as ``target_root_is_remote``: this release reaches no server elsewhere. Its context
 names that phase, its registry directive and ``finishup server use local``, never a service still
-to start or ``finishup service run``. The terminal menu's home line and its service actions name
-both refusals the same way.
+to start or ``finishup service run``. A target authorized under an older disclosure
+(``target_reauthorization_required``) points to this computer's server as well, since this release
+cannot confirm it again. When an isolation variable names the root instead, ``finishup server use
+local`` cannot change it (``selection_overridden``), so the directive says to unset it or use an
+unpinned launcher (``remote_root_override_clear``). The terminal menu's home line and its service
+actions name every refusal the same way.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from finishup.adapters.integrations.codex_lifecycle import LifecycleMapping, sto
 from finishup.adapters.integrations.observation_local import LocalObservationStore
 from finishup.cli import observe_hooks as observe_hooks_module
 from finishup.client import targets
-from finishup.config.paths import active_root, reset_selection_memo
+from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, active_root, reset_selection_memo
 from finishup.domain.observation import ObservationSource
 from finishup.protocol.ids import IdKind, new_id
 from finishup.service import client as service_client
@@ -61,25 +65,45 @@ class _Refused:
     root: Path
     phase: str
     continuation: str
+    # The owner's way back: 'finishup server use local' when the selection names the root, and
+    # clearing the override when an isolation variable names it, which outranks the selection
+    # ('finishup server use local' answers selection_overridden there).
+    way_back: str = "'finishup server use local'"
 
 
-@pytest.fixture(params=["zero_network", "remote_root"])
-def refused(home: Path, request: pytest.FixtureRequest) -> _Refused:
-    """A remote target is selected: with this computer's last report of zero-network, or
+@pytest.fixture(params=["zero_network", "remote_root", "stale_disclosure", "isolation"])
+def refused(
+    home: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> _Refused:
+    """A remote root: a selected target with this computer's last report of zero-network,
     authorized under the current disclosure with no such report (a remote root this release
-    does not reach)."""
+    does not reach), or under an older disclosure; or an isolation variable naming its root."""
 
     with targets.registry_lock():
         record, root = targets.new_remote_target(
             "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
         )
-        targets.write_selection(record)
+        if request.param != "isolation":
+            targets.write_selection(record)
+    if request.param == "isolation":
+        monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(root))
     reset_selection_memo()
     assert active_root() == root
     assert not record.needs_reauthorization
     if request.param == "zero_network":
         everyday_policy.record_reported_policy(zero_network=True, now=_AT)
         return _Refused(root, "zero_network_remote_selected", "zero_network_local_server_required")
+    if request.param == "stale_disclosure":
+        # A later release shows a newer disclosure than the one the owner confirmed.
+        monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION + 1)
+        return _Refused(root, "target_reauthorization_required", "server_reauthorization_required")
+    if request.param == "isolation":
+        return _Refused(
+            root,
+            "target_root_is_remote",
+            "remote_root_override_clear",
+            "unset it or use an unpinned launcher",
+        )
     return _Refused(root, "target_root_is_remote", "remote_target_no_local_service")
 
 
@@ -139,8 +163,14 @@ def _session_start(
 
 
 def _names_the_refusal(context: str, refused: _Refused) -> None:
+    from finishup.protocol.recovery import directive_for
+
     assert f"({refused.phase})" in context
-    assert "'finishup server use local'" in context
+    directive = directive_for(refused.continuation)
+    assert directive is not None
+    assert directive.directive in context
+    assert refused.way_back in context
+    assert "server use NAME" not in context and "with its name" not in context
     assert "nothing was sent" in context
     assert f"Continuation: {refused.continuation}." in context
     assert "could not be reached" not in context
@@ -252,7 +282,7 @@ def test_the_menu_names_the_refusal_and_never_a_service_to_start(
         f"Continuation: {refused.continuation}\n"
         f"Next: {directive.directive}\n"
     )
-    assert "'finishup server use local'" in captured.err
+    assert refused.way_back in captured.err
     assert "service run" not in captured.out + captured.err
     assert "start it" not in captured.out
     assert "lab.example" not in captured.out + captured.err

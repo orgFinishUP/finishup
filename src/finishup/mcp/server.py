@@ -2151,16 +2151,17 @@ def _control_error_result(
             safe_details={"reason_code": "service_draining"},
         )
     if error.reason == "service_unavailable":
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS
+        from finishup.client.targets import REMOTE_ROOT_REFUSALS, remote_root_continuation
 
         if error.phase in REMOTE_ROOT_REFUSALS:
             # The root in use names a server elsewhere (ADR-051): refused before anything was
-            # sent or started. Name the phase and its continuation, never a local service to run.
+            # sent or started. Name the phase and the continuation of its way back, which follows
+            # what named this bridge's root, never a local service to run.
             remote_details: dict[str, object] = {
                 "reason_code": "service_unavailable",
                 "phase": error.phase,
             }
-            remote_continuation = continuation_for_reason(error.phase)
+            remote_continuation = remote_root_continuation(error.phase)
             if remote_continuation is not None:
                 remote_details["continuation"] = remote_continuation
             return _control_public_error_result(

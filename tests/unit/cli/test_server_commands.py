@@ -1509,6 +1509,11 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     assert refused.exit_code == 2
     assert refused.stderr.startswith("target_reauthorization_required:")
     assert "lab.example" not in refused.stderr
+    # 'server use NAME' cannot confirm it while the remote kinds are closed (it is refused
+    # below), so the way on is a server on this computer; a later release can authorize it.
+    assert "server use NAME" not in refused.stderr
+    assert "only a later release can authorize it again" in refused.stderr
+    assert "'finishup server use local'" in refused.stderr
     status = _status_json("lab")
     authorization = cast(
         dict[str, JsonValue], cast(dict[str, JsonValue], status["target"])["authorization"]

@@ -313,8 +313,13 @@ kind without a record migration.
   service starts (decision 6, *No silent fallback*). No remote `TargetRuntime` is registered, so
   `target_runtime` answers a remote kind with `remote_unreachable`, phase `runtime_unavailable`.
   Every host's SessionStart hook and the terminal menu keep that phase (or the zero-network and
-  stale-disclosure phases of decision 8) and name it with its directive, whose way back is
-  `finishup server use local`, never a service still to start.
+  stale-disclosure phases of decision 8) and name it with its directive, never a service still to
+  start. The way back follows what named the root: for the saved selection, `finishup server use
+  local` and then a new agent session (an open session's MCP bridge keeps the root it started
+  with); a stale disclosure cannot be confirmed while the remote kinds are closed, so it points
+  there too and says a later release can authorize that server again. When an isolation variable
+  or a pinned launcher names the root, `server use` answers `selection_overridden`, so the
+  directive is to unset it or use an unpinned launcher (`remote_root_override_clear`).
 - Setup refuses such a root at its entry with the same phase and directive (exit 20, stderr
   only): `setup run` in every form, bare `finishup` and the menu's setup wizard, and the terminal
   interface's first run, whether a selection or an isolation variable names the root. It looks

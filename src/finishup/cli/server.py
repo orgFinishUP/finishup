@@ -266,10 +266,12 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "this FinishUP build has no client runtime for that kind of server target",
         _UNAVAILABLE,
     ),
+    # 'finishup server use NAME' cannot confirm the current disclosure while the remote kinds
+    # are closed (it answers 'remote_kind_unavailable'), so the way on is a server on this computer.
     "target_reauthorization_required": (
         "this server target was authorized under an older disclosure of what leaves this "
-        "computer; run 'finishup server use NAME' in your own terminal to read the current one "
-        "and confirm it",
+        "computer, so nothing was sent to it, and only a later release can authorize it again; "
+        "use a server on this computer ('finishup server use local')",
         _USAGE,
     ),
     "usage": ("give --local: this release adds only named local servers on this computer", _USAGE),

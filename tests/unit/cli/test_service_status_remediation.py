@@ -366,7 +366,51 @@ def test_a_refused_remote_root_names_its_directive_never_a_local_service(
         monkeypatch, ControlError("service_unavailable", retryable=True, phase=phase)
     )
 
+    from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+    from finishup.protocol.recovery import directive_for
+
+    directive = directive_for(REASON_CODE_CONTINUATIONS[phase])
+    assert directive is not None
     assert code == 20
     assert guidance.startswith(f"{phase}: FinishUP refused the selected server's connection")
+    assert f"Next: {directive.directive}\n" in guidance
     assert "finishup service run" not in guidance
-    assert "finishup server use local" in guidance or "finishup server use" in guidance
+    assert "'finishup server use local'" in directive.directive
+    assert "server use NAME" not in guidance and "with its name" not in guidance
+
+
+@pytest.mark.parametrize("phase", ["target_root_is_remote", "target_reauthorization_required"])
+def test_a_remote_root_an_isolation_variable_names_points_to_that_override(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """'finishup server use local' cannot change a root an isolation variable or a pinned
+    launcher names (it answers selection_overridden): the text and the JSON recovery name the
+    override's way back instead."""
+
+    import json
+
+    import finishup.client.targets as targets
+    from finishup.protocol.recovery import directive_for
+
+    monkeypatch.setattr(targets, "_root_named_explicitly", lambda: True)
+    directive = directive_for("remote_root_override_clear")
+    assert directive is not None
+
+    code, guidance = _status_stderr(
+        monkeypatch, ControlError("service_unavailable", retryable=True, phase=phase)
+    )
+
+    assert code == 20
+    assert "Continuation: remote_root_override_clear\n" in guidance
+    assert f"Next: {directive.directive}\n" in guidance
+    assert "Ask the owner to run 'finishup server use local'" not in guidance
+
+    async def refuse(*_args: object, **_kwargs: object) -> ServiceClient:
+        raise ControlError("service_unavailable", retryable=True, phase=phase)
+
+    monkeypatch.setattr(cli, "build_service_client", refuse)
+    result = CliRunner().invoke(cli.app, ["service", "status", "--json"])
+    body = json.loads(result.stdout)
+    assert body["phase"] == phase
+    assert body["recovery"]["continuation"] == "remote_root_override_clear"
+    assert body["recovery"]["directive"] == directive.directive

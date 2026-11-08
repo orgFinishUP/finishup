@@ -69,6 +69,7 @@ __all__ = [
     "DISCLOSURE_VERSION",
     "PRE_DIAL_REFUSALS",
     "REMOTE_KINDS",
+    "REMOTE_ROOT_OVERRIDE_CONTINUATION",
     "REMOTE_ROOT_REFUSALS",
     "RESERVED_NAMES",
     "TARGET_KINDS",
@@ -94,6 +95,7 @@ __all__ = [
     "read_target",
     "reauthorized",
     "registry_lock",
+    "remote_root_continuation",
     "remove_leftover_root",
     "remove_target_root",
     "require_current_authorization",
@@ -188,6 +190,10 @@ PRE_DIAL_REFUSALS: Final = frozenset(
 # and the one remote ``phase`` a structured error keeps (``protocol.errors``).
 REMOTE_ROOT_REFUSALS: Final = PRE_DIAL_REFUSALS | frozenset({"target_root_is_remote"})
 assert REMOTE_ROOT_REFUSALS == REMOTE_ROOT_REFUSAL_PHASES
+# The continuation of any of those refusals while an isolation variable or a pinned launcher names
+# the root (``remote_root_continuation``): 'finishup server use local' answers
+# ``selection_overridden`` there, so the way back is to clear that override instead.
+REMOTE_ROOT_OVERRIDE_CONTINUATION: Final = "remote_root_override_clear"
 
 
 class TargetError(Exception):
@@ -877,9 +883,10 @@ def require_current_authorization(record: ServerTarget | None) -> None:
       is the way out. A process whose root an isolation variable or runtime pin decides keeps its
       own policy and is not refused here.
     * ``target_reauthorization_required``: the owner authorized the target under an older
-      disclosure. A new disclosure version needs a fresh typed confirmation: ``finishup server use
-      NAME`` on the trusted console shows the current disclosure and records it
-      (``reauthorized``).
+      disclosure. A new disclosure version needs a fresh typed confirmation of the current one
+      (``reauthorized``). The remote kinds are closed in this release, so ``finishup server use
+      NAME`` cannot give it (``remote_kind_unavailable``): the way on is a server on this
+      computer, and a later release can authorize the target again.
 
     ``None`` and a local record pass. Every path that opens a connection to a remote target calls
     this; the display and reverse paths (``server status``, ``list``, ``test``, ``remove``,
@@ -1018,6 +1025,40 @@ def active_remote_refusal() -> str | None:
     except Exception:
         return "target_root_is_remote"
     return "target_root_is_remote"
+
+
+def remote_root_continuation(phase: str) -> str | None:
+    """The continuation a remote-root refusal ``phase`` resolves to in this process.
+
+    For one of ``REMOTE_ROOT_REFUSALS``, the way back depends on what named the root. When the
+    saved selection did, it is the phase's own registry continuation: 'finishup server use local'
+    (``remote_target_no_local_service``, ``server_reauthorization_required``,
+    ``zero_network_local_server_required``), then a new agent session, since an open one keeps
+    the root its MCP bridge started with. When an isolation variable or a pinned launcher did, the
+    selection is not in force ('finishup server use local' answers ``selection_overridden``), so
+    it is ``REMOTE_ROOT_OVERRIDE_CONTINUATION``: unset that variable or use an unpinned launcher.
+    A variable or pin that cannot be read still names the root (it fails closed on its own path).
+    Any other phase resolves as ``continuation_for_reason`` does. Every surface that names a
+    remote-root refusal (the CLI, setup, the menu, the terminal interface, hooks and MCP) reads its
+    continuation here. Hook-safe: environment and pin reads only.
+    """
+
+    from finishup.protocol.recovery import continuation_for_reason
+
+    if phase in REMOTE_ROOT_REFUSALS and _root_named_explicitly():
+        return REMOTE_ROOT_OVERRIDE_CONTINUATION
+    return continuation_for_reason(phase)
+
+
+def _root_named_explicitly() -> bool:
+    """Whether an isolation variable or a runtime pin, not the selection, names this root."""
+
+    from finishup.config.paths import isolated_root_variable, read_runtime_pin
+
+    try:
+        return isolated_root_variable() is not None or read_runtime_pin() is not None
+    except PathSafetyError:
+        return True
 
 
 def active_root_may_be_remote() -> bool:

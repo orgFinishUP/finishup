@@ -624,9 +624,10 @@ class FinishUpTui(App[int]):
         phase = self.runtime.remote_root_refusal()
         if phase is None:
             return False
-        from finishup.protocol.recovery import continuation_for_reason, directive_for
+        from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.recovery import directive_for
 
-        directive = directive_for(continuation_for_reason(phase))
+        directive = directive_for(remote_root_continuation(phase))
         body = () if directive is None else (directive.directive,)
         details = [f"reason={phase}"]
         if directive is not None:

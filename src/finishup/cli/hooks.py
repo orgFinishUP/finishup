@@ -176,18 +176,19 @@ def remote_refusal_context(phase: str) -> str:
     ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS`` (``zero_network_remote_selected``,
     ``target_reauthorization_required``, or ``target_root_is_remote`` for any other remote root,
     which this release does not connect to): not an outage of a service, so the text names the
-    closed reason, the registry directive (that nothing was sent, why, and the command the owner
-    runs in their own terminal, ``finishup server use local`` for a remote root) and its
+    closed reason, the directive of its way back (that nothing was sent, why, and what the owner
+    does: ``finishup server use local`` when the selection names the root, unsetting the variable
+    or using an unpinned launcher when one names it, ``targets.remote_root_continuation``) and its
     continuation token, as MCP ``start`` and the CLI do, and never a hook budget that was not
     spent or a service still to start.
     """
 
-    from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+    from finishup.client.targets import remote_root_continuation
     from finishup.protocol.recovery import directive_for
 
-    token = REASON_CODE_CONTINUATIONS[phase]
+    token = remote_root_continuation(phase)
     directive = directive_for(token)
-    assert directive is not None
+    assert token is not None and directive is not None
     nudge = "" if directive.nudge is None else f" {directive.nudge}"
     return (
         f"FinishUP refused the selected server's connection before anything was sent ({phase}). "
