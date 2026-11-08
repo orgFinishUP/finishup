@@ -14,29 +14,24 @@ the egress gateway, key access, and structural receipts. CLI, MCP, a future UI, 
 and provider adapters are callers with bounded capabilities. An MCP caller or agent is never a
 local-human authorization principal, even when its request asserts that the user consented.
 
-When the owner selects a FinishUP server on another machine
-([ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md), Proposed), that server's
-service is this trusted service and this protocol runs there unchanged. The hop between the
-owner's FinishUP client and that server is the owner-authorized FinishUP server hop: it is not one
-of the five network channels below, and enabling it enables none of them. Adding or selecting a
-remote target is refused in the zero-network state (the ADR-009 amendment proposed by ADR-051).
-The zero-network state and a selected remote target are never in force together (ADR-051 decision
-8, maintainer decision of 2026-11-07, replacing the 2026-11-06 choice to let the owner keep the
-target). A change that would set this computer's machine-scope policy to that state while the
-selection names a remote target is decided before it is applied: on the trusted console the owner
-chooses between switching to this computer's everyday FinishUP (`finishup server use local`) and
-making the change, or cancelling the change and keeping the target, and Enter, end of input and
-Ctrl-C cancel; without that console (a machine-readable answer, a relayed decision) it is refused
-with `zero_network_remote_selected` and nothing is applied. While a remote target is selected, a
-fresh command does not set this computer's policy (the server-host privacy commands are refused
-with `requires_server_host`; `privacy tighten|propose` reach the selected server and change its
-own policy), so the choice arises only when a process that resolved this computer's server before
-the selection changed makes the change. As the last line of defence every client connection to a
-remote target is refused, before anything is sent, while this computer last reported the
-zero-network state: the client remembers each report of this computer's machine-scope policy in an
-owner-only marker outside the vault, and the connection check reads that marker, never the
-service, so a process whose selection predates the change sends nothing either. The owner
-displays read the live policy first and fall back to that marker ("this computer last reported").
+[ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed) defines FinishUP
+servers on another machine. This release selects only servers on this computer (the everyday
+server and named local servers, each its own instance of this trusted service); it refuses every
+remote kind (`remote_kind_unavailable`) before any prompt or probe, and refuses a connection to a
+remote root before any dial, so no FinishUP server hop is taken and no channel is added to the five
+below. When a remote kind opens, the selected server's service is this trusted service and this
+protocol runs there unchanged; the hop between the owner's FinishUP client and that server is the
+owner-authorized FinishUP server hop, not one of the five network channels, and enabling it enables
+none of them. The zero-network state and a selected remote target are never in force together
+(ADR-051 decision 8, maintainer decision of 2026-11-07): adding or selecting a remote target is
+refused in that state; a change into it while a remote target is selected asks the owner on the
+trusted console to switch to this computer's everyday FinishUP (`finishup server use local`) and
+make the change, or cancel it (Enter, end of input and Ctrl-C cancel), and is refused without that
+console with `zero_network_remote_selected`; and every client connection to a remote target is
+refused, before anything is sent, while this computer last reported the zero-network state. To know
+that while this computer's service is stopped or locked, the client remembers each report of this
+computer's machine-scope policy in an owner-only marker outside the vault; this release already
+keeps that marker up to date.
 
 ## Content classes
 

@@ -12,12 +12,15 @@ do.** CLI, MCP, and a future UI are communication surfaces to that one persisten
 — they never open the encrypted catalog or a task bundle directly, never hold a key handle, and
 never unlock the vault themselves.
 
-By default that service runs on the same machine as its clients. When the owner selects a FinishUP
-server on another machine ([ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md)),
-the server's service is that one service, on its own host, and everything on this page applies
-there. The client machine then holds no vault, ledger, or decrypted state; its clients reach the
-server's ordinary control channel only through the route the target's kind defines, and the
-confidential channels below are never reached from another machine.
+That service runs on the same machine as its clients. The owner may add named local servers
+([ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md)); each is its own instance of
+this service, with its own vault, ledger and owner-only endpoints, and everything on this page
+applies to each. FinishUP servers on another machine (SSH, HTTPS and localhost-port servers) are
+defined by ADR-051 but closed in this release (`remote_kind_unavailable`): no control channel is
+reachable from another machine. When a remote kind opens, the server's service is that one
+service, on its own host; the client machine then holds no vault, ledger, or decrypted state, its
+clients reach the server's ordinary control channel only through the route the target's kind
+defines, and the confidential channels below are never reached from another machine.
 
 ## Trust boundary
 
@@ -51,10 +54,11 @@ confidential channel. **This is not a claim that arbitrary malicious code alread
 same user cannot emulate a raw client of these sockets** — that is an explicit limit of the
 same-UID threat model, stated plainly here rather than implied away.
 
-A FinishUP server on another machine is reached through its ordinary control channel only. The
-secret-ingress and human-control endpoints are never forwarded, tunnelled, or exposed to another
-machine: unlock, consent, and the owner receipt view run only on the server's host (over SSH,
-through a remote terminal there), and a remote `receipt` returns the ordinary view.
+Once a remote kind opens, a FinishUP server on another machine is reached through its ordinary
+control channel only. The secret-ingress and human-control endpoints are never forwarded,
+tunnelled, or exposed to another machine: unlock, consent, and the owner receipt view run only on
+the server's host (over SSH, through a remote terminal there), and a remote `receipt` returns the
+ordinary view.
 
 ## First-install: keyring versus passphrase
 
@@ -203,12 +207,13 @@ best-effort page-locking and overwrite where the platform supports it; CPython a
 libraries can still make uncontrollable copies, so no perfect zero-copy or guaranteed zeroization
 claim is made.
 
-A server target adds a network edge in front of the ordinary control channel, and that edge is
-only as strong as its credential. An SSH target is owner-equivalent: anyone who can log in to the
-server as the service owner can already reach these endpoints. An HTTPS key is a bearer
-credential limited to its scope's methods; anyone holding it can use those methods until it is
-revoked. On the client, software running as the same account can read a stored server key, as it
-can read any owner-only file.
+A remote server target, once its kind opens, will add a network edge in front of the ordinary
+control channel, and that edge is only as strong as its credential. An SSH target is
+owner-equivalent: anyone who can log in to the server as the service owner can already reach these
+endpoints. An HTTPS key is a bearer credential limited to its scope's methods; anyone holding it can
+use those methods until it is revoked. On the client, software running as the same account can read
+a stored server key, as it can read any owner-only file. This release stores no server key:
+`finishup server login` is refused while the remote kinds are closed.
 
 ## Headless and native-vault status
 

@@ -1904,9 +1904,13 @@ text) read the same records.
 
 ## Amendment proposed by ADR-051 (2026-11-05): the FinishUP server hop
 
-[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) lets a client
-use a FinishUP service on another machine that the same owner runs. Once it is accepted, this
-record changes as follows.
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) defines how a
+client will use a FinishUP service on another machine that the same owner runs. Once it is
+accepted, this record changes as follows. **In layer 1 the hop is defined but never taken**
+(narrowed 2026-11-08): the remote kinds are closed (`remote_kind_unavailable`), a remote root is
+refused before any dial, and no channel or endpoint is added to what this record permits. Of the
+rules below only the owner-only record of what this computer's everyday service last reported is
+kept up to date in layer 1; the rest is the contract the layers that open a remote kind implement.
 
 - **A distinct hop, outside the five channels.** Traffic between a FinishUP client and the
   owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one

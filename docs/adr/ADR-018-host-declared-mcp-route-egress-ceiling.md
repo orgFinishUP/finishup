@@ -302,8 +302,11 @@ failure conditions in isolated state; fresh native host runs on those OS cells r
 
 ## Amendment proposed by ADR-051 (2026-11-05): strict route on a remote target
 
-[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) lets the MCP
-bridge reach a FinishUP service on another machine that the owner selected. Once it is accepted:
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) defines how the
+MCP bridge will reach a FinishUP service on another machine that the owner selected. In layer 1 no
+remote target can be added or selected (`remote_kind_unavailable`), so the bridge's control
+traffic stays on this computer and decision 2 is unchanged in effect (narrowed 2026-11-08). Once a
+remote kind opens:
 
 - **Strict stays allowed on remote targets.** Strict means the route never requests AI-powered
   review and never invokes an evaluator. The bridge still sends `route_profile` on every `check`

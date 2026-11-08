@@ -195,8 +195,11 @@ targets. Once it is accepted, this record changes as follows.
   `isolation_root_invalid` with the existing path-safety reasons and never falls back to the
   ambient singleton (decision 2).
 - **The endpoint still follows the root (decision 3).** A remote target's root holds only
-  client-side state and its approach's client-side endpoint; nothing beneath it can reach the
-  ambient singleton, and the client never spawns or supersedes a service for a remote root.
+  client-side state (and, once a remote kind opens, the endpoint of that target's background
+  helper); nothing beneath it can reach the ambient singleton, and the client never spawns or
+  supersedes a service for a remote root. In layer 1 a remote kind cannot be added or selected
+  (`remote_kind_unavailable`), and a connection to a remote root is refused before any dial
+  (`target_root_is_remote`); named local targets are the targets this release selects.
 - **Decision 4.** The client forwards the *active* root to the process it spawns for a target, so
   a selected local target spawns exactly as an isolated one does.
 - **Decision 5.** `isolation_binding()` gains the value `selection`; the isolation report's wire

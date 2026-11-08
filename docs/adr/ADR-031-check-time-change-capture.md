@@ -952,9 +952,12 @@ claim had no basis and is removed.
 
 ## Amendment proposed by ADR-051 (2026-11-05): capture by the client workspace agent
 
-[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) lets a client
-use a FinishUP service on another machine. Such a service cannot read the agent's working tree,
-and a server directory at the same path is a different tree. Once ADR-051 is accepted:
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) defines how a
+client will use a FinishUP service on another machine. Such a service cannot read the agent's
+working tree, and a server directory at the same path is a different tree. Layer 1 builds the
+claim-bound path below and tests it in process; no shipped client sends a claim yet, because no
+remote target can be added or selected (`remote_kind_unavailable`), so every capture in layer 1 is
+the service's own read (narrowed 2026-11-08). Once ADR-051 is accepted:
 
 - **Decision 2 for a claim-bound connection.** A connection to a remote target carries a
   workspace *claim* (a keyed digest) instead of a locator, so the service holds no path to read.

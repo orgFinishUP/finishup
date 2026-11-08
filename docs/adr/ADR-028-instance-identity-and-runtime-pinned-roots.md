@@ -179,8 +179,9 @@ terms:
 - **`<ambient state dir>/servers/` is a deliberately owner-written redirection surface.** It holds
   one root per target, each with an owner-only `target.json` (`yoetz.server-target/1`), and the
   selection file names at most one of them. Both are owner-only, symlink-free and never inside a
-  repository. Selecting a remote kind needs the trusted foreground console and a typed
-  confirmation; an agent has no tool to change either file.
+  repository. Selecting a remote kind will need the trusted foreground console and a typed
+  confirmation (in layer 1 a remote kind cannot be added or selected at all,
+  `remote_kind_unavailable`); an agent has no tool to change either file.
 - **Never stamped into a registration.** Host registrations, launch lines, the Codex RECORD proof
   and the upgrade guard keep resolving `isolated_root()` (environment or pin), never the
   selection, so connecting a host while a target is selected does not bind it to that target and
