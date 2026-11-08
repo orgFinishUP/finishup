@@ -4642,7 +4642,10 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
   syntax is validated first only where telling the kind needs it, and nothing touches the
   network. The text is "this release connects only to FinishUP servers on this computer: the
   everyday server and named local servers ('finishup server add NAME --local'). SSH, HTTPS and
-  port servers arrive in a later release; nothing was added."; `--json` output carries the reason.
+  port servers arrive in a later release; nothing was added", printed as one stderr line after the
+  closed token (`remote_kind_unavailable: …`) with exit 2 and nothing on stdout. `server add` has no
+  `--json` option, so no JSON document carries the reason; a script reads the token before the
+  first colon.
 - A remote record another build or a hand edit wrote is read, never used: `server use NAME`
   refuses `remote_kind_unavailable` and leaves the selection unchanged, as does choosing it in the
   terminal interface's `/server`, and `server list`, `server status` and `/server` show it as not
@@ -4686,14 +4689,16 @@ never inside a repository, with exact field sets.
 
 | Record | Location | Fields |
 |---|---|---|
-| `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | `schema`, `target_id` (`t_` + 8 lowercase hex), `name`, `kind`, `created_at`. `ssh` adds `user`, `host`, `port`, `remote_root`, `remote_launcher`. `https` and `local_port` add `base_url`, one of `ca_file` or `tls_pin` (`sha256:<64 hex>`), and `credential` (`keyring\|file`). Every remote kind adds `claim_salt` (32 random bytes), `authorized_at` and `disclosure_version`. |
+| `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | The key set is exact per kind (`client.targets._FIELDS_BY_KIND`); every listed key is present, a nullable one as JSON `null`, and no other key is admitted. Every kind: `schema`, `target_id` (`t_` + 8 lowercase hex, the folder's own name), `name`, `kind`, `created_at` (RFC 3339, milliseconds). `local`: those five only. `https` and `local_port`: also `base_url` (normalized; loopback only for `local_port`), `ca_file` (absolute path or `null`), `tls_pin` (`sha256:<64 hex>` or `null`; at most one of `ca_file` and `tls_pin` is set, and both `null` means the system certificate store) and `credential` (`keyring`, `file` or `null` while no key is stored). `ssh`: also `user` (or `null`), `host`, `port`, `remote_root`, `remote_endpoint` (`<remote_root>/run/control.sock`, derived) and `remote_launcher`, the last three absolute paths or `null`. Every remote kind also has `claim_salt` (base64 of 32 random bytes), `authorized_at` and `disclosure_version` (an integer of at least 1), never `null`. |
 | `yoetz.server-selection/1` | `<ambient config dir>/server-selection.json` | `schema`, `target_id`. Absent means the ambient service. |
 | `yoetz.server-folders/1` | `<target root>/config/folders.json` (remote kinds only) | `schema`, `target_id` (the root's own), `folders` (sorted, unique, at most 32 absolute paths that pass `admitted_input_root_valid` and neither are nor hold the home directory), and `mode` (`local\|listed`) once the owner chose one (at `server add`, or with `server folders mode`). Every remote kind has the same two modes and no default: no `mode` means `listed` (`not_chosen`), except an HTTPS target whose exact hostname is in `client.server_folders.OFFICIAL_ENDPOINT_HOSTS` and that trusts the system certificate store, which is `local` (`official_endpoint`). An absent record means no folder and no mode; one that cannot be read means `listed` with no folder. In both modes the folders also admit task inputs for that target's claim-bound sessions, whatever the server's own input-root policy names (maintainer decision 2026-11-07). Written only by `server add` and `server folders add`/`remove`/`mode`, never sent to a server. |
 
-A target name matches `[a-z0-9][a-z0-9-]{0,15}` and `local` is reserved. The name appears only in
-`target.json` and in owner displays (`server list`, `server status`, `server test`); errors, logs,
-hook output, MCP text and receipts name a target by `target_id` only, and never print a host,
-address or path.
+A target name matches `[a-z0-9][a-z0-9-]{0,15}` and `local` is reserved. The name appears in
+`target.json` and in owner-facing output on this computer: the `finishup server` commands (`add`,
+`use` and `remove` confirm it; `list`, `status`, `test`, `connect`, `disconnect` and the hidden
+`folders` group show it) and the terminal interface's `/server` (its choices and "Using the server
+NAME"). Structural errors (closed reason tokens and their fixed refusal text), logs and receipts
+name a target by `target_id` only, and never print a name, host, address or path.
 
 **Target kinds** (closed): `local` (a named persistent instance root with its own service),
 `local_port` (`https://127.0.0.1:<port>` or `https://[::1]:<port>`), `ssh`
@@ -4865,15 +4870,10 @@ The test suite points `_location` at a per-test folder (`tests/conftest.py`).
 *Reads.* `everyday_network_state()` answers `zero_network|network_permitted|no_policy|unreadable`
 from the everyday installation's effective machine-scope policy, in a fresh `contextvars.Context`
 (`asyncio.to_thread` copies a context naming the running async library under `anyio.run`), which
-enters `selection_override(None)` again itself.
-`server add|use` refuse `zero_network_in_force` from it (the terminal interface's `/server`
-"Use NAME" reads it in a worker thread and the typed confirmation on its loop thread with Python's
-default Ctrl-C handler, `cli.server.confirm_use_on_this_thread`, so an interrupt cancels it);
-when it is `unreadable` a marker that says zero-network refuses `zero_network_in_force` with the
-fixed sentence naming `reported_at`, and anything else refuses `network_policy_unreadable` (while
-any target is selected, a named local one included, its text names `server connect local`, and
-`server use local` before `service unlock`, since `service start|unlock` are refused for a remote
-target and act on a named local one). `find_zero_network_selection()` reads the selection file
+enters `selection_override(None)` again itself. In layer 1 neither `server add` nor `server use`
+reads it: both refuse a remote kind with `remote_kind_unavailable` before any policy read, and a
+server on this computer needs no network, so `zero_network_in_force` arises only from
+`zero_network_refusal(record)` below. `find_zero_network_selection()` reads the selection file
 afresh (`read_selection_on_disk()`, never the memo) and returns a
 `ZeroNetworkSelection(reason, target_id, kind, detail, policy_read, last_reported_at)` under
 `zero_network` (`policy_read="live"`), or under `unreadable` when the marker says zero-network
@@ -4915,9 +4915,17 @@ that resolved the everyday root before the selection changed can make such a cha
 `server_host` privacy commands are refused with `requires_server_host` and `privacy
 tighten|propose` reach the target.
 
-*Switching.* `cli.server.use_target(name, *, authorize=None) -> TargetSwitch` (`record`, the
-target now selected or `None`; `left`, the remote target the selection named before when the
-switch moved away from it; `left_open`; `left_lines()`) stops `left` through
+*Switching.* `cli.server.use_target(name: str) -> TargetSwitch` is the one way the selection
+changes (`server use`, the choice `1` above, and the terminal interface's `use_server`); it asks
+nothing. `use_target("local")` clears the selection without resolving it, so a damaged or dangling
+selection is cleared too. Any other name must be a target: a remote kind is refused with
+`ServerCommandRefused("remote_kind_unavailable")` (fixed text ending "the selected server is
+unchanged") on its first read and again on the record re-read under `registry_lock()` immediately
+before `write_selection`, so a record another process rewrote as a remote kind in between is
+refused and nothing is written. While the isolation variable or a runtime pin is in force both
+forms refuse `selection_overridden`. The result, `TargetSwitch` (`record`, the target now selected
+or `None`; `left`, the remote target the selection named before when the switch moved away from
+it; `left_open`; `left_lines()`), stops `left` through
 `runtime_for(left.kind).stop(target_root(left.target_id))` after the selection changed, as `server
 disconnect` does; a kind with no registered runtime (every remote kind in layer 1) has nothing of
 this client's to stop and is not left open. `server use`, the choice `1` and the terminal

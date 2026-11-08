@@ -21,9 +21,10 @@ finishup server add lab --local
 ```
 
 A name is up to 16 lowercase letters, digits and hyphens, starting with a letter or digit. `local`
-is reserved: it always means the everyday FinishUP on this computer. FinishUP shows names only in
-`finishup server list`, `status` and `test`; everywhere else, including messages your agent can
-read, a server is named by a short id such as `t_1a2b3c4d`.
+is reserved: it always means the everyday FinishUP on this computer. FinishUP shows a server's
+name where you manage servers yourself: the `finishup server` commands (`add`, `use`, `list`,
+`status`, `test`, `connect`, `disconnect` and `remove`) and `/server` in the terminal interface.
+Error codes, logs and receipts name a server only by a short id such as `t_1a2b3c4d`.
 
 A named local server is a second FinishUP on this computer, with its own tasks, vault, privacy
 policy and AI-powered review settings. It starts when something first needs it, like the everyday
@@ -108,8 +109,11 @@ happens in your shell too.
 ## Troubleshooting
 
 FinishUP never quietly falls back to another FinishUP when the server in use cannot be reached,
-and it never queues work to send later: a call that could not reach the server says so and can be
-repeated safely.
+and it never keeps a request of yours or your agent's to send later: a call that could not reach
+the server says so and can be repeated safely. What your agent's hooks capture for observation is
+the one thing that waits on purpose: it stays on this computer and is delivered by a later hook or
+by FinishUP's background delivery once the server answers (`finishup observe drain` delivers it
+now).
 
 | You see | What it means | What to do |
 |---|---|---|

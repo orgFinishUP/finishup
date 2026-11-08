@@ -256,8 +256,11 @@ server edges, API key scopes, discovery, the official origin preset and the comp
   the variable or a pin is in force (`selection_overridden`). `server status` always names the
   source that decided the root.
 - **Names.** A target name matches `[a-z0-9][a-z0-9-]{0,15}`; `local` is reserved. A name appears
-  only in `target.json` and in owner displays (`server list`, `server status`, `server test`).
-  Errors, logs, hook output, MCP text and receipts name a target by its id only.
+  in `target.json` and in the owner-facing output of this computer's own server commands: the
+  `finishup server` commands (`add`, `use`, `remove`, `list`, `status`, `test`, `connect`,
+  `disconnect`, and the hidden `folders` group) and the terminal interface's `/server`. Structural
+  errors (closed reason tokens and their fixed refusal text), logs and receipts name a target by
+  its id only, never by a name, host, address or path.
 - **No new variable or argv token.** The entry fast paths, the Claude Code, Cursor and Codex
   registration classifiers, the Cursor live-process classifier and the configuration variable
   allowlist are untouched.
@@ -300,7 +303,9 @@ kind without a record migration.
   parsed only as far as telling its kind needs, and nothing touches the network. The text says
   that this release connects only to FinishUP servers on this computer (the everyday server and
   named local servers, `finishup server add NAME --local`), that SSH, HTTPS and port servers arrive
-  in a later release, and that nothing was added; `--json` output carries the reason.
+  in a later release, and that nothing was added. It is one line on stderr, the closed token
+  first (`remote_kind_unavailable: …`), with exit 2 and nothing on stdout; `server add` has no
+  JSON mode, so a script reads the token before the first colon.
 - `finishup server use NAME` on a record of a remote kind (one another build wrote, or a hand
   edit) is refused the same way, and the selection is unchanged.
 - A connection or an on-demand start for a remote root keeps the foundation's refusal: a
