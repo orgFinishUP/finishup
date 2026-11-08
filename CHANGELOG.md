@@ -95,6 +95,41 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - A consent prepared before the upgrade stays reviewable after it, with the warning it was prepared
   with, and expires within 15 minutes as usual.
 
+### Named local servers (#903, #1308)
+
+- **Use another FinishUP on this computer.** `finishup server add NAME --local` adds a named local
+  server: a second FinishUP on this computer with its own tasks, vault, privacy policy and
+  settings, started on demand like the everyday one. `finishup server use NAME` makes your agents'
+  hooks and tools, the `finishup` command and the terminal interface use it, and `server use
+  local` goes back. `server list`, `server status [--json]` and `server test` show which server is
+  in use and what chose it; `server connect` and `server disconnect` start and stop a server's
+  service; `server remove [--select-local]` deletes a named local server with its tasks and vault.
+  `/server` in the terminal interface lists and switches servers, and the header shows a server
+  other than the everyday one. Codex, Claude Code and Cursor registrations are unchanged and
+  follow the choice; restart open agent sessions after switching. An isolated root or a pinned
+  test copy always wins, and `server use` then refuses (`selection_overridden`); the isolation
+  report names a root the choice decided as `selection` (isolation report 1.1.0). See
+  [FinishUP servers](docs/usage/servers.md) and
+  [ADR-051](docs/adr/ADR-051-client-server-cut-and-server-targets.md).
+- **Servers on another machine, on the web or on a port are not in this release.** `finishup
+  server add` refuses SSH (`ssh://…`), HTTPS (`https://…`) and port (`--port`) servers with
+  `remote_kind_unavailable` before it asks anything or connects anywhere, and nothing is added; a
+  server another FinishUP build recorded for one of them is listed as not available and cannot be
+  chosen. They arrive in later releases, in the layers ADR-051's unified model describes (levels,
+  connection styles and server edges; the server offers, the client decides).
+- **Groundwork that changes nothing you see yet.** Control envelopes move to 2.10.0 (workspace
+  claims, the workspace-agent declaration, and its call and reply frames), with the eighteen bounded
+  workspace-agent operations, the service's workspace hub and routing, client attestation of hook
+  observations and the client-attested receipt lines. With no remote server, and in this release
+  there is none, clients name their project by its path exactly as before and nothing is sent over
+  a network that was not sent before. One part applies to every task: a receipt whose
+  session-opening record the service cannot read is still made, and says so in a fixed
+  provenance-unknown section and its `workspace_provenance` member (receipt-result 1.5.0),
+  including whether running it again can help.
+- FinishUP remembers, in an owner-only file beside its server list and outside the vault, whether
+  this computer's privacy policy last reported the zero-network mode and when (no path, name or
+  policy content). It is the record the later remote servers check before sending anything.
+
 ### Added
 
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy
