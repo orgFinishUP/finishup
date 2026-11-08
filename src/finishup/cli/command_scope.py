@@ -7,9 +7,10 @@ command with one closed scope:
   acts only on the active root's own client state, such as the observation store that is the
   client's authority on a remote target).
 * ``server_host`` — administers the server host itself (its vault, recovery set, provider runtime,
-  privacy ceremonies, observation store, backups, or the service process). On a remote target it
-  is refused with ``requires_server_host`` before it runs; a local target (the everyday server or a
-  named local server) is the server host, so nothing changes there.
+  privacy ceremonies, backups, or the service process). On a remote target it is refused with
+  ``requires_server_host`` before it runs; a local target (the everyday server or a named local
+  server) is the server host, so nothing changes there. Observation administration (``observe``)
+  is ``any``: the active root's observation store is the client's own (ADR-051 decision 12).
 * ``client_only`` — acts on this machine's host registrations or server targets and never on a
   server.
 

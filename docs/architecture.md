@@ -115,9 +115,13 @@ service's observation store still shares.
 | **GATEWAY** (server host; reserved) | `gateway`: the gateway server edge, a same-user control client of the service that a later layer adds. It may import SHARED modules and `service.client`, never a workspace reader, and never touches the vault or storage. No module carries this side in layer 1. |
 
 Commands carry a scope too. Each CLI and terminal-interface command is `any`, `server_host` (vault
-setup and unlock, provider and privacy configuration, backup, restore, migrate, observation store
-administration) or `client_only` (host registration and `finishup server …`). A `server_host`
-command is refused while a remote target is active, with `requires_server_host`.
+setup and unlock, provider and privacy configuration, backup, restore, migrate, the service
+process) or `client_only` (host registration and `finishup server …`). A `server_host` command is
+refused while a remote target is active, with `requires_server_host`. Observation administration
+(`finishup observe …`, `/observe`) is `any`, not `server_host`: it acts on the active root's own
+observation store (consent, content profiles, approved-check trust, mappings and the outbox),
+which stays on this computer and is the client's authority for a remote target (ADR-051 decision
+12), so it is never refused there.
 
 **Targets.** The client talks to one *target*: the ambient local service by default, or a named
 local service (its own isolated root, vault and ledger, started on demand). The owner adds targets
@@ -154,14 +158,27 @@ NAMED LOCAL (each an ADR-028 persistent instance root)
   selected "work" ──► <state>/servers/t_1a2b3c4d/run/control.sock ──► service #2 (own vault, ledger)
   selected "lab"  ──► <state>/servers/t_9f8e7d6c/run/control.sock ──► service #3
 
-REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1
-  client host                                           server host (same owner)
-  hook / MCP / CLI / TUI ═══ control frames (later layer) ═══► service (vault, ledger)
-  workspace agent ◄═════════ workspace_call / workspace_reply ══════ workspace hub
+REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1, none of it built
+  client host                                             server host (same owner)
+
+  ssh: control frames over the forwarded owner-only socket (sshd stream-local forwarding)
+  hook / MCP / CLI / TUI ─► relay helper ──┐
+  hook / MCP / CLI / TUI ─► direct (ssh -W) ┴═ control frames ═► control.sock ─► service
+  workspace agent ◄══════ workspace_call / workspace_reply frames ══════ workspace hub
+
+  https, local_port: REST v1 to the edge the server owner runs
+  hook / MCP / CLI / TUI ─► relay helper (maps frames to REST) ─┐
+  hook / MCP / CLI / TUI ─► direct REST client ─────────────────┴═ REST v1 ═► edge
+      edge = gateway (separate process, no vault) ─► control.sock ─► service
+          or native (a listener inside the service) ─► service
+  workspace agent ◄══════ REST v1 (register, poll, reply) ══════ edge ─► workspace hub
+
   human-control and secret channels: never leave the server host
 ```
 
-The remote path follows ADR-051's unified model, delivered in later layers: a *level* says where
+None of the remote path exists in layer 1: no helper, SSH transport, REST protocol, gateway or
+native edge is built, and a remote root is refused before any dial. The remote path follows
+ADR-051's unified model, delivered in later layers: a *level* says where
 the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
 review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of
 the code), a *connection style* says how this computer reaches the server (`unix` for local and
