@@ -561,5 +561,19 @@ unchanged on whichever host runs the service.
   same user can read it. In layer 1 nothing stores one (`server login` is refused); `server
   logout` and `server remove` still delete one an earlier build stored.
 - **Selection (lines on the peer model).** "It never accepts a caller-selected endpoint" still
-  holds: owner-written target configuration alone selects the endpoint, and nothing an agent,
-  request body, repository or environment variable supplies can switch it.
+  holds for what a caller sends: no request body, MCP frame, hook payload or repository file can
+  name or switch the endpoint, which follows from the root the process uses alone. That root is
+  decided outside any request, in order (`config.paths.active_root`): the supported isolation
+  variable (`FINISHUP_ISOLATED_ROOT`, or its legacy spelling; ADR-026), then a runtime pin
+  (ADR-028), then the owner-only selection file, then the ambient installation. The isolation
+  variable is an operator setting inherited by the process tree that carries it, so an agent's
+  shell that sets it changes that tree's root too; it never reaches a server elsewhere in layer 1,
+  because a remote target's root is refused before any dial however it was chosen. The selection
+  file changes only through the local CLI and the terminal interface (`finishup server use
+  NAME|local`, `/server`), which any process running as the owner can invoke, including an
+  agent's shell; no MCP tool or hook changes it. In layer 1 it selects only servers on this
+  computer (the everyday server or a named local server, each with its own vault and ledger), so
+  no confirmation is asked: a remote record is refused (`remote_kind_unavailable`), and while the
+  variable or a pin is in force `server use` is refused (`selection_overridden`). The typed
+  confirmation of a remote target's disclosure on the trusted console (ADR-051 decision 8) arrives
+  with the remote kinds; in layer 1 no selection needs one.
