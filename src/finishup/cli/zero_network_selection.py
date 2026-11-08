@@ -12,8 +12,9 @@ the web (``ssh``, ``https``, ``local_port``).
   read the live policy first; while it cannot be read (the service is stopped or locked, the
   normal case while a remote server is used) they fall back to that marker and say "this
   computer last reported" it.
-* **Adding or selecting a remote server** is refused in the zero-network state, live or last
-  reported (``cli.server``).
+* **Adding or selecting a remote server** is closed in this release (``cli.server``,
+  ``remote_kind_unavailable``), before this computer's policy is asked; once the remote kinds
+  open, it is refused in the zero-network state, live or last reported.
 * **A change that would make this computer zero-network while a remote server is selected**
   (``guard_policy_change``, before anything is applied). On the owner's trusted foreground console
   it offers exactly two choices: ``1`` switch to this computer's everyday FinishUP and make the
