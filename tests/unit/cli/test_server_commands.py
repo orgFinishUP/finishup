@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
@@ -816,7 +816,7 @@ def test_use_refuses_a_record_that_turned_remote_before_the_selection_is_written
     real_lock = targets.registry_lock
 
     @contextmanager
-    def turned_remote() -> Iterator[None]:
+    def turned_remote() -> Generator[None]:
         # Another process rewrites the record after ``use`` read it, before the lock is held.
         targets.write_target(root, remote)
         with real_lock():
