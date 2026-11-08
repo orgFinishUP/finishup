@@ -827,8 +827,12 @@ def use_target(name: str) -> TargetSwitch:
         raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
     try:
         with registry_lock():
-            # Read again under the lock: a target removed meanwhile stays gone.
+            # Read again under the lock: a target removed meanwhile stays gone, and one whose
+            # record another process rewrote as a remote kind meanwhile is refused here, before
+            # the selection is written, exactly as it would have been on the first read.
             record = _stored_record(record)
+            if record.is_remote:
+                raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
             previous = _selected_remote()
             write_selection(record)
     except TargetError as error:

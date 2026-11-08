@@ -791,6 +791,50 @@ def test_use_refuses_a_remote_record_and_leaves_the_selection(
     )
 
 
+def test_use_refuses_a_record_that_turned_remote_before_the_selection_is_written(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``use`` reads the record once to refuse a remote kind early and again under the registry
+    lock. A named local record another process rewrote as a remote kind between those reads is
+    refused under the lock with ``remote_kind_unavailable``, and no selection is written."""
+
+    from contextlib import contextmanager
+
+    assert _invoke("add", "work", "--local").exit_code == 0
+    local = targets.find_target("work")
+    root = targets.target_root(local.target_id)
+    remote = targets.ServerTarget(
+        local.target_id,
+        local.name,
+        "https",
+        local.created_at,
+        base_url="https://work.example",
+        claim_salt="A" * 43 + "=",
+        authorized_at=local.created_at,
+        disclosure_version=targets.DISCLOSURE_VERSION,
+    )
+    real_lock = targets.registry_lock
+
+    @contextmanager
+    def turned_remote() -> Iterator[None]:
+        # Another process rewrites the record after ``use`` read it, before the lock is held.
+        targets.write_target(root, remote)
+        with real_lock():
+            yield
+
+    monkeypatch.setattr(server_cli, "registry_lock", turned_remote)
+
+    result = _invoke("use", "work")
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert result.stderr.startswith("remote_kind_unavailable: ")
+    assert result.stderr.endswith("; the selected server is unchanged\n")
+    assert "work.example" not in result.output
+    assert not targets.selection_path().exists()
+    assert targets.read_selected_target_id() is None
+
+
 def test_list_and_status_show_a_remote_record_as_not_available(
     home: Path, quiet_probe: None
 ) -> None:
