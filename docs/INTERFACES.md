@@ -4652,6 +4652,10 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
 - Connection and spawn paths keep the refusal for a remote root (retryable
   `service_unavailable`, phase `target_root_is_remote`: nothing is sent, no service starts), and
   `runtime_for(kind)` answers `remote_unreachable` / phase `runtime_unavailable` for a remote kind.
+  Every host's SessionStart hook (mapped and unmapped) and the terminal menu (its home line and
+  the actions that need the service) keep that phase and name it with its directive (continuation
+  `remote_target_no_local_service`, `finishup server use local` as the way back), never a service
+  still to start or `finishup service run`.
 - `server login`, `server logout` and the `server folders` group are hidden from `--help` and
   still parse. The terminal interface's `/server` add flow offers only "on this computer" (a named
   local server), and setup and menu next steps never suggest adding a remote server.
@@ -5653,7 +5657,7 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 | `workspace_agent_unavailable` | no workspace agent answered within the hub's wait | no directive (`REASON_CODE_DIRECTIVE_EXEMPTIONS`): it is recorded as the check-time change gap `check_time_change_unavailable_workspace_agent_unavailable`, never raised as an error, and that gap's fixed sentence names `finishup server status NAME` on the client and that checking again can help |
 | `workspace_agent_refused` | the agent refused a read the check-time change needed as one it does not answer (a workspace it did not claim, an unknown operation or argument, a root no owner could admit) | no directive, on the same terms: the gap `check_time_change_unavailable_workspace_agent_refused` names the release mismatch and installing the same release on both computers. The directives `workspace_agent_reconnect` and `workspace_agent_refusal_review` were removed (2026-11-07): nothing raised an error carrying these reasons, so they never reached an agent. Files listed mode keeps from a server are not refusals of the check but the disclosure `outside_reads_not_listed` |
 | `requires_server_host` | a `server_host` command runs while a remote target is active | run it on the server host (for SSH, through `ssh -t`) |
-| `target_root_is_remote` | a service is asked to run in a root whose `target.json` names a remote kind or cannot be read: the daemon refuses at composition, before any bundle, state or singleton exists (`LifecycleError`, recorded as a startup failure), and an on-demand start refuses to spawn one (`service_unavailable` with this phase, at once). A human `service run`/`service start` on a readable remote record meets the server-host guard first (`requires_server_host`) | the service runs on the server; use `finishup server test` here, or `finishup server use local` |
+| `target_root_is_remote` | a service is asked to run in a root whose `target.json` names a remote kind or cannot be read: the daemon refuses at composition, before any bundle, state or singleton exists (`LifecycleError`, recorded as a startup failure), and an on-demand start refuses to spawn one (`service_unavailable` with this phase, at once). A human `service run`/`service start` on a readable remote record meets the server-host guard first (`requires_server_host`) | continuation `remote_target_no_local_service`: this release reaches no server elsewhere, so the owner runs `finishup server use local`; nothing was sent or started |
 | `selection_overridden` | `server use` while the isolation variable or a runtime pin decides the root | unset the variable or use an unpinned runtime |
 | `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): the owner uses a server on this computer, `finishup server use local` or a named local one (`finishup server add NAME --local`), then the request is repeated; SSH, HTTPS and port servers arrive in a later release, and nothing was added, selected or sent |
 | `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | the owner runs `finishup server use NAME` on the trusted console |
@@ -7841,11 +7845,15 @@ reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. A selected remote server this computer refuses
-before any dial (ADR-051 decision 8) records its own reason, `zero_network_remote_selected` or
-`target_reauthorization_required`, read from the target record and this computer's last-reported
-policy marker without a connection attempt; the SessionStart context of every host then names that
-reason with its registry directive (the owner's fix, `finishup server use local` for zero-network)
-and continuation, never a hook-budget outage. Turn-boundary hooks retry auto-attach under a
+before any dial (ADR-051 decision 8) records its own reason, `zero_network_remote_selected`,
+`target_reauthorization_required`, or `target_root_is_remote` for any other remote root (or one whose
+record cannot be read), since this release reaches no server elsewhere: one of
+`targets.REMOTE_ROOT_REFUSALS`, read by `targets.active_remote_refusal()` from the target record and
+this computer's last-reported policy marker without a connection attempt, the same phase the connect
+seams refuse with. The SessionStart context of every host then names that reason with its registry
+directive (the owner's fix, `finishup server use local` for zero-network and for a remote root) and
+continuation, never a hook-budget outage or a service still to start; a mapped session's status read
+keeps the same phase. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
 bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,

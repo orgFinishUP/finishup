@@ -633,6 +633,10 @@ async def test_a_remote_target_root_is_refused_before_anything_is_dialled(
     assert (refused.value.reason, refused.value.phase) == ("service_unavailable", phase)
     assert refused.value.retryable is True
     assert tried == []
+    # Hooks and setup name the same refusal from the record alone, before any connection.
+    from finishup.client.targets import active_remote_refusal
+
+    assert active_remote_refusal() == phase
 
 
 def test_a_local_or_named_local_root_still_spawns(

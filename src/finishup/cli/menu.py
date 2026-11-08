@@ -45,7 +45,29 @@ def menu_available() -> bool:
         return False
 
 
+def _remote_refusal_phase(error: ControlError) -> str | None:
+    """The phase of a remote root refused before anything was sent (ADR-051), or None.
+
+    One of ``targets.REMOTE_ROOT_REFUSALS`` on a ``service_unavailable``: no service of this
+    computer is absent or still starting, so the menu never tells the owner to run one.
+    """
+
+    from finishup.client.targets import REMOTE_ROOT_REFUSALS
+
+    if error.reason == "service_unavailable" and error.phase in REMOTE_ROOT_REFUSALS:
+        return error.phase
+    return None
+
+
 def _control_guidance(error: ControlError) -> str:
+    phase = _remote_refusal_phase(error)
+    if phase is not None:
+        from finishup.cli.render import render_remote_refusal
+
+        return "service_unavailable: " + render_remote_refusal(
+            phase,
+            head="this computer refused the selected FinishUP server before anything was sent",
+        )
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (
@@ -199,8 +221,15 @@ async def _service_summary() -> str:
             status = await client.service_status()
         finally:
             await client.close()
-    except ControlError:
-        return "not reachable — start it with 'finishup service run'"
+    except ControlError as error:
+        phase = _remote_refusal_phase(error)
+        if phase is None:
+            return "not reachable — start it with 'finishup service run'"
+        from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+        directive = directive_for(continuation_for_reason(phase))
+        assert directive is not None
+        return f"refused before anything was sent ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
 

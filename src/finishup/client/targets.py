@@ -68,6 +68,7 @@ __all__ = [
     "DISCLOSURE_VERSION",
     "PRE_DIAL_REFUSALS",
     "REMOTE_KINDS",
+    "REMOTE_ROOT_REFUSALS",
     "RESERVED_NAMES",
     "TARGET_KINDS",
     "TARGET_SCHEMA",
@@ -179,6 +180,11 @@ _REASONS: Final = frozenset(
 PRE_DIAL_REFUSALS: Final = frozenset(
     {"target_reauthorization_required", "zero_network_remote_selected"}
 )
+# Every closed reason a remote target's root is refused with before anything is sent or started
+# in this release (``active_remote_refusal``, and the connect seams of ``finishup.service.client``):
+# the two above, and ``target_root_is_remote`` for any other remote root, since this release
+# reaches no server on another machine. Each is a protocol reason code with its own directive.
+REMOTE_ROOT_REFUSALS: Final = PRE_DIAL_REFUSALS | frozenset({"target_root_is_remote"})
 
 
 class TargetError(Exception):
@@ -981,23 +987,34 @@ def selection_source() -> SelectionSource:
 def active_remote_refusal() -> str | None:
     """The closed reason every connection from this process is refused with before any dial.
 
-    ``zero_network_remote_selected`` or ``target_reauthorization_required`` when the root this
-    process uses is a remote target that ``require_current_authorization`` refuses, exactly as
-    the connect seams do (``finishup.service.client``); ``None`` otherwise, including for a local
-    root and for a root that cannot be resolved or whose record cannot be read, which the
-    connect seams name on their own. Hook-safe: it reads only the target record and this
-    computer's last-reported policy marker, never a service, so a hook can name the refusal
-    without spending its budget (ADR-051 decision 8). Never raises.
+    Exactly the phase the connect seams refuse with (``finishup.service.client``), one of
+    ``REMOTE_ROOT_REFUSALS``: ``zero_network_remote_selected`` or
+    ``target_reauthorization_required`` when ``require_current_authorization`` refuses the
+    remote target this process's root is, and ``target_root_is_remote`` for any other remote
+    root and for a root whose record cannot be read (it may name a remote kind), since this
+    release reaches no server on another machine. ``None`` for a local root (the everyday server,
+    a named local server, an isolated root that is not a target) and for a root that cannot be
+    resolved at all, which the caller's own path-safety refusal names. Hook-safe: it reads only
+    the target record and this computer's last-reported policy marker, never a service, so a
+    hook or a setup entry can name the refusal without spending its budget or asking anything
+    (ADR-051 decision 8). Never raises.
     """
 
     try:
         record = active_target_record()
-        require_current_authorization(record)
-    except TargetError as error:
-        return error.reason if error.reason in PRE_DIAL_REFUSALS else None
+    except TargetRecordUnreadable:
+        return "target_root_is_remote"
     except Exception:
         return None
-    return None
+    if record is None or not record.is_remote:
+        return None
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        return error.reason if error.reason in PRE_DIAL_REFUSALS else "target_root_is_remote"
+    except Exception:
+        return "target_root_is_remote"
+    return "target_root_is_remote"
 
 
 def active_root_may_be_remote() -> bool:

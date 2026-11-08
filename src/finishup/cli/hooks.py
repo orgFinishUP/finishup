@@ -116,7 +116,8 @@ class StatusOutcome:
     # same status result carried, plus the declared deliverables when the second read answered.
     recap: RecapFacts | None = None
     # Set only for an ``unavailable`` read this computer refused before anything was sent
-    # (ADR-051 decision 8): ``zero_network_remote_selected`` or ``target_reauthorization_required``.
+    # (ADR-051 decision 8, ``targets.REMOTE_ROOT_REFUSALS``): ``zero_network_remote_selected``,
+    # ``target_reauthorization_required``, or ``target_root_is_remote`` for any other remote root.
     phase: str | None = None
 
 
@@ -172,11 +173,13 @@ _LOCKED_CONTEXT: Final = (
 def remote_refusal_context(phase: str) -> str:
     """The hook text for a connection this computer refused before any dial (ADR-051 decision 8).
 
-    ``phase`` is one of ``targets.PRE_DIAL_REFUSALS`` (``zero_network_remote_selected``,
-    ``target_reauthorization_required``): not an outage of the server, so the text names the
+    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS`` (``zero_network_remote_selected``,
+    ``target_reauthorization_required``, or ``target_root_is_remote`` for any other remote root,
+    which this release does not connect to): not an outage of a service, so the text names the
     closed reason, the registry directive (that nothing was sent, why, and the command the owner
-    runs in their own terminal) and its continuation token, as MCP ``start`` and the CLI do, and
-    never a hook budget that was not spent.
+    runs in their own terminal, ``finishup server use local`` for a remote root) and its
+    continuation token, as MCP ``start`` and the CLI do, and never a hook budget that was not
+    spent or a service still to start.
     """
 
     from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
@@ -196,13 +199,13 @@ def unavailable_context(phase: str | None) -> str:
     """The SessionStart text for an unavailable service; a refusal before any dial names itself.
 
     ``phase`` is set only when this computer refused the selected server before anything was sent
-    (``targets.PRE_DIAL_REFUSALS``, ADR-051 decision 8); every other unavailable read keeps the
-    plain text.
+    (``targets.REMOTE_ROOT_REFUSALS``, ADR-051 decision 8); every other unavailable read keeps
+    the plain text.
     """
 
-    from finishup.client.targets import PRE_DIAL_REFUSALS
+    from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
-    if phase in PRE_DIAL_REFUSALS:
+    if phase in REMOTE_ROOT_REFUSALS:
         return remote_refusal_context(phase).rstrip()
     return _UNAVAILABLE_CONTEXT
 
@@ -1636,11 +1639,11 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        from finishup.client.targets import PRE_DIAL_REFUSALS
+        from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
         return StatusOutcome(
             _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
-            phase=error.phase if error.phase in PRE_DIAL_REFUSALS else None,
+            phase=error.phase if error.phase in REMOTE_ROOT_REFUSALS else None,
         )
     except Exception:
         return StatusOutcome("unavailable")

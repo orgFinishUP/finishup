@@ -1148,8 +1148,9 @@ payload-free `hook_diagnostics` reason
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 `storage_corrupt`, or, for a selected remote server this computer refuses before any dial,
-`zero_network_remote_selected` or `target_reauthorization_required`, which the SessionStart context
-names with the owner's fix) and the session keeps an observation-only binding; `UserPromptSubmit`
+`zero_network_remote_selected`, `target_reauthorization_required` or `target_root_is_remote` (any
+other remote root, which this release does not reach), which the SessionStart context names with
+the owner's fix) and the session keeps an observation-only binding; `UserPromptSubmit`
 and `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent
 and defers service delivery without spending an auto-attach retry. An explicit cooperative MCP
 `start` bound from its exact `PostToolUse` result remains a recovery path, not a substitute proof

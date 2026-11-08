@@ -159,8 +159,10 @@ _REASONS: Final = frozenset(
         "auto_attach_recovery_busy",
         "auto_attach_binding_ambiguous",
         # This computer refused the selected server before anything was sent (ADR-051 decision
-        # 8): zero-network, or a target confirmed under an older disclosure.
+        # 8): zero-network, or a target confirmed under an older disclosure; any other remote
+        # root, since this release reaches no server on another machine.
         "target_reauthorization_required",
+        "target_root_is_remote",
         "zero_network_remote_selected",
         "privacy_authority_required",
         "runtime_gate_contended",

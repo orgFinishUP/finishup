@@ -1419,8 +1419,9 @@ ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 `storage_corrupt`, or, for a selected remote server this computer refuses before any dial,
-`zero_network_remote_selected` or `target_reauthorization_required`, which the `sessionStart`
-context names with the owner's fix) in the same diagnostics file, and the session keeps an
+`zero_network_remote_selected`, `target_reauthorization_required` or `target_root_is_remote` (any
+other remote root, which this release does not reach), which the `sessionStart` context names with
+the owner's fix) in the same diagnostics file, and the session keeps an
 observation-only binding
 until a retry or an explicit `start` maps it. An explicit `mode=create` collision remains
 `SESSION_CONFLICT` and is not a recovery selector. For `vault_locked` on a never-initialized

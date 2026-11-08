@@ -128,6 +128,7 @@ __all__ = [
     "render_human_status",
     "render_local_recovery_lines",
     "render_recovery_directive_lines",
+    "render_remote_refusal",
     "render_semantic_outcome_recovery_lines",
     "render_semantic_progress_lines",
 ]
@@ -1493,6 +1494,22 @@ def render_recovery_directive_lines(
     if directive.nudge is not None:
         lines.append(directive.nudge)
     return lines
+
+
+def render_remote_refusal(phase: str, *, head: str) -> str:
+    """A remote root refused before anything was sent (ADR-051): ``<phase>: <head>``, then the
+    phase's registry directive lines, as every CLI error surface shows a directive.
+
+    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code, so its directive
+    resolves through the protocol vocabulary (``target_root_is_remote`` names 'finishup server use
+    local'); ``head`` is the caller's fixed sentence about what stopped.
+    """
+
+    lines = [f"{phase}: {head}"]
+    directive = directive_for(continuation_for_reason(phase))
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive))
+    return "\n".join(lines)
 
 
 def render_local_recovery_lines(reason: object) -> list[str]:

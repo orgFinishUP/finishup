@@ -619,12 +619,13 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 def _attachment_recovery_context(reason: str) -> str:
     """Render only trusted classifications, never host/error payload text."""
 
-    from finishup.client.targets import PRE_DIAL_REFUSALS
+    from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
-    if reason in PRE_DIAL_REFUSALS:
+    if reason in REMOTE_ROOT_REFUSALS:
         # ADR-051 decision 8: this computer refused the selected server before anything was sent
-        # (zero-network, or an older disclosure). Name the reason and the owner's fix, as MCP
-        # ``start`` and the CLI do; the server was never asked, so no budget was spent on it.
+        # (zero-network, an older disclosure, or any other remote root, which this release does
+        # not connect to). Name the reason and the owner's fix, as MCP ``start`` and the CLI do;
+        # the server was never asked, so no budget was spent and no service is left to start.
         from finishup.cli.hooks import remote_refusal_context
 
         return remote_refusal_context(reason)
@@ -3571,9 +3572,9 @@ async def _try_auto_start(
             # A running service of this installation closed the hello (#1040 follow-up): not a
             # service that still has to start, and not another installation to replace.
             return AutoAttachOutcome(None, "service_handshake_failed")
-        from finishup.client.targets import PRE_DIAL_REFUSALS
+        from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
-        if error.phase in PRE_DIAL_REFUSALS:
+        if error.phase in REMOTE_ROOT_REFUSALS:
             # A selection that changed after the check above: the connect seam refused it.
             return AutoAttachOutcome(None, error.phase)
         return AutoAttachOutcome(

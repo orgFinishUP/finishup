@@ -780,11 +780,12 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="remote_target_no_local_service",
         directive=(
-            "The selected FinishUP target is a server on another machine, so no local service "
-            "runs for it and nothing was started. Check the selection with 'finishup server "
-            "status', or select a local server, then run this again."
+            "The selected FinishUP server is elsewhere (another machine, the web or a port), which "
+            "this release does not reach, so nothing was sent or started. Ask the owner to run "
+            "'finishup server use local', then repeat this request."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select a FinishUP server for the owner, or start a service for this.",
     ),
     RecoveryDirective(
         token="server_reauthorization_required",
