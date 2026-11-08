@@ -1345,10 +1345,25 @@ class FinishUpTui(App[int]):
         which opens ``/dev/tty`` itself, checks that it really is the controlling
         terminal, and disables echo — so no key press ever reaches a widget and
         no secret byte can end up in the transcript, a log, or a snapshot.
+
+        A ceremony that fails or is cancelled (Ctrl-C at its prompt, #1326) still hands the
+        terminal back before its error reaches the caller. Textual's ``suspend`` resumes the
+        interface only when its block exits normally, so the error is held until then. A
+        cancelled task is held the same way (a dismissed screen or a newer exclusive worker
+        cancels it while the interface keeps running) and its cancellation is raised again
+        once the interface is back. Interpreter exits are not held.
         """
 
+        failure: Exception | asyncio.CancelledError | None = None
+        result: Any = None
         with self.suspend():
-            return await operation()
+            try:
+                result = await operation()
+            except (Exception, asyncio.CancelledError) as error:
+                failure = error
+        if failure is not None:
+            raise failure
+        return result
 
     async def _run_confidential(
         self,

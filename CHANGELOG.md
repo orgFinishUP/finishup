@@ -761,6 +761,14 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Fixed
 
+- Ctrl-C at a secure prompt (a passphrase, an approve/deny decision, a recovery-set path) now
+  cancels it at once and sends no answer; `finishup service unlock` and
+  `finishup privacy decide-policy`, for example, print `cancelled` and exit 130. The first Ctrl-C
+  used to be ignored, so the prompt kept waiting and took the next line typed as its answer (#1326).
+  In the terminal interface, a secure entry that is cancelled or fails now hands the screen back and
+  says why; the screen used to stay frozen. This covers secure prompts only: some ordinary
+  questions, such as setup choices and the `finishup privacy setup` questionnaire, can still ignore
+  the first Ctrl-C.
 - Claude Code and Cursor now work like Codex after setup. Connecting them records the project's
   bounded structural event recording in the same reviewed step Codex setup has always shown, so
   their hooks observe work and tell the agent about FinishUP; before, the agent was never told and

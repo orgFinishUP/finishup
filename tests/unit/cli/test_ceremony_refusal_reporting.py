@@ -11,12 +11,15 @@ correctly, and the one fact that explained what to do next never reached them.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 import typer
 
-from finishup.cli.app import _trusted_exception_failure
+from builders.console_ctrl_c import CtrlCAtPrompt
+from finishup.cli import privacy_control, trusted_console
+from finishup.cli.app import _trusted_call, _trusted_exception_failure, run_async
 from finishup.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
 from finishup.cli.unlock import HumanCeremonyCliError
 from finishup.protocol.errors import PublicErrorCode
@@ -83,6 +86,96 @@ def test_cancellation_is_not_a_refusal(capsys: pytest.CaptureFixture[str]) -> No
 
     assert capsys.readouterr().err.strip() == "cancelled"
     assert code == exit_code_for("cancelled")
+
+
+_DECISION_PROMPT = b"Decision [approve/deny/edit]: "
+_DEADLINE_SECONDS = 10.0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_ctrl_c_at_a_decision_prompt_cancels_the_session_and_exits_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #1326: one Ctrl-C at the prompt ends the ceremony; no later line is decided."""
+
+    master, slave = os.openpty()
+
+    class _PtyConsole(trusted_console._PosixConsoleAdapter):
+        def open(self) -> None:
+            self._fd = slave
+
+        def close(self) -> None:
+            self._fd = -1
+
+    class _Preview:
+        pass
+
+    class _Session:
+        def __init__(self) -> None:
+            self.cancels = 0
+            self.actions: list[object] = []
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def cancel(self) -> None:
+            self.cancels += 1
+
+        async def send_action(self, action: object) -> None:
+            self.actions.append(action)
+
+        async def wait_phase_or_result(self) -> object:
+            raise AssertionError("the line typed after Ctrl-C was sent as a decision")
+
+    session = _Session()
+
+    class _Client:
+        async def open(self, _kind: object, _target: object) -> _Session:
+            return session
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(trusted_console, "_new_adapter", _PtyConsole)
+    monkeypatch.setattr(privacy_control, "HumanControlClient", _Client)
+    monkeypatch.setattr(privacy_control, "PrivacyPolicyDecisionPreview", _Preview)
+
+    def verified_preview(*_args: object) -> _Preview:
+        return _Preview()
+
+    def render_nothing(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(privacy_control, "_verify_preview", verified_preview)
+    monkeypatch.setattr(privacy_control, "_render_preview", render_nothing)
+
+    ctrl_c = CtrlCAtPrompt(master, _DECISION_PROMPT, deadline_seconds=_DEADLINE_SECONDS)
+
+    async def decide() -> object:
+        try:
+            return await privacy_control.decide_policy("pending-1326")
+        finally:
+            ctrl_c.ended.set()
+
+    try:
+        with ctrl_c:
+            try:
+                code = run_async(lambda: _trusted_call(decide, False))
+            except KeyboardInterrupt:
+                pytest.fail("Ctrl-C did not cancel the prompt; the asyncio runner took it later")
+    finally:
+        os.close(slave)
+        os.close(master)
+
+    assert ctrl_c.ctrl_c_sent.is_set(), "the decision prompt never appeared"
+    assert not ctrl_c.late_line_typed.is_set(), "the prompt kept waiting after Ctrl-C"
+    assert code == exit_code_for("cancelled") == 130
+    assert capsys.readouterr().err.strip() == "cancelled"
+    assert session.cancels == 1
+    assert session.actions == []
 
 
 def test_unknown_reasons_have_no_refusal_message() -> None:

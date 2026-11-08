@@ -4379,7 +4379,10 @@ and writes one `*` mask marker per accepted input unit. On Windows it opens
 `CONIN$`/`CONOUT$`, validates real console handles and current-process attachment, disables raw
 secret echo, and writes the same mask feedback through Win32 console APIs. Backspace removes one
 marker. The mask intentionally reveals entered length to a local terminal observer, never content.
-It never falls back to
+On macOS/Linux, Ctrl-C during a console read ends it at once as `cancelled`, also under the CLI's
+asyncio runner, whose own SIGINT handler only cancels a task and lets the read resume (#1326): for
+the read alone, on the main thread, the console installs `signal.default_int_handler` and restores
+the previous handler before any cleanup runs. It never falls back to
 redirected standard streams. These channels are absent from
 `ControlClientPort`, ordinary CLI/MCP import graphs and schemas, argv, environment, config, stdin,
 logs, traces, transcripts, and LLM context. These console properties protect secret ingress but

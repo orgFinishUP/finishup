@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
+import threading
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
 import pytest
 
+from builders.console_ctrl_c import AnswerAtPrompt, CtrlCAtPrompt
 from finishup.cli import trusted_console
 from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
@@ -126,6 +130,162 @@ def test_posix_hidden_input_renders_live_masks_and_erases_on_backspace() -> None
     changed = set_attributes.call_args_list[0].args[2]
     assert cast(int, changed[3]) & (termios.ECHO | termios.ICANON) == 0
     assert set_attributes.call_args_list[-1].args[2] is attributes
+
+
+_READ_DEADLINE_SECONDS = 10.0
+
+
+def _settings(attributes: list[object]) -> list[object]:
+    """``tcgetattr`` output without the kernel's own PENDIN state bit in the local flags."""
+
+    import termios
+
+    settings = list(attributes)
+    settings[3] = cast(int, settings[3]) & ~getattr(termios, "PENDIN", 0)
+    return settings
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+@pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
+def test_posix_ctrl_c_under_asyncio_runner_cancels_the_read_at_once(hidden: bool) -> None:
+    """Issue #1326: the CLI reads under ``anyio.run`` (``asyncio.Runner``), whose first Ctrl-C
+    only cancels a task.
+
+    That handler returns, so PEP 475 retried the blocking read and it took the next line typed.
+    """
+
+    import termios
+
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+    attributes_before = termios.tcgetattr(slave)
+    try:
+        with CtrlCAtPrompt(
+            master, b"Decision: ", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as ctrl_c:
+
+            async def ceremony() -> tuple[bytearray | TrustedConsoleError, object, object]:
+                runner_handler = signal.getsignal(signal.SIGINT)
+                try:
+                    outcome: bytearray | TrustedConsoleError = adapter.read_line(
+                        "Decision: ", 32, hidden=hidden
+                    )
+                except TrustedConsoleError as exc:
+                    outcome = exc
+                finally:
+                    ctrl_c.ended.set()
+                handler_after_read = signal.getsignal(signal.SIGINT)
+                await asyncio.sleep(0)
+                return outcome, runner_handler, handler_after_read
+
+            try:
+                outcome, runner_handler, handler_after_read = asyncio.run(ceremony())
+            except KeyboardInterrupt:
+                pytest.fail(
+                    "Ctrl-C did not cancel the console read; the asyncio runner took it later "
+                    f"(a later line was typed: {ctrl_c.late_line_typed.is_set()})"
+                )
+        attributes_after = termios.tcgetattr(slave)
+    finally:
+        os.close(slave)
+        os.close(master)
+
+    assert ctrl_c.ctrl_c_sent.is_set(), "the prompt never appeared"
+    assert not ctrl_c.late_line_typed.is_set(), "the read kept waiting after Ctrl-C"
+    assert isinstance(outcome, TrustedConsoleError)
+    assert outcome.reason == "cancelled"
+    # The read ran under the runner's own handler, and handed that handler back afterwards.
+    assert runner_handler is not signal.default_int_handler
+    assert handler_after_read is runner_handler
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    # The terminal's own settings are back. PENDIN is the kernel's state bit, not a setting:
+    # BSD and macOS set it themselves when a terminal returns to canonical mode.
+    assert _settings(attributes_after) == _settings(attributes_before)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_ctrl_c_helper_sends_nothing_when_the_code_under_test_ends_before_its_prompt() -> None:
+    """An early failure must fail its own test, not raise ``KeyboardInterrupt`` in pytest."""
+
+    master, slave = os.openpty()
+    received: list[int] = []
+
+    def record(signum: int, _frame: object) -> None:
+        received.append(signum)
+
+    previous = signal.signal(signal.SIGINT, record)
+    try:
+        with CtrlCAtPrompt(
+            master, b"Decision: ", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as ctrl_c:
+            os.write(slave, b"refused before any prompt\n")
+            ctrl_c.ended.set()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        os.close(slave)
+        os.close(master)
+
+    assert not ctrl_c.ctrl_c_sent.is_set()
+    assert received == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+@pytest.mark.parametrize("hidden", [False, True], ids=["visible", "hidden"])
+def test_posix_completed_read_under_asyncio_runner_restores_its_sigint_handler(
+    hidden: bool,
+) -> None:
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+
+    async def ceremony() -> tuple[bytearray, object, object]:
+        runner_handler = signal.getsignal(signal.SIGINT)
+        try:
+            line = adapter.read_line("Decision: ", 32, hidden=hidden)
+        finally:
+            answer.ended.set()
+        return line, runner_handler, signal.getsignal(signal.SIGINT)
+
+    try:
+        # Typed once the prompt is up, as a person would; the helper keeps reading the master
+        # side, which macOS needs before the hidden read's TCSADRAIN can return.
+        with AnswerAtPrompt(
+            master, b"Decision: ", b"approve\n", deadline_seconds=_READ_DEADLINE_SECONDS
+        ) as answer:
+            line, runner_handler, handler_after_read = asyncio.run(ceremony())
+    finally:
+        os.close(slave)
+        os.close(master)
+
+    assert line == bytearray(b"approve")
+    assert runner_handler is not signal.default_int_handler
+    assert handler_after_read is runner_handler
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_posix_read_off_the_main_thread_leaves_sigint_alone() -> None:
+    master, slave = os.openpty()
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = slave  # pyright: ignore[reportPrivateUsage]
+    os.write(master, b"approve\n")
+    outcome: list[bytearray | BaseException] = []
+
+    def read() -> None:
+        try:
+            outcome.append(adapter.read_line("Decision: ", 32, hidden=False))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    handler_before = signal.getsignal(signal.SIGINT)
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(_READ_DEADLINE_SECONDS)
+    os.close(slave)
+    os.close(master)
+
+    assert outcome == [bytearray(b"approve")]
+    assert signal.getsignal(signal.SIGINT) is handler_before
 
 
 class _WindowsApi:
