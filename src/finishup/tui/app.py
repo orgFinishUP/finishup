@@ -603,7 +603,37 @@ class FinishUpTui(App[int]):
     # First run
     # ------------------------------------------------------------------
 
+    def _remote_root_refused(self) -> bool:
+        """Stop first-run setup at its entry while this process's root is a server elsewhere.
+
+        Every connection from such a root is refused before anything is sent (ADR-051, layer 1),
+        so setup names that phase and its registry directive before it looks for agents, asks
+        anything or changes any agent's configuration, as ``finishup setup run`` does. The
+        interface stays open: ``/server`` switches to this computer's server.
+        """
+
+        phase = self.runtime.remote_root_refusal()
+        if phase is None:
+            return False
+        from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+        directive = directive_for(continuation_for_reason(phase))
+        body = () if directive is None else (directive.directive,)
+        details = [f"reason={phase}"]
+        if directive is not None:
+            details.append(f"continuation={directive.token}")
+        self.say(
+            Level.BLOCKED,
+            "Setup did not start: the selected FinishUP server is refused before anything is sent",
+            body,
+            details=details,
+        )
+        self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+        return True
+
     async def _first_run_flow(self) -> None:
+        if self._remote_root_refused():
+            return
         detection = await self.runtime.detect()
         self._detection = detection
         self.say(Level.ACTIVE, "", render_welcome(self.body_width))

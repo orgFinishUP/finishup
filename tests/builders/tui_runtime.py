@@ -177,6 +177,11 @@ class FakeRuntime:
     # connection did not close.
     server_left_lines: tuple[str, ...] = ()
     server_left_open: bool = False
+    # The phase a remote root is refused with before anything is sent (ADR-051), which first-run
+    # setup reads before it looks for agents; ``None`` for a server on this computer.
+    remote_refusal: str | None = None
+    # How often the interface looked for agents (``detect``).
+    detections: int = 0
     # The zero-network item (ADR-051 decision 8): lines ``/server`` shows, and how often it was read.
     zero_network: tuple[str, ...] = ()
     zero_network_title: str = "This computer is zero-network: the selected server is refused"
@@ -209,6 +214,7 @@ class FakeRuntime:
         return self.harnesses
 
     async def detect(self) -> Detection:
+        self.detections += 1
         return Detection(
             project_root="/tmp/project",
             project_name="project",
@@ -520,6 +526,9 @@ class FakeRuntime:
 
     async def service_stop(self) -> str:
         return "draining"
+
+    def remote_root_refusal(self) -> str | None:
+        return self.remote_refusal
 
     def server_indicator(self) -> str | None:
         return self.server_selected

@@ -166,7 +166,7 @@ the service cannot then tell whether the task was claim-bound.
 **Closed:** the remote kinds `ssh`, `https` and `local_port` (decision 3). `server add` refuses
 them, `server use` refuses a remote record, and `server login` refuses, each with
 `remote_kind_unavailable`; a connection or service start for a remote root is refused with
-`target_root_is_remote` and sends nothing.
+`target_root_is_remote` and sends nothing, and setup refuses such a root at its entry.
 
 **Not yet built:** every remote kind and its runtime; the background helper and both remote
 connection styles (layer 4); the server profile, handshake and per-request consent binding
@@ -307,6 +307,15 @@ kind without a record migration.
   retryable `service_unavailable` with phase `target_root_is_remote`; nothing is sent and no
   service starts (decision 6, *No silent fallback*). No remote `TargetRuntime` is registered, so
   `target_runtime` answers a remote kind with `remote_unreachable`, phase `runtime_unavailable`.
+  Every host's SessionStart hook and the terminal menu keep that phase (or the zero-network and
+  stale-disclosure phases of decision 8) and name it with its directive, whose way back is
+  `finishup server use local`, never a service still to start.
+- Setup refuses such a root at its entry with the same phase and directive (exit 20, stderr
+  only): `setup run` in every form, bare `finishup` and the menu's setup wizard, and the terminal
+  interface's first run, whether a selection or an isolation variable names the root. It looks
+  for no agent, asks nothing and registers or writes nothing; the connection guard stays as
+  well. `setup status`, which writes nothing, and `setup disconnect`, the way out, are not
+  refused.
 - `server login` is refused with `remote_kind_unavailable`; `server logout` stays the offline way
   out (decision 7). `server login`, `server logout` and the `server folders` group are hidden from
   `--help` and still parse.

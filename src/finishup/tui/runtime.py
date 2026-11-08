@@ -1474,6 +1474,19 @@ class FinishUpRuntime:
 
     # -- server targets ---------------------------------------------------
 
+    def remote_root_refusal(self) -> str | None:
+        """The phase every connection from this process is refused with before anything is sent,
+        while its root is a server elsewhere (``targets.active_remote_refusal``), or ``None``.
+
+        One of ``targets.REMOTE_ROOT_REFUSALS``, read from the target record and this computer's
+        last-reported policy marker alone, never a service: first-run setup asks it before it
+        looks for agents or asks anything (ADR-051, layer 1).
+        """
+
+        from finishup.client.targets import active_remote_refusal
+
+        return active_remote_refusal()
+
     def server_indicator(self) -> str | None:
         """The selected server target as ``<kind> <id>``; ``None`` for the everyday server.
 

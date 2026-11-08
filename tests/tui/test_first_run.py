@@ -88,6 +88,44 @@ async def test_welcome_shows_detection_and_offers_the_recommended_path(
         ]
 
 
+@pytest.mark.parametrize(
+    ("phase", "continuation"),
+    [
+        ("target_root_is_remote", "remote_target_no_local_service"),
+        ("zero_network_remote_selected", "zero_network_local_server_required"),
+    ],
+)
+async def test_a_remote_root_stops_first_run_before_it_looks_or_asks(
+    make_app: MakeApp, phase: str, continuation: str
+) -> None:
+    """ADR-051, layer 1: while this process's root is a server elsewhere, every connection is
+    refused before anything is sent, so first run names that phase and its directive (the way
+    back is 'finishup server use local') before it looks for agents, asks anything or changes
+    anything, as 'finishup setup run' does; the interface stays open for ``/server``."""
+
+    from finishup.protocol.recovery import directive_for
+
+    runtime = FakeRuntime(remote_refusal=phase)
+    app = make_app(first_run=True, runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        shown = transcript(app)
+        directive = directive_for(continuation)
+        assert directive is not None
+        assert "Setup did not start" in shown
+        assert directive.directive in shown
+        assert "'finishup server use local'" in shown
+        assert "Setup stopped. Nothing was changed." in shown
+        assert "Welcome to FinishUP" not in shown
+        assert app.open_view is None
+        details = [detail for event in app.transcript.events for detail in event.details]
+        assert f"reason={phase}" in details
+        assert f"continuation={continuation}" in details
+        assert runtime.detections == 0
+        assert runtime.applied == []
+        assert app.markers_written == []  # type: ignore[attr-defined]
+
+
 async def test_without_a_codex_installation_the_connect_option_is_disabled(
     make_app: MakeApp,
 ) -> None:

@@ -4656,6 +4656,15 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
   the actions that need the service) keep that phase and name it with its directive (continuation
   `remote_target_no_local_service`, `finishup server use local` as the way back), never a service
   still to start or `finishup service run`.
+- Setup refuses a remote root at its entry (`cli.setup._remote_root_refused`, reading
+  `targets.active_remote_refusal()`), whether a selection or an isolation variable names it:
+  `setup run` in every form, bare `finishup` and the menu's setup wizard (all through
+  `run_setup_wizard`), and the terminal interface's first run (`FinishUpRuntime.remote_root_refusal`).
+  The phase (`target_root_is_remote`, `zero_network_remote_selected` or
+  `target_reauthorization_required`) and its directive go to stderr with exit 20 before any
+  discovery, question, registration or host-configuration write; stdout stays empty, so a `--json`
+  report keeps its released shape. `setup status` writes nothing and `setup disconnect` is the way
+  out, so neither is refused.
 - `server login`, `server logout` and the `server folders` group are hidden from `--help` and
   still parse. The terminal interface's `/server` add flow offers only "on this computer" (a named
   local server), and setup and menu next steps never suggest adding a remote server.

@@ -3774,6 +3774,41 @@ async def _run_setup_batch(
     return result
 
 
+# What setup says before the registry directive of a remote root it refused at its entry.
+_REMOTE_ROOT_SETUP_REFUSAL: Final = (
+    "the FinishUP server this process uses is refused before anything is sent, so setup stopped "
+    "before looking for agents, asking anything, or changing any agent's configuration"
+)
+
+
+def _remote_root_refused() -> int | None:
+    """Refuse setup at its entry while this process's root is a server elsewhere (ADR-051).
+
+    When that root is a server target on another machine, the web or a port (a selection another
+    build or a hand edit left, or an isolation variable or runtime pin naming such a target's
+    root), every connection is refused before anything is sent with one of
+    ``targets.REMOTE_ROOT_REFUSALS``: ``zero_network_remote_selected``,
+    ``target_reauthorization_required`` or ``target_root_is_remote``. Setup reads that phase
+    first, from the target record alone (``targets.active_remote_refusal``), and refuses before
+    discovery, any question, registration or host-configuration write instead of after them; the
+    connection guard in ``finishup.service.client`` stays as well. The phase and its registry
+    directive go to stderr with exit 20; stdout is never written, so a ``--json`` report keeps its
+    released shape (as for a folder refusal). ``None`` lets setup proceed.
+    """
+
+    from finishup.client.targets import active_remote_refusal
+
+    phase = active_remote_refusal()
+    if phase is None:
+        return None
+    from finishup.cli.exits import exit_code_for
+    from finishup.cli.render import render_remote_refusal
+    from finishup.protocol.errors import PublicErrorCode
+
+    typer.echo(render_remote_refusal(phase, head=_REMOTE_ROOT_SETUP_REFUSAL), err=True)
+    return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
+
+
 async def run_setup_wizard(
     *,
     non_interactive: bool,
@@ -3790,7 +3825,16 @@ async def run_setup_wizard(
     request_value: str | None = None,
     preview_digest: str | None = None,
 ) -> int:
-    """Require a fresh explicit home opt-in, including for unattended accepted previews."""
+    """Require a fresh explicit home opt-in, including for unattended accepted previews.
+
+    Every way into setup that can ask or write comes through here (``setup run`` in every form,
+    bare ``finishup`` without the terminal interface, and the menu's setup wizard), so a remote
+    root is refused first (``_remote_root_refused``).
+    """
+
+    refused = _remote_root_refused()
+    if refused is not None:
+        return refused
 
     from finishup.config.home_project import home_project_scope
 

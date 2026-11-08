@@ -523,6 +523,10 @@ def _setup_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> tuple[Path, Path
     monkeypatch.setenv("HOME", str(user_home))
     # This computer's own policy is not part of these cases: never ask a service about it.
     monkeypatch.setattr(zero_network_selection, "find_zero_network_selection", lambda: None)
+    # This release refuses setup at its entry while a remote server is selected
+    # (``_remote_root_refused``, ``test_setup_remote_root``). The policy-server naming these cases
+    # cover is shared and dormant behind that refusal, so they run past it, in process.
+    monkeypatch.setattr(setup_cli, "_remote_root_refused", lambda: None)
     return user_home, scratch
 
 
