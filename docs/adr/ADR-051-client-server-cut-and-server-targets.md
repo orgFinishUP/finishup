@@ -2,34 +2,39 @@
 
 **Status:** Proposed for [issue #1308](https://github.com/orgFinishUP/finishup/issues/1308), which
 scopes the original request in [issue #903](https://github.com/orgFinishUP/finishup/issues/903).
-Design gates: protocol (control envelopes 2.10.0 and the workspace frames), privacy/egress (the
-FinishUP server hop), storage layout (target roots and the selection file), release/packaging
-(client and edge processes, version lockstep) and the `OPEN_QUESTIONS` flip. Maintainer
-acknowledgement: on 2026-11-05 the maintainer explicitly requested this scoped work — separate the
-FinishUP client from the server inside this repository; let a client use the local server, several
-local servers including ones reached on localhost ports, a server on another machine over SSH and
-web-hosted servers over HTTPS with an address and an API key; deliver three complete pull requests,
-one per way of doing the separation, each "full, plug and play". Under the intake rule in
-`AGENTS.md`, that explicit request is the design-gate acknowledgement for this scope; it is
-recorded on #1308 and in each pull request body. The acknowledgement grants no runtime,
-credential, disclosure or destructive-action authority.
-**Implemented by (shared foundation, identical in all three pull requests):**
-`tests/unit/architecture/` (boundary map, crossing ledger and the AST boundary test),
-`src/finishup/cli/command_scope.py`, the `src/finishup/client/` package (targets, credentials,
-`target_runtime`, `workspace_claim`, `workspace_agent`, `workspace_ref`, `remote_binding`,
-`observation_outbox`, `attribution`), `src/finishup/cli/server.py`,
+Rewritten on 2026-11-08 for the **unified client/server model** the maintainer accepted that day
+(see *Unified model* and *Maintainer decisions of 2026-11-08* below): the three competing pull
+requests become options of one product, delivered as stacked layers. **Layer 1**, the first of
+them, carries the shared decisions recorded here; every remote kind stays closed
+(`remote_kind_unavailable`) until its own layer opens it. Design gates: protocol (control
+envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
+layout (target roots and the selection file), release/packaging (client and server-edge
+processes, version lockstep) and the `OPEN_QUESTIONS` flip. Maintainer acknowledgement: on
+2026-11-05 the maintainer explicitly requested this scoped work — separate the FinishUP client from
+the server inside this repository; let a client use the local server, several local servers
+including ones reached on localhost ports, a server on another machine over SSH and web-hosted
+servers over HTTPS with an address and an API key. On 2026-11-08 the maintainer accepted the
+unified design and asked for its delivery as stacked pull requests. Under the intake rule in
+`AGENTS.md`, those explicit requests are the design-gate acknowledgement for this scope; they grant
+no runtime, credential, disclosure or destructive-action authority.
+**Implemented by (layer 1, the shared foundation):** `tests/unit/architecture/` (boundary map,
+crossing ledger and the AST boundary test), `src/finishup/cli/command_scope.py`, the
+`src/finishup/client/` package (targets, credentials, `target_runtime`, `workspace_claim`,
+`workspace_agent`, `workspace_ref`, `remote_binding`, `server_folders`, `everyday_policy`,
+`observation_outbox`, `observation_attestation`, `attribution`), `src/finishup/cli/server.py`,
 `active_root()` and the `selection` binding in `src/finishup/config/paths.py`,
 `src/finishup/ports/workspace_agent.py`, `src/finishup/adapters/workspace_root.py`,
 `src/finishup/service/workspace_hub.py`, `src/finishup/service/workspace_routing.py`,
 `src/finishup/application/observation_workspace.py`, the claim path of
 `src/finishup/service/control_protocol.py` and `src/finishup/service/daemon.py`, the
 control-envelope 2.10.0 schemas and fixtures, and the closed tokens in
-`src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Each approach adds the
-modules its topology section names.
+`src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Later layers add the
+modules their own amendments of this ADR name.
 **Amends:** ADR-001, ADR-008, ADR-009, ADR-018, ADR-026, ADR-028 and ADR-031; each carries a dated
-amendment note pointing here. **Relates to:** ADR-002 (idempotency scope), ADR-010 (Cursor roots),
-ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz` identifier namespace), issue #903 and
-closed pull request #946.
+amendment note pointing here, limited to what layer 1 does. **Relates to:** ADR-002 (idempotency
+scope), ADR-010 (Cursor roots), ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz`
+identifier namespace), issue #903, closed pull request #946 and pull requests #1311, #1312 and
+#1313 (the three approaches this model unifies).
 
 ## Context
 
@@ -75,13 +80,108 @@ including check-time change capture, reviewer file reads, task inputs, approved 
 observation, with no coverage gap standing in for any of them. Gaps are allowed only as honest,
 typed outcomes when the client side cannot be reached.
 
+Three pull requests then built that request three ways, on one shared foundation: #1313 (A, an
+edge relay: a local connector per target and a gateway per HTTPS server), #1312 (B, direct dial:
+each client process dials SSH or HTTPS itself) and #1311 (C, a server-native REST API with a
+long-polling client agent). Their shared decisions were identical; only the topology differed. On
+2026-11-08 the maintainer decided that the three are not exclusive: each becomes an option of one
+product, chosen by the server's type and the user, and the work is delivered as one unification in
+stacked layers (*Maintainer decisions of 2026-11-08*, below). This ADR records the shared
+decisions, the vocabulary of the unified model, and what layer 1 builds; each later layer amends it
+with the contract it adds. The handshake and server profile, the consent envelope and the server
+copy of the code (level L2) are recorded in their own ADR when their layers land.
+
+## Unified model
+
+Three independent axes describe how a client works with a server. The words are fixed here so
+every later layer, document and surface uses the same ones.
+
+| Axis | Values | Chosen by |
+|---|---|---|
+| **Level** — where the work happens | **L0 local**: everything on this computer (the default, unchanged). **L1 code-here**: the server keeps tasks, ledger and review; this computer's workspace agent answers the server's eighteen bounded workspace operations (decision 5). **L2 server-copy**: the server also keeps a synced copy of the repository and reads it itself; approved checks still run on this computer. | The user, per server, with a per-repository override, within what the server offers. |
+| **Connection style** — how this computer reaches the server | **unix**: the owner-only Unix endpoint of a local or named-local root (today's code path). **relay**: client processes reach the server through one local background helper per server, which holds the key and a warm upstream. **direct**: each client process dials the server itself. | The client, from what the server offers; relay is the default for SSH and HTTPS, direct an advanced option. |
+| **Server edge** — how the server is reached | **ssh**: `sshd` forwards a stream-local channel into the owner-only control socket (no API key). **gateway**: a separate same-user process with no vault re-enters the service through its control socket. **native**: a listener inside the service process. | The server's owner. |
+
+One rule holds on every axis: **the server offers, the client decides.** A server can only offer
+levels and styles and state its requirements; the client picks within the user's recorded consent
+and this computer's privacy policy (zero-network, and the repository egress hold of layer 2). A
+server can never make a client send more on its own, and the client may always step down to more
+local work. An incompatible level is refused explicitly, never switched silently to another service
+or ledger.
+
+Further fixed points of the model:
+
+- **One network protocol.** The public network contract is C's resource-shaped REST API (`/v1`),
+  served by either HTTP edge (gateway or native). The control-frame binding over HTTPS that A and B
+  built ("HTTPS binding v1") is retired; it was never released. SSH keeps raw control frames over
+  the forwarded owner-only socket, which is owner-equivalent and not a public contract.
+- **One background helper per remote server** for every connection style: it relays (relay
+  style), runs the background workspace agent of each claimed worktree, drains observations,
+  caches and re-checks the server's profile, and syncs the code at L2. It replaces A's connector,
+  B's MCP-bridge background agent and C's pull agent.
+- **Supported combinations.** `local` and named-local servers: unix edge and style, level L0.
+  `local_port` and `https` (self-hosted): gateway or native edge, relay (default) or direct,
+  levels L1 and L2. `ssh`: ssh edge, relay (default, through an SSH forward) or direct (`ssh -W`),
+  levels L1 and L2. An official HTTPS service (implemented in another repository): REST, relay or
+  direct, levels as it advertises.
+
+## Delivery in layers
+
+The unification lands as stacked pull requests; each exposes only complete capabilities. "Layer"
+names a step of that delivery; "level" (L0, L1, L2) names where work happens, above.
+
+1. **Foundation** (this layer): the shared decisions below, on current `main`.
+2. **Shared authorization**: authorization generations, the consent-envelope types, the repository
+   egress hold (round 5) before any claim, dial or sync, and the recovery contracts.
+3. **Profile and registration**: the server profile, consent bound to every request through a
+   profile revision, and the helper's workspace registration API.
+4. **Helper and SSH**: the background helper, the relay and direct styles, and `server add ssh://…`
+   with its handshake.
+5. **REST**: one REST client, the gateway and native edges behind one backend interface, API key
+   scopes (decision 9), discovery and the official origin preset, the server conformance kit and
+   the compatibility window (decision 10).
+6. **L2**: the sanitized code export, encrypted storage on the server, immutable snapshots,
+   retention and forget, and per-evidence provenance.
+7. **Lifecycle validation** across hosts (Codex, Claude Code, Cursor), surfaces and operating
+   systems.
+
+### Built in layer 1, and not yet built
+
+**Built and in use:** the cut line (decision 1), target roots and the selection (decision 2), and
+named local servers (`finishup server add NAME --local`), which work end to end like the everyday
+server. With no remote target selected — and in layer 1 none can be — every surface behaves byte
+for byte as it did before server targets existed.
+
+**Built, exercised in process, dormant on the network:** control envelopes 2.10.0 with the
+workspace claim, agent declaration and workspace frames (decision 4); the workspace agent and its
+eighteen operations, `service/workspace_hub.py` and `service/workspace_routing.py` (decision 5);
+claim-bound sessions; outside-read modes and the client's folder record (decision 5); the
+zero-network selection rules (decision 8); hook content and client attestation on a remote target
+(decision 12); and the client-attested receipt lines (decision 6). Their tests drive them in
+process; no shipped client sends a claim, because no remote root can be selected. One part of
+decision 6 is live for every task: a receipt whose session-opening record the service cannot read
+is still built, with the provenance-unknown section and its `workspace_provenance` member, since
+the service cannot then tell whether the task was claim-bound.
+
+**Closed:** the remote kinds `ssh`, `https` and `local_port` (decision 3). `server add` refuses
+them, `server use` refuses a remote record, and `server login` refuses, each with
+`remote_kind_unavailable`; a connection or service start for a remote root is refused with
+`target_root_is_remote` and sends nothing.
+
+**Not yet built:** every remote kind and its runtime; the background helper and both remote
+connection styles (layer 4); the server profile, handshake and per-request consent binding
+(layer 3); authorization generations and the repository egress hold (layer 2); REST, both HTTP
+server edges, API key scopes, discovery, the official origin preset and the compatibility window
+(layer 5); the server copy and level L2 (layer 6).
+
 ## Decisions
 
 ### 1. The cut line is an enforced contract, not a package move
 
 - Every module under `src/finishup/` is labelled CLIENT, SERVER, SHARED, WORKSPACE or GATEWAY in
-  one boundary map. GATEWAY is reserved for a same-user control client of the daemon on the server
-  host (`finishup.gateway`), used only by the approaches that run one. CLIENT covers `cli`, `mcp`,
+  one boundary map. GATEWAY is reserved for the gateway server edge, a same-user control client of
+  the daemon on the server host (`finishup.gateway`); no module carries it in layer 1, and the
+  REST layer adds the first. CLIENT covers `cli`, `mcp`,
   `tui`, `service.client`, `service.confidential_client`, the host integration adapters (except the
   observation store the service also opens), the client-side application modules and the new
   `finishup.client` package. SHARED covers `protocol`, `ports`, `domain`, `config`,
@@ -132,8 +232,8 @@ typed outcomes when the client side cannot be reached.
   OpenSSH's ControlMaster `run/m` under its 17-byte temporary suffix. A
   `local` target's root is a persistent ADR-028 instance root with its own vault, ledger, config,
   endpoints and on-demand service. A remote target's root holds only client state: startup gates,
-  hook memos, the bridge↔hook records, the observation outbox and spool, and whatever its
-  approach's client-side process needs.
+  hook memos, the bridge↔hook records, the observation outbox and spool, and, from layer 4, the
+  background helper's own state.
 - **Selection.** `<ambient config dir>/server-selection.json` (tag `yoetz.server-selection/1`)
   holds one `target_id`. Absent, the ambient service is used exactly as today.
 - **Precedence.** A new `active_root()` resolves `FINISHUP_ISOLATED_ROOT` (or its legacy alias),
@@ -176,25 +276,50 @@ typed outcomes when the client side cannot be reached.
   selection once per process and never switches mid-session; hooks follow a new selection at
   once, so `server use` tells the owner to restart open sessions.
 
-### 3. Four target kinds, a closed set
+### 3. Four target kinds, a closed set; only `local` opens in layer 1
 
-| Kind | Address | Notes |
-|---|---|---|
-| `local` | none; a named root on this machine | "Several local servers": each named root runs its own service, started on demand. |
-| `local_port` | `https://127.0.0.1:<port>` or `https://[::1]:<port>` | The "localhost ports" kind. Same as `https`, but the origin must be loopback. |
-| `ssh` | `ssh://[user@]host[:port]`, optional `--remote-root` (the server's isolated root) and `--remote-launcher` (absolute path of the server's `finishup`) | Owner-equivalent: the SSH login is the service owner. |
-| `https` | `https://host[:port][/base]` with `--ca-file` or `--tls-pin sha256:…` | No userinfo, query or fragment. Plain `http` is refused. |
+| Kind | Address | Notes | Layer 1 |
+|---|---|---|---|
+| `local` | none; a named root on this machine | "Several local servers": each named root runs its own service, started on demand. | Works end to end. |
+| `local_port` | `https://127.0.0.1:<port>` or `https://[::1]:<port>` | The "localhost ports" kind. Same as `https`, but the origin must be loopback. | Closed until layer 5. |
+| `ssh` | `ssh://[user@]host[:port]`, optional `--remote-root` (the server's isolated root) and `--remote-launcher` (absolute path of the server's `finishup`) | Owner-equivalent: the SSH login is the service owner. | Closed until layer 4. |
+| `https` | `https://host[:port][/base]` with `--ca-file` or `--tls-pin sha256:…` | No userinfo, query or fragment. Plain `http` is refused. | Closed until layer 5. |
 
 Every kind except `local` is a *remote kind* for consent, the zero-network refusal and the
 workspace agent, including `local_port`: a loopback port can forward anywhere. `server add NAME
-https://127.0.0.1:<port>` and `https://[::1]:<port>` record `local_port`, as does `--port <port>`
-(which records `127.0.0.1`); any other HTTPS address, `localhost` included, is `https`.
+https://127.0.0.1:<port>` and `https://[::1]:<port>` name `local_port`, as does `--port <port>`
+(which names `127.0.0.1`); any other HTTPS address, `localhost` included, is `https`. The record
+vocabulary (`target.json` and its fields per kind) keeps all four kinds, so a later layer opens a
+kind without a record migration.
+
+**The remote kinds are closed in layer 1** (closed reason `remote_kind_unavailable`, continuation
+`server_on_this_computer_required`):
+
+- `finishup server add NAME ssh://…`, `https://…` or `--port N` is refused before any
+  trusted-console prompt, zero-network check, probe, dial, key prompt or write; the address is
+  parsed only as far as telling its kind needs, and nothing touches the network. The text says
+  that this release connects only to FinishUP servers on this computer (the everyday server and
+  named local servers, `finishup server add NAME --local`), that SSH, HTTPS and port servers arrive
+  in a later release, and that nothing was added; `--json` output carries the reason.
+- `finishup server use NAME` on a record of a remote kind (one another build wrote, or a hand
+  edit) is refused the same way, and the selection is unchanged.
+- A connection or an on-demand start for a remote root keeps the foundation's refusal: a
+  retryable `service_unavailable` with phase `target_root_is_remote`; nothing is sent and no
+  service starts (decision 6, *No silent fallback*). No remote `TargetRuntime` is registered, so
+  `target_runtime` answers a remote kind with `remote_unreachable`, phase `runtime_unavailable`.
+- `server login` is refused with `remote_kind_unavailable`; `server logout` stays the offline way
+  out (decision 7). `server login`, `server logout` and the `server folders` group are hidden from
+  `--help` and still parse.
+- The terminal interface's `/server` add flow offers only a server on this computer (a named local
+  server); a remote record shown or chosen there gets the same refusal. `server list` and `server
+  status` show an existing remote record as not available in this release, and no setup or menu
+  next step suggests adding a remote server.
 
 `finishup server add|list|use|status [--json]|test|remove|login|logout|connect|disconnect` manages
 targets; each mutating command has its reverse (see *Reverse states*). `connect`, `disconnect` and
 `test` dispatch through one small interface, `finishup.client.target_runtime.TargetRuntime`
-(`ensure_ready(root)`, `stop(root)`, `probe(root) -> ProbeResult`). The foundation ships the
-`local` implementation; each approach registers its remote implementations. Two server-host
+(`ensure_ready(root)`, `stop(root)`, `probe(root) -> ProbeResult`). Layer 1 ships the `local`
+implementation; the layers that open a remote kind register its runtime. Two server-host
 commands are added: `finishup service start` (idempotent on-demand start plus status) and
 `finishup service endpoint --json` (endpoint, absolute launcher, release, manifest digest, whether
 the runtime directory is tied to the login session, and linger state).
@@ -202,7 +327,9 @@ the runtime directory is tied to the login session, and linger state).
 ### 4. Wire contract: control envelopes 2.10.0
 
 The four control envelopes move to **2.10.0** together through the schema generator and the
-resource ripple.
+resource ripple. Layer 1 ships the whole contract below and its daemon side; its tests open
+claim-bound connections in process. No shipped client sends a claim in layer 1: a local or
+named-local root binds by locator, as before, and no remote root can be selected.
 
 - **Claim or locator, never both.** The hello gains an optional `workspace_claim`
   `{schema_version: "1.0.0", identity_kind: "git_common_root" | "directory", digest:
@@ -274,7 +401,11 @@ resource ripple.
 ### 5. The workspace agent and its eighteen operations
 
 The server reaches the agent's working tree only through a client-side **workspace agent** that
-answers bounded `workspace_call`s on a connection that declared it.
+answers bounded `workspace_call`s on a connection that declared it. This is level L1 of the
+unified model. Layer 1 ships the agent, the hub and the routing and tests them in process; no
+network reaches them yet. The outside-read modes and the client's folder record below govern
+remote kinds only, so they are dormant in layer 1, where the `server folders` group is hidden from
+`--help`.
 
 - **One catalog.** `ports/workspace_agent.py` is the single source of truth for each operation's
   name, argument codec, result codec, argument byte bound and result byte bound; every result
@@ -379,7 +510,10 @@ answers bounded `workspace_call`s on a connection that declared it.
   store: a target added with `--ca-file` or `--tls-pin` never counts as official by its hostname
   alone, and is asked. Its `local` is not recorded, so it follows the reviewed list; an explicit
   `--outside-reads` is recorded as the owner's own. The constant is empty, because no official
-  hosted endpoint exists yet; the maintainer fills it in when one does. A record with no mode (no
+  hosted endpoint exists yet; the maintainer fills it in when one does. The unified model keeps
+  the official exception and tightens its match: the REST layer pins canonical origins (scheme,
+  host, port and path prefix) in a release-pinned list behind a `finishup server add official`
+  preset, and the server's own claim to be official never counts. A record with no mode (no
   release wrote one; a record whose mode could not be written) reads as `listed`, the fail-closed
   value (source `not_chosen`), and `server status`, `server folders list` and the terminal's
   `/server` status say how to choose. Once chosen, nothing asks again: hooks, agent tools (MCP),
@@ -601,14 +735,14 @@ answers bounded `workspace_call`s on a connection that declared it.
 - **The client side.** A connection to a remote root sends a `ClientWorkspaceBinding` (the claim,
   and optionally the agent) in place of its locator. `binding_for_active_root(locator, *,
   serve_workspace)` builds it from the active target's `claim_salt` and returns none for a local
-  root, so every approach decides the same way. A client that serves an agent answers at most four
-  workspace calls at once in daemon worker threads, which never keep a finished process open; a
-  client without one still rejects a `workspace_call`
-  as a malformed frame, so a local connection is unchanged.
+  root, so every connection style decides the same way. A client that serves an agent answers at
+  most four workspace calls at once in daemon worker threads, which never keep a finished process
+  open; a client without one still rejects a `workspace_call` as a malformed frame, so a local
+  connection is unchanged.
 - **Observation over claims.** Observation verification and approved checks for a `client:`
   locator route through the hub, and the client drains the outbox and spool it captured for a
-  remote root over its own claim-bound connection (`ClientObservationDrain`; which long-lived
-  client process holds it is the approach's choice). A hook pass's own drain and `finishup
+  remote root over its own claim-bound connection (`ClientObservationDrain`; from layer 4 the
+  background helper holds the long-lived drain). A hook pass's own drain and `finishup
   observe drain` claim their workspace the same way on a remote root, or on one whose record
   cannot be read: they name the workspace to the connect seam, which claims it, and never open
   an unbound connection there. A hook pass that knows no workspace, like `observe drain` for any
@@ -714,6 +848,8 @@ answers bounded `workspace_call`s on a connection that declared it.
     The token is a closed set supplied by whoever builds the connection: `unix` (the default, a
     service's local control endpoint), `connector` (a local relay that carries the connection on),
     `ssh` (an SSH channel the client process opened) or `https` (HTTPS the client process speaks).
+    In the unified model's words, `connector` is the relay style and `ssh` and `https` the direct
+    style; in layer 1 every connection is `unix`, so a client never prints these lines.
     The connection's lines never enter the MCP structured result, CLI JSON output or a local
     connection's output. Per host, that decides who sees them: Claude Code reads the text
     channel and Cursor the text copy, so their agents do; Codex outside code mode hands its model
@@ -742,9 +878,11 @@ answers bounded `workspace_call`s on a connection that declared it.
   leaves an unlisted input unread instead of refusing the read (decision 5, amended 2026-11-07),
   a check-time refusal is now a request the agent does not answer (a handle it did not claim, an
   unknown operation or argument, a root no owner could admit), in practice two releases that do
-  not match; its sentence says so and names `finishup server connect NAME` on the client. The
-  unavailable sentence names `finishup server status NAME` and `finishup server connect NAME`
-  on the client and that checking again can help. Files listed mode kept from review are the
+  not match; its sentence says so and that the same release belongs on both computers, the client
+  included. The unavailable sentence names `finishup server status NAME` on the client and that
+  checking again can help. (Amended 2026-11-08 for layer 1: both sentences named `finishup server
+  connect NAME`, whose remote meaning was one approach's connector; how a client reconnects its
+  agent is the helper's, from layer 4.) Files listed mode kept from review are the
   disclosure `outside_reads_not_listed` (decision 5), never a check-time change gap: the rest of
   the change still reaches review.
 - **No silent fallback.** A remote root never spawns or supersedes a local service and never
@@ -767,6 +905,12 @@ answers bounded `workspace_call`s on a connection that declared it.
   later. `KeyringOrFileCredential` stores the key in the OS credential store under service
   `yoetz.server-credential.v1`, account = target id, and falls back to the existing owner-only
   file store at `<target root>/config/credential` where no platform store is usable.
+- **Layer 1.** No remote kind can be added, so there is no key to store: `server login` is
+  refused with `remote_kind_unavailable` (decision 3) before any prompt, and both `login` and
+  `logout` are hidden from `--help`. `server logout` stays the offline way out: it deletes a key
+  that a record written by another build holds, never touching the network, and `server remove`
+  deletes it with the root. The rest of this decision is the contract the layers that open the
+  HTTPS kinds (layer 5) implement; the store and its reverse paths are already built.
 - `server login` reads the key from a masked prompt or, for automation, from a `--key-file`
   (owner-only, read once); `server logout` deletes it; `server remove` deletes it with the root.
   The store the key is recorded in decides: a store it is not recorded in is only tidied, best
@@ -775,9 +919,9 @@ answers bounded `workspace_call`s on a connection that declared it.
   store cannot be used (locked, or not loadable in this session, such as a desktop keyring reached
   over SSH), `logout` refuses (`credential_store_unavailable`, the key stays, and the refusal says
   so) and `remove` still removes the target and names the entry it left there, by target id.
-- `server login` checks the key with the server before storing it, alike for every approach
-  (maintainer decision of 2026-11-07: the approaches and remote kinds behave the same; refusal is
-  the last resort; say what happened, why, and the fix). A key the server refuses
+- `server login` checks the key with the server before storing it, alike for every connection
+  style (maintainer decision of 2026-11-07: every remote kind behaves the same; refusal is the last
+  resort; say what happened, why, and the fix; not built in layer 1). A key the server refuses
   (`remote_auth_failed`), a server whose certificate does not match the recorded trust
   (`remote_identity_changed`, refused inside the TLS handshake before the key is sent) or that
   runs another release (`remote_incompatible`) stores nothing, and the message says why, that
@@ -789,7 +933,8 @@ answers bounded `workspace_call`s on a connection that declared it.
 - SSH keys, `ssh-agent` and `known_hosts` stay with OpenSSH. FinishUP stores no SSH key, never asks
   for a password, and runs OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, except
   for the one probe of `server add` below.
-- *SSH add*, alike for every approach (the same maintainer decision of 2026-11-07). After the
+- *SSH add*, alike for every connection style (the same maintainer decision of 2026-11-07; built
+  with the SSH kind in layer 4, where it becomes part of the handshake). After the
   owner's typed confirmation on the trusted console, `server add ssh://…` asks the server where
   its service listens over one `ssh` that lets OpenSSH ask, on that same terminal, to confirm a
   host key this computer does not know yet (`StrictHostKeyChecking=ask`, no master, no
@@ -802,14 +947,24 @@ answers bounded `workspace_call`s on a connection that declared it.
   the fingerprint with the server's own. A key the owner declines, or does not confirm, is
   refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the question
   to answer. Without that console the add never gets this far: the typed confirmation before it
-  is refused as `trusted_console_required`, before any `ssh` runs. Approach A: the probe runs the
-  server's own `finishup service endpoint --json` and records the endpoint and an absolute
-  launcher from it; every later connection is the connector's `BatchMode` master.
-- Which client process reads the credential is part of each approach's topology. Any process
+  is refused as `trusted_console_required`, before any `ssh` runs.
+- Which client process reads the credential follows the connection style: in the relay style
+  only the background helper reads it; in the direct style the helper and each dialing process do,
+  an ADR-008 amendment made with the layer that ships that style, and logging out bumps a
+  credential generation every direct process checks before its next request. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.
 
 ### 8. Consent per remote target, on the trusted console
+
+Layer 1 status: every rule of this decision guards a remote target, and none can be added or
+selected (decision 3), so the consent confirmation is never reached and the zero-network refusals
+are dormant. Two parts act already: the owner-only record of what this computer's everyday service
+last reported (*Remember*, below) is kept up to date, and the last line of defence still refuses
+a remote record that something other than `server use` selected. The unified model binds consent
+to the server's offer: a consent envelope compared by an explicit partial order (layer 2) and a
+profile revision carried on every request (layer 3) replace the disclosure-version check below
+for the kinds that need them; the trusted-console rule stays.
 
 - `server add` and `server use` for a remote kind need the trusted foreground console, a versioned
   disclosure and the owner typing the target name. At `server add` the same confirmation first
@@ -905,8 +1060,8 @@ answers bounded `workspace_call`s on a connection that declared it.
     disclosure check, with the closed reason `zero_network_remote_selected`. It is a remote
     connection phase (`REMOTE_CONNECTION_PHASES`) with the continuation
     `zero_network_local_server_required`, so the CLI, MCP, hooks and the terminal interface say
-    why and the remedy for a process whose selection predates the change, and no connector or
-    agent is started for it. The check reads the marker only, never the service, so hooks keep
+    why and the remedy for a process whose selection predates the change, and nothing is
+    started or sent for it. The check reads the marker only, never the service, so hooks keep
     their budgets. A command that acts on one remote target names the refusal for that target
     (`cli.server.zero_network_connection_refusal`): the selected target, or any target while the
     selection cannot be read, is `zero_network_remote_selected` with `finishup server use local`;
@@ -920,9 +1075,9 @@ answers bounded `workspace_call`s on a connection that declared it.
     same marker itself, because it would otherwise keep sending after the change: it checks
     before every connection it opens or relays and at least once a second while it runs, and on
     finding the marker it closes what it holds, sends nothing more (no last delivery of captured
-    observations), and names `zero_network_remote_selected`. Each approach names its own such
-    processes in its topology below (approach A: the connector and its background workspace
-    agents).
+    observations), and names `zero_network_remote_selected`. Layer 1 runs no such process; the
+    background helper of layer 4 and every long-lived client of the direct style are such
+    processes.
 
   **Where the choice can arise.** While a remote target is selected, a fresh process does not
   set this computer's policy: every `server_host` privacy command (the privacy ceremonies,
@@ -949,20 +1104,18 @@ answers bounded `workspace_call`s on a connection that declared it.
   terminal interface's `/server` "Use local" all run `cli.server.use_target`, which clears the
   selection and then stops what this client runs for the remote target it left, through that
   target's runtime exactly as `server disconnect` does, never by pattern (`use` of another target
-  does the same for the one it leaves). With the edge relay that is the target's connector: it makes
-  its last bounded delivery of what the hooks already captured for that server (at most 2 seconds;
-  what is left stays in this client's outbox; none once this computer last reported zero-network,
-  since the connector checks that record before every delivery, its last one included), closes its
-  background workspace agents, so a server job already under way (the AI-powered review loop,
-  observation verification) can no longer read files here, and exits before the command returns. The
-  choice's `1` switches before the change is made, so that delivery still precedes the zero-network
-  policy. Every surface that switches says so by generated id and kind. When the stop does not
-  finish within its wait the selection is still cleared, and the command says so on stderr with
-  `finishup server disconnect` as the way to finish it. Until open agent sessions restart, a running
-  MCP bridge keeps the target it started with: under zero-network its connections are refused,
-  otherwise its next call starts that target's connector again. A selection that cannot be read
-  names no target, so switching away from it stops nothing (`finishup server disconnect NAME` stops
-  a target's connection).
+  does the same for the one it leaves). From layer 4 that is the target's background helper: it
+  makes its last bounded delivery of what the hooks already captured for that server (none once
+  this computer last reported zero-network), closes its background workspace agents, so a server
+  job already under way can no longer read files here, and exits before the command returns; the
+  choice's `1` switches before the change is made, so that delivery still precedes the
+  zero-network policy. In layer 1 no runtime is registered for a remote kind, so this client ran
+  nothing for such a target and the switch has nothing to stop or report. Every surface that
+  switches says so by generated id and kind. When a stop does not finish within its wait the
+  selection is still cleared, and the command says so on stderr with `finishup server disconnect`
+  as the way to finish it. Until open agent sessions restart, a running MCP bridge keeps the
+  target it started with. A selection that cannot be read names no target, so switching away
+  from it stops nothing (`finishup server disconnect NAME` stops a target's connection).
 
   **Honest limits:** a connection already open when the policy changes is
   not cut (its next connection is refused); after switching, open agent sessions keep the
@@ -1022,6 +1175,9 @@ answers bounded `workspace_call`s on a connection that declared it.
 
 ### 9. Scopes, not self-declared client kinds, bound a key
 
+Not built in layer 1: no server edge exists yet. The REST layer (layer 5) enforces these scopes
+on both HTTP server edges, gateway and native, around the REST routes.
+
 An HTTPS or `local_port` key carries a scope, `agent` or `operator`, that the server-side edge
 enforces as a method allow-list; the daemon's client-kind gate stays as a second layer.
 
@@ -1031,7 +1187,8 @@ enforces as a method allow-list; the daemon's client-kind gate stays as a second
 | `operator` | `agent` plus `project`, `review`, `import_codex_jsonl`, `observation_status`, the read and tighten privacy methods (`privacy_get_setup`, `privacy_get_effective`, `privacy_pending_list`, `privacy_receipts_list`, `privacy_receipts_get`, `privacy_propose_policy`, `privacy_tighten_policy`) and `service_lock`. |
 | Never over HTTPS | `service_stop`; `backup_*`, `restore_*`, `migrate_*` and `integration_*` (they name server paths); `observation_pause`, `observation_resume`, `observation_revoke`; the human-control and secret channels. |
 
-A hello that carries `workspace_locator` is refused at an HTTPS edge. The owner receipt view needs
+A hello that carries `workspace_locator` is refused at an HTTP edge (the composition flag
+`refuse_workspace_locators`, decision 4, built in layer 1). The owner receipt view needs
 a ceremony bound to its own connection on the service host, so a remote `receipt` returns the
 ordinary view. An SSH target is owner-equivalent and allows every method, as locally; scoped SSH
 through a forced command is later work.
@@ -1041,7 +1198,11 @@ through a forced command is later work.
 The client and the server run the same release. The handshake already requires an exact
 `schema_manifest_digest` match; a mismatch on a remote target is `remote_incompatible`, whose text
 names both releases (release versions are not user-controlled). A remote service is never
-superseded by a client. A compatibility window is a later decision.
+superseded by a client. On 2026-11-08 the maintainer decided the compatibility window (U18):
+self-hosted servers keep this lockstep, and the REST layer adds a public API compatibility
+manifest, capability negotiation and cross-version conformance tests, so that a server, the
+official service in particular, can serve a window of client releases. Until then lockstep is the
+rule.
 
 ### 11. What stays on the server host
 
@@ -1053,12 +1214,17 @@ client. Over SSH, `finishup service start|stop|restart|status|lock|unlock|diagno
 can run there through `ssh -t`, whose remote pseudo-terminal passes the trusted-console check.
 On the client every `server_host` command is refused with `requires_server_host`, whose remedy
 says to run it on the server host (through `ssh -t` for an SSH target; by the server's operator for
-an HTTPS target).
+an HTTPS target). The guard is built in layer 1; it refuses only while a remote root is active,
+which in layer 1 only a record selected outside `server use` can make (decision 1 fails it closed
+for a root whose record cannot be read).
 
 ### 12. Observation on a remote target
 
 For a remote target the hooks run on the client, the owner granted observation consent there, and
-the rows were captured there. The server holds none of it and must not borrow it.
+the rows were captured there. The server holds none of it and must not borrow it. Layer 1 builds
+the whole decision, the hook-content rule included, and tests the server side in process; with no
+remote target selectable, a client's hooks deliver to a local or named-local service exactly as
+before.
 
 - **The client is the authority.** The client's observation store under the target root (consent,
   content-capture profiles, selection, approved-check policy trust, the observation key that
@@ -1155,177 +1321,56 @@ the rows were captured there. The server holds none of it and must not borrow it
   follow-up; both need a control method of their own. Follow-up owner: issue #903, the remote
   service request this ADR scopes, until a dedicated issue is filed.
 
-## Topology (approach-specific)
+## Topology
 
-### Approach A — edge relay: a connector per target, a gateway per HTTPS server
+Layer 1 has one topology, the unix style. Every hook, MCP bridge, CLI and terminal process dials
+`<root>/run/control.sock` of the everyday root or of a named local root, with the owner-only
+checks and peer-UID authentication of ADR-008; the service never opens a network socket. A remote
+root has no endpoint to dial: the connect seam refuses it before any dial (`target_root_is_remote`,
+decision 6).
 
-Agent-facing processes do not change. Every hook, MCP bridge, CLI and terminal process keeps
-dialling `<root>/run/control.sock` with the same owner-only checks and peer-UID authentication. For
-a remote target root that endpoint is served by a vault-less **connector** on the client machine;
-the server's service still never opens a network socket.
+The remote topology arrives with layers 4 and 5, in the shape the maintainer accepted on
+2026-11-08 (*Unified model*). Each of those layers amends this section with its exact contract;
+what follows is the direction, not a built surface.
 
-```
-SSH (owner-equivalent)
-  client host                                                    server host (same owner)
-  hook/MCP/CLI/TUI ─AF_UNIX─► <troot>/run/control.sock
-                              finishup connector (no vault) ─AF_UNIX─► <troot>/run/upstream.sock
-                                (ssh -M -S <troot>/run/m -L upstream.sock:<remote endpoint>)
-                              ════ one warm SSH connection, one channel per client connection ═══►
-                                                               sshd child (owner) ─AF_UNIX─► control.sock ─► service
-
-HTTPS and local_port
-  hook/MCP/CLI/TUI ─AF_UNIX─► <troot>/run/control.sock
-                              finishup connector (holds the API key)
-                              ════ HTTPS binding v1: sessions, calls, long-polls ════►
-                                                               finishup service gateway (same UID; key, scope)
-                                                                 └─AF_UNIX─► control.sock ─► service
-
-Both kinds: workspace_call frames flow server → client and workspace_reply frames client → server
-through the same relay; human-control and secret channels never leave the server host.
-```
-
-- **Connector** (`finishup.client.connector`; `finishup connector run --root <troot>`, hidden,
-  `client_only`). `service.client` starts it on demand for a remote root instead of
-  `service run`, and `finishup server connect` starts it explicitly; it never supersedes anything.
-  A client replaces a running connector (by its stamped pid) only when an older release of this
-  client started it; a newer one is kept, since it serves the upgraded clients and also relays a
-  process that predates the upgrade. It takes the singleton flock `<troot>/state/connector.lock`, stamped with its pid, release and
-  schema-manifest digest; binds `run/control.sock` through the existing Unix-socket listener,
-  clearing a stale endpoint only while it holds that lock; runs with a scrubbed environment (no
-  FinishUP variable and nothing secret-shaped; `SSH_AUTH_SOCK` is kept so OpenSSH can use the
-  owner's agent, and `DBUS_SESSION_BUS_ADDRESS` so an HTTPS target's key stored in a Linux
-  desktop's Secret Service can be read); refuses any hello that names a `workspace_locator`; and exits after 15 idle
-  minutes. It writes `<troot>/state/connector-status.json` (`yoetz.connector-status/1`:
-  `generation`, `phase` of `starting|ready|unavailable|stopped`, a closed `reason`, a
-  `correlation_id`, `pid`, `started_at`). A client whose connection the connector accepted and
-  closed reads that status and raises `service_unavailable` with the remote phase as `phase` (the
-  connector records a phase before it closes any connection it could not relay). A connection
-  accepted but not yet answered is waited for, never named; when the wait runs out, only a phase
-  recorded during it names the outage, and otherwise it is `remote_unreachable`. The
-  MCP availability latch keys on the status generation, which moves on every change of phase or
-  reason, so a repaired connection clears it.
-- **SSH.** One OpenSSH master per target with the fixed, secret-free argv `-M -S <troot>/run/m -N
-  -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o
-  StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o
-  ServerAliveCountMax=3 -p <port> -L <troot>/run/upstream.sock:<remote endpoint> <[user@]host>`.
-  Each local connection gets its own channel and an unparsed byte pump; only the first frame (the
-  hello) is read, to refuse a locator and to note a claim. When sshd cannot reach the server's
-  endpoint on a client's connection (an idle-stopped service), the connector runs the server's
-  own `<remote launcher> service start` once over the master, pinned to the remote root, and
-  retries; the connector's own background agents never start it, so a service the owner stopped
-  stays stopped until a client connects. `server add
-  ssh://…` records the endpoint and an absolute launcher from one interactive `ssh … finishup
-  service endpoint --json`, in which OpenSSH itself asks the owner to confirm a new host key
-  (decision 7: password and keyboard-interactive login off; a declined or unanswered key is
-  `remote_host_key_unconfirmed`, a changed one `remote_identity_changed`). The
-  socket-path bound counts OpenSSH's 17-byte temporary suffix on the master path.
-- **HTTPS and `local_port`.** Each local connection is one gateway session of the HTTPS binding
-  v1 (see `INTERFACES.md`). A call is never posted twice: after an ambiguous failure the connector
-  only polls its result. Polls, cancels and workspace replies, which are safe to repeat, are retried
-  after a transient failure (up to three in a row), so one network blip does not end a relayed
-  connection and every call on it. When the hello declared a workspace agent, server frames arrive through
-  the `GET …/frames` long-poll and replies go out with `POST …/frames`. TLS uses the target's CA
-  file, or its `sha256:` pin of the leaf certificate, checked right after the handshake and before
-  any request byte. Only the connector reads the API key, and it rereads it after a refusal so a
-  key rotated with `server login` takes effect without a restart.
-- **Gateway** (`finishup.gateway`; `finishup service gateway run --listen H:P (--tls-cert F
-  --tls-key F | --behind-proxy)` and `service gateway key create|list|revoke`, all `server_host`).
-  A same-user process with no vault, storage or policy authority: it may import SHARED modules and
-  `service.client` only, and `cli/gateway.py` is the one client module allowed to launch it. Keys
-  are `fuk_<12 hex id>_<43 base64url secret>`, shown once on the trusted console or written to a
-  new owner-only file, and kept only as a salted `sha256` in `<state>/gateway/keys.json`
-  (`yoetz.gateway-keys/1`), compared in constant time; expiry and rotation are supported, and a
-  revoked key fails its next request and its sessions close. Each session holds one control
-  connection to the daemon (started on demand through `service.client.ensure_service_running()`,
-  no handshake of its own) and forwards the client's hello byte for byte. It refuses `Origin`
-  headers and locator hellos, enforces the key's scope (decision 9) by answering an out-of-scope
-  call with a synthesized `method_forbidden` control-result that is never forwarded, keeps results
-  per `(sid, rpc_id)` until fetched and readable for 60 seconds after (8 MiB per session), expires
-  a session after 120 seconds idle (an agent session also once no frames long-poll began for 40
-  seconds, so a client that died without `DELETE` stops being the agent workspace calls go to),
-  closes a session whose client left while its hello was held (a slow on-demand service start),
-  holds at most 64 per key, and stops with `gateway_stale` when
-  the daemon answers with another release's manifest. `--behind-proxy` serves plain HTTP on a
-  loopback address only. There is no access log; audit lines carry the key id, route, method,
-  status, closed reason and correlation id only, and the audit is bounded (one rotation at 8 MiB;
-  unauthenticated refusals written once per reason per minute, with a count of the rest). v1 has one principal (`owner`): claims pass
-  unchanged, so the owner's SSH and HTTPS clients reach the same tasks; per-principal claim
-  namespaces wait for multi-key hosting.
-- **Binding at the connect seam.** `service.client` binds every connection to a remote root:
-  `connect_service` and `connect_service_on_demand` turn the caller's locator into the target's
-  claim (`binding_for_active_root`), never send the path, mark the connection's transport
-  `connector`, and start the connector when none answers (the plain connect too: it is
-  client-owned and vault-less). Processes whose calls run workspace work while they are live
-  pass `serve_workspace=True` and answer the server's workspace calls on their own connection:
-  the CLI (`build_service_client`, which the menu and the terminal interface also use) and the
-  MCP bridge. Hooks stay claim-only, so their observation ingest is attested and their `start`
-  sends the handle. The claimed locator is first normalized to its worktree's top level by the
-  hooks' own rule (`canonical_workspace_locator`), so a bridge started in a subfolder and a hook
-  in the same worktree claim it alike and reach one handle. A workspace the shared root rule
-  cannot resolve is not claimed, and a remote
-  connection with no claim refuses an absolute `workspace_ref` instead of sending it. A target the
-  owner confirmed under an older disclosure is refused before any dial, with or without a
-  workspace to claim, as the retryable `service_unavailable` with phase
-  `target_reauthorization_required` (a record that can no longer be read: `target_root_is_remote`);
-  no connector is started and nothing is sent until `finishup server use NAME` renews it.
-- **Workspace agent location.** Per connection, the client process's own `ServiceClient` answers
-  through the relay. For work that outlives the call, the connector keeps one long-lived agent
-  connection per workspace whose claim it relayed, for 15 minutes after that workspace's last hello
-  or until the connector stops (`server disconnect`, a `server use` that leaves the target, or its
-  idle exit) (`open_background_agent(root, claim, dial)`); each linked worktree of one repository is its own
-  workspace here, with its own lease and agent, although the worktrees share the repository's claim
-  digest. It learns which local workspace a claim stands for from the root's owner-only
-  claimed-workspace index (`<troot>/state/claimed-workspaces/<64 hex>-<64 hex>.json`, named by the
-  claim's repository and worktree digests, `yoetz.claimed-workspace/1`), which the connecting
-  process writes and which never leaves the machine; it derives the claim again from the recorded
-  workspace with the target's salt and serves it only when the two match. The agent connection runs
-  the real `WorkspaceAgentHandler`, is relayed by the connector itself over a socket pair (so it
-  neither keeps the connector from idling out nor renews its own lease), and reconnects whenever the
-  service ends it. Over the same connection the connector delivers what the client's hooks captured
-  for that workspace (the observation outbox and spool, `ClientObservationDrain`, each row attested
-  by the client's own store) every 30 seconds and once more as it stops; hooks still drain once per
-  pass. Several connections may serve one worktree's handle (a CLI command, the MCP bridge, the
-  connector): a live call goes first to the agent its own connection offered, otherwise to the
-  newest, and a workspace an agent opened for observation verification and another agent does not
-  know (`handle_unknown`) is opened again on the answering agent and the call retried once. Every
-  answer comes from the task's own worktree; a linked worktree's change capture is refused
-  `unsafe_root` by the client's own adapter (its `.git` is a file), exactly as a service on that
-  machine refuses it.
-- **Remote remedies on every surface.** A remote target's failure is named by its closed phase
-  and its ADR-030 directive on the CLI, the menu, setup's next steps, the MCP bridge, the hook
-  contexts and the terminal interface: every `service_unavailable` from a remote root carries a
-  remote phase (the connector's recorded one, or `remote_unreachable` when it recorded none,
-  including a connection lost mid-session), and a locked vault on the remote server is
-  `remote_vault_unlock_required`. None of them names a local `service run` or `service unlock`,
-  a host or a target name; a local root keeps its exact text.
-- **Reverse states.** `server connect` / `server disconnect` (the stamped pid only, then `ssh -O
-  exit` for a master that outlived it; never by pattern), the same stop when `server use` leaves
-  the target (decision 8), and the 15-minute idle exit;
-  `service gateway key create` / `key revoke`; `service gateway run` / Ctrl-C or the supervisor.
-  `server status` and `server test` show the connector's state; `key list` shows the keys.
-- **Modules.** `finishup.client.connector` (relay, leases, drain), `connector_status`,
-  `connector_runtime`, `connector_agent` (the background agent), `claimed_workspaces` (the index),
-  `ssh_upstream`, `https_upstream`; `finishup.gateway` and `finishup.protocol.rest_binding`;
-  `finishup.cli.remote_remedy` (one place for every surface's remote remedy).
-- **Why this shape.** The credential and the warm connection live in one process per target, so a
-  short-lived hook pays a local Unix connect plus the round trips, never a TLS or SSH handshake,
-  and `httpx` never enters the hook import path. The cost is one supervised client process per
-  target and, for HTTPS, one gateway process on the server.
+- **Background helper** (layer 4). One hidden, `client_only` process per remote target, started
+  on demand (never by `service run`), exiting 15 minutes after its last client, stopped by `server
+  disconnect`, `logout`, `remove` and a `server use` that leaves the target, and reaped by its
+  parent. In the relay style it serves `<troot>/run/control.sock`, so agent-facing processes keep
+  dialling a Unix endpoint, and its upstream is an SSH forward or REST. In every style it runs the
+  background workspace agent of each claimed worktree, the observation drain, the profile
+  re-check and, at L2, the code sync. It grows out of approach A's connector, whose lifecycle
+  fixes become its regression tests.
+- **Direct style** (layers 4 and 5). Each client process dials the server itself: `ssh -W` for
+  SSH (from approach B) and the one REST client for HTTPS (from approach C).
+- **SSH edge** (layer 4). `sshd` forwards a stream-local channel into the server's owner-only
+  control socket; raw control frames, owner-equivalent, no API key.
+- **HTTP edges** (layer 5). REST v1 behind one backend interface with two implementations: the
+  **gateway**, a separate same-user process with no vault that re-enters the service over its
+  control socket (approaches A and B's key hashing, scopes, `Origin` refusal, session caps and
+  bounded audit, re-hosted around the REST routes), and the **native** edge, a listener inside the
+  service process (approach C; the maintainer owns the security review of a vault-holding process
+  on the network, recorded as an ADR-008 amendment with that layer). The server's owner picks the
+  edge; a client sees only REST.
 
 
 ## Reverse states
+
+In layer 1 only `local` targets can be added, so the rows for keys and outside reads apply to a
+remote record another build wrote; their ways out stay usable for it (`server logout`, `server
+folders remove`, `server remove`), and their ways in are refused or reach nothing until a remote
+kind opens.
 
 | Way in | Way out | Way to see it |
 |---|---|---|
 | `server add NAME …` | `server remove NAME [--select-local]` (under the registry lock: clears a selection that names it first, so no new hook dials it, then disconnects, deletes the credential, disconnects again for a connection a running MCP bridge started meanwhile, and disposes of the root; refuses the selected target unless `--select-local`, and keeps the root while a connection does not stop; that refusal keeps and prints the switch to the everyday server, and a key deleted before the last stop stays deleted, recorded as gone and named in the refusal; a folder something changed while it was deleted refuses `target_partly_removed`, which says how to finish); `server remove ID` deletes a leftover folder that an interrupted add or remove left without a record | `server list` (names each leftover by id) |
 | `server use NAME` | `server use local` (removes the selection file; ambient resolution returns with no residue; a remote target it leaves is stopped as `server disconnect` stops it) | `server status` (names the deciding source) |
-| `server login NAME` | `server logout NAME` | `server status` (credential present or absent, never the value) |
+| `server login NAME` (refused with `remote_kind_unavailable` in layer 1) | `server logout NAME` (offline; deletes a stored key, never touches the network) | `server status` (credential present or absent, never the value) |
 | `server add NAME …` for a remote kind records the outside-read mode the owner answered (or `--outside-reads`; an official endpoint is `local` unrecorded) | `server folders mode NAME local` or `listed` changes it; `server remove NAME` removes it with the target | `server add` output, `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server folders mode NAME local` (trusted console and typed name whenever it records `local`, an official endpoint's included; without the console an official endpoint's `local` is left unrecorded) | `server folders mode NAME listed` (applies from the workspace agent's next read; a read already in progress may finish) | `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server folders add NAME FOLDER` (trusted console) | `server folders remove NAME FOLDER` or `--all` (also clears a damaged record, to an empty one in `listed` mode; applies from the workspace agent's next read, in either mode, and a read already in progress may still return files, and a review the server already prepared may still send what it read) | `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server connect [NAME]` | `server disconnect [NAME]` (stops only what that root's runtime stamped; never by name or pattern) | `server status`, `server test` |
 | This computer's everyday service reports its machine-scope policy (the zero-network check, `privacy show`, a privacy change here): the owner-only marker of what it last reported (decision 8) | the next report replaces it; deleting FinishUP's folders removes it; the zero-network check removes it once the everyday installation no longer exists | `server status [--json]` (`policy_read`, `last_reported_at`), `server list`, `setup status --next`, the menu home, `/server` and the header |
-| Server-side key or edge setup | its revoke or teardown, named in the topology section | the server's own key listing |
 
 Deleting a target's root removes every client-side artifact of that target except an API key
 kept in the platform credential store (service `yoetz.server-credential.v1`, account = target id),
@@ -1335,8 +1380,12 @@ it, or it exits once idle. The ambient installation is never touched by a target
 
 ## Consequences
 
-- With no selection file, local behaviour is unchanged. The only local deltas are the new commands
-  and the control-schema version and digest, which every envelope bump already moves.
+- With no remote target selected — in layer 1, always — every surface behaves byte for byte as
+  before server targets existed. The only local deltas are the new `server` commands, named local
+  servers, and the control-schema version and digest, which every envelope bump already moves.
+- Layer 1 sends nothing over a network that `main` did not send: the remote kinds are refused
+  before any prompt or probe, and a remote root is refused before any dial.
+- The consequences below hold once a remote kind opens (layers 4 and 5).
 - Remote evidence is `client_attested`: the ADR-031 fences run on the client, inside the workspace
   agent, and the server cannot check them independently. Receipts say so in one fixed line.
 - Remote round trips cost hook budget. No budget is relaxed; `server test` measures the round trip
@@ -1382,22 +1431,31 @@ it, or it exits once idle. The ambient installation is never touched by a target
   store that never answers holds one thread. The deadline bounds only what the attempt awaits: an
   `os_keyring` root-key read on the event loop, or an activation step that joins its worker
   thread, still runs to its end (2026-11-06, after review).
-- Out of scope: multi-user or team hosting; a FinishUP-operated cloud; ledger sync or migration
-  between targets; an offline write queue; a plain-TCP control channel; unlock, consent or the
-  owner view over the network; MCP over HTTP to hosts; native launchd or systemd installers;
-  native Windows (WSL 2 follows Linux); a per-repository server file, which would let a repository
-  redirect its own ledger traffic.
+- Out of scope: multi-user or team hosting (principal namespacing is groundwork only); building a
+  FinishUP-operated service in this repository (the core only connects to one, maintainer decision
+  U8); ledger sync or migration between targets; an offline write queue; a plain-TCP control
+  channel; unlock, consent or the owner view over the network; MCP over HTTP to hosts; native
+  launchd or systemd installers; native Windows (WSL 2 follows Linux); a per-repository server file,
+  which would let a repository redirect its own ledger traffic.
 
 ## Alternatives considered
 
-**The three ways of doing the separation.** Each is a complete pull request on top of the shared
-decisions above; the maintainer chooses one. Its own topology section replaces the marker above.
+**The three ways of doing the separation, unified.** Each was built as a complete pull request
+on top of the shared decisions above, for the maintainer to choose one. On 2026-11-08 the
+maintainer chose none alone: the three become options of one model (U1), and the build starts
+from A and ports B's and C's pieces in (U15).
 
-| Approach | Shape | Strengths | Costs |
-|---|---|---|---|
-| A — edge relay | Clients keep dialling the target root's Unix endpoint. A vault-less per-target connector behind it relays to the server: OpenSSH stream-local forwarding for SSH, and an HTTPS binding of the control frames to a same-user gateway on the server for HTTPS and localhost ports. | Agent-facing processes and registrations are untouched; one process holds the credential; connections stay warm across short-lived hooks. | A client-side process to supervise; a gateway process on the server. |
-| B — client SDK, direct dial | Each client process selects a transport from the target record — Unix, SSH (`ssh -W` over a persistent master) or HTTPS against the same gateway as A — in place of the hardcoded Unix connect. | No local relay process; transports are in-process. | The credential is read by each client process (an ADR-008 amendment); hooks load a transport lazily; each process opens its own channel. |
-| C — server-native network API | The daemon gets an optional network listener with a resource-shaped REST API; a dedicated client-side agent process long-polls for workspace calls; SSH tunnels HTTP to that listener. | One network protocol for every remote kind; no gateway or connector process. | TLS and HTTP parsing move into the process that holds the vault, which amends ADR-008 invariant 6 at its root; a second, resource-shaped public API to keep. |
+| Approach | Shape | Strengths | Costs | Fate in the unified model |
+|---|---|---|---|---|
+| A — edge relay (#1313) | Clients keep dialling the target root's Unix endpoint. A vault-less per-target connector behind it relays to the server: OpenSSH stream-local forwarding for SSH, and a binding of the control frames to HTTPS, served by a same-user gateway on the server, for HTTPS and localhost ports. | Agent-facing processes and registrations are untouched; one process holds the credential; connections stay warm across short-lived hooks. | A client-side process to supervise; a gateway process on the server. | The connector becomes the background helper and the relay style (the default); the gateway's hardening becomes the gateway edge, serving REST; the frame binding is retired. |
+| B — client SDK, direct dial (#1312) | Each client process selects a transport from the target record — Unix, SSH (`ssh -W` over a persistent master) or HTTPS against the same gateway as A — in place of the hardcoded Unix connect. | No local relay process; transports are in-process. | The credential is read by each client process (an ADR-008 amendment); hooks load a transport lazily; each process opens its own channel. | Becomes the direct style, an advanced option; its MCP-bridge background agent and `server connect --agent` give way to the helper. |
+| C — server-native network API (#1311) | The daemon gets an optional network listener with a resource-shaped REST API; a dedicated client-side agent process long-polls for workspace calls; SSH tunnels HTTP to that listener. | One network protocol for every remote kind; no gateway or connector process. | TLS and HTTP parsing move into the process that holds the vault, which amends ADR-008 invariant 6 at its root; a second, resource-shaped public API to keep. | Its REST API becomes the public network contract (U9) and the only HTTP protocol (U21); its listener becomes the native edge, an owner opt-in; its pull agent gives way to the helper. |
+
+**Retired before release.** The HTTPS binding of the control frames (A and B), so that one
+schema set, one conformance kit and one client library serve HTTP; keeping it beside REST would
+have meant two HTTP protocols and two conformance surfaces. B's background agent in the MCP
+bridge and C's `finishup agent run`, both replaced by the one helper, which also serves users who
+only run the CLI.
 
 **Rejected.**
 
@@ -1489,10 +1547,41 @@ decisions above; the maintainer chooses one. Its own topology section replaces t
    with its own service, and HTTPS servers reached on localhost ports (the `local_port` kind).
 3. **How is the separation delivered?** Three pull requests, one per way of doing the separation,
    each complete and mergeable on its own; every decision other than the topology is identical in
-   all three.
+   all three. *Superseded on 2026-11-08* (U1, U15, U16): one unification, in which the three ways
+   become options, delivered as stacked pull requests (*Delivery in layers*).
 
-The "REST API" question is answered by that comparison: approaches A and B bind the existing
-control frames to HTTPS, and approach C offers a resource-shaped API. The remaining proposals of
-this ADR — the classification of the network hop (decision 8), strict route on remote targets
-(ADR-018 amendment), SSH as owner-equivalent (decision 9) and version lockstep (decision 10) —
-stand as Proposed until the maintainer reviews the chosen pull request.
+The "REST API" question is answered by the 2026-11-08 decisions: approach C's resource-shaped REST
+API is the public network contract (U9) and the only HTTP protocol (U21); approaches A and B's
+binding of the control frames to HTTPS is retired. The remaining proposals of this ADR — the
+classification of the network hop (decision 8), strict route on remote targets (ADR-018
+amendment), SSH as owner-equivalent (decision 9) and version lockstep with its compatibility
+window (decision 10) — stand as Proposed until the layer that uses each lands.
+
+## Maintainer decisions of 2026-11-08
+
+The maintainer accepted the unified design on 2026-11-08. The decisions this ADR depends on:
+
+| # | Decision |
+|---|---|
+| U1 | The three approaches are not exclusive; all become options in one product, chosen by the server's type and the user's choice. |
+| U2 | Pre-packaged profiles: the default stays full local (today's behaviour, byte for byte); adding an SSH or web server runs a handshake in which the client learns what the server offers and configures itself to conform. |
+| U3, U4 | Levels of how much is on the server are a per-server setting with a per-repository override; a new level keeps a copy of the code on the server (L2). |
+| U5 | Consent is asked when a connection starts, according to what the server needs, and asked again when a later handshake widens it. |
+| U6, U10, U19, U20 | At L2 code reaches the server as git data the client sends; the copy holds git-visible files minus secrets (patterns plus a content scan, each held-out file named on the receipt); forgetting deletes the copy and the excerpts derived from it. |
+| U7 | Approved checks run on the user's computer. |
+| U8, U9 | This repository builds the core only; the core can connect to a specific official URL. The public network contract is C's REST API. |
+| U11 | Retention: on a self-hosted server the user chooses; on an official service the service's policy offers the options. |
+| U12 | One background helper per server for every connection style. |
+| U13 | The server side offers both HTTP edges (separate gateway process, built-in listener); the server owner picks; the maintainer owns the security review of the built-in listener. |
+| U14 | The repository egress hold (round 5) is included (layer 2). |
+| U15, U16, U17 | The build starts from approach A and ports B and C in; delivery is stacked pull requests; everything is designed now and implemented as one unification. |
+| U18 | Compatibility window (decision 10). |
+| U21 | Relay is the default style for SSH and HTTPS, direct an advanced option; REST is the only HTTP protocol and the frame binding is retired. |
+
+Questions left to the layers that use them, each decided in this ADR's amendment or the new ADR of
+that layer: reversing a repository-level override; downgrading from L2 to L1 and what happens to
+the copy; interrupted uploads, links, hard links and case collisions in an export, hostile packs,
+exclusion-policy changes and key rotation during an upload; and older helpers and MCP bridges
+still running across an upgrade. Acceptance is recorded per host (Codex, Claude Code, Cursor) ×
+surface (CLI, MCP, hooks, terminal interface, receipts) × operating system (macOS, Linux, WSL 2)
+in layer 7.
