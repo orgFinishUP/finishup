@@ -4668,7 +4668,10 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
   a pinned launcher names the root, `finishup server use local` answers `selection_overridden`, so
   it is `remote_root_override_clear` (`targets.REMOTE_ROOT_OVERRIDE_CONTINUATION`, attached by the
   client, never through a reason code): the owner unsets the variable or uses an unpinned launcher,
-  then starts a new agent session. An MCP tool result keeps the phase as
+  then starts a new agent session. The menu refuses each action whose CLI command is `server_host`
+  in `cli.command_scope` (`menu._ACTION_COMMANDS`: every provider action, refused at the submenu's
+  entry, the harness skill actions, the setup posture, and unlocking or initializing the vault)
+  with that phase and directive on stderr before any prompt, ceremony, service call or write. An MCP tool result keeps the phase as
   `safe_details.phase` beside its continuation (the normalizer admits exactly the three remote-root
   phases, `REMOTE_ROOT_REFUSAL_PHASES`), and its text channel reads `Reason: service_unavailable
   (phase: <phase>).`

@@ -319,7 +319,10 @@ kind without a record migration.
   with); a stale disclosure cannot be confirmed while the remote kinds are closed, so it points
   there too and says a later release can authorize that server again. When an isolation variable
   or a pinned launcher names the root, `server use` answers `selection_overridden`, so the
-  directive is to unset it or use an unpinned launcher (`remote_root_override_clear`).
+  directive is to unset it or use an unpinned launcher (`remote_root_override_clear`). The menu
+  refuses an action whose command is `server_host` (provider setup, the harness skill, the setup
+  posture, vault unlock and initialization) with the same phase and directive before it asks or
+  writes anything, as the command itself is refused.
 - Setup refuses such a root at its entry with the same phase and directive (exit 20, stderr
   only): `setup run` in every form, bare `finishup` and the menu's setup wizard, and the terminal
   interface's first run, whether a selection or an isolation variable names the root. It looks

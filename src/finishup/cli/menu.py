@@ -6,7 +6,10 @@ otherwise assemble from subcommands: harness (Codex) MCP registration, the
 provider-credential ceremonies, privacy inspection, and service lifecycle.
 The menu adds no authority: every mutation keeps its preview/confirm gate,
 trusted ceremonies still run through ``cli/unlock.py`` on the controlling
-TTY, no service is ever spawned, and no secret enters a menu prompt.
+TTY, no service is ever spawned, and no secret enters a menu prompt. An
+action whose command administers the server host (``cli.command_scope``) is
+refused while this process's root is a server elsewhere (ADR-051), before
+it asks or changes anything, as the command itself is.
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 import click
@@ -43,6 +47,80 @@ def menu_available() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except (OSError, ValueError):
         return False
+
+
+# The CLI command each menu action stands for, by submenu and choice, so whether it administers
+# the server host is read from the one table every command uses (``cli.command_scope``, ADR-051).
+# The setup posture is what 'privacy setup' shows before it asks anything.
+_ACTION_COMMANDS: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
+    {
+        "harness": MappingProxyType(
+            {
+                "1": "integrate mcp status",
+                "2": "integrate mcp preview",
+                "3": "integrate mcp install",
+                "4": "integrate skill status",
+                "5": "integrate skill preview",
+                "6": "integrate skill install",
+                "7": "integrate skill remove",
+            }
+        ),
+        "provider": MappingProxyType(
+            {
+                "1": "provider endpoint",
+                "2": "provider credential set",
+                "3": "provider credential rotate",
+                "4": "provider codex-subscription setup",
+                "5": "provider codex-subscription status",
+                "6": "provider codex-subscription disconnect",
+                "7": "provider codex-subscription rollback",
+                "8": "provider codex-subscription repair",
+                "9": "provider codex-subscription runtime status",
+            }
+        ),
+        "privacy": MappingProxyType({"1": "privacy show", "2": "privacy setup"}),
+        "service": MappingProxyType(
+            {
+                "1": "service status",
+                "2": "service unlock",
+                "3": "service initialize-passphrase",
+                "4": "service lock",
+                "5": "service stop",
+            }
+        ),
+    }
+)
+_SERVER_HOST_ACTION_REFUSAL: Final = (
+    "this action runs on the FinishUP server host, and the server this process uses is "
+    "elsewhere and refused before anything is sent, so nothing was asked or changed"
+)
+
+
+def _server_host_refused(*commands: str) -> bool:
+    """Refuse server-host menu actions while this process's root is a server elsewhere (ADR-051).
+
+    ``commands`` are the CLI command paths of the actions (``_ACTION_COMMANDS``): one chosen
+    action, or every action of a submenu, which is refused at its entry only when each of them is
+    ``server_host``. While the root is a server elsewhere (``targets.active_remote_refusal``: a
+    remote record, one that cannot be read, a stale disclosure or a zero-network report), the
+    menu names that phase and the directive of its way back (``render_remote_refusal``) on stderr
+    before any prompt, ceremony, service call or write, as the CLI refuses the command itself.
+    Returns whether it refused; a local root (the everyday server, a named local one) never is.
+    """
+
+    from finishup.cli.command_scope import command_scope
+
+    if not commands or any(command_scope(command) != "server_host" for command in commands):
+        return False
+    from finishup.client.targets import active_remote_refusal
+
+    phase = active_remote_refusal()
+    if phase is None:
+        return False
+    from finishup.cli.render import render_remote_refusal
+
+    typer.echo(render_remote_refusal(phase, head=_SERVER_HOST_ACTION_REFUSAL), err=True)
+    return True
 
 
 def _remote_refusal_phase(error: ControlError) -> str | None:
@@ -383,7 +461,7 @@ def _harness_menu() -> None:
     typer.echo("  7  Skill remove")
     typer.echo("  b  Back")
     choice = _ask(("1", "2", "3", "4", "5", "6", "7", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["harness"][choice]):
         return
     if choice in {"1", "2", "3"}:
         _harness_registration({"1": "status", "2": "preview", "3": "install"}[choice])
@@ -393,6 +471,9 @@ def _harness_menu() -> None:
 
 
 def _provider_menu() -> None:
+    # Every provider action administers the server host: refused before its first question.
+    if _server_host_refused(*_ACTION_COMMANDS["provider"].values()):
+        return
     typer.echo("")
     typer.echo("LLM provider connection")
     typer.echo("  API credentials and Codex-managed ChatGPT login are separate authorities.")
@@ -580,7 +661,7 @@ def _privacy_menu() -> None:
     typer.echo("  (policy changes stay explicit: 'finishup privacy setup|propose|tighten',")
     typer.echo("   receipts via 'finishup privacy receipts list|get')")
     choice = _ask(("1", "2", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["privacy"][choice]):
         return
     method = "privacy_get_effective" if choice == "1" else "privacy_get_setup"
     _run(lambda: _privacy_show(method))
@@ -642,7 +723,7 @@ def _service_menu() -> None:
     typer.echo("  5  Stop the service")
     typer.echo("  b  Back")
     choice = _ask(("1", "2", "3", "4", "5", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["service"][choice]):
         return
     if choice == "1":
         _run(lambda: _service_simple("service_status"))
