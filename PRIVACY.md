@@ -8,9 +8,8 @@
 FinishUP is designed around one trusted persistent local service. The service—not the CLI, MCP,
 an agent, an LLM, or a future ordinary UI—owns encryption keys, decrypted local state, privacy
 policy, provider credentials, and outbound dispatch. Normal clients exchange only bounded control
-requests and results. By default that service runs on your own machine. If you choose a FinishUP
-server on another machine, that server's service holds this authority on its machine instead; see
-[FinishUP servers on another machine](#finishup-servers-on-another-machine).
+requests and results. That service runs on your own machine; a named local server you add is a
+second such service on it, with its own keys and policy (see [FinishUP servers](#finishup-servers)).
 
 ## Planned default and disclosure path
 
@@ -65,34 +64,13 @@ turning update checks off). That mode still permits only exact release-profiled 
 for the FinishUP service, confidential helper, approved local model, OS credential/user-presence
 service, and session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
 
-That mode and a FinishUP server on another machine, on a local port, or on the web are never in
-force together (decided on 2026-11-07). Such a server cannot be added or selected in that mode.
-While one is selected, a new FinishUP command does not change this computer's policy: the privacy
-commands either refuse to run (`requires_server_host`) or, like `finishup privacy tighten` and
-`finishup privacy propose`, change the selected server's own policy and say which server, by its
-id and kind, before and after the change. FinishUP that was already working with this computer's
-own FinishUP when the server was selected (an open terminal interface or menu, or a privacy step
-or setup already under way) could still turn the mode on here, for example by approving a privacy
-decision proposed before the server was selected. Before it does, FinishUP asks on
-your own terminal: switch to this computer's own FinishUP and make the change, or cancel the
-change and keep the server. Enter, end of input, Ctrl-C or any answer but the switch cancels;
-FinishUP never switches on its own. Without your terminal to ask in, for a command that answers
-in JSON, or for a decision relayed from an agent, the change is refused before it is applied,
-with `zero_network_remote_selected`, and nothing changes; `finishup server use local`, then the
-same change again, is the fix. Anything still pointed at such a server while this computer is in
-that mode (an agent session or a hook started earlier) is refused at its next connection, before
-anything is sent, with the same reason and fix. Two limits: a connection already open when the
-mode is turned on is not cut, and this check relies on what this computer last reported (below),
-so after an upgrade from a release without that record it applies once this computer's FinishUP
-has reported its policy again.
-
-To tell the mode when this computer's own FinishUP service is stopped or locked (as it usually is
-while another server is used), FinishUP remembers, in a small file only you can read beside its
-server list (outside the vault), whether this computer's policy last reported the mode and when;
-it holds no path, name or policy content. `finishup setup status --next`, `finishup server
-status` and `list`, the menu and the terminal interface then say "this computer last reported"
-it. A file that cannot be read counts as no record and is replaced by the next report. Deleting
-FinishUP's folders removes it.
+FinishUP remembers, in a small file only you can read beside its server list (outside the vault),
+whether this computer's policy last reported that mode and when; it holds no path, name or policy
+content, and it is updated whenever this computer's FinishUP reports its policy (for example
+during setup or `finishup privacy show`). Servers on another machine, which arrive in a later
+release, rely on it: that mode and such a server will never be in force together, even while this
+computer's own FinishUP service is stopped or locked. A file that cannot be read counts as no record
+and is replaced by the next report. Deleting FinishUP's folders removes it.
 
 An independent review-context profile controls which potentially useful material is selected before
 those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`. The
@@ -315,84 +293,18 @@ A claim with concrete checked-in test or fixture coverage is flagged `evidenced`
 CI. A claim whose own wording names still-missing capability or drill evidence remains explicitly
 “not yet evidenced” and is not asserted as release evidence.
 
-## FinishUP servers on another machine
+## FinishUP servers
 
-By default nothing in this document leaves your machine through FinishUP except what your privacy
-policy authorizes. You may instead choose to use a FinishUP server you run elsewhere — reached over
-SSH, over HTTPS on the web, or over HTTPS on a local port. That choice is its own decision, outside
-the LLM profiles and the four non-LLM channels above, and enabling it enables none of them:
+This release uses only FinishUP servers on this computer: the everyday one and the named local
+servers you add (`finishup server add NAME --local`). Each is its own FinishUP service on this
+machine, with its own vault, privacy policy, records and receipts, and everything in this document
+applies to each; choosing one sends nothing anywhere.
 
-- **You confirm each server yourself.** Adding or choosing such a server shows what will leave this
-  machine and asks you to type the server's name, in a terminal you are typing in. An agent cannot
-  add or choose one. The confirmation is recorded with the disclosure version it covered, and a new
-  disclosure asks again. It is a terminal confirmation, not a vault reauthentication, because a
-  machine that only uses a server may have no vault of its own.
-- **What travels to the server:** your agents' FinishUP calls and their results (task statements,
-  published work, evidence, checks, responses, receipts), consented hook observations, a keyed
-  fingerprint of the project folder instead of its path, and the bounded workspace evidence the
-  server asks for — the change since the task started, facts about files the task names, files the
-  reviewer reads, task inputs, declared tests, observation checks, and results of checks you
-  approved — read on your machine by FinishUP's workspace agent within the usual limits.
-- **Hook observations carry what your agent saw and did.** From Codex, and from Claude Code or
-  Cursor once you turn on content capture for a project, they can hold your prompts, the agent's
-  messages, and tool inputs and outputs, which can name file paths on your machine and hold the
-  contents of files the agent read, even outside your project or the folders you list for that
-  server. They go unchanged to every such server, in local or listed mode alike (below): a server in
-  listed mode receives them too, even when they name or hold files outside its listed folders.
-  The server keeps them as FinishUP on your machine would. The confirmation you give when
-  adding or choosing a server says so first (disclosure 2); a server confirmed under an earlier
-  disclosure is used again only after you confirm the current one. To keep this content on your
-  machine: for Claude Code and Cursor, leave content capture off (`finishup observe
-  content-disable`) or do not give observation consent for that project. Codex hook content comes
-  with observation consent itself, so turning content capture off does not stop it: only
-  withholding that consent for the project keeps it here, and revoking it (`finishup observe
-  revoke`) stops further capture.
-- **What does not:** the project folder's path as its name (a path can still appear inside what
-  your agents write and inside hook observations, above), your vault passphrase, the server's API
-  key, and the unlock, consent, and owner-view prompts, which run only on the server's own
-  machine.
-- **Outside your project, you choose what it may read.** Each such server reads outside your
-  project folder either as FinishUP on this computer would (local mode) or only beneath folders
-  you list for it (listed mode), chosen when you add it. A folder you list for a server with
-  `finishup server folders add`, after typing its name in a terminal you are typing in, lets it
-  read the files a task names there in either mode, even where the server's own privacy policy
-  admits no folder for task inputs; that policy still decides what may be sent on for AI-powered
-  review. The mode limits only what the server reads, not what your hooks deliver: hook
-  observations (above) carry what your agent itself read, in either mode. The list stays on this computer and is never sent to
-  the server; removing a folder applies from the server's next read, to the copies of files there
-  that FinishUP kept when a task started too, though a review the server has already prepared may
-  still send what it read there.
-- **The server's policy governs AI-powered review.** Whether anything is sent on to an AI-powered
-  review provider is decided by the server's own privacy policy, repository permissions, and
-  never-send fence, which apply minimization, redaction, and scanning there before any external
-  disclosure, exactly as on one machine.
-- **Credentials.** A web server's API key is kept in your system's credential store, or in a file
-  only you can read where none is usable; it never appears in a command line, an environment
-  variable, a settings file, a log, or anything an agent can read. Software running as your own
-  account can read it, as it can read other owner-only files.
-- **Zero-network mode and such a server are never in force together.** While your policy forbids
-  all network use, no such server can be added or chosen, and anything still pointed at one is
-  refused at its next connection, before anything is sent (a connection already open is not cut). While one is chosen, new FinishUP commands do not change this
-  computer's policy (they refuse, or change the chosen server's policy instead); if FinishUP that
-  was already running here would turn the mode on anyway, it asks first: switch to this
-  computer's own FinishUP and make the change, or cancel it and keep the server (Enter or Ctrl-C
-  cancels). It never switches on its own; without your terminal to ask in, the change is refused.
-  The fix is always `finishup server use local`; after it, restart open agent sessions, which keep
-  the server they started with. FinishUP remembers what this computer last reported, so the
-  setup, server status and terminal views can say so even while this computer's FinishUP service
-  is stopped or locked.
-- **Receipts say so, with two exceptions for agents.** A text or markdown receipt from such a
-  server states, in its own workspace-evidence section, that workspace evidence was read on your
-  machine by the FinishUP workspace agent and attested over the connection, and, when hook
-  observations contributed, that the server did not verify the observation consent they came
-  with; that section reaches you and your agent on every host. A JSON receipt has no such section.
-  The `finishup` command and the terminal interface add the same lines when they show one, and so
-  does the text a Claude Code or Cursor agent reads, but two kinds of agent do not see them: a
-  Codex agent outside Codex's code mode (Codex hands it only the structured result), and any
-  agent that receives a long JSON receipt in pages. When the server cannot read how the task's
-  session was opened, every receipt, JSON included, says instead that it cannot tell where the
-  evidence was read; raw JSON output carries only that statement, as its `workspace_provenance`
-  member.
+FinishUP servers on another machine (over SSH), on the web (over HTTPS) or on a local port arrive
+in a later release. Until then `finishup server add` refuses them before it asks anything or
+connects anywhere, and a server that another FinishUP build recorded for one of them is never
+used. Before such a server can be used, this document will say what travels to it and what does
+not, and you will confirm each server yourself.
 
 ## How to inspect or report a privacy problem
 
@@ -401,8 +313,7 @@ answers are plain reviewed configuration you can read and edit; every terminal o
 and physical attempt leaves a local structural egress receipt; and the installation privacy
 catalog keeps encrypted proposal objects and their structural sidecars enumerable for the
 supported installation-data lifetime. No control surface is required to trust a summary: the
-receipts, catalog, and policy file are the evidence, and they live on the machine that runs your
-FinishUP service — your own, unless you chose a FinishUP server on another machine.
+receipts, catalog, and policy file are the evidence, and they live on your machine.
 
 If you believe FinishUP has disclosed, retained, or logged something these commitments forbid,
 treat it as a security report: use GitHub private vulnerability reporting or email
