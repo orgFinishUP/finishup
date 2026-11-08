@@ -46,7 +46,11 @@ from finishup.domain.compaction_recap import RECAP_CONTEXT_LIMIT, RecapFacts
 from finishup.domain.finishup_tools import FINISHUP_SCOPED_TOOL_PREFIXES
 from finishup.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from finishup.protocol.canonical import JsonValue, strict_json_parse
-from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import (
+    REMOTE_CONNECTION_PHASES,
+    ProtocolValueError,
+    PublicErrorCode,
+)
 from finishup.protocol.ids import IdKind, is_valid_id, new_id
 from finishup.protocol.models import OperationFailureModel, StatusRequest
 from finishup.service.client import connect_service
@@ -112,6 +116,9 @@ class StatusOutcome:
     kind: str
     mapping: LifecycleMapping | None = None
     replacement: StaleReplacement | None = None
+    # Set only for an ``unavailable`` read of a remote target (ADR-051): the closed remote phase
+    # the connection failed with, so the context names it and its directive.
+    phase: str | None = None
     # Set only for an ``active`` read made for a post-compaction start (ADR-044): the facts the
     # same status result carried, plus the declared deliverables when the second read answered.
     recap: RecapFacts | None = None
@@ -164,6 +171,65 @@ _LOCKED_CONTEXT: Final = (
     "FinishUP vault is locked for this mapped session; no live receipt can be promised."
     + render_hook_recovery_suffix("vault_locked")
 )
+# ADR-051: the selected server is on another machine. Its vault is unlocked there, never by a
+# local `service unlock`; no host or name is in either text.
+_REMOTE_LOCKED_CONTEXT: Final = (
+    "The selected FinishUP server's vault is locked for this mapped session; no live receipt "
+    "can be promised." + render_hook_recovery_suffix("remote_vault_locked")
+)
+
+
+def remote_refusal_context(phase: str) -> str:
+    """The hook text for a connection this computer refused before any dial (ADR-051 decision 8).
+
+    ``phase`` is one of ``targets.PRE_DIAL_REFUSALS`` (``zero_network_remote_selected``,
+    ``target_reauthorization_required``): not an outage of the server, so the text names the
+    closed reason, the registry directive (that nothing was sent, why, and the command the owner
+    runs in their own terminal) and its continuation token, as MCP ``start`` and the CLI do, and
+    never a hook budget that was not spent.
+    """
+
+    from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
+    from finishup.protocol.recovery import directive_for
+
+    token = REASON_CODE_CONTINUATIONS[phase]
+    directive = directive_for(token)
+    assert directive is not None
+    nudge = "" if directive.nudge is None else f" {directive.nudge}"
+    return (
+        f"FinishUP refused the selected server's connection before anything was sent ({phase}). "
+        f"{directive.directive}{nudge} Continuation: {token}. "
+    )
+
+
+def unavailable_context(phase: str | None) -> str:
+    """The SessionStart text for an unavailable service; a remote phase is named with its token."""
+
+    from finishup.client.targets import PRE_DIAL_REFUSALS
+
+    if phase in PRE_DIAL_REFUSALS:
+        return remote_refusal_context(phase).rstrip()
+    if phase not in REMOTE_CONNECTION_PHASES:
+        return _UNAVAILABLE_CONTEXT
+    if phase == "remote_auth_failed":
+        # The server was reached: it answered and refused the key.
+        return (
+            "The selected FinishUP server answered and refused this client's key for this mapped "
+            f"session ({phase}); no live receipt can be promised."
+            + render_hook_recovery_suffix(phase)
+        )
+    return (
+        f"The selected FinishUP server is unavailable for this mapped session ({phase}); no "
+        "live receipt can be promised." + render_hook_recovery_suffix(phase)
+    )
+
+
+def locked_context() -> str:
+    """The SessionStart text for a locked vault: the remote server's own when one is selected."""
+
+    from finishup.client.targets import active_target_is_remote
+
+    return _REMOTE_LOCKED_CONTEXT if active_target_is_remote() else _LOCKED_CONTEXT
 
 
 def _stale_mapping_context(
@@ -1593,7 +1659,10 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        return StatusOutcome(_CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"))
+        return StatusOutcome(
+            _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
+            phase=error.phase if error.phase in REMOTE_CONNECTION_PHASES else None,
+        )
     except Exception:
         return StatusOutcome("unavailable")
     finally:
@@ -1873,7 +1942,7 @@ def handle_session_start(
                 )
                 return 0
             if kind == "locked":
-                _stdout_json(_context_output("SessionStart", _LOCKED_CONTEXT), stdout)
+                _stdout_json(_context_output("SessionStart", locked_context()), stdout)
                 return 0
             if kind == "retry":
                 _stdout_json(_context_output("SessionStart", _RETRY_CONTEXT), stdout)
@@ -1896,7 +1965,9 @@ def handle_session_start(
                     stdout,
                 )
                 return 0
-            _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
+            _stdout_json(
+                _context_output("SessionStart", unavailable_context(outcome.phase)), stdout
+            )
             return 0
     except Exception as exc:
         _note_oversize_hook_ingress(exc, "SessionStart", workspace=workspace, _state=_state)

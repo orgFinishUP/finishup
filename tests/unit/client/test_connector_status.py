@@ -1,0 +1,215 @@
+"""The connector's owner-only records: status generations, the stamped lock, the scrubbed env."""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from builders.server_targets import ambient_home
+from finishup.client.connector_status import (
+    ConnectorLock,
+    ConnectorLockBusy,
+    ConnectorStatus,
+    connector_environment,
+    connector_holder,
+    new_status,
+    read_connector_status,
+    spawn_connector,
+    stop_connector,
+    write_connector_status,
+)
+
+_STARTED = "2026-11-05T12:00:00.000Z"
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.fixture
+def root(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    with ambient_home(monkeypatch) as home:
+        target = home / "t_0000000a"
+        (target / "state").mkdir(mode=0o700, parents=True)
+        yield target
+
+
+def test_status_round_trips_and_moves_its_generation_only_on_a_change(root: Path) -> None:
+    first = new_status(None, "starting", None, started_at=_STARTED)
+    assert first.generation == 1
+    write_connector_status(root, first)
+    assert read_connector_status(root) == first
+    same = new_status(first, "starting", None, started_at=_STARTED)
+    assert same.generation == 1
+    ready = new_status(first, "ready", None, started_at=_STARTED)
+    down = new_status(ready, "unavailable", "remote_unreachable", started_at=_STARTED)
+    again = new_status(down, "unavailable", "remote_unreachable", started_at=_STARTED)
+    repaired = new_status(again, "ready", None, started_at=_STARTED)
+    assert [ready.generation, down.generation, again.generation, repaired.generation] == [
+        2,
+        3,
+        3,
+        4,
+    ]
+    stamped = (root / "state" / "connector-status.json").stat()
+    assert stamped.st_mode & 0o777 == 0o600
+
+
+def test_a_new_process_continues_the_roots_sequence(root: Path) -> None:
+    previous = ConnectorStatus(7, "stopped", "idle_timeout", None, 1, _STARTED)
+    assert previous.pid != os.getpid()
+    assert new_status(previous, "starting", None, started_at=_STARTED).generation == 8
+
+
+@pytest.mark.parametrize(
+    ("phase", "reason"),
+    [
+        ("ready", "remote_unreachable"),
+        ("unavailable", None),
+        ("unavailable", "lab.example unreachable"),
+        ("stopped", "remote_unreachable"),
+        ("listening", None),
+    ],
+)
+def test_status_holds_closed_tokens_only(phase: str, reason: str | None) -> None:
+    with pytest.raises(ValueError, match="connector_status_invalid"):
+        ConnectorStatus(1, phase, reason, None, os.getpid(), _STARTED)  # type: ignore[arg-type]
+
+
+def test_an_unsafe_or_damaged_status_reads_as_none(root: Path) -> None:
+    write_connector_status(root, new_status(None, "ready", None, started_at=_STARTED))
+    path = root / "state" / "connector-status.json"
+    path.chmod(0o644)
+    assert read_connector_status(root) is None
+    path.chmod(0o600)
+    path.write_bytes(b'{"schema":"yoetz.connector-status/1"}\n')
+    assert read_connector_status(root) is None
+    path.unlink()
+    assert read_connector_status(root) is None
+
+
+def test_the_lock_is_a_stamped_singleton(root: Path) -> None:
+    lock = ConnectorLock(root)
+    lock.acquire(version="0.1.0", schema_manifest_digest=_DIGEST)
+    try:
+        holder = connector_holder(root)
+        assert holder is not None
+        assert (holder.pid, holder.version, holder.schema_manifest_digest) == (
+            os.getpid(),
+            "0.1.0",
+            _DIGEST,
+        )
+        with pytest.raises(ConnectorLockBusy):
+            ConnectorLock(root).acquire(version="0.1.0", schema_manifest_digest=_DIGEST)
+        lock.assert_held()
+    finally:
+        lock.release()
+    assert connector_holder(root) is None
+    with pytest.raises(RuntimeError):
+        lock.assert_held()
+    assert stop_connector(root) is True
+
+
+def test_the_environment_carries_no_product_variable_or_secret(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    monkeypatch.setenv("FINISHUP_ISOLATED_ROOT", "/elsewhere")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/agent.sock")
+    environment = connector_environment(root)
+    assert environment.get("SSH_AUTH_SOCK") == "/run/agent.sock"
+    assert "FINISHUP_ISOLATED_ROOT" not in environment
+    assert "OPENAI_API_KEY" not in environment
+    # The XDG base directories travel so the connector resolves its client's registry.
+    assert environment.get("XDG_STATE_HOME") == os.environ["XDG_STATE_HOME"]
+    assert set(environment) <= {
+        "DBUS_SESSION_BUS_ADDRESS",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOGNAME",
+        "PATH",
+        "SSH_AUTH_SOCK",
+        "TMPDIR",
+        "USER",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+    }
+
+
+def test_the_environment_lets_the_platform_keyring_find_the_session_bus(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """``server login`` stores an HTTPS key in the Secret Service on a Linux desktop; the
+    connector reads it under its scrubbed environment, where the keyring's D-Bus client must
+    still find the session bus (it reads only ``DBUS_SESSION_BUS_ADDRESS``)."""
+
+    import subprocess
+    import sys
+
+    pytest.importorskip("jeepney")
+    address = "unix:path=/run/user/1000/bus"
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", address)
+    environment = connector_environment(root)
+    assert environment.get("DBUS_SESSION_BUS_ADDRESS") == address
+    found = subprocess.run(  # noqa: S603 - fixed interpreter and program
+        (
+            sys.executable,
+            "-I",
+            "-c",
+            "from jeepney.bus import find_session_bus; print(find_session_bus())",
+        ),
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert found.returncode == 0
+    assert found.stdout.strip() == b"/run/user/1000/bus"
+
+
+def _process_state(pid: int) -> str | None:
+    """The kernel's one-letter state of ``pid`` (``Z`` for a zombie), ``None`` once it is gone."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    return stat.rsplit(")", 1)[1].split()[0]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads the kernel's /proc")
+def test_a_spawned_connector_that_another_process_stops_is_reaped_at_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RE-3: a bridge's connector stopped by a switch or zero-network never stays <defunct>.
+
+    The spawning process drops the handle, as every caller does, and keeps running; the stop comes
+    from elsewhere (here the test signals the one pid it spawned, as ``stop_connector`` signals the
+    stamped one). The child must be reaped while this process lives, not when it exits.
+    """
+
+    import finishup.client.connector_status as connector_status
+
+    def paused(_root: Path) -> tuple[str, ...]:
+        return (sys.executable, "-c", "import signal; signal.pause()")
+
+    monkeypatch.setattr(connector_status, "_connector_command", paused)
+    process = spawn_connector(root)
+    pid = process.pid
+    del process
+    assert _process_state(pid) not in {None, "Z"}
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 10.0
+    state = _process_state(pid)
+    while state is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+        state = _process_state(pid)
+    assert state is None, f"connector child left in state {state}"

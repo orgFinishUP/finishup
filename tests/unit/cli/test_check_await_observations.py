@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -141,3 +143,70 @@ def test_mcp_check_tool_advertises_the_optional_flag() -> None:
     assert flag["type"] == "boolean"
     assert "instead of polling status" in flag["description"]
     assert "await_observations" not in cast(list[str], schema.get("required", []))
+
+
+_CLAIM_BOUND_UNAVAILABLE = (
+    "Hook observations awaited: unavailable (the server cannot wait for observations still on "
+    "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
+    "the project folder first, then check again without --await-observations)"
+)
+
+
+def test_a_claim_bound_unavailable_wait_names_the_real_cause_and_the_fix() -> None:
+    """ADR-051 decision 12: over a claim-bound connection the rows wait in this computer's outbox,
+    which the server cannot read; the local outbox is fine, so the line must not say otherwise."""
+
+    wire = _result_wire({"state": "unavailable", "pending_count": "0"})
+    success = CheckResult.model_validate(wire).root
+    assert isinstance(success, CheckSuccessModel)
+    claimed = render_human_check(success, claim_bound=True)
+    assert _CLAIM_BOUND_UNAVAILABLE in claimed
+    assert "local outbox not readable" not in claimed
+    # A claim-bound wait is always unavailable, so the fix must not send the owner back to a
+    # check that waits: after the drain, the check that clears the line is one without the flag.
+    assert "then check again without --await-observations)" in claimed
+    # A local connection's unavailable wait keeps its own cause.
+    assert "unavailable (local outbox not readable)" in render_human_check(success)
+    # Other states read the same either way.
+    for awaited in ({"state": "complete", "pending_count": "0"},):
+        other = CheckResult.model_validate(_result_wire(awaited)).root
+        assert isinstance(other, CheckSuccessModel)
+        assert render_human_check(other, claim_bound=True) == render_human_check(other)
+
+
+class _ClaimClient(_Client):
+    def __init__(self, result: CheckResult, binding: str) -> None:
+        super().__init__(result)
+        self.workspace_binding = binding
+        self.workspace_handle = "client:0123456789abcdef" if binding == "client_claim" else None
+        self.service_instance_id = "svc_00000000-0000-4000-8000-0000000000e4"
+        self.transport = "ssh"
+
+
+@pytest.mark.parametrize("binding", ["client_claim", "local_path"])
+def test_the_check_command_says_which_cause_by_its_connection(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], binding: str
+) -> None:
+    client = _ClaimClient(
+        CheckResult.model_validate(_result_wire({"state": "unavailable", "pending_count": "0"})),
+        binding,
+    )
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    code = asyncio.run(
+        module._call_workflow(  # pyright: ignore[reportPrivateUsage]
+            "check",
+            CheckRequest,
+            None,
+            json.dumps(_REQUEST),
+            False,
+            None,
+            await_observations=True,
+        )
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    if binding == "client_claim":
+        assert _CLAIM_BOUND_UNAVAILABLE in out
+    else:
+        assert "unavailable (local outbox not readable)" in out

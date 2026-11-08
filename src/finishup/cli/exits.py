@@ -89,6 +89,7 @@ LIFECYCLE_PUBLIC_CODES: Final = MappingProxyType(
         "session_monitor_unavailable": PublicErrorCode.SERVICE_UNAVAILABLE,
         "human_authorization_required": PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
         "human_authorization_stale": PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+        "target_root_is_remote": PublicErrorCode.SERVICE_UNAVAILABLE,
     }
 )
 
@@ -215,6 +216,12 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "tty, in the foreground process group). From an agent session run "
             "'finishup consent prepare <operation>' then 'finishup consent authorize' instead"
         ),
+        # A passphrase rotation refused at open while the service is ready or unlocking (#492
+        # review).
+        "credential_store_check_in_progress": (
+            "the service is still finishing its latest unlock or the credential-store check after "
+            "it, so the passphrase was not changed and nothing was stored; try again in a moment"
+        ),
         "human_authority_unavailable": (
             "no verified foreground console was found for this review; run "
             "'finishup consent review' directly on a local terminal"
@@ -288,6 +295,11 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         ),
         "service_draining": (
             "the local service is shutting down; wait for it to exit, then start it again"
+        ),
+        "target_root_is_remote": (
+            "this FinishUP root belongs to a server target on another machine, so no local "
+            "service runs in it; start the service on the server host, or select this "
+            "computer's server with 'finishup server use local'"
         ),
         "storage_unsafe": (
             "the local FinishUP observation store has an unsafe file or path shape; repair its "
@@ -398,8 +410,10 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "FinishUP will not choose one and nothing was read or changed; set both to the same "
             "root, or unset YOETZ_ISOLATED_ROOT, then retry. No instance needs to be disposed"
         ),
-        # Two sources raise this token: the isolation-root variable (either spelling), or, with
-        # the variable unset, this runtime's pin naming a root that no longer exists. A pinned
+        # Three sources raise this token: the isolation-root variable (either spelling), with the
+        # variable unset this runtime's pin naming a root that no longer exists, and with neither
+        # the server selection (ADR-051) naming a server target whose folder is missing or unsafe
+        # here, including one removed since an open agent session started with it. A pinned
         # runtime never falls back to the everyday installation (#604), so the remedy names the
         # action for each source.
         "isolation_root_invalid": (
@@ -410,7 +424,10 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "retry. If neither is set, this runtime is pinned to an instance root that is gone "
             "and will not fall back to the everyday installation; recreate the instance, or run "
             "'finishup instance dispose --root <root>' with the root given when the instance was "
-            "provisioned to remove the stale pin"
+            "provisioned to remove the stale pin. If this runtime is not pinned either, the "
+            "FinishUP server chosen on this computer, or the one an open agent session started "
+            "with, was removed or its folder is damaged: run 'finishup server use local' (or "
+            "'finishup server use NAME'), then restart open agent sessions"
         ),
         # Ambient roots exist under both product names, so neither is chosen (ADR-048). Nothing
         # is moved or merged automatically: recorded data is never rewritten. A settings file

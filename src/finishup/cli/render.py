@@ -7,20 +7,30 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Final, cast
 
+from finishup.client.attribution import (
+    ServiceAttribution,
+    attribution_lines,
+    coverage_hook_observed,
+)
 from finishup.domain.check_totals import render_check_totals
 from finishup.domain.findings import SELF_VERIFIED_GUIDANCE
 from finishup.domain.receipts import (
     COORDINATOR_FAILURE_LIMITATION,
     DEFERRED_BEFORE_FIRST_EDIT_TEXT,
+    OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE,
     UNRESOLVED_VERIFICATION_GAP,
     UNRESOLVED_VERIFICATION_LIMITATION,
+    WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     check_time_change_gap_sentence,
     historical_gaps_from_wire,
+    kept_back_from_wire,
     limitations_name_coordinator_failure,
+    outside_reads_kept_back_sentence,
     privacy_block_sentence,
     review_deferred_before_first_edit,
     semantic_redacted_value_agent_lines,
     semantic_redacted_value_text,
+    workspace_provenance_unknown_block,
 )
 from finishup.domain.review_guidance import review_guidance_line
 from finishup.domain.review_input_render import (
@@ -419,8 +429,24 @@ def _render_overall_next(
     return f"Overall next [{next_step.status}]: {action}{targets}{endpoint}.{predicted}"
 
 
-def render_human_check(result: CheckSuccessModel) -> str:
-    """Render an exact check verdict and bounded AI-powered review status."""
+# ADR-051 decision 12: over a claim-bound connection a check that asked to await observations
+# always reports the wait ``unavailable`` because the rows wait in this computer's outbox, which
+# the server cannot read; this computer's own outbox is fine. Fixed words: what happened, why, and
+# the fix that clears it: deliver the rows, then check without asking the server to wait, since a
+# check that asks again reports the same state.
+CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE: Final = (
+    "Hook observations awaited: unavailable (the server cannot wait for observations still on "
+    "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
+    "the project folder first, then check again without --await-observations)"
+)
+
+
+def render_human_check(result: CheckSuccessModel, *, claim_bound: bool = False) -> str:
+    """Render an exact check verdict and bounded AI-powered review status.
+
+    ``claim_bound`` is True when the check went over a connection to a server on another machine
+    (``workspace_binding == "client_claim"``), so an unavailable observation wait names that cause.
+    """
 
     if type(result) is not CheckSuccessModel:
         raise TypeError("check_result_invalid")
@@ -481,6 +507,8 @@ def render_human_check(result: CheckSuccessModel) -> str:
                 f"Hook observations awaited: bounded_timeout ({int(awaited.pending_count)} "
                 "still pending; the check used the record as it stood)"
                 if awaited.state == "bounded_timeout"
+                else CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE
+                if claim_bound
                 else "Hook observations awaited: unavailable (local outbox not readable)"
             ),
         )
@@ -887,8 +915,14 @@ def _status_task_lifecycle_lines(result: StatusSuccessModel) -> tuple[str, ...]:
     return (line,) if line else ()
 
 
-def render_human_status(result: StatusSuccessModel) -> str:
-    """Render current structural status without dumping the ledger."""
+def render_human_status(
+    result: StatusSuccessModel, *, attribution: ServiceAttribution | None = None
+) -> str:
+    """Render current structural status without dumping the ledger.
+
+    ``attribution`` is the connection's (``finishup.client.attribution``): a claim-bound
+    connection's status ends with the fixed workspace-evidence line and the producing service.
+    """
 
     if type(result) is not StatusSuccessModel:
         raise TypeError("status_result_invalid")
@@ -1140,6 +1174,7 @@ def render_human_status(result: StatusSuccessModel) -> str:
         lines.append(DEFERRED_BEFORE_FIRST_EDIT_TEXT)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     lines.extend(_check_time_change_sentences(tuple(dict.fromkeys(gaps))))
+    lines.extend(attribution_lines(attribution))
     return "\n".join(lines)
 
 
@@ -1219,8 +1254,21 @@ def _render_lineage(page: StatusLineagePageModel) -> list[str]:
     return lines
 
 
-def render_human_receipt(result: ReceiptSuccessModel) -> str:
-    """Render the receipt conclusion without claiming stronger assurance."""
+def render_human_receipt(
+    result: ReceiptSuccessModel, *, attribution: ServiceAttribution | None = None
+) -> str:
+    """Render the receipt conclusion without claiming stronger assurance.
+
+    ``attribution`` is the connection's (``finishup.client.attribution``): a claim-bound
+    connection's receipt ends with the fixed workspace-evidence line, unless the service's own
+    text already carries it, and the producing service.
+
+    A receipt whose ``workspace_provenance`` says the provenance is unknown (decision D4) shows
+    the fixed "Workspace evidence" section for its ``reason`` saying what happened, why it
+    matters, and what to do for the passing cause or why that cause lasts, unless its
+    text already carries it (a JSON receipt, or one whose text was withheld, has no such text);
+    the connection's "read on the client machine" line is then left out.
+    """
 
     if type(result) is not ReceiptSuccessModel:
         raise TypeError("receipt_result_invalid")
@@ -1259,6 +1307,14 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
 
             lines.append("Verification coverage (agent-declared)")
             lines.extend(verification_coverage_wire_lines(cast(Mapping[str, object], declared)))
+        kept_back = kept_back_from_wire(document)
+        if kept_back is not None and result.human_text is None:
+            # ADR-051 decision 5: a JSON receipt says how many files listed mode kept back and
+            # the owner's two ways out; markdown and text carry the same in ``human_text``.
+            lines.append(
+                f"{outside_reads_kept_back_sentence(kept_back)}"
+                f" {OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE}"
+            )
         historical = historical_gaps_from_wire(document)
         if historical:
             lines.append(
@@ -1282,9 +1338,23 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
             )
     if result.suppressed_finding_count:
         lines.append(f"Suppressed findings: {result.suppressed_finding_count}")
+    provenance = result.workspace_provenance
+    provenance_unknown = provenance is not None
+    if provenance is not None and WORKSPACE_PROVENANCE_UNKNOWN_LINE not in shown:
+        # ADR-051 decision D4: fixed words for the result's closed reason only; a text or
+        # markdown receipt already ends with them.
+        lines.append(workspace_provenance_unknown_block(markdown=False, reason=provenance.reason))
     if result.agent_closing_prompt is not None:
         # #1240 D5: the same closing line the MCP reply carries (fixed words and counts only).
         lines.append(result.agent_closing_prompt)
+    lines.extend(
+        attribution_lines(
+            attribution,
+            shown=shown,
+            provenance_unknown=provenance_unknown,
+            hook_observed=coverage_hook_observed(result.coverage.publication_channels),
+        )
+    )
     return "\n".join(lines)
 
 

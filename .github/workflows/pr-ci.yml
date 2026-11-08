@@ -330,8 +330,10 @@ jobs:
             paths: tests/unit/adapters
           - name: application
             paths: tests/unit/application
-          - name: cli-domain
-            paths: tests/unit/cli tests/unit/domain tests/unit/config tests/unit/dogfood
+          - name: cli
+            paths: tests/unit/cli
+          - name: domain-config
+            paths: tests/unit/domain tests/unit/config tests/unit/dogfood
           - name: conformance-observation
             paths: tests/conformance/observation
           - name: protocol-property-conformance
@@ -407,8 +409,10 @@ jobs:
             paths: tests/unit/adapters
           - name: application
             paths: tests/unit/application
-          - name: cli-domain
-            paths: tests/unit/cli tests/unit/domain tests/unit/config tests/unit/dogfood
+          - name: cli
+            paths: tests/unit/cli
+          - name: domain-config
+            paths: tests/unit/domain tests/unit/config tests/unit/dogfood
           - name: conformance-observation
             paths: tests/conformance/observation
           - name: protocol-property-conformance
