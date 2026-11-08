@@ -4658,7 +4658,10 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
   Every host's SessionStart hook (mapped and unmapped) and the terminal menu (its home line and
   the actions that need the service) keep that phase and name it with its directive (continuation
   `remote_target_no_local_service`, `finishup server use local` as the way back), never a service
-  still to start or `finishup service run`.
+  still to start or `finishup service run`. An MCP tool result keeps the phase as
+  `safe_details.phase` beside its continuation (the normalizer admits exactly the three remote-root
+  phases, `REMOTE_ROOT_REFUSAL_PHASES`), and its text channel reads `Reason: service_unavailable
+  (phase: <phase>).`
 - Setup refuses a remote root at its entry (`cli.setup._remote_root_refused`, reading
   `targets.active_remote_refusal()`), whether a selection or an isolation variable names it:
   `setup run` in every form, bare `finishup` and the menu's setup wizard (all through

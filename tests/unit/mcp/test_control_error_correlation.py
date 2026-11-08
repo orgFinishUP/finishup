@@ -534,19 +534,50 @@ def test_start_timeout_names_a_slow_start_not_a_supervisor_or_lifecycle_command(
     ["target_root_is_remote", "zero_network_remote_selected", "target_reauthorization_required"],
 )
 def test_a_refused_remote_root_names_its_continuation_never_a_local_service(phase: str) -> None:
-    """MCP names a remote root's refusal and its continuation, never 'finishup service run'."""
+    """MCP names a remote root's refusal and its continuation, never 'finishup service run'.
 
-    from finishup.protocol.recovery import continuation_for_reason
+    The phase is kept where an agent reads it: in the final structured details (the normalizer
+    admits exactly the three remote-root phases) and in the native text, which never carries the
+    free-form message.
+    """
+
+    from finishup.protocol.recovery import continuation_for_reason, directive_for
 
     result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
         ControlError("service_unavailable", retryable=True, phase=phase),
         request_id=_REQUEST,
         operation="start",
     )
-    structured = cast(dict[str, object], result.structuredContent)
-    text = json.dumps(structured)
-    assert "service run" not in text
-    assert phase in text
     continuation = continuation_for_reason(phase)
     assert continuation is not None
-    assert continuation in text
+    error = _error_of(result)
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["safe_details"] == {
+        "continuation": continuation,
+        "phase": phase,
+        "reason_code": "service_unavailable",
+    }
+    text = cast(str, getattr(result.content[0], "text"))
+    assert f" Reason: service_unavailable (phase: {phase})." in text
+    directive = directive_for(continuation)
+    assert directive is not None
+    assert f"Continuation: {continuation}. {directive.directive}" in text
+    assert "service run" not in json.dumps(result.structuredContent) + text
+
+
+def test_only_the_remote_root_phases_are_admitted_among_the_remote_phases() -> None:
+    """A remote connection phase outside the three refusals stays out of the details."""
+
+    from finishup.protocol.errors import (
+        REMOTE_CONNECTION_PHASES,
+        REMOTE_ROOT_REFUSAL_PHASES,
+        normalize_safe_details,
+    )
+
+    assert REMOTE_ROOT_REFUSAL_PHASES == frozenset(
+        {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
+    )
+    for phase in REMOTE_CONNECTION_PHASES:
+        kept = normalize_safe_details({"phase": phase}).get("phase")
+        assert kept == (phase if phase in REMOTE_ROOT_REFUSAL_PHASES else None)

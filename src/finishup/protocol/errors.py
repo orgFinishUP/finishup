@@ -16,6 +16,7 @@ __all__ = [
     "PROTOCOL_REASON_CODES",
     "REASON_CODE_CONTINUATIONS",
     "REMOTE_CONNECTION_PHASES",
+    "REMOTE_ROOT_REFUSAL_PHASES",
     "SAFE_DETAIL_KEYS",
     "SERVICE_HANDSHAKE_PHASES",
     "SERVICE_START_TIMEOUT_PHASE",
@@ -485,6 +486,13 @@ REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
         "zero_network_remote_selected",
     }
 )
+# The three of those a client refuses a remote target's root with before anything is sent or
+# started in this release (``targets.REMOTE_ROOT_REFUSALS``, ADR-051): the only remote phases a
+# ``phase`` safe detail admits, so a structured error and its text name which refusal it was.
+REMOTE_ROOT_REFUSAL_PHASES: frozenset[str] = frozenset(
+    {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
+)
+assert REMOTE_ROOT_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
 # #1244: the four delivery_* continuation refusals; #1190: review_mode_parent_is_check; ADR-051:
 # the twelve workspace-binding, server-target and remote-connection reasons, plus the stale
 # disclosure refusal (``target_reauthorization_required``), the zero-network refusal
@@ -1024,10 +1032,12 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         # stages (``finishup.service.startup_failure``) name where a spawned service failed (#1040).
         if value in {"replay", "model", "digest", "projection", "handler", "unknown"}:
             return value
+        # A remote root refused before anything was sent (ADR-051) names which refusal it was.
         if (
             value in SERVICE_STARTUP_PHASES
             or value in SERVICE_HANDSHAKE_PHASES
             or value == SERVICE_START_TIMEOUT_PHASE
+            or value in REMOTE_ROOT_REFUSAL_PHASES
         ):
             return value
         return None

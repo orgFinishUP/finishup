@@ -62,6 +62,7 @@ from finishup.config.paths import (
     verify_private_local_bundle,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from finishup.protocol.errors import REMOTE_ROOT_REFUSAL_PHASES
 
 __all__ = [
     "CLAIM_SALT_BYTES",
@@ -183,8 +184,10 @@ PRE_DIAL_REFUSALS: Final = frozenset(
 # Every closed reason a remote target's root is refused with before anything is sent or started
 # in this release (``active_remote_refusal``, and the connect seams of ``finishup.service.client``):
 # the two above, and ``target_root_is_remote`` for any other remote root, since this release
-# reaches no server on another machine. Each is a protocol reason code with its own directive.
+# reaches no server on another machine. Each is a protocol reason code with its own directive,
+# and the one remote ``phase`` a structured error keeps (``protocol.errors``).
 REMOTE_ROOT_REFUSALS: Final = PRE_DIAL_REFUSALS | frozenset({"target_root_is_remote"})
+assert REMOTE_ROOT_REFUSALS == REMOTE_ROOT_REFUSAL_PHASES
 
 
 class TargetError(Exception):

@@ -63,6 +63,7 @@ from finishup.legacy_names import LAUNCHER_NAME, LAUNCHER_NAMES
 from finishup.mcp.errors import VALIDATION_REASON_TOKENS, field_repair_hint
 from finishup.protocol.canonical import JsonValue, ensure_canonical_value
 from finishup.protocol.errors import (
+    REMOTE_ROOT_REFUSAL_PHASES,
     SERVICE_STARTUP_PHASES,
     PublicErrorCode,
     normalize_safe_details,
@@ -1361,6 +1362,10 @@ def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
         # The stage a spawned service failed at (#1040); its exception class and origin are in
         # the record the correlation_id resolves.
         return f" Reason: {gated_reason} (stage: {gated_phase})."
+    if gated_phase in REMOTE_ROOT_REFUSAL_PHASES:
+        # Which refusal stopped a connection from a remote root before anything was sent
+        # (ADR-051); the continuation beside it names the owner's way back.
+        return f" Reason: {gated_reason} (phase: {gated_phase})."
     return f" Reason: {gated_reason}."
 
 
