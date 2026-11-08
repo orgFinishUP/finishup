@@ -4665,7 +4665,9 @@ sets are unchanged, but none can be added or selected, and no remote runtime is 
 - Setup refuses a remote root at its entry (`cli.setup._remote_root_refused`, reading
   `targets.active_remote_refusal()`), whether a selection or an isolation variable names it:
   `setup run` in every form, bare `finishup` and the menu's setup wizard (all through
-  `run_setup_wizard`), and the terminal interface's first run (`FinishUpRuntime.remote_root_refusal`).
+  `run_setup_wizard`), and the terminal interface's first run (`FinishUpRuntime.remote_root_refusal`,
+  asked on mount before the interface reads this computer's policy, a read that records its
+  answer, so nothing live is read or written).
   The phase (`target_root_is_remote`, `zero_network_remote_selected` or
   `target_reauthorization_required`) and its directive go to stderr with exit 20 before any
   discovery, question, registration or host-configuration write; stdout stays empty, so a `--json`

@@ -124,6 +124,8 @@ async def test_a_remote_root_stops_first_run_before_it_looks_or_asks(
         assert runtime.detections == 0
         assert runtime.applied == []
         assert app.markers_written == []  # type: ignore[attr-defined]
+        # Not even this computer's policy was asked: that live read records what it answers.
+        assert runtime.zero_network_reads == 0
 
 
 async def test_without_a_codex_installation_the_connect_option_is_disabled(

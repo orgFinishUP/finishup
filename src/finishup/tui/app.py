@@ -341,16 +341,24 @@ class FinishUpTui(App[int]):
         return self._stack[-1] if self._stack else None
 
     async def on_mount(self) -> None:
-        # Before any command can run: whether a remote server is still selected while this
-        # computer forbids network use, or last reported so (ADR-051 decision 8), for the header
-        # and ``/server``.
-        await self.runtime.refresh_zero_network_item()
+        # First run while this process's root is a server elsewhere stops before anything live
+        # is read or written (ADR-051, layer 1): not even this computer's policy is asked, since
+        # that read records what it answers, so "Nothing was changed" holds. The header then
+        # shows only what the target record says.
+        refused = self.first_run and self._remote_root_refused()
+        if not refused:
+            # Before any command can run: whether a remote server is still selected while this
+            # computer forbids network use, or last reported so (ADR-051 decision 8), for the
+            # header and ``/server``.
+            await self.runtime.refresh_zero_network_item()
         self.header_widget.set_state(
             version=__version__,
             project=str(self.runtime.project_root()),
             server=self.runtime.server_indicator(),
         )
         self.composer.focus_input()
+        if refused:
+            return
         self._flow = self.run_worker(
             self._first_run_flow() if self.first_run else self._resume_flow(),
             name="flow",
@@ -608,8 +616,9 @@ class FinishUpTui(App[int]):
 
         Every connection from such a root is refused before anything is sent (ADR-051, layer 1),
         so setup names that phase and its registry directive before it looks for agents, asks
-        anything or changes any agent's configuration, as ``finishup setup run`` does. The
-        interface stays open: ``/server`` switches to this computer's server.
+        anything or changes anything, as ``finishup setup run`` does. ``on_mount`` asks this
+        before any live read or write, this computer's policy read included; the phase comes from
+        the target record and the last-reported policy marker alone. The interface stays open.
         """
 
         phase = self.runtime.remote_root_refusal()
@@ -632,8 +641,7 @@ class FinishUpTui(App[int]):
         return True
 
     async def _first_run_flow(self) -> None:
-        if self._remote_root_refused():
-            return
+        # A remote root never gets here: ``on_mount`` refused it first.
         detection = await self.runtime.detect()
         self._detection = detection
         self.say(Level.ACTIVE, "", render_welcome(self.body_width))

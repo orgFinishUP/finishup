@@ -318,8 +318,9 @@ kind without a record migration.
 - Setup refuses such a root at its entry with the same phase and directive (exit 20, stderr
   only): `setup run` in every form, bare `finishup` and the menu's setup wizard, and the terminal
   interface's first run, whether a selection or an isolation variable names the root. It looks
-  for no agent, asks nothing and registers or writes nothing; the connection guard stays as
-  well. `setup status`, which writes nothing, and `setup disconnect`, the way out, are not
+  for no agent, asks nothing and registers or writes nothing (the terminal interface does not even
+  read this computer's policy first, since that read records its answer); the connection guard
+  stays as well. `setup status`, which writes nothing, and `setup disconnect`, the way out, are not
   refused.
 - `server login` is refused with `remote_kind_unavailable`; `server logout` stays the offline way
   out (decision 7). `server login`, `server logout` and the `server folders` group are hidden from

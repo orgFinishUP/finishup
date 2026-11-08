@@ -199,6 +199,54 @@ def test_the_terminal_interface_reads_the_same_refusal(home: Path, refused: _Ref
     assert FinishUpRuntime().remote_root_refusal() == refused.phase
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_the_terminal_interface_first_run_asks_and_writes_nothing_live(
+    home: Path, refused: _Refused, monkeypatch: pytest.MonkeyPatch, anyio_backend: str
+) -> None:
+    """The real interface refuses its first run before this computer's policy is read.
+
+    That read asks the everyday service and records its answer beside the server registry, so a
+    refusal after it would say "Nothing was changed" over a write. Here the read answers as a
+    reachable service would (and records the answer); the refused first run never makes it.
+    """
+
+    from finishup.cli import zero_network_selection
+    from finishup.tui.app import FinishUpTui
+    from finishup.tui.runtime import FinishUpRuntime
+
+    # The real selection read (the suite answers "no selection" unless a test puts it back).
+    monkeypatch.setattr(
+        zero_network_selection,
+        "_selection_on_disk",
+        zero_network_selection.read_selection_on_disk,
+    )
+    asked: list[str] = []
+
+    def live_policy() -> str:
+        asked.append("everyday_network_state")
+        everyday_policy.record_reported_policy(zero_network=False, now=_AT)
+        return "network_permitted"
+
+    monkeypatch.setattr(zero_network_selection, "everyday_network_state", live_policy)
+    project = home / "project"
+    project.mkdir(mode=0o700)
+    marker = everyday_policy.read_marker()
+    before = _tree(home)
+
+    app = FinishUpTui(FinishUpRuntime(cwd=project), first_run=True)
+    async with app.run_test(size=(100, 34)) as pilot:
+        await pilot.pause()
+        shown = "\n".join("\n".join((event.title, *event.body)) for event in app.transcript.events)
+
+    assert "Setup did not start" in shown
+    assert "Setup stopped. Nothing was changed." in shown
+    assert "Welcome to FinishUP" not in shown
+    assert asked == []
+    assert everyday_policy.read_marker() == marker
+    assert _tree(home) == before
+
+
 def test_a_server_on_this_computer_is_never_refused(home: Path) -> None:
     """The everyday server and a named local one go on to setup's own steps, byte for byte."""
 
