@@ -1530,9 +1530,10 @@ none can be added or selected yet.
   workspace claim, and this computer's workspace agent serves the server's workspace reads.
   Outside the project folder it reads as the target's outside-read mode (`local` or `listed`)
   says; the owner chooses that mode on their own terminal, and no hook, MCP tool or CLI call in a
-  Codex session asks for it, the same on every host and with no registration change. A file
-  `listed` mode leaves unread is named on the receipt (`outside_reads_not_listed`), and receipts
-  carry the `client_attested` line.
+  Codex session asks for it, the same on every host and with no registration change. When
+  `listed` mode leaves files unread, the receipt states the omission code
+  (`outside_reads_not_listed`) and how many task inputs and declared tests were kept back, never
+  which file, and receipts carry the `client_attested` line.
 - **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
   and the outbox stay on this computer, and each row a remote target receives carries the client
   attestation. Host decision for content: Codex hook content is the profileless arm of observation
