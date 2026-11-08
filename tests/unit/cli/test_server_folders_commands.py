@@ -734,10 +734,12 @@ def test_status_text_and_json_show_the_mode_and_its_origin(
 
 
 def test_the_folder_refusal_names_exactly_what_is_refused() -> None:
-    """RE-8: the refusal and the guide name the rule itself, not "no hidden or system folder".
+    """RE-8: the refusal and ADR-051 name the rule itself, not "no hidden or system folder".
 
     Every system tree the input-root shape refuses and every home private tree is named; nothing
-    broader is promised, and a folder outside that list, such as ``/usr/lib``, is admitted.
+    broader is promised, and a folder outside that list, such as ``/usr/lib``, is admitted. The
+    user guide does not document ``server folders`` while remote server kinds are closed, so the
+    rule's written form is ADR-051's.
     """
 
     from finishup.adapters.home_project_reads import (
@@ -747,7 +749,9 @@ def test_the_folder_refusal_names_exactly_what_is_refused() -> None:
     from finishup.domain.privacy import SYSTEM_DIRECTORY_PREFIXES
 
     message = server_cli.refusal_message(server_cli.ServerCommandRefused("folder_invalid"))
-    guide = (Path(__file__).parents[3] / "docs/usage/servers.md").read_text()
+    guide = (
+        Path(__file__).parents[3] / "docs/adr/ADR-051-client-server-cut-and-server-targets.md"
+    ).read_text()
     for text in (message, guide):
         assert "system folder" not in text
         assert "hidden or system" not in text
