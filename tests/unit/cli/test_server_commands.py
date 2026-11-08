@@ -15,6 +15,7 @@ runs with one.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import replace
@@ -148,13 +149,20 @@ def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
 
     listing = _invoke("--help")
     assert listing.exit_code == 0, listing.output
-    commands = {
-        line.split()[1]
-        for line in listing.stdout.splitlines()
-        if line.startswith("│ ") and len(line.split()) > 1
+    # The registry, not the rendered panel: help is box-drawn or plain depending on the terminal.
+    shown = {
+        command.name
+        for command in server_cli.server_app.registered_commands
+        if command.name is not None and not command.hidden
+    } | {
+        group.name
+        for group in server_cli.server_app.registered_groups
+        if group.name is not None and not group.hidden
     }
-    assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= commands
-    assert not commands & {"login", "logout", "folders"}
+    assert shown == {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"}
+    words = set(re.findall(r"[a-z]+", listing.stdout))
+    assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
+    assert not words & {"login", "logout", "folders"}
 
     add = _invoke("add", "--help")
     assert add.exit_code == 0, add.output
