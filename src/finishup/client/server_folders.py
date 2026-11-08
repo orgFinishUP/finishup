@@ -19,9 +19,9 @@ claim-bound sessions, even where the server's own input-root policy names no roo
 (maintainer decision, 2026-11-07): in ``local`` mode beside the server's own roots, in ``listed``
 mode alone.
 
-The owner chooses the mode when adding the target (``finishup server add``, on the trusted
-console, or ``--outside-reads``), and ``finishup server folders mode NAME local|listed`` changes
-it. There is no default per kind. An HTTPS target at an official FinishUP endpoint
+The owner chooses the mode with ``finishup server folders mode NAME local|listed``; adding a
+server elsewhere asks it too, once such a server can be added (the remote kinds are closed in
+this release). There is no default per kind. An HTTPS target at an official FinishUP endpoint
 (``OFFICIAL_ENDPOINT_HOSTS``, matched by exact hostname, and only while it trusts the system
 certificate store) is not asked and is ``local`` while its owner has recorded no mode. Any other
 target with no mode recorded is ``listed`` (``not_chosen``), and a record that cannot be read is
@@ -117,8 +117,8 @@ type OutsideReadMode = Literal["local", "listed"]
 type OutsideReadSource = Literal["owner", "official_endpoint", "not_chosen", "unreadable"]
 OUTSIDE_READ_MODES: Final[tuple[OutsideReadMode, ...]] = ("listed", "local")
 
-# What the owner is asked at 'server add' (the trusted console) and in the terminal interface's
-# '/server' add flow, then one plain line per mode. Fixed text, the same for every remote kind.
+# What the owner is asked when a server elsewhere is added (closed in this release), then one plain
+# line per mode. Fixed text, the same for every remote kind.
 OUTSIDE_READ_QUESTION: Final = "What may this server read outside your projects on this computer?"
 OUTSIDE_READ_MODE_LINES: Final[Mapping[OutsideReadMode, str]] = MappingProxyType(
     {
@@ -187,7 +187,8 @@ def official_address(
 
     Only an ``https`` target whose exact hostname is in ``OFFICIAL_ENDPOINT_HOSTS`` and that
     trusts the system certificate store: one with its own ``ca_file`` or ``tls_pin`` never counts
-    by hostname. ``server add`` asks this before the target exists, to skip the mode question.
+    by hostname. Adding such a target asks this before the target exists, to skip the mode
+    question.
     """
 
     if kind != "https" or base_url is None or ca_file is not None or tls_pin is not None:
@@ -477,8 +478,8 @@ def set_mode(root: Path, target_id: str, mode: OutsideReadMode) -> bool:
     """Record ``mode`` as the owner's choice for the target at ``root``; False when it already
     was. The listed folders are kept.
 
-    A recorded mode is the owner's own: ``server add`` records the answer to its question (or
-    ``--outside-reads``), and ``finishup server folders mode`` changes it. A recorded ``local``
+    A recorded mode is the owner's own: ``finishup server folders mode`` records it (and adding a
+    server elsewhere records the answer to its question, once the remote kinds open). A recorded ``local``
     widens what the server reads, so callers record it only after the owner typed the target's
     name on the trusted console, an official endpoint's included, whose ``local`` would otherwise
     follow the reviewed list of official hosts. A damaged record is refused, never replaced:

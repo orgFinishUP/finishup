@@ -1,9 +1,11 @@
-"""``/server`` lists server targets, shows status, and switches with the CLI's confirmation.
+"""``/server`` lists server targets, shows status, and switches as ``finishup server use`` does.
 
 ADR-051: the header names a selected target by kind and id only; the everyday server leaves the
-header exactly as before. Switching to a remote target hands the terminal to the same trusted
-console confirmation ``finishup server use`` uses; ``add``, ``remove`` and ``login`` belong on the
-command line, so ``/server`` prints those commands. Server-host commands refuse a remote target.
+header exactly as before. The remote kinds are closed in this release: ``/server`` offers to add
+only a server on this computer, and a remote record (one another build wrote) is shown as not
+available and refused with ``remote_kind_unavailable`` when chosen, the selection unchanged.
+``add`` and ``remove`` belong on the command line, so ``/server`` prints those commands.
+Server-host commands refuse a remote target.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from builders.tui_runtime import FakeRuntime
+from builders.tui_runtime import REMOTE_USE_REFUSED, FakeRuntime
 from finishup.cli.command_scope import ServerHostRequired
 from finishup.tui.app import FinishUpTui
 from finishup.tui.commands import command_named
@@ -22,7 +24,7 @@ from finishup.tui.models import ServerRow, ServerSwitch
 from finishup.tui.render import render_session_header
 from finishup.tui.runtime import RuntimeError_
 from finishup.tui.symbols import Level
-from finishup.tui.widgets.views import ApprovalView, BaseView, SelectionView
+from finishup.tui.widgets.views import BaseView, SelectionView
 
 pytestmark = pytest.mark.anyio
 
@@ -90,16 +92,30 @@ async def test_switching_to_a_named_local_server_needs_no_terminal_handoff() -> 
     assert isinstance(selection, SelectionView)
 
 
-async def test_switching_to_a_remote_server_hands_over_for_the_typed_confirmation() -> None:
+async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen() -> None:
+    """The remote kinds are closed in this release: "Use lab" asks for no confirmation and hands
+    nothing over; the refusal is reported with its reason and the selection is unchanged."""
+
     runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["use:lab", "approve"])
+    harness = _Harness(runtime, ["use:lab"])
 
-    await harness.app.command_server()
+    await harness.app._dispatch("server")  # pyright: ignore[reportPrivateUsage]
 
-    assert isinstance(harness.views[1], ApprovalView)
-    assert harness.handed_over == 1
-    assert runtime.server_uses == ["lab"]
-    assert runtime.server_indicator() == "ssh t_9f8e7d6c"
+    selection = harness.views[0]
+    assert isinstance(selection, SelectionView)
+    offered = {
+        option.key: option.description
+        for option in selection._all_options  # pyright: ignore[reportPrivateUsage]
+    }
+    assert offered["use:lab"] == "not available in this release"
+    assert offered["use:work"] == "local"
+    assert len(harness.views) == 1
+    assert harness.handed_over == 0
+    assert harness.header_refreshes == 0
+    assert runtime.server_indicator() is None
+    level, title, body = harness.said[-1]
+    assert (level, title) == (Level.BLOCKED, REMOTE_USE_REFUSED)
+    assert body[0] == "Reason: remote_kind_unavailable"
 
 
 _LEFT = (
@@ -152,147 +168,58 @@ async def test_a_left_connection_that_did_not_close_is_not_shown_as_done() -> No
     )
 
 
-async def test_declining_the_remote_switch_changes_nothing() -> None:
+async def test_remove_prints_the_cli_command_and_no_remote_only_change_is_offered() -> None:
+    """``login`` and ``folders`` act only on servers elsewhere, closed in this release: ``/server``
+    offers neither (the commands are hidden from ``finishup server --help`` too)."""
+
     runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["use:lab", "decline"])
-
-    await harness.app.command_server()
-
-    assert runtime.server_uses == []
-    assert harness.handed_over == 0
-    assert "The selected server is unchanged." in harness.titles
-
-
-@pytest.mark.parametrize(
-    ("choice", "command"),
-    [
-        ("remove", "finishup server remove NAME"),
-        ("login", "finishup server login NAME"),
-        ("folders", "finishup server folders add NAME"),
-        ("folders", "finishup server folders mode NAME local"),
-        ("folders", "finishup server folders mode NAME listed"),
-        # The repair of a damaged record, which '/server' status names (refusal-guide review).
-        ("folders", "finishup server folders remove NAME --all"),
-    ],
-)
-async def test_registry_changes_print_the_cli_command(choice: str, command: str) -> None:
-    runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, [choice])
+    harness = _Harness(runtime, ["remove"])
 
     await harness.app.command_server()
 
     level, title, body = harness.said[-1]
     assert (level, title) == (Level.OPTIONAL, "Run this in your shell")
-    assert any(command in line for line in body)
+    assert body == ("    finishup server remove NAME",)
     assert runtime.server_uses == []
+    selection = harness.views[0]
+    assert isinstance(selection, SelectionView)
+    keys = [option.key for option in selection._all_options]  # pyright: ignore[reportPrivateUsage]
+    assert keys == ["use:work", "use:lab", "status", "add", "remove"]
 
 
-async def test_adding_a_server_on_this_computer_prints_its_command() -> None:
-    runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["add", "add:local"])
-
-    await harness.app.command_server()
-
-    level, title, body = harness.said[-1]
-    assert (level, title) == (Level.OPTIONAL, "Run this in your shell")
-    assert "    finishup server add NAME --local" in body
-    assert not any("--outside-reads" in line for line in body)
-    assert len(harness.views) == 2  # no outside-read question for a server on this computer
-
-
-@pytest.mark.parametrize("answer", ["local", "listed"])
-async def test_adding_a_remote_server_asks_what_it_may_read_outside_your_projects(
-    answer: str,
+@pytest.mark.parametrize("official", [False, True])
+async def test_adding_offers_only_a_server_on_this_computer(
+    monkeypatch: pytest.MonkeyPatch, official: bool
 ) -> None:
-    """D2b: ``/server`` asks the question ``finishup server add`` asks, in the same words, and
-    the printed command carries the answer for every remote kind."""
-
-    from finishup.client.server_folders import OUTSIDE_READ_MODE_LINES, OUTSIDE_READ_QUESTION
-
-    runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["add", "add:remote", answer])
-
-    await harness.app.command_server()
-
-    question = harness.views[2]
-    assert isinstance(question, SelectionView)
-    assert question.title_text == OUTSIDE_READ_QUESTION
-    options = {option.key: option.description for option in question._all_options}  # pyright: ignore[reportPrivateUsage]
-    assert options == dict(OUTSIDE_READ_MODE_LINES)
-    level, title, body = harness.said[-1]
-    assert (level, title) == (Level.OPTIONAL, "Run this in your shell")
-    for address in ("ssh://user@host", "--port PORT", "https://host"):
-        assert f"    finishup server add NAME {address} --outside-reads {answer}" in body
-    assert any("type its name" in line for line in body)
-    assert runtime.server_uses == []
-
-
-async def test_no_official_service_is_offered_while_none_is_reviewed() -> None:
-    """``OFFICIAL_ENDPOINT_HOSTS`` is empty: the add flow offers no official service, and the
-    question names none."""
-
-    from finishup.client.server_folders import OFFICIAL_ENDPOINT_HOSTS
-
-    assert OFFICIAL_ENDPOINT_HOSTS == frozenset()
-    runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["add", "add:remote", "listed"])
-
-    await harness.app.command_server()
-
-    where, question = harness.views[1], harness.views[2]
-    assert isinstance(where, SelectionView) and isinstance(question, SelectionView)
-    keys = [option.key for option in where._all_options]  # pyright: ignore[reportPrivateUsage]
-    assert keys == ["add:local", "add:remote"]
-    assert not any("official" in line for line in question._body)  # pyright: ignore[reportPrivateUsage]
-
-
-async def test_an_official_service_is_not_asked_and_its_command_carries_no_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-051 decision 5: ``server add`` never asks an official FinishUP service and leaves its
-    ``local`` unrecorded, following the reviewed list; ``/server`` does the same, so it never
-    turns that into the owner's own recorded choice with ``--outside-reads``."""
+    """The remote kinds are closed in this release: the add flow offers "On this computer" and
+    nothing else, even while a reviewed official endpoint exists, and asks no outside-read
+    question; the printed command is the named local one."""
 
     from finishup.client import server_folders
 
-    monkeypatch.setattr(
-        server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example", "api.fu.example"})
-    )
+    if official:
+        monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
     runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, ["add", "add:official"])
+    harness = _Harness(runtime, ["add", "add:local"])
 
     await harness.app.command_server()
 
     where = harness.views[1]
     assert isinstance(where, SelectionView)
     keys = [option.key for option in where._all_options]  # pyright: ignore[reportPrivateUsage]
-    assert keys == ["add:local", "add:official", "add:remote"]
-    assert len(harness.views) == 2  # no outside-read question
+    assert keys == ["add:local"]
     level, title, body = harness.said[-1]
     assert (level, title) == (Level.OPTIONAL, "Run this in your shell")
-    assert body[:2] == (
-        "    finishup server add NAME https://api.fu.example",
-        "    finishup server add NAME https://fu.example",
-    )
+    assert body[0] == "    finishup server add NAME --local"
+    assert not any("ssh://" in line or "https://" in line or "--port" in line for line in body)
     assert not any("--outside-reads" in line for line in body)
-    assert any("mode local" in line for line in body)
+    assert len(harness.views) == 2  # no outside-read question
     assert runtime.server_uses == []
 
-    # The question for any other server says an official one is not asked.
-    asked = _Harness(FakeRuntime(servers=_ROWS), ["add", "add:remote", "listed"])
-    await asked.app.command_server()
-    question = asked.views[2]
-    assert isinstance(question, SelectionView)
-    assert any(
-        "An official FinishUP service is not asked" in line
-        for line in question._body  # pyright: ignore[reportPrivateUsage]
-    )
 
-
-@pytest.mark.parametrize("answers", [["add", None], ["add", "add:remote", None]])
-async def test_going_back_from_the_add_flow_adds_nothing(answers: list[str | None]) -> None:
+async def test_going_back_from_the_add_flow_adds_nothing() -> None:
     runtime = FakeRuntime(servers=_ROWS)
-    harness = _Harness(runtime, answers)
+    harness = _Harness(runtime, ["add", None])
 
     await harness.app.command_server()
 
@@ -408,43 +335,46 @@ async def test_the_real_runtime_lists_switches_and_names_the_header(
         assert "nowhere" not in raised.value.message
 
 
-async def test_the_real_runtime_stops_the_remote_server_it_switches_away_from(
+async def test_the_real_runtime_refuses_a_remote_record_and_leaves_one_quietly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``/server`` "Use local" runs ``finishup server use local``: what this client ran for the
-    remote server it leaves is stopped through that target's runtime, never by pattern."""
+    """A remote record another build wrote and selected: ``/server`` "Use lab" runs ``finishup
+    server use lab``, refused with ``remote_kind_unavailable`` before anything is asked, the
+    selection unchanged; "Use local" is the way back, and with no runtime for that kind this
+    client ran nothing for it, so the switch says nothing of a connection it never had."""
 
     from builders.server_targets import ambient_home
     from finishup.client import targets
-    from finishup.client.connector_runtime import ConnectorTargetRuntime
     from finishup.config.paths import reset_selection_memo
     from finishup.tui.runtime import FinishUpRuntime
 
-    stops: list[Path | None] = []
+    def no_console(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a remote record is refused before any prompt")
 
-    def stop(_self: object, target: Path | None) -> None:
-        stops.append(target)
-
-    monkeypatch.setattr(ConnectorTargetRuntime, "stop", stop)
+    monkeypatch.setattr("finishup.cli.trusted_console.TrustedForegroundConsole", no_console)
     with ambient_home(monkeypatch) as home:
         with targets.registry_lock():
-            record, root = targets.new_remote_target(
+            record, _root = targets.new_remote_target(
                 "lab", "ssh", user="owner", host="lab.example", port=22
             )
             targets.write_selection(record)
         reset_selection_memo()
         runtime = FinishUpRuntime(cwd=home)
 
+        with pytest.raises(RuntimeError_) as raised:
+            await runtime.use_server("lab")
+        assert raised.value.reason == "remote_kind_unavailable"
+        assert raised.value.message == REMOTE_USE_REFUSED
+        assert "lab" not in raised.value.message
+        assert targets.read_selected_target_id() == record.target_id
+
+        rows, lines = await runtime.server_rows()
+        assert [(row.name, row.remote) for row in rows] == [("local", False), ("lab", True)]
+        assert any(line.endswith("(not available in this release)") for line in lines)
+
         switch = await runtime.use_server("local")
 
-        assert stops == [root]
-        assert switch == ServerSwitch(
-            "everyday",
-            (
-                f"Closed this computer's connection to the server {record.target_id} (ssh): it "
-                "no longer answers that server's requests for your files.",
-            ),
-        )
+        assert switch == ServerSwitch("everyday")
         assert targets.read_selected_target_id() is None
 
 
@@ -513,63 +443,3 @@ async def test_the_real_runtime_status_shows_what_a_remote_server_may_read_outsi
             "Repair it on this computer with 'finishup server folders remove devbox --all'" in line
             for line in lines
         )
-
-
-@pytest.mark.parametrize("answer", ["typed", "interrupted"])
-async def test_the_typed_confirmation_of_a_remote_server_is_read_on_the_loop_thread(
-    monkeypatch: pytest.MonkeyPatch, answer: str
-) -> None:
-    """SRV-6: ``/server`` "Use NAME" ran the whole switch in a worker thread, so its typed
-    confirmation read the terminal there, where Ctrl-C never reached it while the event loop
-    tore the interface down. The policy read stays in the worker (it runs its own event loop);
-    the confirmation runs on the loop thread with Python's default Ctrl-C handler, so an
-    interrupt cancels it and the interface keeps running."""
-
-    import signal
-    import threading
-
-    from builders.server_targets import ambient_home
-    from finishup.cli import server as server_cli
-    from finishup.client import targets
-    from finishup.config.paths import reset_selection_memo
-    from finishup.tui.runtime import FinishUpRuntime
-
-    seen: dict[str, object] = {}
-
-    def policy_read() -> bool:
-        seen["policy_on_main"] = threading.current_thread() is threading.main_thread()
-        return False
-
-    def confirm(_name: str, _kind: str, **_question: object) -> None:
-        seen["confirm_on_main"] = threading.current_thread() is threading.main_thread()
-        seen["default_handler"] = signal.getsignal(signal.SIGINT) is signal.default_int_handler
-        if answer == "interrupted":
-            raise KeyboardInterrupt
-
-    def loop_handler(_signum: int, _frame: object) -> None:
-        raise AssertionError("the loop's own handler never answers the prompt")
-
-    monkeypatch.setattr(server_cli, "_zero_network_in_force", policy_read)
-    monkeypatch.setattr(server_cli, "_confirm_on_trusted_console", confirm)
-    previous = signal.signal(signal.SIGINT, loop_handler)  # what an event loop runner installs
-    try:
-        with ambient_home(monkeypatch) as home:
-            with targets.registry_lock():
-                record, _root = targets.new_remote_target(
-                    "lab", "ssh", user="owner", host="lab.example", port=22
-                )
-            reset_selection_memo()
-            runtime = FinishUpRuntime(cwd=home)
-            if answer == "typed":
-                switch = await runtime.use_server("lab")
-                assert switch.indicator == f"ssh {record.target_id}"
-                assert targets.read_selected_target_id() == record.target_id
-            else:
-                with pytest.raises(RuntimeError_) as raised:
-                    await runtime.use_server("lab")
-                assert raised.value.reason == "authorization_declined"
-                assert targets.read_selected_target_id() is None
-            assert signal.getsignal(signal.SIGINT) is loop_handler
-    finally:
-        signal.signal(signal.SIGINT, previous)
-    assert seen == {"policy_on_main": False, "confirm_on_main": True, "default_handler": True}

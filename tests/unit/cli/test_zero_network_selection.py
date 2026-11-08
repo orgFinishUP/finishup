@@ -39,7 +39,7 @@ from typer.testing import CliRunner, Result
 import finishup.cli.zero_network_selection as zero_network
 import finishup.client.everyday_policy as everyday_policy
 from builders.privacy_policies import local_only_policy, minimal_external_policy
-from builders.server_targets import ambient_home
+from builders.server_targets import ambient_home, remote_runtime
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.client import targets
@@ -577,63 +577,39 @@ def test_the_policy_read_works_from_a_cli_commands_event_loop(
     assert requests == [_MACHINE_SCOPE]
 
 
-# --- server add and use: refused, live or last reported -----------------------------------------
+# --- server add and use: closed in this release, whatever this computer's policy ----------------
 
 
-def test_remote_use_stays_refused_under_zero_network(
-    home: Path, monkeypatch: pytest.MonkeyPatch, console: type[_Console]
-) -> None:
-    record = _remote(select=False)
-    _policy(monkeypatch, "zero_network")
-
-    result = _invoke("server", "use", _NAME)
-
-    assert result.exit_code == 2
-    assert result.stderr.startswith("zero_network_in_force:")
-    assert console.instances == []
-    assert targets.read_selected_target_id() is None
-    assert record.target_id not in result.stderr
-
-
+@pytest.mark.parametrize("state", ["zero_network", "unreadable", "network_permitted"])
 @pytest.mark.parametrize("command", ["use", "add"])
-def test_remote_add_and_use_are_refused_when_this_computer_last_reported_zero_network(
-    home: Path, monkeypatch: pytest.MonkeyPatch, console: type[_Console], command: str
+def test_remote_add_and_use_are_closed_before_this_computers_policy_is_asked(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    console: type[_Console],
+    command: str,
+    state: str,
 ) -> None:
+    """The remote kinds are closed in this release: ``server add`` and ``server use`` refuse a
+    remote server with ``remote_kind_unavailable`` before the zero-network check, so this
+    computer's policy is never asked and no console opens, whether it is zero-network (live or
+    last reported), cannot be read, or permits network use."""
+
     if command == "use":
         _remote(select=False)
         arguments = ("server", "use", _NAME)
     else:
         arguments = ("server", "add", "lab2", "ssh://owner@lab.example:22")
     record_reported_policy(zero_network=True, now=_AT)
-    _policy(monkeypatch, "unreadable")
+    reads = _policy(monkeypatch, state)
 
     result = _invoke(*arguments)
 
     assert result.exit_code == 2, result.output
-    assert result.stderr.startswith("zero_network_in_force: ")
-    assert f"last reported, at {_STAMP}, that it makes no network connections" in result.stderr
-    assert "change the privacy policy on this computer first" in result.stderr
+    assert result.stderr.startswith("remote_kind_unavailable: ")
+    assert reads == []
     assert console.instances == []
     assert targets.read_selected_target_id() is None
     assert len(targets.list_targets()) == (1 if command == "use" else 0)
-
-
-@pytest.mark.parametrize("marker", ["permitted", "absent"])
-def test_an_unreadable_policy_without_a_zero_network_report_stays_refused_as_unreadable(
-    home: Path, monkeypatch: pytest.MonkeyPatch, console: type[_Console], marker: str
-) -> None:
-    """Fail closed: only a live answer allows a hop; the last report never does."""
-
-    _remote(select=False)
-    if marker == "permitted":
-        record_reported_policy(zero_network=False, now=_AT)
-    _policy(monkeypatch, "unreadable")
-
-    result = _invoke("server", "use", _NAME)
-
-    assert result.exit_code == 20
-    assert result.stderr.startswith("network_policy_unreadable:")
-    assert console.instances == []
 
 
 # --- a command acting on one remote server: the refusal and the fix for that server -------------
@@ -656,39 +632,29 @@ def _in_force_named(stderr: str, record: targets.ServerTarget) -> None:
     assert "server use local" not in stderr
 
 
-@pytest.mark.parametrize("kind", ["https", "local_port"])
-def test_server_login_of_a_server_not_in_use_names_this_computers_policy_as_the_fix(
-    home: Path, monkeypatch: pytest.MonkeyPatch, kind: str
-) -> None:
-    record = _remote(kind, select=False)
-    record_reported_policy(zero_network=True, now=_AT)
-    monkeypatch.setattr(server_cli, "_check_https_key", _never)
-    monkeypatch.setattr(server_cli, "_read_secret_on_console", _never)
-
-    result = _invoke("server", "login", _NAME)
-
-    assert result.exit_code == 2
-    _in_force_named(result.stderr, record)
-
-
-def test_server_login_of_the_selected_server_names_server_use_local_and_that_fix_takes(
+def test_the_selected_servers_fix_takes_and_the_next_refusal_names_this_computers_policy(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The remedy changes what stands in the way: once the server is no longer chosen, the next
+    refusal names this computer's policy, never the same switch again. (``server login`` is
+    closed in this release, so ``server connect`` is the command acting on one server here.)"""
+
+    from finishup.client.target_runtime import runtime_for
+
     record = _remote("https", select=True)
     record_reported_policy(zero_network=True, now=_AT)
-    monkeypatch.setattr(server_cli, "_check_https_key", _never)
-    monkeypatch.setattr(server_cli, "_read_secret_on_console", _never)
+    monkeypatch.setattr(server_cli, "runtime_for", _never)
 
-    first = _invoke("server", "login", _NAME)
+    first = _invoke("server", "connect", _NAME)
 
     assert first.exit_code == 2
     assert first.stderr.startswith("zero_network_remote_selected: ")
     assert "'finishup server use local'" in first.stderr
-    # The remedy changes what stands in the way: the server is no longer chosen, so the next
-    # refusal names this computer's policy, never the same switch again.
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     assert _invoke("server", "use", "local").exit_code == 0
     assert targets.read_selected_target_id() is None
-    second = _invoke("server", "login", _NAME)
+    monkeypatch.setattr(server_cli, "runtime_for", _never)
+    second = _invoke("server", "connect", _NAME)
     assert second.exit_code == 2
     _in_force_named(second.stderr, record)
 
@@ -818,23 +784,16 @@ def test_choosing_1_switches_to_the_everyday_server_then_the_change_goes_ahead(
     console: type[_Console],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from finishup.client.connector_runtime import ConnectorTargetRuntime
-
     record = _stale_process_with_a_remote_selected(monkeypatch)
     console.answer = b"1"
-    stops: list[Path | None] = []
-
-    def stop(_self: object, target: Path | None) -> None:
-        stops.append(target)
-
-    monkeypatch.setattr(ConnectorTargetRuntime, "stop", stop)
+    # This release runs nothing for a remote kind; a later layer's runtime stands in here.
+    runtime = remote_runtime(monkeypatch)
 
     assert _guard() == "switched"
 
     assert targets.read_selected_target_id() is None
-    # Switching stops the traffic it names: what this client ran for that server (approach A:
-    # its connector and the background workspace agents answering the server's reads) stopped.
-    assert stops == [targets.target_root(record.target_id)]
+    # Switching stops the traffic it names: what this client ran for that server stopped.
+    assert runtime.stops == [targets.target_root(record.target_id)]
     shown = _shown(console)
     assert f"the selected FinishUP server {record.target_id} (ssh)" in shown
     assert "make no network connections" in shown
@@ -865,17 +824,13 @@ def test_choosing_2_cancels_the_change_and_keeps_the_server(
     console: type[_Console],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from finishup.client.connector_runtime import ConnectorTargetRuntime
-
-    def never(_self: object, _target: Path | None) -> None:
-        raise AssertionError("keeping the server stops nothing")
-
     record = _stale_process_with_a_remote_selected(monkeypatch)
     console.answer = b"2"
-    monkeypatch.setattr(ConnectorTargetRuntime, "stop", never)
+    runtime = remote_runtime(monkeypatch)
 
     with pytest.raises(zero_network.ZeroNetworkChangeStopped) as stopped:
         _guard()
+    assert runtime.stops == []  # keeping the server stops nothing
 
     assert (stopped.value.reason, stopped.value.cancelled) == (zero_network.REMOTE_SELECTED, True)
     assert targets.read_selected_target_id() == record.target_id
@@ -1706,10 +1661,9 @@ def test_a_process_on_this_computers_server_with_a_remote_selected_meanwhile(
         )
         assert targets.read_selected_target_id() is None
         assert "Using this computer's everyday FinishUP server." in result.stdout
-        # The real stop of what this client ran for it (no connector was running here).
-        assert (
-            f"Closed this computer's connection to the server {record.target_id} (ssh)"
-        ) in result.stdout
+        # No runtime is registered for a remote kind in this release: this client ran nothing for
+        # it, so no connection is said to have closed.
+        assert "connection to the server" not in result.stdout
         # The change was made on this computer: its policy is read again and remembered.
         assert policy_reads == [_MACHINE_SCOPE]
         assert cast(ReportedPolicy, read_marker()).zero_network is True
@@ -2045,20 +1999,12 @@ def test_the_questionnaire_reports_a_guarded_decision_as_cancelled_with_its_reas
 # --- visible while it lasts -------------------------------------------------------------------
 
 
-def _unreachable(_self: object, _root: Path | None) -> object:
-    from finishup.client.target_runtime import ProbeResult
-
-    return ProbeResult("unavailable", reason="remote_unreachable")
-
-
 def test_server_status_and_list_show_the_item(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     record = _remote()
     _policy(monkeypatch, "zero_network")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
 
     status = _invoke("server", "status", "--json")
     assert status.exit_code == 0, status.output
@@ -2084,9 +2030,7 @@ def test_server_status_text_and_json_say_this_computer_last_reported_it(
     record = _remote("https")
     record_reported_policy(zero_network=True, now=_AT)
     _policy(monkeypatch, "unreadable")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
 
     document, stderr = _status_document()
 
@@ -2111,9 +2055,7 @@ def test_server_status_is_unchanged_without_the_item(
 ) -> None:
     _remote()
     _policy(monkeypatch, "network_permitted")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
 
     status = _invoke("server", "status", "--json")
 
@@ -2138,9 +2080,7 @@ def test_server_status_json_carries_the_remote_selected_item(
 
     record = _remote("https")
     reads = _policy(monkeypatch, "zero_network")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
 
     document, stderr = _status_document()
 
@@ -2194,9 +2134,7 @@ def test_server_status_json_says_nothing_when_there_is_nothing_to_say(
     assert (document["zero_network_selection"], stderr, reads) == (None, "", [])
 
     _remote()
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
     document, stderr = _status_document()
     assert (document["zero_network_selection"], stderr, reads) == (None, "", [1])
 
@@ -2209,9 +2147,7 @@ def test_the_status_document_reads_the_item_itself_when_not_given_one(
 
     record = _remote("local_port")
     _policy(monkeypatch, "zero_network")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
     reset_selection_memo()
 
     document = server_cli.build_status_document(None)
@@ -2233,9 +2169,7 @@ def test_server_test_never_asks_this_computers_policy(
 
     _remote()
     reads = _policy(monkeypatch, "zero_network")
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", _unreachable
-    )
+    remote_runtime(monkeypatch)
 
     result = _invoke("server", "test")
 

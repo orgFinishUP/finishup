@@ -1603,36 +1603,20 @@ class FinishUpRuntime:
     async def use_server(self, name: str) -> ServerSwitch:
         """Select ``name`` (``local``: the everyday server), as ``finishup server use`` does.
 
-        A remote target asks for the same typed confirmation on the trusted console, so the
-        caller runs this with the terminal handed over. Returns the new header indicator text and
-        what became of the connection to a remote server the switch left (stopped, as ``finishup
-        server disconnect`` stops it).
+        A remote target is refused with ``remote_kind_unavailable`` and the selection stays as it
+        was: the remote kinds are closed in this release. Returns the new header indicator text
+        and what became of the connection to a remote server the switch left (stopped, as
+        ``finishup server disconnect`` stops it).
         """
 
         import asyncio
 
-        from finishup.cli.server import (
-            ServerCommandRefused,
-            check_remote_hop,
-            confirm_use_on_this_thread,
-            use_target,
-        )
+        from finishup.cli.server import ServerCommandRefused, use_target
         from finishup.client.targets import TargetError
         from finishup.config.paths import PathSafetyError
 
-        loop = asyncio.get_running_loop()
-
-        async def confirm_on_loop(target: str, kind: str) -> None:
-            confirm_use_on_this_thread(target, kind)
-
-        def authorize(target: str, kind: str) -> None:
-            # The policy read runs its own event loop, so here in the worker thread; the typed
-            # confirmation on the loop thread, where Ctrl-C reaches the read (SRV-6).
-            check_remote_hop()
-            asyncio.run_coroutine_threadsafe(confirm_on_loop(target, kind), loop).result()
-
         try:
-            switch = await asyncio.to_thread(use_target, name, authorize=authorize)
+            switch = await asyncio.to_thread(use_target, name)
         except (ServerCommandRefused, TargetError, PathSafetyError) as error:
             raise _server_failure(error) from None
         record = switch.record

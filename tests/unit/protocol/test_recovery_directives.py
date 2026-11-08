@@ -570,6 +570,7 @@ class TestWorkspaceBindingAndServerTargetReasons:
         "remote_service_not_running": "remote_service_start_required",
         "remote_incompatible": "remote_release_mismatch",
         "zero_network_remote_selected": "zero_network_local_server_required",
+        "remote_kind_unavailable": "server_on_this_computer_required",
     }
 
     @pytest.mark.parametrize("reason", sorted(_EXPECTED))
@@ -625,8 +626,13 @@ class TestWorkspaceBindingAndServerTargetReasons:
     def test_remote_connection_phases_are_their_own_reason_codes(self) -> None:
         from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
+        # ``remote_kind_unavailable`` refuses a command (``server add``, ``use``, ``login``), never
+        # a connection: a connection from a remote root keeps ``target_root_is_remote``.
+        assert "remote_kind_unavailable" not in REMOTE_CONNECTION_PHASES
         assert REMOTE_CONNECTION_PHASES == frozenset(
-            reason for reason in self._EXPECTED if reason.startswith("remote_")
+            reason
+            for reason in self._EXPECTED
+            if reason.startswith("remote_") and reason != "remote_kind_unavailable"
         ) | {
             "target_reauthorization_required",
             "target_root_is_remote",
@@ -664,6 +670,18 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert "nothing was sent" in entry.directive
         assert "'finishup server use local'" in entry.directive
         assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
+
+    def test_the_closed_remote_kinds_say_what_this_release_connects_to(self) -> None:
+        # The remote kinds (ssh, https, local_port) are closed in this release: the refusal says
+        # that only servers on this computer are reached, that nothing was added, selected or
+        # sent, and the owner's way back, and never tells an agent to choose a server itself.
+        entry = directive_for("server_on_this_computer_required")
+        assert entry is not None
+        assert "connects only to servers on this computer" in entry.directive
+        assert "SSH, HTTPS and port servers arrive later" in entry.directive
+        assert "nothing was added, selected or sent" in entry.directive
+        assert "'finishup server use local'" in entry.directive
+        assert entry.nudge == "Never select or add a FinishUP server for the owner."
 
     def test_the_new_tokens_are_protocol_tokens_not_local_ones(self) -> None:
         tokens = set(self._EXPECTED.values())

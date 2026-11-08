@@ -807,6 +807,16 @@ _DIRECTIVES: Final = (
         nudge="Never select a FinishUP server or change the privacy policy for the owner.",
     ),
     RecoveryDirective(
+        token="server_on_this_computer_required",
+        directive=(
+            "This FinishUP release connects only to servers on this computer; SSH, HTTPS and "
+            "port servers arrive later, so nothing was added, selected or sent. Ask the owner to "
+            "run 'finishup server use local', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select or add a FinishUP server for the owner.",
+    ),
+    RecoveryDirective(
         token="server_selection_overridden",
         directive=(
             "An environment variable or a runtime pin chooses the FinishUP root, so the saved "

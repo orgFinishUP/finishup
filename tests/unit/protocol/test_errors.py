@@ -330,6 +330,7 @@ ref_mirror_mismatch
 remote_auth_failed
 remote_identity_changed
 remote_incompatible
+remote_kind_unavailable
 remote_service_not_running
 remote_unreachable
 repository_identity_mismatch
@@ -571,9 +572,10 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    # #1244 +4 delivery_*; #1190 review_mode_parent_is_check; ADR-051 +14 workspace/target/remote
-    # (the last, zero_network_remote_selected, the maintainer's decision of 2026-11-07).
-    assert len(source_values) == 370
+    # #1244 +4 delivery_*; #1190 review_mode_parent_is_check; ADR-051 +15 workspace/target/remote
+    # (zero_network_remote_selected, the maintainer's decision of 2026-11-07, and
+    # remote_kind_unavailable, the remote kinds this release keeps closed).
+    assert len(source_values) == 371
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

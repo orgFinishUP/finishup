@@ -370,6 +370,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "remote_auth_failed",
     "remote_identity_changed",
     "remote_incompatible",
+    "remote_kind_unavailable",
     "remote_service_not_running",
     "remote_unreachable",
     "repository_identity_mismatch",
@@ -486,9 +487,10 @@ REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
 )
 # #1244: the four delivery_* continuation refusals; #1190: review_mode_parent_is_check; ADR-051:
 # the twelve workspace-binding, server-target and remote-connection reasons, plus the stale
-# disclosure refusal (``target_reauthorization_required``) and the zero-network refusal
-# (``zero_network_remote_selected``).
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 370
+# disclosure refusal (``target_reauthorization_required``), the zero-network refusal
+# (``zero_network_remote_selected``) and the remote kinds this release keeps closed
+# (``remote_kind_unavailable``).
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 371
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -659,6 +661,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "remote_service_start_required",
         "remote_target_no_local_service",
         "server_host_command_required",
+        "server_on_this_computer_required",
         "server_reauthorization_required",
         "server_selection_overridden",
         "workspace_binding_correction",
@@ -854,6 +857,9 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "remote_service_not_running": "remote_service_start_required",
         "remote_incompatible": "remote_release_mismatch",
         "zero_network_remote_selected": "zero_network_local_server_required",
+        # The remote kinds (ssh, https, local_port) are closed in this release: a server on this
+        # computer is the only one that can be added or selected.
+        "remote_kind_unavailable": "server_on_this_computer_required",
     }
 )
 if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:

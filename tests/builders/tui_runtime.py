@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from finishup.cli.policy_server import PolicyServer
+from finishup.cli.server import REMOTE_KIND_UNAVAILABLE
 from finishup.tui.models import (
     CheckMode,
     Detection,
@@ -36,6 +37,9 @@ from finishup.tui.models import (
     WorkItem,
 )
 from finishup.tui.runtime import RuntimeError_
+
+# What the real runtime says when ``/server`` is asked to use a remote record (``server use``).
+REMOTE_USE_REFUSED = f"{REMOTE_KIND_UNAVAILABLE}; the selected server is unchanged"
 
 DESKTOP = HarnessOption(
     executable_path="/Applications/Codex.app/Contents/MacOS/codex",
@@ -548,6 +552,10 @@ class FakeRuntime:
             raise self.server_error
         self.server_uses.append(name)
         row = next(row for row in self.servers if row.name == name)
+        if row.remote:
+            # As the real runtime (``finishup server use``): the remote kinds are closed in this
+            # release, so a remote row is refused and the selection stays as it was.
+            raise RuntimeError_("remote_kind_unavailable", REMOTE_USE_REFUSED)
         self.servers = tuple(replace(item, selected=item.name == name) for item in self.servers)
         self.server_selected = None if row.target_id is None else f"{row.kind} {row.target_id}"
         return ServerSwitch(
