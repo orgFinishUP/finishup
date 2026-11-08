@@ -206,13 +206,13 @@ def test_a_refusal_says_what_it_now_means_and_where_to_reconnect() -> None:
     """ADR-051 decision 5: listed mode no longer refuses a check-time read (it leaves only the
     unlisted inputs unread, ``outside_reads_not_listed``), so a refusal here is a request the
     agent does not answer, usually a release mismatch. The sentence says so, names the computer
-    and the full command, and that checking again can help; it never claims a listed-mode
-    refusal or names a path."""
+    and that checking again can help; it never claims a listed-mode refusal or names a path, and
+    names no command of a connection this release does not make."""
 
     sentence = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS["workspace_agent_refused"]
     assert "read of the workspace" not in sentence
     assert "same release on both" in sentence
-    assert "`finishup server connect NAME`" in sentence
+    assert "server connect" not in sentence and "--agent" not in sentence
     assert "on the client machine, the computer that holds the project" in sentence
     assert "check again" in sentence
     assert "folders" not in sentence
@@ -222,7 +222,7 @@ def test_a_refusal_says_what_it_now_means_and_where_to_reconnect() -> None:
 def test_an_unavailable_agent_names_where_to_reconnect_and_that_a_retry_can_help() -> None:
     sentence = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS["workspace_agent_unavailable"]
     assert "`finishup server status NAME`" in sentence
-    assert "`finishup server connect NAME`" in sentence
+    assert "server connect" not in sentence and "--agent" not in sentence
     assert "client machine, the computer that holds the project" in sentence
     assert "checking again then can help" in sentence
     assert "/" not in sentence

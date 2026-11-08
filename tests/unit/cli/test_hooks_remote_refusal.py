@@ -4,8 +4,9 @@ ADR-051 decision 8 (maintainer decision of 2026-11-07): while this computer last
 zero-network privacy policy, every connection to a remote target is refused before anything is
 sent, as ``zero_network_remote_selected``, until the owner runs ``finishup server use local``.
 The CLI and MCP ``start`` say so; the SessionStart hook of Codex, Claude Code and Cursor must say
-the same, from a file read only: no dial, no connector, no service connection, no hook-budget
-outage text. A mapped session's status read names it the same way.
+the same, from a file read only: no dial, no service connection, no hook-budget outage text. A
+mapped session's status read names it the same way. (This release adds and selects no remote
+server; the record here is one another build left selected.)
 """
 
 from __future__ import annotations
@@ -76,11 +77,7 @@ def nothing_dialled(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         calls.append("attach_connect")
         raise OSError("never connected")
 
-    def spawn(_root: Path) -> None:
-        calls.append("connector")
-
     monkeypatch.setattr(service_client, "connect_control", dial)
-    monkeypatch.setattr("finishup.client.connector_status.spawn_connector", spawn)
     monkeypatch.setattr(
         service_client, "_spawn_service_process", lambda: calls.append("service_spawn")
     )
@@ -179,33 +176,3 @@ def test_a_mapped_session_start_names_the_zero_network_refusal_without_dialling(
 
     _names_the_refusal(context)
     assert nothing_dialled == []
-
-
-@pytest.mark.parametrize("source", _SOURCES)
-def test_a_session_start_whose_server_refused_the_key_says_it_answered(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: ObservationSource
-) -> None:
-    """RE-6: a server that answered and refused the key is never "could not be reached"."""
-
-    from finishup.ports.control import ControlError
-
-    with targets.registry_lock():
-        record, _root = targets.new_remote_target(
-            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
-        )
-        targets.write_selection(record)
-    reset_selection_memo()
-
-    async def refused(*_args: object, **_kwargs: object) -> object:
-        raise ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
-
-    monkeypatch.setattr(observe_hooks_module, "_connect_attachment_service", refused)
-    monkeypatch.setattr(service_client, "connect_service", refused)
-    _store, locator = _consented(tmp_path)
-
-    context = _session_start(source, "key-refused", locator, tmp_path, start="startup")
-
-    assert "(remote_auth_failed)" in context
-    assert "answered and refused this client's key" in context
-    assert "Continuation: remote_credential_repair." in context
-    assert "could not be reached" not in context

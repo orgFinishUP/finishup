@@ -978,6 +978,28 @@ def selection_source() -> SelectionSource:
     return isolation_binding()
 
 
+def active_remote_refusal() -> str | None:
+    """The closed reason every connection from this process is refused with before any dial.
+
+    ``zero_network_remote_selected`` or ``target_reauthorization_required`` when the root this
+    process uses is a remote target that ``require_current_authorization`` refuses, exactly as
+    the connect seams do (``finishup.service.client``); ``None`` otherwise, including for a local
+    root and for a root that cannot be resolved or whose record cannot be read, which the
+    connect seams name on their own. Hook-safe: it reads only the target record and this
+    computer's last-reported policy marker, never a service, so a hook can name the refusal
+    without spending its budget (ADR-051 decision 8). Never raises.
+    """
+
+    try:
+        record = active_target_record()
+        require_current_authorization(record)
+    except TargetError as error:
+        return error.reason if error.reason in PRE_DIAL_REFUSALS else None
+    except Exception:
+        return None
+    return None
+
+
 def active_root_may_be_remote() -> bool:
     """Whether a connection from this process must claim its workspace instead of naming a path.
 

@@ -150,63 +150,6 @@ async def test_without_a_handle_nothing_is_sent_and_the_locked_server_is_named(
     assert sent.workspace_ref == _HANDLE
 
 
-@pytest.mark.anyio
-async def test_a_locked_remote_vault_is_named_as_such_and_nothing_is_sent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A locked server binds no handle; the agent is told to have its vault unlocked there."""
-
-    import finishup.client.targets as targets
-
-    client = _Client("client_claim", None)
-    _wire(monkeypatch, tmp_path, client)
-    monkeypatch.setattr(targets, "active_target_is_remote", lambda: True)
-    result = await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
-    assert client.sent == []
-    assert getattr(result, "isError") is True
-    structured = cast(dict[str, object], getattr(result, "structuredContent"))
-    error = cast(dict[str, object], structured["error"])
-    assert error["code"] == "VAULT_LOCKED"
-    details = cast(dict[str, object], error["safe_details"])
-    assert details["continuation"] == "remote_vault_unlock_required"
-    assert "private-project" not in repr(result)
-
-
-def _unreadable_record() -> bool:
-    raise PermissionError(13, "target record unreadable")
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("lookup", "remote"),
-    [(_unreadable_record, True), (lambda: False, False)],
-    ids=["record_unreadable", "local_root"],
-)
-async def test_a_target_lookup_that_fails_keeps_the_typed_locked_result(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    lookup: Callable[[], bool],
-    remote: bool,
-) -> None:
-    """A target record read that fails (``OSError``) must not cost the agent its typed
-    ``VAULT_LOCKED``: it answers as a remote server would. A local root is unchanged."""
-
-    import finishup.client.targets as targets
-
-    client = _Client("client_claim", None)
-    _wire(monkeypatch, tmp_path, client)
-    monkeypatch.setattr(targets, "active_target_is_remote", lookup)
-    result = await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
-    assert client.sent == []
-    assert getattr(result, "isError") is True
-    structured = cast(dict[str, object], getattr(result, "structuredContent"))
-    error = cast(dict[str, object], structured["error"])
-    assert error["code"] == "VAULT_LOCKED"
-    details = cast(dict[str, object], error.get("safe_details") or {})
-    assert (details.get("continuation") == "remote_vault_unlock_required") is remote
-    assert "private-project" not in repr(result)
-
-
 class _CheckingClient:
     """A claim-bound connection whose ``check`` the server answers, or refuses ``vault_locked``."""
 

@@ -141,13 +141,11 @@ def test_the_audit_covers_the_design_table() -> None:
     """Design section 5 lists 20 lines: 5 switch to ``active_root()`` and 15 stay explicit. One
     of the 15 (``codex_mcp.py:578``) is the definition of the Codex adapter's
     ``_expected_isolated_root`` helper, which resolves through ``isolated_root_environment``, so
-    the explicit side has 14 calls here. The edge relay (approach A) adds one of each: the
-    client's remote-root check follows the selection, and the connector's own-root check stays
-    explicit. The host-configuration lock's installation state directory stays explicit too
-    (SRV-5)."""
+    the explicit side has 14 calls here. The host-configuration lock's installation state
+    directory stays explicit too (SRV-5)."""
 
-    assert len(_FOLLOWS_SELECTION) == 5 + 1
-    assert len(_STAYS_EXPLICIT) == 14 + 1 + 1
+    assert len(_FOLLOWS_SELECTION) == 5
+    assert len(_STAYS_EXPLICIT) == 14 + 1
 
 
 def test_registration_and_upgrade_sites_never_follow_the_selection() -> None:

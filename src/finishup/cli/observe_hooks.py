@@ -195,7 +195,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from finishup.protocol.errors import REMOTE_CONNECTION_PHASES, ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
 from finishup.protocol.ids import IdKind, is_valid_id
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 
@@ -557,16 +557,9 @@ class AutoAttachOutcome:
     reason: str | None
     recovered: bool = False
     candidate_count: int | None = None
-    # The selected server's closed remote phase when a ``service_unavailable`` attach failed on
-    # a server elsewhere (ADR-051), so the context names what happened there.
-    phase: str | None = None
 
     def __post_init__(self) -> None:
         if (self.mapping is None) == (self.reason is None):
-            raise ValueError("auto_attach_outcome_invalid")
-        if self.phase is not None and (
-            self.reason != "service_unavailable" or self.phase not in REMOTE_CONNECTION_PHASES
-        ):
             raise ValueError("auto_attach_outcome_invalid")
         if self.candidate_count is not None and (
             self.reason != "auto_attach_binding_ambiguous"
@@ -623,13 +616,8 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 
-def _attachment_recovery_context(reason: str, phase: str | None = None) -> str:
-    """Render only trusted classifications, never host/error payload text.
-
-    ``phase`` is the selected server's closed remote phase of a ``service_unavailable`` attach
-    (ADR-051); a phase other than ``remote_unreachable`` says what the server did instead of
-    "could not be reached": a server that refused the key answered.
-    """
+def _attachment_recovery_context(reason: str) -> str:
+    """Render only trusted classifications, never host/error payload text."""
 
     from finishup.client.targets import PRE_DIAL_REFUSALS
 
@@ -656,31 +644,6 @@ def _attachment_recovery_context(reason: str, phase: str | None = None) -> str:
     # the agent never sees, so no timeout replay token applies: the agent's own start is the
     # recovery (issue #739).
     if reason in {"service_unavailable", "timeout"}:
-        from finishup.client.targets import active_target_is_remote
-
-        if (
-            reason == "service_unavailable"
-            and phase in REMOTE_CONNECTION_PHASES
-            and phase != "remote_unreachable"
-        ):
-            from finishup.cli.remote_remedy import remote_summary
-            from finishup.protocol.errors import REASON_CODE_CONTINUATIONS
-
-            summary = remote_summary(phase)
-            return (
-                f"FinishUP attachment pending: service_unavailable ({phase}). "
-                f"{summary[0].upper()}{summary[1:]}. Call start before material work; its result "
-                "names the remote phase and its repair. "
-                f"Continuation: {REASON_CODE_CONTINUATIONS[phase]}. "
-            )
-        if active_target_is_remote():
-            # ADR-051: the selected server is on another machine; nothing starts a local service.
-            return (
-                "FinishUP attachment pending: service_unavailable. The selected FinishUP server "
-                "could not be reached within the hook budget. Call start before material work; "
-                "its result names the remote phase and its repair, and later turn hooks also "
-                "retry within their budget. "
-            )
         return (
             "FinishUP attachment pending: service_unavailable. The bounded service connection "
             "did not complete. Call start before material work to finish service startup and "
@@ -3528,8 +3491,8 @@ async def _try_auto_start(
 
     refusal = active_remote_refusal()
     if refusal is not None:
-        # The connect seams refuse this before any dial (ADR-051 decision 8); naming it here sends
-        # nothing, starts no connector and keeps the closed reason for the context and diagnostics.
+        # This computer refuses the selected server before any dial (ADR-051 decision 8); naming
+        # it here sends nothing and keeps the closed reason for the context and diagnostics.
         return AutoAttachOutcome(None, refusal)
 
     from pydantic import ValidationError
@@ -3613,10 +3576,9 @@ async def _try_auto_start(
         if error.phase in PRE_DIAL_REFUSALS:
             # A selection that changed after the check above: the connect seam refused it.
             return AutoAttachOutcome(None, error.phase)
-        reason = _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
-        if reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
-            return AutoAttachOutcome(None, reason, phase=error.phase)
-        return AutoAttachOutcome(None, reason)
+        return AutoAttachOutcome(
+            None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
+        )
     except TimeoutError:
         return AutoAttachOutcome(None, "timeout")
     except WorkspaceRefNotPortable as refusal:
@@ -4994,7 +4956,6 @@ def _session_start_attach(
         _STARTUP_RECOVERY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
-        _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _WORKSPACE_MISMATCH_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _WORKSPACE_UNBOUND_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         SessionWorkspace,
@@ -5004,12 +4965,12 @@ def _session_start_attach(
         _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
         bound_connector,
         resolve_session_workspace,
+        unavailable_context,
     )
 
     additional = ""
     recap_text = ""
     attach_reason: str | None = None
-    attach_phase: str | None = None
     attach_advisory_only = False
     session_lifecycle_lock = (
         contextlib.nullcontext(True)
@@ -5047,7 +5008,6 @@ def _session_start_attach(
 
                     attach_outcome = cast(AutoAttachOutcome, resolve_runner()(_attach))
                     attach_reason = attach_outcome.reason
-                    attach_phase = attach_outcome.phase
                     mapping = _record_auto_attach(
                         attach_outcome,
                         event,
@@ -5064,9 +5024,7 @@ def _session_start_attach(
                         "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                     )
                     if attach_reason is not None:
-                        additional = (
-                            _attachment_recovery_context(attach_reason, attach_phase) + additional
-                        )
+                        additional = _attachment_recovery_context(attach_reason) + additional
                     attach_advisory_only = True
                 else:
                     additional = _active_context(mapping, mapping.last_frontier)
@@ -5164,7 +5122,7 @@ def _session_start_attach(
                     with contextlib.suppress(Exception):
                         record_hook_diagnostic(kind, event, _state=_state)
                 else:
-                    additional = _UNAVAILABLE_CONTEXT
+                    additional = unavailable_context(outcome.phase)
     return _SessionStartAttach(
         mapping=mapping,
         pending_mapping_deferred=pending_mapping_deferred,

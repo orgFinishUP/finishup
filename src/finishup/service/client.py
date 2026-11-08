@@ -278,33 +278,62 @@ class _SpawnedService:
 
 
 def _refuse_remote_target_root() -> None:
-    """A remote server target's root never starts a local service (ADR-051).
+    """A remote server target's root is never connected to and never starts a service (ADR-051).
 
-    Its record names a remote kind, or cannot be read and may: the spawn is refused at once with
-    the closed phase ``target_root_is_remote``, instead of starting a child that refuses unseen
-    while the caller waits out its whole start budget. A root that cannot be resolved at all is
-    left to the spawn's own path-safety refusal.
+    Its record names a remote kind, or cannot be read and may: every connection and spawn is
+    refused at once, before anything is sent or started, instead of trying an endpoint no service
+    of this computer serves or starting a child that refuses unseen while the caller waits out its
+    whole start budget. The shared connection check decides first
+    (``targets.require_current_authorization``): ``zero_network_remote_selected`` and
+    ``target_reauthorization_required`` keep their names (ADR-051 decision 8); every other remote
+    root is the closed phase ``target_root_is_remote``, since this release reaches no server on
+    another machine. A root that cannot be resolved at all is left to the caller's own
+    path-safety refusal.
     """
 
-    from finishup.client.targets import TargetError, TargetRecordUnreadable, active_target_record
+    from finishup.client.targets import (
+        TargetError,
+        TargetRecordUnreadable,
+        active_target_record,
+        require_current_authorization,
+    )
 
     try:
         record = active_target_record()
     except TargetRecordUnreadable:
-        remote = True
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="target_root_is_remote"
+        ) from None
     except TargetError:
         return
-    else:
-        remote = record is not None and record.is_remote
-    if remote:
-        raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
+    if record is None or not record.is_remote:
+        return
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
+
+
+def _remote_target_refusal(error: Exception) -> ControlError:
+    """A remote root's own ``TargetError`` as the retryable phase every surface renders.
+
+    ``zero_network_remote_selected`` and ``target_reauthorization_required`` keep their names; any
+    other reason is ``target_root_is_remote``. The reason is a closed token and names no path.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    reason = getattr(error, "reason", None)
+    phase = reason if reason in REMOTE_CONNECTION_PHASES else "target_root_is_remote"
+    return ControlError("service_unavailable", retryable=True, phase=phase)
 
 
 def _spawn_service_process() -> _SpawnedService:
     """Start one detached service that records any startup failure under a fresh id (#1040).
 
-    A remote server target's root raises ``service_unavailable`` with the phase
-    ``target_root_is_remote`` and starts nothing.
+    A remote server target's root raises ``service_unavailable`` with its closed phase
+    (``_refuse_remote_target_root``) and starts nothing.
     """
 
     _refuse_remote_target_root()
@@ -2049,6 +2078,9 @@ async def connect_service(
 
     ``workspace_binding`` is for a FinishUP server on another machine: the hello carries its claim
     instead of a locator, and its agent, if any, answers the server's workspace calls.
+
+    A remote server target's root is refused before anything is sent
+    (``_refuse_remote_target_root``): this release connects to no server on another machine.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -2060,6 +2092,7 @@ async def connect_service(
         raise TypeError("projection_render_mode_invalid")
     if type(output_is_controlling_tty) is not bool:
         raise TypeError("projection_tty_fact_invalid")
+    _refuse_remote_target_root()
     return await _connect_service_attempt(
         client_kind,
         workspace_locator=workspace_locator,
@@ -2239,7 +2272,8 @@ async def connect_service_on_demand(
     can be identified the compatible service keeps serving.
 
     ``workspace_binding`` sends a claim (and declares an agent) in place of the locator, as for
-    ``connect_service``; every connection this call opens carries it.
+    ``connect_service``; every connection this call opens carries it. A remote server target's
+    root is refused at once, before anything is sent or started (``_refuse_remote_target_root``).
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -2249,6 +2283,7 @@ async def connect_service_on_demand(
     _check_workspace_binding(workspace_locator, workspace_binding)
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
         raise ValueError("service_start_timeout_invalid")
+    _refuse_remote_target_root()
     deadline = time.monotonic() + timeout_seconds
 
     async def connect_with_remaining_budget() -> ServiceClient:

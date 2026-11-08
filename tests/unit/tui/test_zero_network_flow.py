@@ -231,15 +231,11 @@ async def test_server_status_reuses_the_item_server_read_and_asks_no_service_aga
     never show it, so building them does not ask this computer's service for its policy again.
     A selection switched meanwhile drops the cached item rather than reusing a stale one."""
 
-    from finishup.client.target_runtime import ProbeResult
+    from builders.server_targets import remote_runtime
     from finishup.tui.runtime import FinishUpRuntime
 
-    def unreachable(_self: object, _root: Path | None) -> ProbeResult:
-        return ProbeResult("unavailable", reason="remote_unreachable")
-
-    monkeypatch.setattr(
-        "finishup.client.connector_runtime.ConnectorTargetRuntime.probe", unreachable
-    )
+    # This release registers no runtime for a remote kind; a stand-in answers unreachable.
+    remote_runtime(monkeypatch)
     record = _remote_selected()
     reads: list[int] = []
 

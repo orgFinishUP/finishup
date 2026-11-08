@@ -7,6 +7,10 @@ root under ``/tmp``), with every isolation-root variable unset and the selection
 A target root's longest endpoint must fit the ``sun_path`` bound the runtime enforces
 (``target_root_too_long``). CI isolates ``$HOME`` beneath a long job temp directory, where a root
 named after it may not fit; the home is then the account's own passwd home, which is as private.
+
+This release registers no runtime for a remote kind (``ssh``, ``https``, ``local_port``): they are
+closed. ``remote_runtime`` registers a stand-in for them, for one test, where a test exercises the
+shared seams a later layer's runtime fills (a probe, a stop, a connect).
 """
 
 from __future__ import annotations
@@ -14,16 +18,18 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from finishup.client import target_runtime
+from finishup.client.target_runtime import ProbeResult, TargetRuntime
 from finishup.config.installation import instance_root_fits
 from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, reset_selection_memo
 
-__all__ = ["ambient_home", "short_home_base"]
+__all__ = ["StandInRuntime", "ambient_home", "remote_runtime", "short_home_base"]
 
 _PREFIX = ".yz-target-test-"
 # The deepest root a test makes, ``<home>/<prefix><8 random>/state/finishup/servers/t_<8 hex>``:
@@ -75,3 +81,52 @@ def ambient_home(monkeypatch: pytest.MonkeyPatch) -> Generator[Path]:
     finally:
         reset_selection_memo()
         shutil.rmtree(root, ignore_errors=True)
+
+
+class StandInRuntime:
+    """A runtime registered for the remote kinds by ``remote_runtime``; records every call.
+
+    ``probe_result`` is what each probe answers; ``ready_error`` and ``stop_error``, when set,
+    are raised by ``ensure_ready`` and ``stop``.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Path | None]] = []
+        self.probe_result = ProbeResult("unavailable", reason="remote_unreachable")
+        self.ready_error: Exception | None = None
+        self.stop_error: Exception | None = None
+
+    def ensure_ready(self, root: Path | None) -> None:
+        self.calls.append(("ensure_ready", root))
+        if self.ready_error is not None:
+            raise self.ready_error
+
+    def stop(self, root: Path | None) -> None:
+        self.calls.append(("stop", root))
+        if self.stop_error is not None:
+            raise self.stop_error
+
+    def probe(self, root: Path | None) -> ProbeResult:
+        self.calls.append(("probe", root))
+        return self.probe_result
+
+    @property
+    def stops(self) -> list[Path | None]:
+        return [root for call, root in self.calls if call == "stop"]
+
+
+def remote_runtime(monkeypatch: pytest.MonkeyPatch) -> StandInRuntime:
+    """Register one ``StandInRuntime`` for every remote kind, for this test only."""
+
+    runtime = StandInRuntime()
+
+    def load() -> TargetRuntime:
+        return runtime
+
+    loaders: dict[str, Callable[[], TargetRuntime]] = dict(
+        target_runtime._RUNTIME_LOADERS  # pyright: ignore[reportPrivateUsage]
+    )
+    for kind in ("ssh", "https", "local_port"):
+        loaders[kind] = load
+    monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
+    return runtime

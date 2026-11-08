@@ -333,21 +333,6 @@ def test_an_override_holds_for_its_own_context_only(home: Path) -> None:
     assert active_root() == first_root
 
 
-def test_a_root_selected_for_the_process_holds_in_every_thread(home: Path) -> None:
-    """``finishup connector run`` serves one root for its life; its executor threads use it."""
-
-    import threading
-
-    _record, root = _local_target()
-    paths.select_root_for_process(root)
-    seen: list[Path | None] = []
-    worker = threading.Thread(target=lambda: seen.append(active_root()))
-    worker.start()
-    worker.join(5)
-    assert seen == [root] and active_root() == root
-    assert targets.read_selected_target_id() is None  # nothing on disk changed
-
-
 def test_the_ambient_installation_dirs_name_both_names_whatever_the_root(home: Path) -> None:
     """The workspace agent's fence: the everyday installation's directories, as ``finishup``
     and as the legacy ``yoetz``, are named whichever root this process uses."""

@@ -25,9 +25,8 @@ the web (``ssh``, ``https``, ``local_port``).
   the change again. The choice is read on the calling thread, never in a worker that Ctrl-C
   cannot reach.
 * **Switching** (the choice ``1``, or ``finishup server use local``) also stops what this client
-  runs for the server it leaves, as ``finishup server disconnect`` does (``cli.server.use_target``):
-  with the edge relay, that target's connector and the background workspace agents that answer the
-  server's reads of files here. Only open agent sessions, until restarted, still reach it.
+  runs for the server it leaves, as ``finishup server disconnect`` does (``cli.server.use_target``).
+  Only open agent sessions, until restarted, still reach it.
 * **The last line of defence** is the connection check (``targets.require_current_authorization``):
   a process whose selection predates the change is refused before anything is sent, with the same
   token, on every surface.
@@ -652,8 +651,7 @@ def _switch_to_local() -> bool:
         typer.echo(f"{error.reason}: the server selection was not changed", err=True)
         return False
     typer.echo("Using this computer's everyday FinishUP server.")
-    # The switch also stopped what this client ran for the server (its connection and the
-    # background workspace agents that answer that server's reads); say so, or how to finish it.
+    # The switch also stopped what this client ran for the server; say so, or how to finish it.
     for line in switch.left_lines():
         typer.echo(line, err=switch.left_open)
     typer.echo(OPEN_SESSIONS_LINE)

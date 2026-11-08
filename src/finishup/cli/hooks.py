@@ -115,6 +115,9 @@ class StatusOutcome:
     # Set only for an ``active`` read made for a post-compaction start (ADR-044): the facts the
     # same status result carried, plus the declared deliverables when the second read answered.
     recap: RecapFacts | None = None
+    # Set only for an ``unavailable`` read this computer refused before anything was sent
+    # (ADR-051 decision 8): ``zero_network_remote_selected`` or ``target_reauthorization_required``.
+    phase: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,12 +167,6 @@ _LOCKED_CONTEXT: Final = (
     "FinishUP vault is locked for this mapped session; no live receipt can be promised."
     + render_hook_recovery_suffix("vault_locked")
 )
-# ADR-051: the selected server is on another machine. Its vault is unlocked there, never by a
-# local `service unlock`; no host or name is in either text.
-_REMOTE_LOCKED_CONTEXT: Final = (
-    "The selected FinishUP server's vault is locked for this mapped session; no live receipt "
-    "can be promised." + render_hook_recovery_suffix("remote_vault_locked")
-)
 
 
 def remote_refusal_context(phase: str) -> str:
@@ -196,33 +193,18 @@ def remote_refusal_context(phase: str) -> str:
 
 
 def unavailable_context(phase: str | None) -> str:
-    """The SessionStart text for an unavailable service; a remote phase is named with its token."""
+    """The SessionStart text for an unavailable service; a refusal before any dial names itself.
+
+    ``phase`` is set only when this computer refused the selected server before anything was sent
+    (``targets.PRE_DIAL_REFUSALS``, ADR-051 decision 8); every other unavailable read keeps the
+    plain text.
+    """
 
     from finishup.client.targets import PRE_DIAL_REFUSALS
 
     if phase in PRE_DIAL_REFUSALS:
         return remote_refusal_context(phase).rstrip()
-    if phase not in REMOTE_CONNECTION_PHASES:
-        return _UNAVAILABLE_CONTEXT
-    if phase == "remote_auth_failed":
-        # The server was reached: it answered and refused the key.
-        return (
-            "The selected FinishUP server answered and refused this client's key for this mapped "
-            f"session ({phase}); no live receipt can be promised."
-            + render_hook_recovery_suffix(phase)
-        )
-    return (
-        f"The selected FinishUP server is unavailable for this mapped session ({phase}); no "
-        "live receipt can be promised." + render_hook_recovery_suffix(phase)
-    )
-
-
-def locked_context() -> str:
-    """The SessionStart text for a locked vault: the remote server's own when one is selected."""
-
-    from finishup.client.targets import active_target_is_remote
-
-    return _REMOTE_LOCKED_CONTEXT if active_target_is_remote() else _LOCKED_CONTEXT
+    return _UNAVAILABLE_CONTEXT
 
 
 def _stale_mapping_context(
@@ -1602,7 +1584,9 @@ async def _read_status(
     """Read the mapped session's status through a repository-bound connection.
 
     Without an explicit ``connect`` the real connector is bound to
-    ``workspace_locator`` so the daemon's repository fence can admit the read.
+    ``workspace_locator`` so the daemon's repository fence can admit the read. A selected server
+    this computer refused before anything was sent (ADR-051 decision 8) keeps that refusal's
+    closed reason, so the context names it.
     """
 
     client: _StatusClient | None = None
@@ -1652,7 +1636,12 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        return StatusOutcome(_CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"))
+        from finishup.client.targets import PRE_DIAL_REFUSALS
+
+        return StatusOutcome(
+            _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
+            phase=error.phase if error.phase in PRE_DIAL_REFUSALS else None,
+        )
     except Exception:
         return StatusOutcome("unavailable")
     finally:
@@ -1955,7 +1944,9 @@ def handle_session_start(
                     stdout,
                 )
                 return 0
-            _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
+            _stdout_json(
+                _context_output("SessionStart", unavailable_context(outcome.phase)), stdout
+            )
             return 0
     except Exception as exc:
         _note_oversize_hook_ingress(exc, "SessionStart", workspace=workspace, _state=_state)

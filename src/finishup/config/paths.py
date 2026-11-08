@@ -54,7 +54,6 @@ __all__ = [
     "read_runtime_pin",
     "reset_selection_memo",
     "runtime_dir",
-    "select_root_for_process",
     "selection_override",
     "runtime_pin_path",
     "service_generation_path",
@@ -657,8 +656,7 @@ def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -
     interface's event loop or a concurrent block in another worker never sees it, and blocks
     that end out of order never leave this process resolving another block's root. A thread
     started without the context (``threading.Thread``, ``run_in_executor``) resolves this
-    process's own selection: a process that serves one root for its whole life uses
-    ``select_root_for_process`` instead.
+    process's own selection.
     """
 
     probe = _probe_or_default(_probe)
@@ -668,19 +666,6 @@ def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -
         yield
     finally:
         _SELECTION_OVERRIDE.reset(token)
-
-
-def select_root_for_process(root: Path, *, _probe: _PathProbe | None = None) -> None:
-    """Resolve the selection as ``root`` for the rest of this process, in every thread.
-
-    For a process that serves one validated target root until it exits (``finishup connector
-    run``), whose worker threads resolve paths too. It changes nothing on disk, never outranks the
-    isolation variable or the runtime pin, and is checked like any remembered selection: once the
-    root's record is gone, every path beneath it fails closed.
-    """
-
-    probe = _probe_or_default(_probe)
-    _SELECTION_MEMO[str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)] = root
 
 
 def active_root(*, _probe: _PathProbe | None = None) -> Path | None:

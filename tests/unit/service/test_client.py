@@ -43,6 +43,7 @@ from finishup.service.client import (
     PrivacyReceiptFound,
     PrivacyReceiptNotFound,
     ServiceClient,
+    connect_service,
     connect_service_on_demand,
     prepare_project_request,
 )
@@ -513,8 +514,8 @@ async def test_on_demand_keeps_waiting_when_the_spawned_service_lost_the_singlet
     assert attempts == 3
 
 
-def _remote_record() -> object:
-    from finishup.client.targets import ServerTarget
+def _remote_record(disclosure_version: int | None = None) -> object:
+    from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 
     return ServerTarget(
         "t_0a1b2c3d",
@@ -525,7 +526,7 @@ def _remote_record() -> object:
         port=22,
         claim_salt="A" * 43 + "=",
         authorized_at="2026-11-05T12:00:00.000Z",
-        disclosure_version=1,
+        disclosure_version=DISCLOSURE_VERSION if disclosure_version is None else disclosure_version,
     )
 
 
@@ -574,6 +575,64 @@ async def test_on_demand_names_a_remote_target_root_without_waiting(
         await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=30.0)
     assert refused.value.phase == "target_root_is_remote"
     assert time.monotonic() - started < 5.0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("on_demand", [False, True])
+@pytest.mark.parametrize(
+    ("refusal", "phase"),
+    [
+        (None, "target_root_is_remote"),
+        ("stale", "target_reauthorization_required"),
+        ("zero_network", "zero_network_remote_selected"),
+        ("unreadable", "target_root_is_remote"),
+    ],
+)
+async def test_a_remote_target_root_is_refused_before_anything_is_dialled(
+    monkeypatch: pytest.MonkeyPatch, on_demand: bool, refusal: str | None, phase: str
+) -> None:
+    """This release reaches no server on another machine: a connection from a remote target's
+    root (one another build selected) is refused at once, before its endpoint is even tried or a
+    service started. The shared connection check names a zero-network or stale-disclosure
+    refusal by its own token (ADR-051 decision 8); any other remote root, or one whose record
+    cannot be read, is ``target_root_is_remote``."""
+
+    import finishup.client.everyday_policy as everyday_policy
+    import finishup.service.client as client_module
+
+    tried: list[str] = []
+
+    async def dial() -> object:
+        tried.append("dial")
+        raise AssertionError("a remote root's endpoint is never tried")
+
+    def spawn() -> object:
+        tried.append("spawn")
+        raise AssertionError("no service starts in a remote root")
+
+    if refusal == "unreadable":
+        monkeypatch.setattr("finishup.client.targets.active_target_record", _unreadable_record)
+    else:
+        monkeypatch.setattr(
+            "finishup.client.targets.active_target_record",
+            lambda: _remote_record(1 if refusal == "stale" else None),
+        )
+    zero_network = refusal == "zero_network"
+
+    def reported() -> object:
+        return SimpleNamespace(reported_at="2026-11-07T09:30:00.000Z") if zero_network else None
+
+    monkeypatch.setattr(everyday_policy, "last_reported_zero_network", reported)
+    monkeypatch.setattr(client_module, "connect_control", dial)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    with pytest.raises(ControlError) as refused:
+        if on_demand:
+            await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=5.0)
+        else:
+            await connect_service(ControlClientKind.CLI)
+    assert (refused.value.reason, refused.value.phase) == ("service_unavailable", phase)
+    assert refused.value.retryable is True
+    assert tried == []
 
 
 def test_a_local_or_named_local_root_still_spawns(
