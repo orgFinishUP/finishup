@@ -160,13 +160,11 @@ for everyday work cannot redirect a test run, and `finishup server use` run thro
 launcher or under an exported root refuses with `selection_overridden`. `finishup server status`
 names the source that decided the root.
 
-To exercise server targets end to end, provision separate instances for the server and the client
-from the same revision (lockstep: the handshake refuses a release mismatch with
-`remote_incompatible`). Keep the server's and the client's roots disjoint, run real SSH or TLS
-between them as the approach's topology section describes, and register any host with the client
-instance's absolute launcher. A target is itself an isolated root, so a process tree can also be
-pointed at a target root explicitly with `FINISHUP_ISOLATED_ROOT`, which always wins over the
-selection. Never point either instance at the everyday install's directories, and stop only the
+Remote server kinds (SSH, HTTPS and port) arrive in a later release; until then `finishup server
+add` refuses them with `remote_kind_unavailable`, so testing server targets covers only the
+everyday and named local servers. A named local server is itself an isolated root, so a process
+tree can also be pointed at it explicitly with `FINISHUP_ISOLATED_ROOT`, which always wins over
+the selection. Never point an instance at the everyday install's directories, and stop only the
 processes you started (`finishup server disconnect`, `finishup instance dispose`), never by
 pattern.
 

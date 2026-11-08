@@ -464,6 +464,16 @@ hosts that use this bridge, not Claude-Code-specific.
 
 ## Server targets (ADR-051)
 
+Decision for this release: **Claude Code uses only this computer's FinishUP servers.** Remote
+server kinds (SSH, HTTPS and port) are closed: `finishup server add` refuses them with
+`remote_kind_unavailable` before asking anything, and `finishup server use` refuses a remote
+record, so only this computer's everyday server and named local servers (`finishup server add NAME
+--local`) can be selected. With no remote target, Claude Code hooks, MCP and the CLI behave
+exactly as they did before server targets existed, and the plugin registration is unchanged. The
+shared remote seams (workspace claim, workspace agent, outside-read modes, zero-network selection
+rules, client attestation and the client-attested receipt lines) are present but dormant until a remote
+kind opens in a later release, and no remote cell is claimed for Claude Code.
+
 Decision: **no Claude Code registration changes.** The plugin's MCP entry and hook commands keep
 their exact launcher and arguments and carry no environment block, as described above. They follow
 the FinishUP server the owner selected with `finishup server use` (see the
@@ -474,112 +484,59 @@ explicit root; the selection never overrides it. Connecting Claude Code while a 
 does not record that target in the plugin, and `finishup server use local` returns every later
 process to the default service.
 
-- **Zero-network and a remote target are never in force together** (maintainer decision, 2026-11-07,
-  replacing 2026-11-06; ADR-051 decision 8). Adding or selecting a remote target is refused while
-  this computer's privacy policy is zero-network, live or as this computer last reported it. A
-  change that would make it zero-network while a remote target is selected asks on the owner's
-  terminal first (switch to this computer's everyday FinishUP and make the change, or cancel it and
-  keep the target; Enter, end of input or Ctrl-C cancels) and is refused without that terminal, for
-  `--json`, or for a decision relayed from an agent (`zero_network_remote_selected`, remedy
-  `finishup server use local`, then the change again); it never switches on its own. As the last
-  line of defence, every Claude Code hook, MCP bridge connection and CLI call to a remote target is
-  refused before anything is sent while this computer last reported zero-network: the session's
-  hooks and SessionStart context and the MCP tool error name `zero_network_remote_selected` with its
-  continuation (`zero_network_local_server_required`: ask the owner to run `finishup server use
-  local`, then restart the session). The check reads the owner-only marker of this computer's last
-  reported policy, never the service, so it costs no round trip within the hook budgets. Switching
-  (the choice, `finishup server use local` or the terminal interface's "Use local") also stops this
-  computer's connection to the target as `finishup server disconnect` does: the target's connector
-  closes its background workspace agents, so server work already under way can no longer read files
-  here. After switching, restart open Claude Code sessions: the running MCP bridge keeps the remote
-  target until then (and is refused), while hooks follow at once. `setup status --next`, `server
-  status` and the terminal interface show the state, live or "last reported". While a remote target
-  is selected, fresh server-host privacy commands are refused (`requires_server_host`) and `privacy
-  tighten|propose` reach the target, so the choice comes only from a FinishUP process already on
-  this computer's server (an open terminal interface or menu, or a privacy step or setup under way).
-  Host decision: supported, same code path; no MCP tool or hook carries or answers the choice,
-  because agents cannot change the policy or the selection.
-- **Whose privacy policy a command changes** (ADR-051 decision 8). With a remote target selected,
-  `privacy tighten|propose` and the privacy step of `setup run` (also from the menu or the terminal
-  interface's first run) change the target's policy and name it, by id and kind, before anything
-  is sent and in the result (stderr beside the unchanged `--json` document; the setup summary's
-  privacy line; one terminal-interface message). A widening waits on the server host for
-  `privacy decide-policy <proposal id>`, which is refused here (`requires_server_host`, naming the
-  target); every surface prints that exact command with the proposal's expiry (about five minutes,
-  in UTC), and setup's next steps name it instead of `--privacy` / `--set`. Host
-  decision: supported, same code path for Claude Code; no MCP tool or hook changes a privacy policy, so
-  none carries these lines.
 - **Switching mid-session.** The MCP bridge reads the selection once per process and keeps that
   target for the life of the session; hooks follow a new selection at once. Restart open Claude
   Code sessions after `finishup server use`. In required startup mode a target that cannot be
   reached denies tracked tools exactly as an unreachable local service does; it never falls back to
   the local service.
-- **Workspace.** For a remote target the bridge and hooks send a workspace claim instead of the
-  project path, and the bridge rewrites an absolute `workspace_ref` to the connection's handle
-  before `start`. The client's workspace agent serves the server's change capture, reviewer reads,
-  task inputs, declared tests, observation verification and approved checks for
-  `${CLAUDE_PROJECT_DIR}`; receipts carry the `client_attested` line. Outside that folder the agent
-  reads as the target's outside-read mode says: in `local` mode as a local service would, in
-  `listed` mode only beneath a folder the owner listed for the target on this machine (`finishup
-  server folders mode|add`, ADR-051 decision 5). Every remote kind gets the same choice, asked by
-  `finishup server add` on the owner's own terminal (an official endpoint is `local`); once
-  chosen, no hook, MCP tool or CLI call in a Claude Code session prompts for it again. The
-  decision is the same for every host and changes no registration. Inside it a reviewer's file
-  read returns a file only when Git answers that it is not ignored, as a local service's does; a
-  declared test is read in `local` mode as a local service reads it (Git-ignored, linked worktree
-  or submodule included), and in `listed` mode only where Git answers. In `listed` mode a file
-  left unread (a task input or declared test outside the listed folders, or such a test) costs
-  only that file, and the receipt says so in one fixed line, `outside_reads_not_listed`, naming
-  `finishup server folders add NAME FOLDER` and `finishup server folders mode NAME local` on this
-  machine (ADR-051 decision 5).
-- **Observation.** Hook observations stay this machine's: consent, content profiles, approved-check
-  trust, mappings and the outbox live in the selected target's client-side root, and
-  `finishup observe ...` administers them here. Each row a remote target receives carries the
-  client attestation (ADR-051 decision 12); the server accepts it as `client_attested`, and
-  receipts with hook-observed evidence carry one more fixed line. Host decision for content:
-  with `claude-code-ordinary-observation-v1` enabled, the prompt, message and tool input and
-  output chunks reach the server unchanged, as a local service receives them; without the profile
-  none is sent. The server disclosure (disclosure 2) names this before the owner types the name.
+- **Evidence.** Coverage at the time of writing is unit and integration tests; the remote seams
+  are exercised in process only. No remote cell is claimed for Claude Code or any other host: the
+  real-environment runs are recorded with the pull request that opens a remote kind.
+- **Receipt provenance** (ADR-051, decision D4). This part holds for every task, local ones
+  included: when the service cannot read the task's opening record, the receipt is still made and
+  ends with the fixed provenance-unknown section (on a claim-bound task, in place of the
+  `client_attested` line); every format carries the same words as its `workspace_provenance`
+  member, and the agent gets them in the MCP receipt text and its summary and at the head of a
+  paged receipt's first page.
+
+The decisions below are dormant in this release: they take effect only for a remote target, and
+none can be added or selected yet.
+
+- **Zero-network** (ADR-051 decision 8). A remote target and a zero-network policy on this
+  computer are never in force together: adding or selecting one is refused under zero-network,
+  and every Claude Code hook, MCP bridge connection and CLI call to a remote target is refused
+  before anything is sent while this computer last reported zero-network
+  (`zero_network_remote_selected`, continuation `zero_network_local_server_required`). Host
+  decision: supported, same code path; no MCP tool or hook carries or answers the choice, because
+  agents cannot change the policy or the selection.
+- **Whose privacy policy a command changes** (ADR-051 decision 8). With a remote target selected,
+  `privacy tighten|propose` and the privacy step of `setup run` change the target's policy and
+  name it; a widening is decided on the server host (`privacy decide-policy`, refused here as
+  `requires_server_host`). Host decision: same code path for Claude Code; no MCP tool or hook
+  changes a privacy policy.
+- **Workspace and outside reads** (ADR-051 decision 5). The bridge and hooks send a workspace
+  claim instead of the project path, the bridge rewrites an absolute `workspace_ref` to the
+  connection's handle before `start`, and this computer's workspace agent serves the server's
+  workspace reads for `${CLAUDE_PROJECT_DIR}`. Outside that folder it reads as the target's
+  outside-read mode (`local` or `listed`) says; the owner chooses that mode on their own terminal,
+  and no hook, MCP tool or CLI call in a Claude Code session asks for it, the same on every host
+  and with no registration change. A file `listed` mode leaves unread is named on the receipt
+  (`outside_reads_not_listed`), and receipts carry the `client_attested` line.
+- **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
+  and the outbox stay on this computer, and each row a remote target receives carries the client
+  attestation. Host decision for content: with `claude-code-ordinary-observation-v1` enabled, the
+  prompt, message and tool input and output chunks reach the server unchanged, as a local service
+  receives them; without the profile none is sent.
 - **Service attribution in MCP results.** Host decision: supported. Claude Code reads the MCP
   text channel, which ends with the fixed "read on the client machine" line and the line naming
-  the answering service and transport on `status` and receipts (ADR-051); a paged receipt's every
-  page names the service. The structured result never carries them.
-- **Receipt provenance.** When the server cannot read the task's opening record, a receipt is
-  still made and never refused for it (ADR-051, decision D4): instead of the `client_attested`
-  line it ends with the fixed provenance-unknown section (what happened, why it matters, and
-  whether a retry can help), and every receipt format, JSON included, carries the same words as
-  its `workspace_provenance` member, whose `reason` names the cause and whose last line says only
-  what is true of it (decision D4b). The passing cause (`session_opening_unreadable`: a failed
-  read, or a storage fault while the server loaded the record) says to run `receipt` again and, if it persists,
-  restart the server's service. Each lasting cause gives no retry or restart advice and says how
-  long the receipts will keep saying so: `session_opening_copy_unverifiable` (the server's stored
-  copy is missing or fails its integrity check, which reopening the task repeats: for as long as
-  that lasts), `session_opening_redacted` and `session_opening_erased` (the record will not become
-  readable again), `session_opening_key_unavailable` (while the server does not have the record's
-  key) and `session_opening_format_unknown` (until the server runs a FinishUP version that knows
-  the record's format). The agent sees the same words
-  in the MCP receipt text and its summary, and in the member at the head of a paged receipt's
-  first page. A long receipt has its other sections shortened to fit and still ends with the
-  whole section.
+  the answering service on `status` and receipts; a paged receipt's every page names the service.
+  The structured result never carries them.
 - **Routes.** A strict route (`--semantic off`) stays allowed on a remote target, and the server
   enforces it. On the policy route the initialize instructions say that AI-powered review is
   decided by the selected server, named by its target id, not by a local provider.
-- **Edge relay (approach A).** Hooks connect claim-only and never answer workspace calls; the MCP
-  bridge's connection also answers them while a call runs. Work that outlives a call (the AI-powered
-  review loop, observation verification) is answered by the target's connector, which keeps a
-  background workspace agent for `${CLAUDE_PROJECT_DIR}` for 15 minutes after its last use (until
-  `finishup server disconnect` or a `finishup server use` that leaves the target stops the
-  connector) and delivers the hook-captured rows every 30 seconds. A SessionStart context for an
-  unreachable or locked remote server names the closed phase and its continuation token (for example
-  `remote_unreachable` with `remote_server_test`, or `remote_vault_unlock_required`), never a local
-  `service run` or `service unlock`, a host or a target name.
-- **Budgets.** Hook budgets are not relaxed for a remote target. `finishup server test` measures
-  the round trip and warns when the required startup gate would likely deny.
+- **Budgets.** Hook budgets are not relaxed for a remote target.
 - **Upgrades.** A remote server is never replaced from this machine; a release mismatch is
   `remote_incompatible`, naming both releases.
-- **Evidence.** Coverage at the time of writing is unit and integration tests; the real-environment
-  runs for each target kind are recorded with the pull request that lands the chosen approach. No
-  Claude Code cell is claimed for a remote target until that evidence exists.
 
 ## Legacy Yoetz registrations
 
@@ -1192,14 +1149,14 @@ payload-free `hook_diagnostics` reason
 `privacy_authority_required`, `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 `storage_corrupt`, or, for a selected remote server this computer refuses before any dial,
 `zero_network_remote_selected` or `target_reauthorization_required`, which the SessionStart context
-names with the owner's fix) and the session keeps an observation-only binding; `UserPromptSubmit` and
-`Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
-defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
-bound from its exact `PostToolUse` result remains a recovery path, not a substitute proof that
-natural auto-attach works. An explicit `mode=create` collision remains `SESSION_CONFLICT` and is
-not a recovery selector. For
-`vault_locked` on a never-initialized install, that explicit `start` returns the typed
-`vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
+names with the owner's fix) and the session keeps an observation-only binding; `UserPromptSubmit`
+and `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent
+and defers service delivery without spending an auto-attach retry. An explicit cooperative MCP
+`start` bound from its exact `PostToolUse` result remains a recovery path, not a substitute proof
+that natural auto-attach works. An explicit `mode=create` collision remains `SESSION_CONFLICT` and
+is not a recovery selector. For `vault_locked` on a never-initialized install, that explicit `start`
+returns the typed `vault_initialization_required` continuation (see the proof checklist) rather than
+a dead end.
 
 If a scoped attach returns `SESSION_CONFLICT`, inspect `safe_details.reason_code`:
 `repository_identity_required` means the trusted repository context was omitted, while
