@@ -107,6 +107,12 @@ def _invoke(*arguments: str) -> Result:
     return _RUNNER.invoke(cli.app, ["server", *arguments])
 
 
+def _plain(text: str) -> str:
+    """Help text without terminal styling: CI forces colour, so options and names carry escapes."""
+
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
 def _status_json(*arguments: str) -> dict[str, JsonValue]:
     result = _invoke("status", *arguments, "--json")
     assert result.exit_code == 0, result.output
@@ -160,13 +166,14 @@ def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
         if group.name is not None and not group.hidden
     }
     assert shown == {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"}
-    words = set(re.findall(r"[a-z]+", listing.stdout))
+    words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
     assert not words & {"login", "logout", "folders"}
 
     add = _invoke("add", "--help")
     assert add.exit_code == 0, add.output
-    assert "--local" in add.stdout
+    add_help = _plain(add.stdout)
+    assert "--local" in add_help
     for remote in (
         "ssh://",
         "https://",
@@ -177,7 +184,7 @@ def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
         "--tls-pin",
         "--outside-reads",
     ):
-        assert remote not in add.stdout
+        assert remote not in add_help
     for hidden in (("login", "--help"), ("logout", "--help"), ("folders", "--help")):
         shown = _invoke(*hidden)
         assert shown.exit_code == 0, (hidden, shown.output)
