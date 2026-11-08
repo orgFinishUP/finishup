@@ -1215,10 +1215,7 @@ def observe_drain_cmd(
         str | None,
         typer.Option(
             "--workspace",
-            help=(
-                "Restrict delivery to one workspace; default drains all pending commitments "
-                "(with a server elsewhere, the current folder's)."
-            ),
+            help="Restrict delivery to one workspace; default drains all pending commitments.",
         ),
     ] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
@@ -2612,10 +2609,7 @@ privacy_input_roots_app = typer.Typer(
         "folder) whose files the task names, so AI-powered review can read them as read-only "
         "task inputs. Admitting applies only after the trusted local approval on this terminal; "
         "removing applies at once. Nothing is sent unless this repository's privacy policy "
-        "already sends repository excerpts. Run it on the computer the FinishUP service runs "
-        "on, in the repository's folder there: for a remote server that is its server host, and "
-        "the directory must exist there. For a folder on the client machine, list it for that "
-        "server there instead with 'finishup server folders add NAME FOLDER'."
+        "already sends repository excerpts."
     ),
     no_args_is_help=True,
 )
