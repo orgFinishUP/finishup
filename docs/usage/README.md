@@ -37,9 +37,9 @@ the decisions behind it see [`docs/adr/`](../adr/).
   restarts the agent after a compaction, what each line means, and where it appears.
 - [Receipts and coverage](receipts-and-coverage.md) — how to read a receipt and why the wording is
   deliberately narrow.
-- [FinishUP servers](servers.md) — use another FinishUP on this computer, on a local port, over
-  SSH or on the web: adding, choosing, signing in, what leaves your computer, and the workspace
-  agent.
+- [FinishUP servers](servers.md) — use another FinishUP on this computer, a named local server
+  with its own tasks and vault: adding, choosing, checking, starting and stopping, and removing
+  one.
 
 Agent-facing *runtime* guidance is separate and lives in [`guidance/`](../../guidance/). It ships
 byte-identically to every harness and over MCP, so it is the authority for how an agent should

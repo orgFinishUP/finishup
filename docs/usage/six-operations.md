@@ -172,19 +172,13 @@ observations that are still being delivered before it checks, and the result's
 (`bounded_timeout`, with how many), or the wait could not see them (`unavailable`). On Codex the
 wait also delivers session-log entries FinishUP was still holding to match with their hook reports,
 marked as unmatched, so they count before the check rather than after it. The wait never fails the
-check; without the option nothing changes. With a [FinishUP server](servers.md) on another
-machine, observations still waiting on your computer are out of the server's sight, so the wait is
-always `unavailable`; `finishup check` says so and names the fix: run `finishup observe drain` in
-the project folder first, then check again without `--await-observations` (a check that asks to
-wait reports `unavailable` again).
+check; without the option nothing changes.
 
 #### Inspecting what is left
 
 `"mode": "inspect"` asks FinishUP to look at its own record instead of checking it. It is a read like
 `status`: nothing is recorded, no finding is returned or created, no AI-powered review runs and
-nothing leaves your machine (when you use a [FinishUP server](servers.md) on another machine, only
-the request and its answer travel to and from that server), so a lost answer is fixed by asking
-again. Your agent host still sees
+nothing leaves your machine, so a lost answer is fixed by asking again. Your agent host still sees
 a `check` call and approves it as it approves any check (host admission of `check` covers it); if
 the host holds or refuses an inspection, nothing is waiting in FinishUP and your agent reads `status`
 instead. One call answers three questions:
