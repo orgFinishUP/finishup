@@ -527,3 +527,26 @@ def test_start_timeout_names_a_slow_start_not_a_supervisor_or_lifecycle_command(
     found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
     assert len(found) == 1
     _assert_no_leakage(error, found)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["target_root_is_remote", "zero_network_remote_selected", "target_reauthorization_required"],
+)
+def test_a_refused_remote_root_names_its_continuation_never_a_local_service(phase: str) -> None:
+    """MCP names a remote root's refusal and its continuation, never 'finishup service run'."""
+
+    from finishup.protocol.recovery import continuation_for_reason
+
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    structured = cast(dict[str, object], result.structuredContent)
+    text = json.dumps(structured)
+    assert "service run" not in text
+    assert phase in text
+    continuation = continuation_for_reason(phase)
+    assert continuation is not None
+    assert continuation in text

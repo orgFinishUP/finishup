@@ -2151,6 +2151,31 @@ def _control_error_result(
             safe_details={"reason_code": "service_draining"},
         )
     if error.reason == "service_unavailable":
+        from finishup.client.targets import REMOTE_ROOT_REFUSALS
+
+        if error.phase in REMOTE_ROOT_REFUSALS:
+            # The root in use names a server elsewhere (ADR-051): refused before anything was
+            # sent or started. Name the phase and its continuation, never a local service to run.
+            remote_details: dict[str, object] = {
+                "reason_code": "service_unavailable",
+                "phase": error.phase,
+            }
+            remote_continuation = continuation_for_reason(error.phase)
+            if remote_continuation is not None:
+                remote_details["continuation"] = remote_continuation
+            return _control_public_error_result(
+                error,
+                request_id,
+                operation,
+                code=PublicErrorCode.SERVICE_UNAVAILABLE,
+                message=(
+                    "FinishUP refused the selected server's connection before anything was sent "
+                    f"({error.phase}). Follow the continuation; do not start a local service."
+                ),
+                retryable=True,
+                host_profile=host_profile,
+                safe_details=remote_details,
+            )
         startup = None
         if error.phase in SERVICE_STARTUP_PHASES:
             # Imported here: the bridge's import graph stays the ordinary service client alone.

@@ -350,3 +350,23 @@ def test_start_timeout_and_a_starting_holder_name_the_slow_start(
     _, err = _status_stderr(monkeypatch, ControlError("service_unavailable", retryable=True))
     assert err.startswith("service_unavailable: service_handshake_timeout: ")
     assert "(holder pid 4242)" in err
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["target_root_is_remote", "zero_network_remote_selected", "target_reauthorization_required"],
+)
+def test_a_refused_remote_root_names_its_directive_never_a_local_service(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """A root naming a server elsewhere is refused before anything is sent (ADR-051): the CLI
+    names the phase and its registry directive, never 'finishup service run'."""
+
+    code, guidance = _status_stderr(
+        monkeypatch, ControlError("service_unavailable", retryable=True, phase=phase)
+    )
+
+    assert code == 20
+    assert guidance.startswith(f"{phase}: FinishUP refused the selected server's connection")
+    assert "finishup service run" not in guidance
+    assert "finishup server use local" in guidance or "finishup server use" in guidance

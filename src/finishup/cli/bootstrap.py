@@ -433,6 +433,41 @@ def control_failure(
         )
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
+    if error.reason == "service_unavailable" and error.phase is not None:
+        from finishup.client.targets import REMOTE_ROOT_REFUSALS
+
+        if error.phase in REMOTE_ROOT_REFUSALS:
+            # The root in use names a server elsewhere (ADR-051): this computer refused before
+            # anything was sent or started, so the line names the phase and its registry
+            # directive, never a local service to start.
+            from finishup.cli.render import recovery_directive_json, render_remote_refusal
+            from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+            stderr_writer(
+                _with_correlation(
+                    render_remote_refusal(
+                        error.phase,
+                        head="FinishUP refused the selected server's connection before anything "
+                        "was sent",
+                    ),
+                    error,
+                )
+            )
+            if json_output:
+                payload: dict[str, JsonValue] = {
+                    "ok": False,
+                    "public_code": code.value,
+                    "reason": "service_unavailable",
+                    "phase": error.phase,
+                    "retryable": error.retryable,
+                }
+                if error.correlation_id is not None:
+                    payload["correlation_id"] = error.correlation_id
+                remote_directive = directive_for(continuation_for_reason(error.phase))
+                if remote_directive is not None:
+                    payload["recovery"] = recovery_directive_json(remote_directive)
+                stdout_writer(payload)
+            return exit_code_for(code)
     if error.reason == "request_timeout" and operation is not None:
         from finishup.cli.render import render_recovery_directive_lines
         from finishup.protocol.recovery import (
