@@ -737,6 +737,134 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never match a FinishUP process by name or path to stop it.",
     ),
+    # --- workspace binding, server targets and remote connections (ADR-051) ----------------
+    RecoveryDirective(
+        token="workspace_binding_correction",
+        directive=(
+            "This request names its workspace in a form this connection cannot use (a client: "
+            "handle without a claim, or a path and a claim together), so nothing was recorded. "
+            "Name it by its absolute root and send it once under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The FinishUP MCP bridge and CLI choose the right form for the selected server.",
+    ),
+    RecoveryDirective(
+        token="workspace_handle_required",
+        directive=(
+            "This server names a new session's workspace only by this connection's client: "
+            "handle, so the start was refused before any write. Send it once under a NEW "
+            "request_id with an external_ref and the canonical absolute workspace_ref."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The FinishUP MCP bridge and CLI send the handle in place of that path.",
+    ),
+    RecoveryDirective(
+        token="workspace_agent_reconnect",
+        directive=(
+            "The server needed to read your workspace, but no FinishUP workspace agent on your "
+            "machine answered, so that evidence is a recorded gap. Reconnect FinishUP to this "
+            "server from the machine that holds the workspace, then check again."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Do not describe the missing workspace evidence as verified.",
+    ),
+    RecoveryDirective(
+        token="workspace_agent_refusal_review",
+        directive=(
+            "The FinishUP workspace agent on your machine refused a server read outside the "
+            "claimed workspace or the admitted roots, so nothing was read and the gap is "
+            "recorded. Report the refusal to the user."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Do not move files or widen admitted roots to get past a refusal.",
+    ),
+    RecoveryDirective(
+        token="server_host_command_required",
+        directive=(
+            "This command changes the FinishUP server's own state, so it runs only on the machine "
+            "that hosts the server, and nothing was changed here. Run it on the server host, or "
+            "select a local server, then run it again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="remote_target_no_local_service",
+        directive=(
+            "The selected FinishUP target is a server on another machine, so no local service "
+            "runs for it and nothing was started. Check the selection with 'finishup server "
+            "status', or select a local server, then run this again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="server_reauthorization_required",
+        directive=(
+            "The selected FinishUP server was authorized under an older disclosure, so nothing "
+            "was sent to it. Ask the owner to run 'finishup server use' with its name in their "
+            "own terminal, then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select or authorize a FinishUP server for the owner.",
+    ),
+    RecoveryDirective(
+        token="server_selection_overridden",
+        directive=(
+            "An environment variable or a runtime pin chooses the FinishUP root, so the saved "
+            "server selection is not in effect. Unset the override in this shell, or use a shell "
+            "without it, when the saved selection is wanted."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="remote_server_test",
+        directive=(
+            "The selected FinishUP server could not be reached, or the connection to it ended. "
+            "Run 'finishup server test' to see which step failed, then repeat this request under "
+            "its original identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never fall back to another server or a local service for this request.",
+    ),
+    RecoveryDirective(
+        token="remote_credential_repair",
+        directive=(
+            "The selected FinishUP server refused this client's credentials. Ask the owner to run "
+            "'finishup server login' for an HTTPS server, or to load the SSH key for an SSH "
+            "server, then repeat this request under its original identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never paste a key or credential into chat or a request body.",
+    ),
+    RecoveryDirective(
+        token="remote_identity_verify",
+        directive=(
+            "The selected server's identity no longer matches the one recorded when it was "
+            "added, so FinishUP did not connect and sent nothing. Ask the owner to verify the "
+            "server another way, then remove and re-add the target."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never disable host-key or certificate checks to get past this.",
+    ),
+    RecoveryDirective(
+        token="remote_service_start_required",
+        directive=(
+            "The selected server is reachable, but its FinishUP service is not running. Ask the "
+            "owner to start it on the server host, then repeat this request under its original "
+            "identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never match a FinishUP process by name or path to stop or start it.",
+    ),
+    RecoveryDirective(
+        token="remote_release_mismatch",
+        directive=(
+            "This client and the selected FinishUP server run different releases, so they cannot "
+            "talk and nothing was recorded. Ask the owner to install the same FinishUP release on "
+            "both machines, then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="A FinishUP service on another machine is never replaced from the client.",
+    ),
 )
 
 RECOVERY_DIRECTIVES: Final[Mapping[str, RecoveryDirective]] = MappingProxyType(

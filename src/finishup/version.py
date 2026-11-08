@@ -134,7 +134,11 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # verification coverage).
 # #1275: +2 canonical status vectors on the status-result 1.5.0 wire carrying closure readiness
 # (CAN-025, CAN-026); the released 1.4.0 vectors (CAN-011, CAN-012) stay append-only.
-REVIEWED_RESOURCE_COUNT: Final = 342
+# ADR-051: +10 for the control 2.10.0 envelopes and workspace-binding vectors, +2 schemas
+# (isolation-report 1.1.0 with the ``selection`` binding, server-target-status 1.0.0).
+# ADR-051 decision 12: +1 canonical vector (CTL-2106, a claim-bound observation ingest carrying
+# the client's attestation).
+REVIEWED_RESOURCE_COUNT: Final = 355
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -157,10 +161,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("closure-prepare-request", "1.0.0"),
     ("closure-prepare-result", "1.0.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.9.0"),
-    ("control-hello-result", "2.9.0"),
-    ("control-request", "2.9.0"),
-    ("control-result", "2.9.0"),
+    ("control-hello", "2.10.0"),
+    ("control-hello-result", "2.10.0"),
+    ("control-request", "2.10.0"),
+    ("control-result", "2.10.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.1.0"),
     ("finding", "1.4.0"),
@@ -170,7 +174,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("host-connection", "1.0.0"),
     ("host-connection-batch", "1.0.0"),
     ("mcp-removal", "1.0.0"),
-    ("isolation-report", "1.0.0"),
+    ("isolation-report", "1.1.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.2.0"),
     ("pending-agent", "7.0.0"),
@@ -193,6 +197,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.1.0"),
     ("semantic-provenance", "1.2.0"),
+    ("server-target-status", "1.0.0"),
     ("service-status", "1.0.0"),
     ("session-health", "1.0.0"),
     ("setup-readiness", "1.0.0"),

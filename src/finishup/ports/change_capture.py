@@ -68,6 +68,8 @@ __all__ = [
     "drop_space_cut_words",
     "encode_check_change",
     "encode_task_change_base",
+    "task_input_file_from_wire",
+    "task_input_file_wire",
     "metadata_path_representable",
     "RequestedPathProbe",
     "MAX_BASELINE_UNTRACKED_FILES",
@@ -75,6 +77,7 @@ __all__ = [
     "MAX_TASK_INPUT_FILES",
     "MAX_TASK_INPUT_TEXT_BYTES",
     "NestedUntrackedBaseline",
+    "OutsideSnapshotRead",
     "TASK_INPUT_ORIGINS",
     "TASK_INPUT_BASELINES",
     "TaskInputBaseline",
@@ -435,6 +438,23 @@ class TaskInputFile:
             raise _invalid()
         if type(self.redacted) is not bool:
             raise _invalid()
+
+
+# Kept beside ``TaskInputFile`` so a client workspace agent can return it over a connection
+# (ADR-051); ``finishup.adapters.task_input_read`` produces it and re-exports the name.
+@dataclass(frozen=True, slots=True)
+class OutsideSnapshotRead:
+    """One snapshot candidate the outside read reached (#1118 unit 1).
+
+    ``text`` is the whole file when it is UTF-8 text of at most ``max_bytes``; otherwise
+    ``None`` and ``reason`` is the closed code for why no full original was kept.
+    """
+
+    root: str
+    path: str
+    size: int
+    text: bytes | None
+    reason: Literal["too_large", "not_text", "unreadable"] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1034,14 +1054,20 @@ class CheckWorkspaceSource:
     ``workspace`` is the locator the authenticated connection supplied at handshake and
     ``repository_commitment`` the installation-keyed commitment the service derived from that same
     locator. The capture runs only when the commitment equals the task route's own, so a
-    connection cannot point one task's review at another repository.
+    connection cannot point one task's review at another repository. A claim-bound connection's
+    ``workspace`` is its ``client:`` handle (ADR-051): only its workspace agent reads it.
     """
 
     workspace: str = field(repr=False)
     repository_commitment: str
 
     def __post_init__(self) -> None:
-        if type(self.workspace) is not str or not Path(self.workspace).is_absolute():
+        # Imported here: the workspace-agent catalog builds on this module's own codecs.
+        from finishup.ports.workspace_agent import workspace_handle_valid
+
+        if type(self.workspace) is not str or not (
+            Path(self.workspace).is_absolute() or workspace_handle_valid(self.workspace)
+        ):
             raise _invalid()
         validate_commitment(self.repository_commitment)
 
@@ -1173,6 +1199,58 @@ def _baseline_files(raw: object) -> tuple[UntrackedBaselineFile, ...]:
     return tuple(files)
 
 
+def task_input_file_wire(item: TaskInputFile) -> dict[str, JsonValue]:
+    """One task input file as the JSON object a check-change object stores it in (#1045).
+
+    A field at its default is left out, so an input read before the field existed keeps its
+    bytes; the workspace-agent catalog carries inputs in this same shape (ADR-051).
+    """
+
+    if type(item) is not TaskInputFile:
+        raise _invalid()
+    return {
+        "path": item.path,
+        "redacted": item.redacted,
+        "size": item.size,
+        "text": item.text.decode("utf-8"),
+        **({"origin": item.origin} if item.origin != "task" else {}),
+        **({"summary": True} if item.summary else {}),
+        # #1118 unit 1: written only when set, so an older input keeps its bytes.
+        **({"root": item.root} if item.root is not None else {}),
+        **({"baseline": item.baseline} if item.baseline != "current" else {}),
+        **({"current_state": item.current_state} if item.current_state else {}),
+    }
+
+
+def task_input_file_from_wire(row: object) -> TaskInputFile:
+    """Decode exactly the shape ``task_input_file_wire`` writes; anything else is refused."""
+
+    if type(row) is not dict:
+        raise _invalid()
+    fields = cast(dict[str, object], row)
+    if (
+        set(fields) - {"origin", "summary", "root", "baseline", "current_state"}
+        != {"path", "redacted", "size", "text"}
+        or type(fields["text"]) is not str
+        or fields.get("origin", "verification") == "task"
+        or fields.get("summary", True) is not True
+        or fields.get("baseline", "task_start") == "current"
+    ):
+        # A default value is never written, so a present default is not canonical.
+        raise _invalid()
+    return TaskInputFile(
+        cast(str, fields["path"]),
+        fields["text"].encode("utf-8"),
+        cast(int, fields["size"]),
+        cast(bool, fields["redacted"]),
+        cast(TaskInputOrigin, fields.get("origin", "task")),
+        fields.get("summary", False) is True,
+        cast(str | None, fields.get("root")),
+        cast(TaskInputBaseline, fields.get("baseline", "current")),
+        cast(TaskInputCurrentState | None, fields.get("current_state")),
+    )
+
+
 def encode_check_change(capture: CheckChangeCapture) -> bytes:
     if type(capture) is not CheckChangeCapture:
         raise _invalid()
@@ -1192,21 +1270,7 @@ def encode_check_change(capture: CheckChangeCapture) -> bytes:
         # written without them keeps its bytes.
         # ``origin`` and ``summary`` (issue #1082) are written only when not the default, so an
         # input read before they existed keeps its bytes.
-        body["inputs"] = [
-            {
-                "path": item.path,
-                "redacted": item.redacted,
-                "size": item.size,
-                "text": item.text.decode("utf-8"),
-                **({"origin": item.origin} if item.origin != "task" else {}),
-                **({"summary": True} if item.summary else {}),
-                # #1118 unit 1: written only when set, so an older input keeps its bytes.
-                **({"root": item.root} if item.root is not None else {}),
-                **({"baseline": item.baseline} if item.baseline != "current" else {}),
-                **({"current_state": item.current_state} if item.current_state else {}),
-            }
-            for item in capture.inputs
-        ]
+        body["inputs"] = [task_input_file_wire(item) for item in capture.inputs]
     if capture.outside_inputs_not_admitted:
         # Issue #1102: written only when set, so every object without it keeps its bytes.
         body["outside_inputs_not_admitted"] = True
@@ -1247,34 +1311,7 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
     inputs_raw = source.get("inputs", [])
     if type(inputs_raw) is not list or ("inputs" in source and not inputs_raw):
         raise _invalid()
-    inputs: list[TaskInputFile] = []
-    for row in cast(list[object], inputs_raw):
-        if type(row) is not dict:
-            raise _invalid()
-        fields = cast(dict[str, object], row)
-        if (
-            set(fields) - {"origin", "summary", "root", "baseline", "current_state"}
-            != {"path", "redacted", "size", "text"}
-            or type(fields["text"]) is not str
-            or fields.get("origin", "verification") == "task"
-            or fields.get("summary", True) is not True
-            or fields.get("baseline", "task_start") == "current"
-        ):
-            # A default value is never written, so a present default is not canonical.
-            raise _invalid()
-        inputs.append(
-            TaskInputFile(
-                cast(str, fields["path"]),
-                fields["text"].encode("utf-8"),
-                cast(int, fields["size"]),
-                cast(bool, fields["redacted"]),
-                cast(TaskInputOrigin, fields.get("origin", "task")),
-                fields.get("summary", False) is True,
-                cast(str | None, fields.get("root")),
-                cast(TaskInputBaseline, fields.get("baseline", "current")),
-                cast(TaskInputCurrentState | None, fields.get("current_state")),
-            )
-        )
+    inputs = [task_input_file_from_wire(row) for row in cast(list[object], inputs_raw)]
     return CheckChangeCapture(
         base=cast(ChangeBaseKind, source["base"]),
         text=source["text"].encode("utf-8"),

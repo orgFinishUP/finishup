@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import os
@@ -49,7 +50,10 @@ from finishup.adapters.memory.ledger import (
     acquire_ledger_executors,
     release_ledger_executors,
 )
-from finishup.adapters.repository_identity import resolve_repository_privacy_context
+from finishup.adapters.repository_identity import (
+    claim_repository_privacy_context,
+    resolve_repository_privacy_context,
+)
 from finishup.adapters.session_events import SessionEventMonitor
 from finishup.adapters.sqlite.connection import StorageUnsafeError
 from finishup.application.observation_await import (
@@ -83,10 +87,11 @@ from finishup.config.load import load_config
 from finishup.config.models import ConfigError, FinishUpConfig
 from finishup.config.paths import (
     PathSafetyError,
+    active_root,
     bundle_root,
     ensure_owner_only_dir,
-    isolated_root,
     read_runtime_pin,
+    server_target_kind,
     service_generation_path,
     state_dir,
     unlock_throttle_path,
@@ -124,6 +129,8 @@ from finishup.ports.control import (
     ServiceState,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceCall,
+    WorkspaceClaim,
     WorkspaceLocator,
 )
 from finishup.ports.diagnostics import StartupCheckResult
@@ -221,12 +228,15 @@ from finishup.service.control_protocol import (
     ControlStream,
     HandshakeServiceFault,
     encode_control_frame,
+    is_workspace_reply_frame,
     parse_control_request,
+    parse_workspace_reply,
     read_control_frame,
     server_handshake,
     validate_request,
     validate_result,
     write_control_frame,
+    write_workspace_call,
 )
 from finishup.service.human_control import HumanControlError, HumanControlService, PresenceScope
 from finishup.service.installation_recovery import (
@@ -253,8 +263,56 @@ from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRout
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
 from finishup.service.vault import VaultError, VaultMode, VaultService
+from finishup.service.workspace_hub import (
+    WorkspaceAgentChannel,
+    WorkspaceAgentHub,
+    live_call_scope,
+    workspace_call_deadline,
+)
 
 __all__ = ["ServiceComposition", "ServiceDaemon", "main", "run_service"]
+
+
+class _FrameWrites:
+    """One control connection's frame writes: one at a time, and none after one was cut off.
+
+    A write that a timeout, a cancellation or a transport failure interrupts may have left part
+    of a frame on the stream, and any frame written after it would be read as the rest of that
+    one: control results and workspace calls (ADR-051) share the connection. Such a connection is
+    out of step. Its write side is shut, so the peer reads the end of the stream rather than a
+    spliced frame, and every later write on it fails as a transport failure; the read side then
+    ends the connection as for any peer that went away.
+    """
+
+    __slots__ = ("lock", "out_of_step")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.out_of_step = False
+
+    async def write(self, stream: ControlStream, frame: Callable[[], Awaitable[None]]) -> None:
+        async with self.lock:
+            if self.out_of_step:
+                raise LocalControlTransportError("connection_failed")
+            try:
+                async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
+                    await frame()
+            except (TimeoutError, asyncio.CancelledError, LocalControlTransportError):
+                await self._end(stream)
+                raise
+            except ControlProtocolError as exc:
+                # An encoding refusal writes nothing; only a failed send leaves the stream torn.
+                if exc.reason == "transport_failed":
+                    await self._end(stream)
+                raise
+
+    async def _end(self, stream: ControlStream) -> None:
+        self.out_of_step = True
+        shutdown = getattr(stream, "shutdown_write", None)
+        if callable(shutdown):
+            with contextlib.suppress(Exception):
+                await cast(Callable[[], Awaitable[None]], shutdown)()
+
 
 _INSTALLATION_MARKER_NAME = "installation-state.json"
 _INSTALLATION_MARKER_DOMAIN = b"yoetz/installation-state/v1\x00"
@@ -798,6 +856,12 @@ class ServiceComposition:
     observation_gate: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # One-use owner receipt views minted only by the human-control ceremony (ADR-009 round 3).
     owner_view_grants: OwnerViewGrants = field(default_factory=OwnerViewGrants, repr=False)
+    # The client workspace agents of claim-bound connections (ADR-051). The ready application's
+    # workspace routing calls them through this same hub.
+    workspace_hub: WorkspaceAgentHub = field(default_factory=WorkspaceAgentHub, repr=False)
+    # An edge that admits only claims (a network gateway, say) closes a hello that names a
+    # workspace path on this machine. Off by default: local clients name their path.
+    refuse_workspace_locators: bool = False
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -883,6 +947,8 @@ class ServiceDaemon:
                 raise LifecycleError("invalid_transition")
             lifecycle = self._composition.lifecycle
             await lifecycle.acquire_singleton()
+            # Blocking workspace routing in worker threads reaches the agents through this loop.
+            self._composition.workspace_hub.bind_loop()
             # Own the process-wide ledger pools until this instance's stop() releases them; a
             # failed start releases through close() below (#1231).
             if not self._holds_ledger_pools:
@@ -1286,7 +1352,9 @@ class ServiceDaemon:
                     # The wait runs inside the detached operation, before either dispatch gate
                     # is taken, so the sweeper can deliver rows while this check waits.
                     awaited = (
-                        await self._await_check_observations(check_body, request.deadline_ms)
+                        await self._await_check_observations(
+                            check_body, request.deadline_ms, repository_privacy_context
+                        )
                         if awaits_observations
                         else None
                     )
@@ -1307,7 +1375,9 @@ class ServiceDaemon:
                     request.deadline_ms,
                 )
             awaited = (
-                await self._await_check_observations(cast(CheckRequest, body), request.deadline_ms)
+                await self._await_check_observations(
+                    cast(CheckRequest, body), request.deadline_ms, repository_privacy_context
+                )
                 if awaits_observations
                 else None
             )
@@ -1328,17 +1398,27 @@ class ServiceDaemon:
             raise
 
     async def _await_check_observations(
-        self, body: CheckRequest, deadline_ms: int | None
+        self,
+        body: CheckRequest,
+        deadline_ms: int | None,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
     ) -> CheckObservationsAwaited:
         """Run the optional bounded wait for this task's pending hook rows (issue #1012).
 
         Runs before the dispatch gates: the sweeper takes the observation gate per row, so a
-        wait under the gates could only ever time out. Never raises for the wait itself.
+        wait under the gates could only ever time out. Never raises for the wait itself. A
+        claim-bound connection's rows wait in its client's outbox, which this service cannot
+        read (ADR-051 decision 12), so that wait is ``unavailable``, never ``complete``.
         """
 
         application = self._application
         sweep = None if application is None else getattr(application, "observation_sweep", None)
         probe = getattr(sweep, "task_pending_probe", None)
+        if (
+            repository_privacy_context is not None
+            and repository_privacy_context.identity_kind == "client_claim"
+        ):
+            probe = None
         return await await_task_observations(
             cast(TaskPendingProbe, probe) if callable(probe) else None,
             body.session_id,
@@ -1588,12 +1668,14 @@ class ServiceDaemon:
             routed = self._with_session_route(request)
             try:
                 if request.deadline_ms is None or detached_check:
-                    internal = await self._invoke_ready_handler(
-                        handler,
-                        routed,
-                        repository_privacy_context,
-                        observations_awaited=observations_awaited,
-                    )
+                    # Workspace calls the handler makes are cancelled with it (ADR-051).
+                    with workspace_call_deadline():
+                        internal = await self._invoke_ready_handler(
+                            handler,
+                            routed,
+                            repository_privacy_context,
+                            observations_awaited=observations_awaited,
+                        )
                 else:
                     # A read keeps only what is left of its one budget (#1231); a write keeps
                     # its full handler deadline after the gate waits, as before.
@@ -1602,14 +1684,16 @@ class ServiceDaemon:
                         if deadline_at is None
                         else deadline_at
                     )
-                    async with asyncio.timeout_at(handler_deadline):
-                        with read_stage("handler"):
-                            internal = await self._invoke_ready_handler(
-                                handler,
-                                routed,
-                                repository_privacy_context,
-                                observations_awaited=observations_awaited,
-                            )
+                    # Workspace calls the handler makes never outlast its deadline (ADR-051).
+                    with workspace_call_deadline(handler_deadline):
+                        async with asyncio.timeout_at(handler_deadline):
+                            with read_stage("handler"):
+                                internal = await self._invoke_ready_handler(
+                                    handler,
+                                    routed,
+                                    repository_privacy_context,
+                                    observations_awaited=observations_awaited,
+                                )
             except TimeoutError as exc:
                 # Includes local observation-store contention inside the handler: the wire
                 # vocabulary is closed, so it stays the retryable ``request_timeout`` while
@@ -1721,6 +1805,14 @@ class ServiceDaemon:
             ControlMethod.PRIVACY_PROPOSE_POLICY,
             ControlMethod.PROJECT,
         }:
+            kwargs["repository_privacy_context"] = repository_privacy_context
+        if (
+            request.method is ControlMethod.OBSERVATION_INGEST
+            and repository_privacy_context is not None
+            and repository_privacy_context.identity_kind == "client_claim"
+        ):
+            # A claim-bound row goes to that claim's client-attested store (ADR-051 decision
+            # 12); every other connection's ingest is called exactly as before.
             kwargs["repository_privacy_context"] = repository_privacy_context
         return await operation(request.body, **kwargs)
 
@@ -1926,11 +2018,45 @@ class ServiceDaemon:
         key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
         return await resolve_repository_privacy_context(locator, key)
 
+    async def _refuse_repository_locator(
+        self, locator: WorkspaceLocator
+    ) -> RepositoryPrivacyContext | None:
+        """An edge that admits only claims never resolves a path it was sent (ADR-051)."""
+
+        del locator
+        raise ControlProtocolError("workspace_binding_conflict")
+
+    async def _resolve_claim_context(
+        self, claim: WorkspaceClaim
+    ) -> RepositoryPrivacyContext | None:
+        """Key a client's workspace claim while an installation key is ready; never a path.
+
+        The commitment is the installation MAC over the claim (``yoetz/repository-claim/v1``), so
+        the session's repository identity is ``client_claim`` and its handle is the
+        commitment's ``client:`` prefix. Nothing on this machine's disk is consulted.
+
+        A soft lock (idle, session lock, suspend) re-opens here exactly as it would on the
+        connection's first request: a claim-bound connection's handle is fixed by this answer, so
+        a handle withheld for a lock the next request lifts would leave the connection unable to
+        name its workspace, register its agent or route a hook row for its whole life. A hard
+        lock stays locked and keys nothing. Locator connections are unchanged.
+        """
+
+        vault = self._composition.vault
+        if not vault.ready:
+            await self._try_soft_lock_auto_ready()
+        if not vault.ready:
+            return None
+        key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+        return claim_repository_privacy_context(claim, key)
+
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
         admission: str | None = None
         calls: dict[str, asyncio.Task[None]] = {}
-        write_lock = asyncio.Lock()
+        writes = _FrameWrites()
+        hub = self._composition.workspace_hub
+        channel: WorkspaceAgentChannel | None = None
         try:
             try:
                 async with asyncio.timeout(_CONTROL_HANDSHAKE_DEADLINE_SECONDS):
@@ -1938,7 +2064,12 @@ class ServiceDaemon:
                         stream,
                         stream.peer_identity,
                         self.status(),
-                        repository_context_resolver=self._resolve_repository_context,
+                        repository_context_resolver=(
+                            self._refuse_repository_locator
+                            if self._composition.refuse_workspace_locators
+                            else self._resolve_repository_context
+                        ),
+                        claim_context_resolver=self._resolve_claim_context,
                     )
             except TimeoutError:
                 return
@@ -1946,7 +2077,11 @@ class ServiceDaemon:
                 _record_handshake_service_fault(fault)
                 return
             except ControlProtocolError as exc:
-                if exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
+                if exc.reason in {
+                    "manifest_mismatch",
+                    "protocol_mismatch",
+                    "workspace_binding_conflict",
+                }:
                     record_public_error_without_raising(
                         component="service.daemon",
                         operation="control_handshake",
@@ -1964,9 +2099,37 @@ class ServiceDaemon:
                     reason="connection_nonce_reused",
                 )
                 return
+            if session.workspace_agent is not None and session.workspace_handle is not None:
+                # A claim-bound connection that offered a workspace agent answers this service's
+                # workspace calls for its claim (ADR-051), written under this connection's lock.
+                async def write_call(call: WorkspaceCall) -> None:
+                    await writes.write(stream, lambda: write_workspace_call(stream, call))
+
+                try:
+                    channel = await hub.register(
+                        handle=session.workspace_handle,
+                        declaration=session.workspace_agent,
+                        service_instance_id=session.service_instance_id,
+                        service_generation=session.service_generation,
+                        writer=write_call,
+                        worktree=session.workspace_worktree,
+                    )
+                except ValueError:
+                    # A handle names one worktree; an agent for another under it is never admitted.
+                    record_public_error_without_raising(
+                        component="service.daemon",
+                        operation="control_handshake",
+                        reason="workspace_agent_worktree_conflict",
+                    )
+                    return
+            agent = channel
             while not self._stop_event.is_set():
                 try:
-                    frame = await self._read_control_frame_idle_aware(stream, calls)
+                    frame = await self._read_control_frame_idle_aware(
+                        stream,
+                        calls,
+                        agent_busy=None if agent is None else (lambda: agent.pending_count > 0),
+                    )
                 except TimeoutError:
                     return
                 except ControlProtocolError as exc:
@@ -1979,6 +2142,12 @@ class ServiceDaemon:
                             reason=exc.reason,
                         )
                     return
+                if is_workspace_reply_frame(frame):
+                    if channel is None:
+                        # A reply on a connection that offered no agent answers nothing here.
+                        return
+                    hub.deliver(channel, parse_workspace_reply(frame))
+                    continue
                 request = parse_control_request(frame)
                 session.admit(request)
                 if not isinstance(request, ControlCallRequest):
@@ -1987,7 +2156,9 @@ class ServiceDaemon:
                         target.cancel(EXPLICIT_CONTROL_CANCEL)
                     continue
                 task = asyncio.create_task(
-                    self._serve_call(stream, session, request, write_lock, admission)
+                    self._serve_call(
+                        stream, session, request, writes, admission, agent_channel=channel
+                    )
                 )
                 calls[request.rpc_id] = task
                 task.add_done_callback(lambda _task, rpc_id=request.rpc_id: calls.pop(rpc_id, None))
@@ -1996,6 +2167,9 @@ class ServiceDaemon:
         except Exception:
             return
         finally:
+            if channel is not None:
+                # Pending workspace calls fail now, typed, instead of waiting out their deadline.
+                await hub.unregister(channel)
             if admission is not None:
                 # Revoke on disconnect: a later socket gets a fresh admission, never this one.
                 self._composition.owner_view_grants.release(admission)
@@ -2010,6 +2184,8 @@ class ServiceDaemon:
         self,
         stream: ControlStream,
         calls: dict[str, asyncio.Task[None]],
+        *,
+        agent_busy: Callable[[], bool] | None = None,
     ) -> ControlFrame:
         """Read one frame; apply inactive-session idle only when no calls are active.
 
@@ -2019,6 +2195,9 @@ class ServiceDaemon:
         calls are not cancelled merely because no additional frame arrives. Independently, a frame
         that has begun must finish within ``_CONTROL_FRAME_READ_DEADLINE_SECONDS`` even while calls
         are active, so a partial body is never held open-ended (``frame_read_timeout``).
+
+        ``agent_busy`` (a workspace agent's connection, ADR-051) keeps the session live while a
+        workspace call this service sent it is still pending: its reply is the frame awaited.
         """
 
         read_task = asyncio.create_task(
@@ -2039,6 +2218,16 @@ class ServiceDaemon:
                         if task.done():
                             calls.pop(rpc_id, None)
                     continue
+                if agent_busy is not None:
+                    try:
+                        async with asyncio.timeout(_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS):
+                            return await asyncio.shield(read_task)
+                    except TimeoutError:
+                        if agent_busy():
+                            continue
+                        read_task.cancel()
+                        await asyncio.gather(read_task, return_exceptions=True)
+                        raise
                 try:
                     async with asyncio.timeout(_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS):
                         return await read_task
@@ -2076,8 +2265,10 @@ class ServiceDaemon:
         stream: ControlStream,
         session: ControlSession,
         request: ControlCallRequest,
-        write_lock: asyncio.Lock,
+        writes: _FrameWrites,
         admission: str | None = None,
+        *,
+        agent_channel: WorkspaceAgentChannel | None = None,
     ) -> None:
         call_started = time.monotonic()
         # Presentation facts from the hello describe rendering only. The owner view is the one
@@ -2089,26 +2280,27 @@ class ServiceDaemon:
             session.output_is_controlling_tty,
             owner_view=self._consume_owner_view(session, request, admission),
         )
-        if session.repository_privacy_context is None:
-            result = await self.dispatch(
-                session.client_kind,
-                request,
-                projection_context=projection_context,
-                _defer_stop=True,
-            )
-        else:
-            result = await self.dispatch(
-                session.client_kind,
-                request,
-                projection_context=projection_context,
-                repository_privacy_context=session.repository_privacy_context,
-                _defer_stop=True,
-            )
+        # Workspace calls this dispatch makes wait the shorter bound for an agent, and go to this
+        # connection's own agent first when it offered one (ADR-051).
+        with live_call_scope(agent_channel):
+            if session.repository_privacy_context is None:
+                result = await self.dispatch(
+                    session.client_kind,
+                    request,
+                    projection_context=projection_context,
+                    _defer_stop=True,
+                )
+            else:
+                result = await self.dispatch(
+                    session.client_kind,
+                    request,
+                    projection_context=projection_context,
+                    repository_privacy_context=session.repository_privacy_context,
+                    _defer_stop=True,
+                )
         session.correlate(result)
         try:
-            async with write_lock:
-                async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
-                    await write_control_frame(stream, result)
+            await writes.write(stream, lambda: write_control_frame(stream, result))
         except (LocalControlTransportError, ControlProtocolError) as exc:
             if isinstance(exc, ControlProtocolError) and exc.reason != "transport_failed":
                 # A response this service could not encode is its own defect; keep it loud.
@@ -4772,6 +4964,26 @@ class _HumanConnectionServer:
         raise HumanControlError("kind_forbidden")
 
 
+def _refuse_remote_target_root(root: Path | None) -> None:
+    """Refuse to serve a remote server target's root (ADR-051, ``target_root_is_remote``).
+
+    A remote target's root holds only client state. A root whose ``target.json`` names a remote
+    kind, or holds one that cannot be read (it may be remote), is refused before anything is
+    created, so a local vault, ledger or endpoint never appears in it and a hook dialing that
+    root never reaches a stray local service. The everyday root, an isolated root that is not a
+    target, and a named ``local`` server are served as before.
+    """
+
+    if root is None:
+        return
+    try:
+        kind = server_target_kind(root)
+    except PathSafetyError:
+        raise LifecycleError("target_root_is_remote") from None
+    if kind is not None and kind != "local":
+        raise LifecycleError("target_root_is_remote")
+
+
 async def _production_composition(
     *,
     _config: FinishUpConfig | None = None,
@@ -4783,6 +4995,9 @@ async def _production_composition(
     """Build the real locked-first service graph without opening ready-only state."""
 
     config = _config or load_config({}, os.environ, None)
+    root = active_root()
+    # Before any bundle, state or singleton is made: no service runs in a remote target's root.
+    _refuse_remote_target_root(root)
     paths = _paths or _ProductionPaths.canonical(config)
     clock = _SystemClock()
     # Instance identity gate (issue #604): an expired disposable instance, a re-pointed runtime
@@ -4791,7 +5006,8 @@ async def _production_composition(
     instance_identity = read_instance_identity(paths.state)
     verify_instance_binding(
         instance_identity,
-        isolated=isolated_root() is not None,
+        # A selected named local server is an isolated root too (ADR-051).
+        isolated=root is not None,
         pin=read_runtime_pin(),
         now=clock.now_utc(),
     )
@@ -4947,6 +5163,8 @@ async def _production_composition(
         diagnostics = _NullDiagnostics()
         maintenance_gate = asyncio.Lock()
         observation_gate = asyncio.Lock()
+        # One hub: the daemon registers agent connections, the ready application calls them.
+        workspace_hub = WorkspaceAgentHub()
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -4962,6 +5180,7 @@ async def _production_composition(
                     diagnostics=diagnostics,
                     observation_gate=observation_gate,
                     startup_bundle_upgrade=_startup_bundle_upgrade,
+                    workspace_hub=workspace_hub,
                 ),
             )
         )
@@ -5021,6 +5240,7 @@ async def _production_composition(
             session_route_path=paths.state / SESSION_ROUTE_FILE_NAME,
             observation_gate=observation_gate,
             owner_view_grants=owner_view_grants,
+            workspace_hub=workspace_hub,
         )
     except BaseException:
         await listeners.close()

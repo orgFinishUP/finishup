@@ -42,6 +42,7 @@ from finishup.tui.models import (
     ProviderPosture,
     ReadinessLayer,
     ReceiptSummary,
+    ServerRow,
     StatusSnapshot,
     TaskStatusPage,
     VaultPosture,
@@ -412,6 +413,21 @@ class RuntimeError_(Exception):
         self.reason = reason
         self.message = message
         self.details = tuple(details)
+
+
+def _server_failure(error: Exception) -> RuntimeError_:
+    """Map a refused ``finishup server`` step to its closed reason and fixed message."""
+
+    from finishup.cli.server import ROOT_UNUSABLE_MESSAGE, ServerCommandRefused, refusal_message
+    from finishup.client.targets import TargetError
+    from finishup.config.paths import PathSafetyError
+
+    if isinstance(error, TargetError):
+        error = ServerCommandRefused(error.reason)
+    elif isinstance(error, PathSafetyError):
+        error = ServerCommandRefused(error.reason_code, message=ROOT_UNUSABLE_MESSAGE)
+    assert isinstance(error, ServerCommandRefused)
+    return RuntimeError_(error.reason, refusal_message(error))
 
 
 class ObservationCapacityUnavailable(RuntimeError_):
@@ -1446,6 +1462,78 @@ class FinishUpRuntime:
             ) from error
         return cast(Mapping[str, object], raw)
 
+    # -- server targets ---------------------------------------------------
+
+    def server_indicator(self) -> str | None:
+        """The selected server target as ``<kind> <id>``; ``None`` for the everyday server.
+
+        Header text only: a name the owner typed never appears there, and a root that cannot be
+        resolved shows nothing rather than a guess (the next operation reports it).
+        """
+
+        from finishup.client.targets import TargetError, active_target_record
+
+        try:
+            record = active_target_record()
+        except TargetError:
+            return None
+        return None if record is None else f"{record.kind} {record.target_id}"
+
+    async def server_rows(self) -> tuple[tuple[ServerRow, ...], tuple[str, ...]]:
+        """Every server target (``local`` first) and the ``finishup server list`` lines."""
+
+        import asyncio
+
+        from finishup.cli.server import ServerCommandRefused, render_target_rows, target_rows
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        try:
+            rows, source = await asyncio.to_thread(target_rows)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        return (
+            tuple(
+                ServerRow(row.name, row.kind, row.target_id, row.location, row.selected)
+                for row in rows
+            ),
+            render_target_rows(rows, source),
+        )
+
+    async def server_status_lines(self, name: str | None = None) -> tuple[str, ...]:
+        """``finishup server status`` for ``name`` (or the selected server), probed once."""
+
+        import asyncio
+
+        from finishup.cli.server import ServerCommandRefused, build_status_document, status_lines
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        try:
+            document = await asyncio.to_thread(build_status_document, name)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        return status_lines(document)
+
+    async def use_server(self, name: str) -> str:
+        """Select ``name`` (``local``: the everyday server), as ``finishup server use`` does.
+
+        A remote target asks for the same typed confirmation on the trusted console, so the
+        caller runs this with the terminal handed over. Returns the new header indicator text.
+        """
+
+        import asyncio
+
+        from finishup.cli.server import ServerCommandRefused, use_target
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        try:
+            record = await asyncio.to_thread(use_target, name)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        return "everyday" if record is None else f"{record.kind} {record.target_id}"
+
     # -- service --------------------------------------------------------
 
     @asynccontextmanager
@@ -2439,6 +2527,7 @@ class FinishUpRuntime:
         """
 
         from finishup.cli.render import render_human_status
+        from finishup.client.attribution import connection_attribution
         from finishup.protocol.models import StatusRequestModel
 
         session = self._sessions.get(title)
@@ -2458,10 +2547,12 @@ class FinishUpRuntime:
         )
         async with self._client() as client:
             result = await client.status(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the task view could not be read")
         session.frontier = success.head_frontier
         return TaskStatusPage(
-            tuple(render_human_status(success).splitlines()), success.page.next_cursor
+            tuple(render_human_status(success, attribution=attribution).splitlines()),
+            success.page.next_cursor,
         )
 
     def _work_detail(self, title: str, session: _WorkSession, compact: object) -> WorkDetail:
@@ -2488,6 +2579,7 @@ class FinishUpRuntime:
         """Read the latest check's operation page, including structural review progress."""
 
         from finishup.cli.render import render_human_status
+        from finishup.client.attribution import connection_attribution
         from finishup.protocol.models import StatusRequestModel
 
         session = self._sessions.get(title)
@@ -2508,8 +2600,11 @@ class FinishUpRuntime:
         )
         async with self._client() as client:
             result = await client.status(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the check progress could not be read")
-        return TaskStatusPage(tuple(render_human_status(success).splitlines()), None)
+        return TaskStatusPage(
+            tuple(render_human_status(success, attribution=attribution).splitlines()), None
+        )
 
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         """Run one check in the requested mode and report it without softening."""
@@ -2557,6 +2652,7 @@ class FinishUpRuntime:
         """
 
         from finishup.cli.render import render_human_receipt
+        from finishup.client.attribution import attribution_lines, connection_attribution
         from finishup.protocol.canonical import canonical_encode
         from finishup.protocol.coverage import CheckType
         from finishup.protocol.models import ReceiptRequestModel
@@ -2580,15 +2676,21 @@ class FinishUpRuntime:
             if owner_view:
                 await self._authorize_owner_receipt_view(client, request)
             result = await client.receipt(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the receipt could not be built")
         session.frontier = success.result_frontier
         coverage = getattr(success, "coverage", None)
         gaps = tuple(str(item) for item in getattr(coverage, "known_gaps", ()) or ())
         semantic = CheckType.SEMANTIC_MODEL_DERIVED in success.coverage.check_types
         rendered = (
-            canonical_encode(success.document).decode("utf-8")
+            "\n".join(
+                (
+                    canonical_encode(success.document).decode("utf-8"),
+                    *attribution_lines(attribution),
+                )
+            )
             if success.document is not None
-            else render_human_receipt(success)
+            else render_human_receipt(success, attribution=attribution)
         )
         return ReceiptSummary(
             subject_id=session.task_id,
