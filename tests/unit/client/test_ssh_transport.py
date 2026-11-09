@@ -174,11 +174,36 @@ def test_a_remote_endpoint_that_cannot_be_forwarded_is_refused(
     ssh_target: tuple[ServerTarget, Path],
 ) -> None:
     record, root = ssh_target
-    for endpoint in (None, "/srv/a:b.sock", "/srv/a b.sock"):
+    # OpenSSH splits ``-L`` on ':' and expands '%' tokens and '${VAR}' in socket paths.
+    for endpoint in (None, "/srv/a:b.sock", "/srv/a%hb.sock", "/srv/${HOME}.sock"):
         with pytest.raises(UpstreamUnavailable, match="remote_unreachable"):
             direct_argv("ssh", root, replace(record, remote_endpoint=endpoint))
         with pytest.raises(UpstreamUnavailable, match="remote_unreachable"):
             master_argv("ssh", root, replace(record, remote_endpoint=endpoint))
+
+
+def test_socket_paths_with_spaces_are_handed_to_openssh_as_written(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """B2: macOS keeps FinishUP under "~/Library/Application Support"; spaces are fine."""
+
+    from finishup.client.ssh_transport import ssh_paths_usable
+
+    record, _root = ssh_target
+    root = Path("/Users/me/Library/Application Support/finishup/servers/t_0000000a")
+    endpoint = "/Users/me/Library/Application Support/finishup/run/control.sock"
+    spaced = replace(record, remote_endpoint=endpoint)
+    assert ssh_paths_usable(root, endpoint)
+    master = master_argv("ssh", root, spaced)
+    assert master[master.index("-S") + 1] == f"{root}/run/m"
+    assert master[master.index("-L") + 1] == f"{root}/run/upstream.sock:{endpoint}"
+    direct = direct_argv("ssh", root, spaced)
+    assert direct[direct.index("-W") + 1] == endpoint
+    for unusable in (Path("/home/a%h/servers/t_0000000a"), Path("/home/a:b/servers/t_0000000a")):
+        assert not ssh_paths_usable(unusable)
+        with pytest.raises(UpstreamUnavailable, match="remote_unreachable"):
+            master_argv("ssh", unusable, record)
+    assert not ssh_paths_usable(root, "/srv/${HOME}/control.sock")
 
 
 def test_remote_commands_are_quoted_and_pinned_to_the_remote_root(

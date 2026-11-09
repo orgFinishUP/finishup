@@ -81,6 +81,7 @@ __all__ = [
     "ensure_direct_master",
     "exit_master",
     "exit_master_now",
+    "forwardable_path",
     "host_key_changed",
     "host_key_unconfirmed",
     "host_keys",
@@ -96,6 +97,7 @@ __all__ = [
     "resolve_ssh",
     "run_ssh",
     "ssh_environment",
+    "ssh_paths_usable",
     "ssh_root_fits",
 ]
 
@@ -221,11 +223,43 @@ def ssh_root_fits(root: Path) -> bool:
     ) and socket_path_fits(root / "run" / UPSTREAM_NAME)
 
 
+# ``-L local:remote`` splits on ':', and OpenSSH expands ``%`` tokens and ``${VAR}`` in a forward's
+# and a ControlPath's socket paths: a path holding any of them, or a control character, cannot be
+# handed to it verbatim. A space can (the default root on macOS lives under "Application Support").
+_UNFORWARDABLE: Final = frozenset(":%$")
+
+
+def forwardable_path(text: str) -> bool:
+    """Whether OpenSSH takes ``text`` as a socket path verbatim (absolute, none of ``:%$``, no
+    control character); spaces are fine."""
+
+    return text.startswith("/") and not any(
+        character in _UNFORWARDABLE or ord(character) < 0x20 or ord(character) == 0x7F
+        for character in text
+    )
+
+
+def ssh_paths_usable(root: Path, remote_endpoint: str | None = None) -> bool:
+    """Whether every socket path OpenSSH is given for the target at ``root`` is taken verbatim.
+
+    Its master's ControlPath and the relay's forward beneath ``root``, and the server's
+    ``remote_endpoint`` when given. ``server add`` checks it before a target is recorded.
+    """
+
+    local = (root / "run" / MASTER_NAME, root / "run" / UPSTREAM_NAME)
+    return all(forwardable_path(str(path)) for path in local) and (
+        remote_endpoint is None or forwardable_path(remote_endpoint)
+    )
+
+
 def _forward_path(text: str) -> str:
-    # ``-L local:remote`` splits on ':'; a path that holds one, or whitespace, cannot be forwarded.
-    if not text.startswith("/") or ":" in text or any(ord(c) <= 0x20 for c in text):
+    if not forwardable_path(text):
         raise UpstreamUnavailable(_UNREACHABLE)
     return text
+
+
+def _control_path(root: Path) -> str:
+    return _forward_path(str(root / "run" / MASTER_NAME))
 
 
 def _endpoint(record: ServerTarget) -> str:
@@ -242,7 +276,7 @@ def master_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
         ssh,
         "-M",
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-N",
         "-T",
         *_TRUST,
@@ -270,7 +304,7 @@ def control_argv(ssh: str, root: Path, record: ServerTarget, operation: str) -> 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-O",
         operation,
         "-p",
@@ -293,7 +327,7 @@ def direct_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
         "ControlMaster=no",
         *_TRUST,
@@ -318,7 +352,7 @@ def direct_master_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str,
         ssh,
         "-M",
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
         f"ControlPersist={CONTROL_PERSIST}",
         "-N",
@@ -358,7 +392,7 @@ def remote_argv(ssh: str, root: Path, record: ServerTarget, *arguments: str) -> 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
         "ControlMaster=no",
         *_TRUST,
@@ -380,7 +414,7 @@ def direct_remote_argv(
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
         "ControlMaster=no",
         *_TRUST,
@@ -612,7 +646,7 @@ def exit_master_now(ssh: str, root: Path, record: ServerTarget) -> None:
     control = root / "run" / MASTER_NAME
     _forget_master(root)
     if _owned_socket(control) is not None:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
+        with contextlib.suppress(OSError, subprocess.SubprocessError, UpstreamUnavailable):
             subprocess.run(  # noqa: S603 - fixed argv
                 control_argv(ssh, root, record, "exit"),
                 stdin=subprocess.DEVNULL,

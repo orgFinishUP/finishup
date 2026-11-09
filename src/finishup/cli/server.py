@@ -301,6 +301,14 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "SSH server, or give a valid API key for an HTTPS server",
         _UNAVAILABLE,
     ),
+    # 'server add ssh://' (ADR-052): a socket path OpenSSH would not take verbatim (it splits on
+    # ':' and expands '%' tokens and '${VAR}'), here or on the server; spaces are fine.
+    "ssh_path_unusable": (
+        "OpenSSH cannot use a socket path of this server as written (this computer's FinishUP "
+        "folder, or the server's FinishUP endpoint, holds ':', '%' or '$'), so nothing was added; "
+        "move that FinishUP folder or give the server a --remote-root without those characters",
+        _UNSAFE,
+    ),
     # 'server add ssh://' (ADR-051 decision 7): OpenSSH asked to confirm a host key this computer
     # does not know yet, on the owner's terminal, and the owner declined or did not answer.
     "remote_host_key_unconfirmed": (
@@ -1182,11 +1190,15 @@ def _add_remote(
         raise ServerCommandRefused(error.reason) from None
     session_bound = False
     if kind == "ssh":
+        # Every socket path OpenSSH will be given must be usable as written, checked before
+        # anything reaches the server and again for the endpoint it reports, before a record.
+        _require_ssh_paths(provisional.remote_endpoint)
         # SSH discovery (design v2 section 2.1): the endpoint and the profile, from the server's
         # own launcher; an unknown host key is asked about only on this trusted console.
         found = _discover_ssh(
             user, cast(str, host), cast(int, ssh_port), remote_root, remote_launcher
         )
+        _require_ssh_paths(found.endpoint)
         remote_launcher, session_bound = found.launcher, found.session_bound
         try:
             provisional = replace(
@@ -1248,6 +1260,21 @@ def _add_remote(
         )
     _say_repository_hold(record)
     _emit((f"Use it with 'finishup server use {record.name}'.",))
+
+
+def _require_ssh_paths(remote_endpoint: str | None) -> None:
+    """Refuse ``ssh_path_unusable`` unless OpenSSH can take every socket path of a new SSH
+    target as written: its root's (named like every target root) and ``remote_endpoint``."""
+
+    from finishup.client.ssh_transport import ssh_paths_usable
+    from finishup.client.targets import servers_dir
+
+    try:
+        root = servers_dir() / "t_00000000"
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    if not ssh_paths_usable(root, remote_endpoint):
+        raise ServerCommandRefused("ssh_path_unusable")
 
 
 def _discover_ssh(

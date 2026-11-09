@@ -376,6 +376,68 @@ def test_the_helper_relays_a_session_through_the_real_forward(
         assert not (root / "run" / "m").exists()
 
 
+def test_a_target_root_and_an_endpoint_with_spaces_work_as_on_macos(
+    sshd: Sshd, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: macOS keeps FinishUP under "Application Support"; both styles work through it."""
+
+    from finishup.client.helper import Helper, SshRelayUpstream
+    from finishup.client.ssh_transport import exit_master_now, open_direct_stream
+
+    sshd.pin_host_key()
+    expected = asyncio.run(_reference())
+    with ambient_home(monkeypatch) as home:
+        spaced = home / "A S"
+        spaced.mkdir(mode=0o700)
+        monkeypatch.setenv("XDG_STATE_HOME", str(spaced))
+        open_remote_kinds(monkeypatch, "ssh")
+        endpoint = sshd.directory / "srv d" / "c.sock"
+        endpoint.parent.mkdir(mode=0o700)
+        record, root = _ssh_record(sshd, endpoint)
+        assert " " in str(root) and " " in str(record.remote_endpoint)
+
+        async def no_refresh(_record: ServerTarget) -> None:
+            return None
+
+        async def exercise() -> tuple[list[bytes], list[bytes]]:
+            daemon = ScriptedDaemon()
+            accepting = await _serve_unix(endpoint, daemon)
+            upstream = SshRelayUpstream(root, record, ssh=sshd.ssh)
+            try:
+                helper = Helper(root, record, upstream=upstream, refresher=no_refresh)
+                left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+                client = AuthenticatedUnixStream(left, authenticate_peer(left))
+                local = AuthenticatedUnixStream(right, authenticate_peer(right))
+                relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+                try:
+                    async with asyncio.timeout(60):
+                        relayed = await run_scripted_session(client, server_profile=TEST_REVISION)
+                        await client.shutdown_write()
+                        await asyncio.wait((relay,), timeout=60)
+                finally:
+                    await client.aclose()
+                    await upstream.close()
+                stream = await open_direct_stream(
+                    sshd.ssh, root, record, expected=sshd.host_key_identity()
+                )
+                try:
+                    async with asyncio.timeout(60):
+                        direct = await run_scripted_session(stream, server_profile=TEST_REVISION)
+                finally:
+                    await stream.aclose()
+                return relayed, direct
+            finally:
+                accepting.cancel()
+                await asyncio.gather(accepting, return_exceptions=True)
+
+        try:
+            relayed, direct = asyncio.run(exercise())
+        finally:
+            exit_master_now(sshd.ssh, root, record)
+        assert relayed == expected and direct == expected
+        assert not (root / "run" / "m").exists()
+
+
 def test_the_direct_style_dials_ssh_w_through_one_control_master(
     sshd: Sshd, monkeypatch: pytest.MonkeyPatch
 ) -> None:
