@@ -55,7 +55,7 @@ if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
     from finishup.adapters.integrations.observation_local import LocalObservationStore
     from finishup.application.harness_mcp import HarnessMcpService
     from finishup.cli.policy_server import PolicyServer
-    from finishup.cli.zero_network_selection import ZeroNetworkSelection
+    from finishup.cli.zero_network_selection import RepositoryHoldItem, ZeroNetworkSelection
     from finishup.domain.observation_budget import CapacityRequest
     from finishup.domain.observation_settings import ObservationDetailProfile
     from finishup.ports.harness_mcp import HarnessBinary, McpRegistrationPreview
@@ -691,6 +691,9 @@ class FinishUpRuntime:
         # A remote server still selected while this computer forbids network use (ADR-051
         # decision 8), as last read by ``refresh_zero_network_item``.
         self._zero_network: ZeroNetworkSelection | None = None
+        # This interface's repository held from, or kept here for, the selected server elsewhere
+        # (ADR-051 decision 8, round 4), as last read by ``refresh_repository_hold_item``.
+        self._repository_hold: RepositoryHoldItem | None = None
 
     # -- discovery ------------------------------------------------------
 
@@ -1501,7 +1504,8 @@ class FinishUpRuntime:
         except TargetError:
             record = None
         indicator = None if record is None else f"{record.kind} {record.target_id}"
-        return self._zero_network_indicator(indicator)
+        indicator = self._zero_network_indicator(indicator)
+        return self._repository_hold_indicator(indicator)
 
     def selected_policy_server(self) -> PolicyServer | None:
         """The remote server whose privacy policy a questionnaire changes (ADR-051 decision 8).
@@ -1532,6 +1536,86 @@ class FinishUpRuntime:
             self._zero_network = None
             return indicator
         return item.indicator()
+
+    def _repository_hold_indicator(self, indicator: str | None) -> str | None:
+        """The header adds that this repository is held (or kept here) while it still is.
+
+        A record-only re-check at each header refresh: the same server is still selected on
+        disk and the records still hold the repository from it; otherwise the item is dropped
+        (ADR-051 decision 8, round 4).
+        """
+
+        from finishup.cli.zero_network_selection import still_holds
+
+        item = self._repository_hold
+        if item is None or indicator is None or self._zero_network is not None:
+            return indicator
+        if not still_holds(item):
+            self._repository_hold = None
+            return indicator
+        return indicator + item.indicator_suffix()
+
+    async def refresh_repository_hold_item(self) -> tuple[str, ...]:
+        """Whether this interface's repository is held from the selected server elsewhere, or
+        kept on this computer for it (ADR-051 decision 8, round 4).
+
+        Asks this computer's everyday FinishUP about the repository when it can answer (in a
+        worker thread, in a fresh context, as ``refresh_zero_network_item`` does), then decides
+        from the records. Returns the item's lines for ``/server``, empty when there is nothing
+        to say; the header shows it until it no longer applies.
+        """
+
+        from finishup.cli.zero_network_selection import find_repository_hold_async
+
+        self._repository_hold = await find_repository_hold_async(self._cwd, live=True)
+        return () if self._repository_hold is None else self._repository_hold.lines()
+
+    def repository_hold_heading(self) -> str:
+        """The ``/server`` title of the repository item last read."""
+
+        item = self._repository_hold
+        if item is None:
+            return "This repository's work is held from the selected server"
+        return item.heading()
+
+    async def allow_repository_here(self) -> tuple[str, bool]:
+        """``finishup server repositories add`` for this interface's repository.
+
+        The same core, disclosure and typed name as the command; the caller hands the terminal
+        over first. The typed confirmation is read on the event loop thread (the SRV-6 pattern),
+        the rest in a worker thread. Returns the server's generated id and whether an allow was
+        recorded.
+        """
+
+        import asyncio
+
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            allow_repository_here,
+            confirm_repository_on_this_thread,
+        )
+        from finishup.client.targets import ServerTarget, TargetError
+        from finishup.config.paths import PathSafetyError
+
+        loop = asyncio.get_running_loop()
+
+        async def confirm_on_loop(record: ServerTarget, worktree: str, state: str) -> None:
+            confirm_repository_on_this_thread(record, worktree, state)
+
+        def confirm(record: ServerTarget, worktree: str, state: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                confirm_on_loop(record, worktree, state), loop
+            ).result()
+
+        try:
+            record, allowed = await asyncio.to_thread(
+                allow_repository_here, str(self._cwd), confirm=confirm
+            )
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        if allowed:
+            self._repository_hold = None
+        return record.target_id, allowed
 
     async def refresh_zero_network_item(self) -> tuple[str, ...]:
         """Whether this computer forbids network use while a remote server is selected.
@@ -1606,7 +1690,7 @@ class FinishUpRuntime:
             # Off the loop: the probe, and this client's record of what that server may read
             # outside your projects (ADR-051 decision 5), which the document carries.
             document = await asyncio.to_thread(
-                build_status_document, name, zero_network=zero_network
+                build_status_document, name, zero_network=zero_network, workspace=str(self._cwd)
             )
             in_use = await asyncio.to_thread(target_in_use, name)
         except (ServerCommandRefused, TargetError, PathSafetyError) as error:

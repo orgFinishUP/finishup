@@ -2331,11 +2331,31 @@ def _confirm_repository_on_trusted_console(record: ServerTarget, worktree: str, 
     _confirm_notice(record, _REPOSITORY_NOTICE, folder=worktree, state=state)
 
 
-def allow_repository(record: ServerTarget, here: RepositoryHere) -> bool:
+def confirm_repository_on_this_thread(record: ServerTarget, worktree: str, state: str) -> None:
+    """``server repositories add``'s disclosure and typed confirmation, read on the calling
+    thread (the SRV-6 pattern): the terminal interface's event loop thread, with the terminal
+    handed over, where Ctrl-C reaches the read and declines."""
+
+    from finishup.cli.zero_network_selection import interrupt_answers_the_prompt
+
+    try:
+        with interrupt_answers_the_prompt():
+            _confirm_repository_on_trusted_console(record, worktree, state)
+    except KeyboardInterrupt:
+        raise ServerCommandRefused("authorization_declined") from None
+
+
+def allow_repository(
+    record: ServerTarget,
+    here: RepositoryHere,
+    *,
+    confirm: Callable[[ServerTarget, str, str], None] | None = None,
+) -> bool:
     """``server repositories add``'s core: ask on the trusted console, then record the allow.
 
-    The terminal interface runs the same core with the terminal handed over. Prints what
-    happened; returns whether an allow was recorded. Refusals raise ``ServerCommandRefused``.
+    The terminal interface runs the same core with the terminal handed over, its ``confirm``
+    reading the typed name on its own event loop thread. Prints what happened; returns whether an
+    allow was recorded. Refusals raise ``ServerCommandRefused``.
     """
 
     from finishup.client.everyday_policy import repository_report
@@ -2384,7 +2404,7 @@ def allow_repository(record: ServerTarget, here: RepositoryHere) -> bool:
         )
     elif decision.state == "kept":
         state += "\nYou chose to keep it on this computer before; allowing it replaces that choice."
-    _confirm_repository_on_trusted_console(record, here.worktree, state)
+    (confirm or _confirm_repository_on_trusted_console)(record, here.worktree, state)
     try:
         with registry_lock():
             # Read again under the lock: the confirmation may have taken minutes.
@@ -2412,6 +2432,24 @@ def allow_repository(record: ServerTarget, here: RepositoryHere) -> bool:
         f"Undo it with 'finishup server repositories remove {record.name}' in this repository."
     )
     return True
+
+
+def allow_repository_here(
+    folder: str | None = None,
+    *,
+    confirm: Callable[[ServerTarget, str, str], None] | None = None,
+) -> tuple[ServerTarget, bool]:
+    """``server repositories add`` for the selected server and the repository of ``folder`` (the
+    current folder when None): the same checks and core. Returns the server and whether an allow
+    was recorded; refusals raise ``ServerCommandRefused``."""
+
+    _require_selection_in_force()
+    record = _repository_target(None)
+    require_open_kind(record)
+    refused = zero_network_connection_refusal(record)
+    if refused is not None:
+        raise refused
+    return record, allow_repository(record, repository_here(folder), confirm=confirm)
 
 
 def keep_repository(record: ServerTarget, here: RepositoryHere, *, named: bool) -> bool:
