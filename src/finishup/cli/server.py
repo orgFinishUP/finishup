@@ -690,10 +690,20 @@ _LEVEL_LINES: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 _PROVIDER_NAMES: Final[dict[str, str]] = {
+    "anthropic": "Anthropic",
+    "fireworks": "Fireworks",
+    "google": "Google",
     "openai": "OpenAI",
     "openai-codex": "OpenAI Codex",
     "openai-compatible": "an OpenAI-compatible endpoint its owner declared",
+    "openrouter": "OpenRouter",
+    "vercel-ai-gateway": "Vercel AI Gateway",
+    "xai": "xAI",
 }
+
+
+def _provider_name(token: str | None) -> str:
+    return _PROVIDER_NAMES.get(token or "", "a provider this release does not name")
 
 
 def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
@@ -705,13 +715,20 @@ def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
             "That server states it sends nothing it reads to an AI-powered review provider.",
         )
     else:
-        provider = _PROVIDER_NAMES.get(
-            review.provider_disclosure or "", "a provider this release does not name"
-        )
-        review_lines = (
-            "That server's AI-powered review may send what it reads to a model provider",
-            f"({provider}), as that server's own privacy policy decides.",
-        )
+        provider = _provider_name(review.provider_disclosure)
+        if review.fallback_disclosure is None:
+            review_lines = (
+                "That server's AI-powered review may send what it reads to a model provider",
+                f"({provider}), as that server's own privacy policy decides.",
+            )
+        else:
+            # Every provider it may send to is named: the fallback too (ADR-052).
+            review_lines = (
+                "That server's AI-powered review may send what it reads to a model provider",
+                f"({provider}) and, when that one fails, to another "
+                f"({_provider_name(review.fallback_disclosure)}),",
+                "as that server's own privacy policy decides.",
+            )
     return (
         *_LEVEL_LINES[envelope.level],
         *review_lines,

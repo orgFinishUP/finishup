@@ -13,7 +13,11 @@ client decides (design v2 §1).
 * ``review``: derived from this service's own ``config.toml``, from the same settings that decide
   whether it can reach an AI provider at all, so the profile never understates it: a profile whose
   semantic capability is an external provider states ``server_policy`` (its owner's privacy policy
-  decides what is sent) and names that provider by a closed token; any other states ``none``.
+  decides what is sent) and names, by closed tokens, every provider its review may send to: the
+  one it sends to first and, with a ``[semantic_fallback]`` pairing, the one it falls back to; any
+  other states ``none``. A configuration the profile cannot state exactly (a provider id that is
+  not a profile token) offers **no profile** rather than one that understates it: the
+  ``server_profile`` operation is refused, and so is every hello that names a revision or a claim.
 * ``official`` is always false here (the official service is built elsewhere, and the claim never
   counts on its own); ``edges`` is ``ssh-control``; a peer-authenticated session is the owner's
   (``operator``, no key id).
@@ -63,6 +67,7 @@ __all__ = [
     "REVISION_FILE_NAME",
     "REVISION_SCHEMA",
     "ProfileRevisionStore",
+    "ProfileUnavailable",
     "ServerProfileSource",
     "offer_digest",
     "review_offer",
@@ -78,26 +83,45 @@ _PROVIDER_TOKEN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$", re.
 _MAX_RECORD_BYTES: Final = 1_024
 
 
+class ProfileUnavailable(Exception):
+    """This service's configuration cannot be stated exactly in a profile; ``reason`` is closed."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _provider_token(provider_id: str) -> str:
+    if not _PROVIDER_TOKEN.match(provider_id):
+        # Never server prose, and never "no provider named": a provider the profile cannot name
+        # exactly would make two different providers look the same to a consent.
+        raise ProfileUnavailable("review_provider_unrepresentable")
+    return provider_id
+
+
 def review_offer(config: FinishUpConfig) -> ReviewEgress:
-    """What this service's AI review may send to a model provider, from its own config."""
+    """What this service's AI review may send to a model provider, from its own config.
+
+    Names every provider its review may send to: the primary and, with a ``[semantic_fallback]``
+    pairing, the fallback. Raises ``ProfileUnavailable`` for a provider it cannot name exactly.
+    """
 
     from finishup.config.models import (
-        CODEX_SUBSCRIPTION_PROVIDER_ID,
         PROFILE_CAPABILITIES,
         SemanticPolicy,
+        fallback_external_endpoint,
+        primary_external_endpoint,
     )
 
     if PROFILE_CAPABILITIES[config.profile].semantic is not SemanticPolicy.OPTIONAL_EXTERNAL:
         return ReviewEgress("none", None)
-    provider: str | None = None
-    if config.provider is not None:
-        provider = config.provider.provider_id
-    elif config.external_runtime is not None:
-        provider = CODEX_SUBSCRIPTION_PROVIDER_ID
-    if provider is not None and not _PROVIDER_TOKEN.match(provider):
-        # Never server prose: a provider this release cannot name as a token is named by none.
-        provider = None
-    return ReviewEgress("server_policy", provider)
+    primary = primary_external_endpoint(config)
+    fallback = fallback_external_endpoint(config)
+    return ReviewEgress(
+        "server_policy",
+        None if primary is None else _provider_token(primary.provider_id),
+        None if fallback is None else _provider_token(fallback.provider_id),
+    )
 
 
 def _subset(review: ReviewEgress) -> dict[str, JsonValue]:
@@ -107,7 +131,10 @@ def _subset(review: ReviewEgress) -> dict[str, JsonValue]:
 
 
 def offer_digest(config: FinishUpConfig) -> str:
-    """The ``profile_digest`` of what this service offers under ``config``."""
+    """The ``profile_digest`` of what this service offers under ``config``.
+
+    Raises ``ProfileUnavailable`` when ``config`` cannot be stated exactly.
+    """
 
     return profile_digest(_subset(review_offer(config)))
 
@@ -220,23 +247,38 @@ def _encode(revision: ServerProfileRevision) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class ServerProfileSource:
-    """What this running service offers, and the revision it issued at start."""
+    """What this running service offers, and the revision it issued at start.
 
-    review: ReviewEgress
-    revision: ServerProfileRevision
+    ``review`` and ``revision`` are ``None`` together when the configuration cannot be stated
+    exactly (``ProfileUnavailable``): the service then offers no profile, and every hello held to
+    a revision is refused (there is none it issues).
+    """
+
+    review: ReviewEgress | None
+    revision: ServerProfileRevision | None
 
     @classmethod
     def load(cls, config: FinishUpConfig, state_dir: Path) -> ServerProfileSource:
         """Decide the offer from ``config`` and issue its revision (once, at service start)."""
 
-        review = review_offer(config)
+        try:
+            review = review_offer(config)
+        except ProfileUnavailable:
+            # No revision is issued or recorded for an offer that cannot be stated: the record
+            # keeps the last one, and the next offer that can be stated advances past it.
+            return cls(None, None)
         digest = profile_digest(_subset(review))
         revision = ProfileRevisionStore(state_dir / REVISION_FILE_NAME).advance(digest)
         return cls(review, revision)
 
     def profile(self, status: ServiceStatus, manifest_digest: str) -> ServerProfile:
-        """The profile this service answers a peer-authenticated owner session with."""
+        """The profile this service answers a peer-authenticated owner session with.
 
+        Raises ``ProfileUnavailable`` when the service offers none.
+        """
+
+        if self.review is None or self.revision is None:
+            raise ProfileUnavailable("review_provider_unrepresentable")
         return ServerProfile(
             release=status.service_version,
             schema_manifest_digest=manifest_digest,

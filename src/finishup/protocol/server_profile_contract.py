@@ -96,13 +96,15 @@ class ServerProfileExclusions(BaseModel):
 
 class ServerProfileReview(BaseModel):
     """Whether the server's own AI review may send what it reads to a model provider, and which:
-    ``none`` names no provider; ``server_policy`` (its owner's privacy policy decides) names one
-    by a token the client shows in its own words."""
+    ``none`` names no provider; ``server_policy`` (its owner's privacy policy decides) names the
+    provider it sends to first and, when it pairs two, the fallback it sends to when the first
+    fails, each by a token the client shows in its own words."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     ai_review: Literal["none", "server_policy"]
     provider_disclosure: Token | None
+    fallback_disclosure: Token | None
 
 
 class ServerProfileRevisionContract(BaseModel):

@@ -14541,7 +14541,9 @@ from `protocol.server_profile_contract`; golden vectors `fixtures/service/server
 scope: operator | agent | read, principal}`), `edges` (`rest-1`, `ssh-control`), `levels`
 (`{offered, required_min}`), `code_sync`, `retention` (`{options, default}`) and `exclusions`
 (`{always}`) — present exactly when L2 is offered, else `null` — `review` (`{ai_review: none |
-server_policy, provider_disclosure}`), `official` (a claim only), `profile_revision` (`{issuer,
+server_policy, provider_disclosure, fallback_disclosure}`: the provider review sends to first and
+the one a pairing falls back to, each a token or `null`; `none` names neither, and a fallback
+needs a first provider), `official` (a claim only), `profile_revision` (`{issuer,
 revision, profile_digest}`) and `profile_digest` (`sha256` over `yoetz/server-profile/v1` NUL and
 the canonical `{levels, code_sync, retention, exclusions, review}`, each shared member in the
 consent envelope's encoding). `protocol.server_profile` is the hook-safe strict parser; a document
@@ -14562,8 +14564,11 @@ answer lists only released methods (#436).
 
 **Where the offer comes from.** `service.server_profile`: levels pinned by the release (L1 offered
 and required); review from the service's `config.toml` (an external semantic provider →
-`server_policy` with its provider id; otherwise `none`); `official` false; edge `ssh-control`; the
-owner's key (`{null, operator, owner}`).
+`server_policy` with its provider id and, with a `[semantic_fallback]` pairing, the fallback's;
+otherwise `none`); `official` false; edge `ssh-control`; the owner's key (`{null, operator,
+owner}`). A configuration whose provider id is not a profile token offers no profile: no revision
+is issued, `server_profile` is refused `method_forbidden` and every hello naming a revision or a
+claim is refused `server_profile_changed`.
 
 **CLI.** `finishup service profile [--json]` (hidden in layer 3; server-host scope): starts this
 root's service on demand and prints the verified profile.

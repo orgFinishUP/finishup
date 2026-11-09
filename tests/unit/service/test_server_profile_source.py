@@ -10,7 +10,12 @@ from typing import Any, cast
 
 import pytest
 
-from finishup.config.models import FinishUpConfig
+from finishup.config.models import (
+    ExternalRuntimeProfileConfig,
+    FinishUpConfig,
+    SemanticFallbackConfig,
+)
+from finishup.config.write import codex_subscription_runtime, fireworks_provider
 from finishup.ports.control import ServiceState, ServiceStatus
 from finishup.protocol.canonical import JsonValue
 from finishup.protocol.consent_envelope import ReviewEgress
@@ -19,6 +24,7 @@ from finishup.protocol.server_profile import profile_from_json
 from finishup.service.server_profile import (
     REVISION_FILE_NAME,
     ProfileRevisionStore,
+    ProfileUnavailable,
     ServerProfileSource,
     offer_digest,
     review_offer,
@@ -67,7 +73,7 @@ def test_a_service_with_no_external_provider_offers_no_ai_review() -> None:
 
 def test_a_service_with_an_external_provider_states_server_policy_and_names_it() -> None:
     config = _provider_config()
-    assert review_offer(config) == ReviewEgress("server_policy", "openai")
+    assert review_offer(config) == ReviewEgress("server_policy", "openai", None)
     assert offer_digest(config) != offer_digest(FinishUpConfig())
 
 
@@ -178,3 +184,113 @@ def test_a_restart_under_the_same_config_keeps_the_revision(state: Path) -> None
     second = ServerProfileSource.load(FinishUpConfig(), state)
 
     assert first.revision == second.revision
+
+
+# --- every provider its review may send to (review of layer 3: A1) ------------------------------
+
+_DIGEST = "sha256:" + "a" * 64
+
+
+def _runtime() -> ExternalRuntimeProfileConfig:
+    return codex_subscription_runtime(
+        executable_path="/opt/codex/bin/codex",
+        executable_sha256=_DIGEST,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-linux-x64-0.150.1",
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home="/opt/codex/home",
+        model="gpt-test",
+        reasoning_effort="high",
+    )
+
+
+def _fireworks() -> FinishUpConfig:
+    return FinishUpConfig(profile="local-openai", provider=fireworks_provider(model="m"))
+
+
+def _codex() -> FinishUpConfig:
+    return FinishUpConfig(profile="codex-subscription", external_runtime=_runtime())
+
+
+def _paired(primary: str) -> FinishUpConfig:
+    return FinishUpConfig(
+        profile="codex-subscription" if primary == "codex_subscription" else "local-openai",
+        provider=fireworks_provider(model="m"),
+        external_runtime=_runtime(),
+        semantic_fallback=SemanticFallbackConfig(primary=cast(Any, primary)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("primary", "first", "fallback"),
+    [
+        ("api_provider", "fireworks", "openai-codex"),
+        ("codex_subscription", "openai-codex", "fireworks"),
+    ],
+)
+def test_a_paired_review_names_the_provider_it_sends_to_first_and_its_fallback(
+    primary: str, first: str, fallback: str
+) -> None:
+    assert review_offer(_fireworks()) == ReviewEgress("server_policy", "fireworks", None)
+    assert review_offer(_codex()) == ReviewEgress("server_policy", "openai-codex", None)
+
+    assert review_offer(_paired(primary)) == ReviewEgress("server_policy", first, fallback)
+
+
+def test_pairing_a_fallback_changes_the_digest_and_a_restart_advances_the_revision(
+    state: Path,
+) -> None:
+    """A consent made before a second provider was paired never matches what is offered after."""
+
+    digests = {
+        offer_digest(config)
+        for config in (
+            _fireworks(),
+            _codex(),
+            _paired("api_provider"),
+            _paired("codex_subscription"),
+        )
+    }
+    assert len(digests) == 4
+
+    single = ServerProfileSource.load(_fireworks(), state)
+    paired = ServerProfileSource.load(_paired("api_provider"), state)
+
+    assert single.revision is not None and paired.revision is not None
+    assert paired.revision.issuer == single.revision.issuer
+    assert paired.revision.revision == single.revision.revision + 1
+    assert paired.revision.profile_digest != single.revision.profile_digest
+    document = paired.document(_STATUS, _MANIFEST)
+    validate_schema_instance("server-profile", "1.0.0", cast(JsonValue, document))
+    assert profile_from_json(cast(JsonValue, document)).review == ReviewEgress(
+        "server_policy", "fireworks", "openai-codex"
+    )
+
+
+@pytest.mark.parametrize("provider_id", ["acme+beta", "a" * 200])
+def test_a_provider_the_profile_cannot_name_exactly_offers_no_profile(
+    state: Path, provider_id: str
+) -> None:
+    """Never a profile that understates: two such providers would look the same to a consent."""
+
+    config = _provider_config(provider_id)
+    with pytest.raises(ProfileUnavailable) as unavailable:
+        review_offer(config)
+    assert unavailable.value.reason == "review_provider_unrepresentable"
+    with pytest.raises(ProfileUnavailable):
+        offer_digest(config)
+    recorded = ServerProfileSource.load(_fireworks(), state)
+    before = (state / REVISION_FILE_NAME).read_bytes()
+
+    source = ServerProfileSource.load(config, state)
+
+    assert (source.review, source.revision) == (None, None)
+    with pytest.raises(ProfileUnavailable):
+        source.document(_STATUS, _MANIFEST)
+    # Nothing is issued or recorded for it: the record keeps the last revision it stood for.
+    assert (state / REVISION_FILE_NAME).read_bytes() == before
+    assert ServerProfileSource.load(_fireworks(), state).revision == recorded.revision

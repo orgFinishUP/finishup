@@ -140,8 +140,9 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   can stop anything you do yet.
 - **A server states what it offers, and your consent is bound to it** (ADR-052). A FinishUP server
   now describes what it offers a computer that uses it (the level of use, and whether its
-  AI-powered review may send what it reads to a model provider) and gives that description a
-  revision; it serves a connection from elsewhere only under the revision that computer agreed
+  AI-powered review may send what it reads to a model provider, naming each provider, the fallback
+  too) and gives that description a revision; a server whose provider it cannot name exactly
+  describes nothing and serves no connection from elsewhere; it serves a connection from elsewhere only under the revision that computer agreed
   to, before doing any work. On your side, agreeing to use a server elsewhere will record what you
   agreed to, ask again on your own terminal whenever the server asks for more, and quietly follow
   it when it asks for less (`finishup server status` says so). Errors name

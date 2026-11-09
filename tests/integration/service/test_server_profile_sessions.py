@@ -15,11 +15,14 @@ import dataclasses
 import hmac
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import cast
 
 import pytest
 
 from builders.workspace_agent_fake import fake_declaration
+from finishup.config.models import FinishUpConfig, SemanticFallbackConfig
+from finishup.config.write import codex_subscription_runtime, fireworks_provider
 from finishup.domain.values import JsonObject
 from finishup.ports.control import ControlClientKind, ControlError, ControlMethod, WorkspaceClaim
 from finishup.protocol.canonical import JsonValue, canonical_encode
@@ -213,5 +216,99 @@ async def test_a_service_that_issues_no_revision_refuses_the_profile_method() ->
             refused = await client.call(ControlMethod.SERVER_PROFILE, JsonObject({}))
             assert isinstance(refused, ControlError)
             assert refused.reason == "method_forbidden"
+        finally:
+            await client.close()
+
+
+# --- a review provider paired after the consent (review of layer 3: A1) -------------------------
+
+
+def _paired_configs() -> tuple[FinishUpConfig, FinishUpConfig]:
+    digest = "sha256:" + "a" * 64
+    runtime = codex_subscription_runtime(
+        executable_path="/opt/codex/bin/codex",
+        executable_sha256=digest,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-linux-x64-0.150.1",
+        app_server_schema_sha256=digest,
+        capability_cell_sha256=digest,
+        isolated_config_sha256=digest,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home="/opt/codex/home",
+        model="gpt-test",
+        reasoning_effort="high",
+    )
+    single = FinishUpConfig(profile="local-openai", provider=fireworks_provider(model="m"))
+    paired = FinishUpConfig(
+        profile="local-openai",
+        provider=fireworks_provider(model="m"),
+        external_runtime=runtime,
+        semantic_fallback=SemanticFallbackConfig(primary="api_provider"),
+    )
+    return single, paired
+
+
+async def test_a_hello_consented_before_a_fallback_provider_was_paired_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The server restarted with a Codex fallback paired to its Fireworks review: a client whose
+    consent named only Fireworks is not admitted, and one under the new revision is."""
+
+    tmp_path.chmod(0o700)
+    single, paired = _paired_configs()
+    consented = cast(ServerProfileRevision, ServerProfileSource.load(single, tmp_path).revision)
+    restarted = ServerProfileSource.load(paired, tmp_path)
+    current = cast(ServerProfileRevision, restarted.revision)
+    assert current != consented
+    async with _running(None) as service:
+        service.daemon._composition = dataclasses.replace(  # pyright: ignore[reportPrivateUsage]
+            service.daemon.composition, server_profile=restarted
+        )
+        with pytest.raises(ControlProtocolError) as refused:
+            await service.connect(claim=_CLAIM, server_profile=consented, agent=True)
+        assert refused.value.reason == "server_profile_changed"
+        await asyncio.gather(*service.served, return_exceptions=True)
+        assert service.daemon.composition.workspace_hub._channels == {}  # pyright: ignore[reportPrivateUsage]
+        assert service.application.check_requests == []
+
+        client = await service.connect(claim=_CLAIM, server_profile=current, agent=True)
+        try:
+            await client.call(ControlMethod.CHECK, _check())
+            assert len(service.application.check_requests) == 1
+            answered = await client.call(ControlMethod.SERVER_PROFILE, JsonObject({}))
+            profile = profile_from_json(canonical_encode(cast(JsonValue, answered)))
+            assert profile.review == ReviewEgress("server_policy", "fireworks", "openai-codex")
+        finally:
+            await client.close()
+
+
+async def test_a_service_that_cannot_state_its_review_admits_no_remote_hello_and_no_profile() -> (
+    None
+):
+    """A configuration the profile cannot state exactly offers none: every hello that names a
+    revision or a claim is refused, and the profile is not answered; a local client is served."""
+
+    async with _running(None) as service:
+        service.daemon._composition = dataclasses.replace(  # pyright: ignore[reportPrivateUsage]
+            service.daemon.composition, server_profile=ServerProfileSource(None, None)
+        )
+        with pytest.raises(ControlProtocolError) as refused:
+            await service.connect(claim=_CLAIM, server_profile=_REVISION, agent=True)
+        assert refused.value.reason == "server_profile_changed"
+        # A claim named under no revision at all is not admitted either.
+        with pytest.raises(ControlProtocolError):
+            await service.connect(claim=_CLAIM, server_profile=None, agent=True)
+        await asyncio.gather(*service.served, return_exceptions=True)
+        assert service.daemon.composition.workspace_hub._channels == {}  # pyright: ignore[reportPrivateUsage]
+        assert service.application.check_requests == []
+
+        client = await service.connect(claim=None, server_profile=None)
+        try:
+            refused_profile = await client.call(ControlMethod.SERVER_PROFILE, JsonObject({}))
+            assert isinstance(refused_profile, ControlError)
+            assert refused_profile.reason == "method_forbidden"
+            await client.call(ControlMethod.CHECK, _check())
+            assert len(service.application.check_requests) == 1
         finally:
             await client.close()

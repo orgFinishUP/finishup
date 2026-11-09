@@ -947,7 +947,9 @@ class ServiceComposition:
     refuse_workspace_locators: bool = False
     # What this server offers a client elsewhere and the profile revision it issued at start
     # (ADR-052). With none, the ``server_profile`` method is refused and no hello is held to a
-    # revision (a composition that predates profiles).
+    # revision (a composition that predates profiles). A source that offers no profile (its
+    # configuration cannot be stated exactly) refuses that method too, and every hello that names
+    # a revision or a claim.
     server_profile: ServerProfileSource | None = None
 
     def __repr__(self) -> str:
@@ -1316,7 +1318,9 @@ class ServiceDaemon:
                 return self._error_result(request, ControlError("server_profile_changed"))
             if request.method is ControlMethod.SERVER_PROFILE:
                 source = self._composition.server_profile
-                if source is None:
+                if source is None or source.revision is None:
+                    # No profile: a composition without one, or a configuration the profile
+                    # cannot state exactly (it never offers one that understates it, ADR-052).
                     raise ControlError("method_forbidden")
                 body: object = freeze_json(source.document(self.status(), schema_manifest_digest()))
             elif request.method is ControlMethod.SERVICE_STATUS:

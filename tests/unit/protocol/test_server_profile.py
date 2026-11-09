@@ -154,7 +154,11 @@ def test_an_unknown_retention_kind_or_review_value_is_refused_not_kept() -> None
         profile_from_json(cast(JsonValue, _resealed(document)))
     assert retention.value.reason == "profile_value_unknown"
     document = _document("l1_no_ai_review")
-    document["review"] = {"ai_review": "always", "provider_disclosure": None}
+    document["review"] = {
+        "ai_review": "always",
+        "provider_disclosure": None,
+        "fallback_disclosure": None,
+    }
     with pytest.raises(ProfileError) as review:
         profile_from_json(cast(JsonValue, _resealed(document)))
     assert review.value.reason == "profile_value_unknown"

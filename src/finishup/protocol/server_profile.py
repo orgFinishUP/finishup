@@ -5,7 +5,8 @@ SSH from its own ``finishup service profile --json`` (layer 4), over REST from `
 (layer 5), and on any peer-authenticated control session from the ``server_profile`` operation. It
 states the server's release and schema manifest, the service instance, the caller's key, the
 edges it serves, the **levels** it offers (and the minimum it requires), how code reaches it and
-how long it keeps it (level L2 only), the exclusions it enforces, its AI-review egress, its
+how long it keeps it (level L2 only), the exclusions it enforces, its AI-review egress (every
+provider its review may send to: the first, and the fallback when it pairs two), its
 ``official`` claim (a claim only: it never counts on its own, design v2 §2.4), and its **profile
 revision**.
 

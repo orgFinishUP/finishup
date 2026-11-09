@@ -282,6 +282,32 @@ def test_the_disclosure_names_a_provider_only_in_this_releases_words(
     assert "acme-ai" not in console.text
 
 
+def test_the_disclosure_names_every_provider_a_paired_review_may_send_to(
+    source: _Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server whose review falls back to a second provider names both (review of layer 3:
+    A1), and the consent records both."""
+
+    source.document = profile_document(
+        review=ReviewEgress("server_policy", "fireworks", "openai-codex")
+    )
+    console = _console(monkeypatch, b"listed", b"lab")
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code == 0, result.output
+    text = " ".join(console.text.split())
+    assert "(Fireworks) and, when that one fails, to another (OpenAI Codex)" in text
+    consented = json.loads(
+        (targets.target_root(_only().target_id) / "config" / "consent-envelope.json").read_bytes()
+    )
+    assert consented["review"] == {
+        "ai_review": "server_policy",
+        "provider_disclosure": "fireworks",
+        "fallback_disclosure": "openai-codex",
+    }
+
+
 def _remote(source: _Source) -> ServerTarget:
     del source
     with targets.registry_lock():

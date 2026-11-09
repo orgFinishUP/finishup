@@ -164,7 +164,8 @@ exclusions, review egress and the disclosure version.
   value; retention with nothing kept at the bottom, `until_forgotten` at the top, `days:N ⊑ days:M`
   for N ≤ M, and `task_close` and `days:N` incomparable; exclusions by exact pattern superset only
   (no pattern semantics); review `none` below `server_policy`, a provider named only with
-  `server_policy`.
+  `server_policy`, and any other change of the providers named (another provider, a fallback
+  added, removed or swapped with the first) incomparable.
 - **`compare(consented, current)`** returns a typed verdict: anything unknown → `ask_again`; a
   required minimum above the level agreed → `level_unavailable` (never a silent upgrade); identical
   canonical bytes → `same`; `current ⊑ consented` → `narrower` with the fields whose narrowing
@@ -269,8 +270,17 @@ counted on its own, section 2.4) and its revision.
   layer 6, which adds a configuration table for it. Review egress is derived from the server's own
   `config.toml` (its semantic capability and provider), the settings that decide whether it can
   reach an AI provider at all, so the profile never understates it: an external provider states
-  `server_policy` (its owner's privacy policy decides) and names the provider by a closed token;
-  anything else states `none`. `official` is false (the official service is built in another
+  `server_policy` (its owner's privacy policy decides) and names, by closed tokens, every provider
+  its review may send to: `provider_disclosure`, the one it sends to first, and
+  `fallback_disclosure`, the one a `[semantic_fallback]` pairing falls back to when the first
+  fails (`null` without one), so pairing, dropping or swapping a fallback changes the digest and
+  advances the revision (review of layer 3, A1). Anything else states `none`. A configuration the
+  profile cannot state exactly (a provider id that is not a profile token) offers **no profile**
+  rather than one that understates it: no revision is issued or recorded, the `server_profile`
+  operation is refused (`method_forbidden`) and every hello naming a revision or a claim is
+  refused (`server_profile_changed`). Provider granularity is the token: the model, endpoint
+  profile or owner-declared origin behind the same provider id is the server owner's policy, as
+  `server_policy` says. `official` is false (the official service is built in another
   repository); the edge is `ssh-control`; a peer-authenticated session is the owner's.
 - **The revision.** The server keeps `<state dir>/server-profile-revision.json`
   (`yoetz.server-profile-revision/1`, owner-only canonical JSON): a random issuer, a number and the

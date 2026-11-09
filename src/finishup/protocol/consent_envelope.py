@@ -110,7 +110,7 @@ _ENDPOINT_FIELDS: Final = ("kind", "origin", "identity_type", "identity")
 _PRINCIPAL_FIELDS: Final = ("key_id", "principal")
 _CODE_SYNC_FIELDS: Final = ("methods", "max_repo_bytes", "max_file_bytes")
 _RETENTION_FIELDS: Final = ("kind", "days")
-_REVIEW_FIELDS: Final = ("ai_review", "provider_disclosure")
+_REVIEW_FIELDS: Final = ("ai_review", "provider_disclosure", "fallback_disclosure")
 
 type Verdict = Literal["same", "narrower", "ask_again", "level_unavailable"]
 type FieldOrder = Literal["equal", "narrower", "wider", "incomparable"]
@@ -164,10 +164,17 @@ class Retention:
 
 @dataclass(frozen=True, slots=True)
 class ReviewEgress:
-    """Whether the server may send what it holds to an AI provider for review, and which."""
+    """Whether the server may send what it holds to an AI provider for review, and to which.
+
+    ``provider_disclosure`` names the provider its review sends to first; ``fallback_disclosure``
+    the one it may send to when that provider fails (a server whose review pairs two providers),
+    or ``None``. Every provider a server's review may send to is named, so adding, removing or
+    swapping one changes the envelope (ADR-052).
+    """
 
     ai_review: str
     provider_disclosure: str | None
+    fallback_disclosure: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,12 +382,16 @@ def _review(value: JsonValue, unknown: list[tuple[str, str, str]], paths: set[st
     unknown.extend(_unknown(source, _REVIEW_FIELDS, "review"))
     ai_review = _required_token(_member(source, "ai_review"))
     disclosure = _token(_member(source, "provider_disclosure"), nullable=True)
+    fallback = _token(_member(source, "fallback_disclosure"), nullable=True)
+    if fallback is not None and disclosure is None:
+        # A fallback is the provider used when the first one fails: there is a first one.
+        raise EnvelopeError("envelope_field_invalid")
     if ai_review not in AI_REVIEW_VALUES:
         paths.add("review.ai_review")
     elif ai_review == "none" and disclosure is not None:
         # No review egress names no provider; one canonical form for "nothing is sent".
         raise EnvelopeError("envelope_field_invalid")
-    return ReviewEgress(ai_review, disclosure)
+    return ReviewEgress(ai_review, disclosure, fallback)
 
 
 def parse_shared_member(name: str, value: JsonValue) -> CodeSync | Retention | ReviewEgress | None:
@@ -479,7 +490,11 @@ def retention_to_json(retention: Retention | None) -> JsonValue:
 def review_to_json(review: ReviewEgress) -> dict[str, JsonValue]:
     """``review`` in the envelope's canonical shape (shared with the server profile)."""
 
-    return {"ai_review": review.ai_review, "provider_disclosure": review.provider_disclosure}
+    return {
+        "ai_review": review.ai_review,
+        "provider_disclosure": review.provider_disclosure,
+        "fallback_disclosure": review.fallback_disclosure,
+    }
 
 
 def exclusions_to_json(exclusions: frozenset[str]) -> list[JsonValue]:
@@ -643,6 +658,7 @@ def _review_order(current: ConsentEnvelope, consented: ConsentEnvelope) -> Field
         return "narrower"
     if now.ai_review == "server_policy" and then.ai_review == "none":
         return "wider"
+    # Another provider, a fallback added, removed or swapped with the first: asked again.
     return "incomparable"
 
 
