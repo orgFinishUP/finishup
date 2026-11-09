@@ -573,8 +573,7 @@ class Helper:
             return admission
         if admission is not None:
             # Lapsed: every connection made under it ends (O8: the relay too).
-            self._admission = None
-            self._end_relays()
+            self._lapse(admission)
         try:
             from finishup.client.targets import read_target
 
@@ -627,8 +626,25 @@ class Helper:
     # -- the relay -------------------------------------------------------------------------------
 
     def _end_relays(self) -> None:
+        # The relay asking (an admission refused while it opens) ends by its own refusal; every
+        # other one is cancelled.
+        current = asyncio.current_task()
         for task in tuple(self._relays):
-            task.cancel()
+            if task is not current:
+                task.cancel()
+
+    def _lapse(self, admission: ConnectionAuthorization) -> None:
+        """``admission`` no longer admits: end every relay made under it, then forget it.
+
+        Every relay of the helper runs under its one current admission (a lapse ends them all
+        before another is taken), so a refusal seen by one relay, by the refresh or by the
+        watch ends every other one too, its server-to-client direction included (O8), and the
+        next admission starts with none of them.
+        """
+
+        self._end_relays()
+        if self._admission is admission:
+            self._admission = None
 
     async def _dial_own(self) -> ControlStream:
         """A connection to this helper's relay that bypasses its endpoint (background agents).
@@ -684,6 +700,7 @@ class Helper:
             if not self._may_forward(admission):
                 with contextlib.suppress(Exception):
                     await upstream.aclose()
+                self._lapse(admission)
                 raise _RelayEnded
             try:
                 await upstream.send_all(hello)
@@ -698,6 +715,7 @@ class Helper:
             now = self._clock()
             if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
                 if not self._may_forward(admission):
+                    self._lapse(admission)
                     raise _RelayEnded
                 self._last_restart = now
                 if await self._upstream.start_remote_service():
@@ -745,14 +763,16 @@ class Helper:
         except Exception:  # noqa: BLE001 - a relay fault ends this connection only
             pass
         finally:
+            # Counted first: a cancellation landing while the streams close never leaves the
+            # helper believing a client is still connected.
+            if not own:
+                self._active -= 1
+                self._last_activity = self._clock()
             if upstream is not None:
                 with contextlib.suppress(Exception):
                     await upstream.aclose()
             with contextlib.suppress(Exception):
                 await local.aclose()
-            if not own:
-                self._active -= 1
-                self._last_activity = self._clock()
 
     async def _pump_checked(
         self, source: ControlStream, sink: ControlStream, admission: ConnectionAuthorization
@@ -769,9 +789,10 @@ class Helper:
                 end = _FRAME_PREFIX + size
                 if len(buffer) < end:
                     break
-                if admission.refusal() is not None or not self._may_send():
-                    # What this connection was admitted under changed: nothing more is sent.
-                    self._admission = None
+                if not self._may_forward(admission) or not self._may_send():
+                    # What this connection was admitted under changed: nothing more is sent,
+                    # over this relay or any other made under it.
+                    self._lapse(admission)
                     raise _RelayEnded
                 frame = bytes(buffer[:end])
                 del buffer[:end]
@@ -953,9 +974,11 @@ class Helper:
             await self._refresher(current)
         except Exception:  # noqa: BLE001 - the cached profile stays; the next due fetch retries
             return
-        # A refreshed consent or revision: connections admitted before it are admitted again.
-        if self._admission is not None and self._admission.refusal() is not None:
-            self._admission = None
+        # A refreshed consent or revision: connections admitted before it end, and the next one
+        # is admitted again.
+        admission = self._admission
+        if admission is not None and admission.refusal() is not None:
+            self._lapse(admission)
 
     def _start_refresh(self) -> None:
         self._refresh.task = asyncio.create_task(self._run_refresh())

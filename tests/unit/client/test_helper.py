@@ -607,3 +607,84 @@ def test_an_authorization_change_before_the_remote_start_starts_nothing(
         return upstream.started
 
     assert asyncio.run(run()) == (1 if change == "none" else 0)
+
+
+async def _open_relays(
+    helper: Helper, count: int
+) -> list[tuple[AuthenticatedUnixStream, asyncio.Task[None]]]:
+    """``count`` relayed client connections, each past its hello."""
+
+    opened: list[tuple[AuthenticatedUnixStream, asyncio.Task[None]]] = []
+    for _ in range(count):
+        client, local = _pair()
+        before = set(helper._relays)  # pyright: ignore[reportPrivateUsage]
+        # As the endpoint's accept loop does, so the helper knows the relay.
+        helper._spawn_relay(local, own=False)  # pyright: ignore[reportPrivateUsage]
+        [relay] = set(helper._relays) - before  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(hello_frame(server_profile=TEST_REVISION))
+        assert await client.receive(65_536)  # the hello result
+        opened.append((client, relay))
+    return opened
+
+
+def test_a_frame_refused_on_one_relay_ends_every_relay_of_that_admission(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A4: a refusal one relay sees ends the others too, before another admission is taken."""
+
+    record, root = ssh_target
+
+    async def run() -> bytes:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()))
+        async with asyncio.timeout(10):
+            (first, first_relay), (second, second_relay) = await _open_relays(helper, 2)
+            bump_credential_generation(root)
+            await first.send_all(
+                encode_control_frame(call_request(1, ControlMethod.SERVICE_STATUS))
+            )
+            assert await first.receive(65_536) == b""
+        # Waited on without cancelling them: a relay swallows a cancellation as its end.
+        done, _ = await asyncio.wait((first_relay, second_relay), timeout=10)
+        # No tick ran: the other relay of that admission ended with it.
+        assert done == {first_relay, second_relay}
+        async with asyncio.timeout(10):
+            ended = await second.receive(65_536)
+            # The next tick admits again (a credential change is a new generation) with none of
+            # the old relays left.
+            await helper.step()
+            assert not helper._relays  # pyright: ignore[reportPrivateUsage]
+        await first.aclose()
+        await second.aclose()
+        return ended
+
+    assert asyncio.run(run()) == b""
+
+
+def test_a_refresh_that_ends_the_admission_ends_its_relays(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A4: a refresh that changes what the connections were admitted under ends them all."""
+
+    from builders.server_profiles import profile_document, refreshed
+
+    record, root = ssh_target
+
+    async def refresher(current: ServerTarget) -> None:
+        # The same offer under a new revision: the consent follows it quietly, and connections
+        # that named the old revision in their hello are no longer what it admits.
+        refreshed(current, profile_document(revision=2))
+
+    async def run() -> bytes:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), refresher=refresher)
+        async with asyncio.timeout(10):
+            assert helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
+            [(client, relay)] = await _open_relays(helper, 1)
+            await helper._run_refresh()  # pyright: ignore[reportPrivateUsage]
+        done, _ = await asyncio.wait((relay,), timeout=10)
+        assert done == {relay}
+        async with asyncio.timeout(10):
+            ended = await client.receive(65_536)
+        await client.aclose()
+        return ended
+
+    assert asyncio.run(run()) == b""
