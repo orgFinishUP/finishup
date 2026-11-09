@@ -368,11 +368,20 @@ def _gather_overview() -> _Overview:
     from finishup.cli.zero_network_selection import find_zero_network_selection
 
     zero_network = find_zero_network_selection()
+    server_lines: tuple[str, ...] = () if zero_network is None else zero_network.lines()
+    if zero_network is None:
+        from finishup.cli.zero_network_selection import find_repository_hold
+
+        # ADR-051 decision 8, round 4: this folder's repository held from, or kept here for,
+        # the selected server elsewhere; from the records alone.
+        held = find_repository_hold()
+        if held is not None:
+            server_lines = held.lines()
     return _Overview(
         service_line=cast(str, lines["service"]),
         harness_lines=cast(tuple[str, ...], lines["harness"]),
         setup_line=setup_line,
-        server_lines=() if zero_network is None else zero_network.lines(),
+        server_lines=server_lines,
     )
 
 

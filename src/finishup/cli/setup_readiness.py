@@ -124,6 +124,29 @@ def _zero_network_selection() -> dict[str, JsonValue] | None:
     return fact
 
 
+def _repository_hold(project: Path) -> dict[str, JsonValue] | None:
+    """This project's repository held from the selected server elsewhere, or kept here for it
+    (ADR-051 decision 8, round 4), as a readiness fact with its continuation; from the records
+    alone."""
+
+    from finishup.cli.zero_network_selection import find_repository_hold
+
+    item = find_repository_hold(project)
+    if item is None:
+        return None
+    fact = item.fact()
+    fact["line"] = item.line()
+    fact["next_command"] = continuation(["server", "repositories", "add"], project=project)
+    return fact
+
+
+def _repository_hold_line(fact: JsonValue) -> str | None:
+    if not isinstance(fact, dict):
+        return None
+    line = fact.get("line")
+    return line if isinstance(line, str) else None
+
+
 def _server_selection_line(fact: JsonValue) -> str | None:
     from finishup.cli.zero_network_selection import REMOTE_SELECTED
 
@@ -218,6 +241,10 @@ def _setup_next(
     zero_network = _zero_network_selection()
     if zero_network is not None:
         facts["server_selection"] = zero_network
+    else:
+        held = _repository_hold(project)
+        if held is not None:
+            facts["repository_hold"] = held
     arguments = cast(list[str] | None, facts.pop("arguments", None))
     reason = cast(SetupReadinessReason, str(facts.pop("reason", "ready")))
     selected_home: str | None = None
@@ -287,7 +314,9 @@ def _setup_next(
     from finishup.cli.provider_status import background_advice_human_line
 
     advice_line = background_advice_human_line(facts.get("background_advice"))
-    server_line = _server_selection_line(facts.get("server_selection"))
+    server_line = _server_selection_line(facts.get("server_selection")) or _repository_hold_line(
+        facts.get("repository_hold")
+    )
     typer.echo(
         report.model_dump_json(by_alias=True)
         if json_output
