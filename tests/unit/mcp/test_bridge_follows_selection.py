@@ -279,3 +279,46 @@ async def test_a_switch_between_servers_on_this_computer_keeps_the_bridge_as_bef
     assert dialled and set(dialled) == {local_root}
     assert "workspace_locator" in _last_hello(daemon)
     await _cleanup(runtime)
+
+
+@pytest.mark.anyio
+async def test_a_request_id_sent_to_one_server_is_never_sent_to_another(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    dialled: list[Path | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of layer 2 (A1): an agent that repeats a request (the same ``request_id``) after
+    the owner selected another server is refused before it is sent: it may be recorded on the
+    first server, so its outcome there is unknown. A new request follows the selection."""
+
+    open_remote_kinds(monkeypatch, "https")
+    record = _remote()
+    remote_root = targets.target_root(record.target_id)
+    targets.write_selection(record)
+    reset_selection_memo()
+    runtime = bridge.build_bridge_runtime(
+        host_profile="claude", workspace_locator=WorkspaceLocator(workspace)
+    )
+    repeated = new_id(IdKind.REQUEST)
+    assert _code(await bridge.dispatch_status(_status(repeated), runtime)) == "VAULT_LOCKED"
+    # The same request again, on the same server: a replay, sent as before.
+    assert _code(await bridge.dispatch_status(_status(repeated), runtime)) == "VAULT_LOCKED"
+    assert _calls(daemon, "status") == 2
+    # The owner returns to this computer's everyday server; the connection to A ends.
+    _switch_to_everyday_elsewhere()
+    assert _code(await bridge.dispatch_status(_status(new_id(IdKind.REQUEST)), runtime)) == (
+        "VAULT_LOCKED"
+    )
+    sent = _calls(daemon, "status")
+    result = await bridge.dispatch_status(_status(repeated), runtime)
+    error = _error(result)
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert cast(dict[str, object], error["safe_details"])["phase"] == (
+        "server_authorization_changed"
+    )
+    # Never sent to the server selected now.
+    assert _calls(daemon, "status") == sent
+    assert dialled[0] == remote_root and dialled[-1] is None
+    await _cleanup(runtime)

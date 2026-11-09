@@ -10,6 +10,7 @@ import stat
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -3231,6 +3232,46 @@ async def _timeout_operation_state(
         return (_TimeoutOperationState.UNKNOWN, session_id, writer_id)
 
 
+# Where each request id this bridge sent went: a server elsewhere's target id, or ``None`` for this
+# computer's own server (ADR-052, review of layer 2: A1). Bounded; the oldest are forgotten first.
+_SENT_REQUEST_TARGETS: OrderedDict[str, str | None] = OrderedDict()
+_SENT_REQUEST_LIMIT: Final = 4_096
+
+
+def _connection_target(client: ServiceClient) -> str | None:
+    """The server elsewhere ``client`` is connected to (its target id); ``None`` when local."""
+
+    grant = getattr(getattr(client, "authorization", None), "grant", None)
+    target_id = getattr(grant, "target_id", None)
+    return target_id if type(target_id) is str else None
+
+
+def _admit_request_target(request_id: str | None, client: ServiceClient) -> None:
+    """Refuse a request id already sent to another server than ``client``'s; record this one.
+
+    An agent may repeat a request with the same ``request_id`` (after ``request_timeout``, say)
+    once the selection moved to another server: that request may already be recorded where it
+    was first sent, so it is never sent to another server (no replay across targets). It ends
+    as ``server_authorization_changed``: its outcome there is unknown. Requests between servers
+    on this computer are never compared (local-to-local switches stay as before, O1).
+    """
+
+    if request_id is None:
+        return
+    target = _connection_target(client)
+    if request_id in _SENT_REQUEST_TARGETS:
+        first = _SENT_REQUEST_TARGETS[request_id]
+        if first != target and (first is not None or target is not None):
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            )
+        _SENT_REQUEST_TARGETS.move_to_end(request_id)
+        return
+    _SENT_REQUEST_TARGETS[request_id] = target
+    while len(_SENT_REQUEST_TARGETS) > _SENT_REQUEST_LIMIT:
+        _SENT_REQUEST_TARGETS.popitem(last=False)
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
@@ -3244,6 +3285,7 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
         request_id=request_id,
         retain_availability_failure_for_latch=retain_availability_failure_for_latch,
     )
+    _admit_request_target(request_id, client)
     try:
         return await invoke(client, request)
     except ControlError as error:
@@ -3263,6 +3305,7 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
             request_id=request_id,
             retain_availability_failure_for_latch=retain_availability_failure_for_latch,
         )
+        _admit_request_target(request_id, replacement)
         return await invoke(replacement, request)
 
 
