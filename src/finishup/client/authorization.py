@@ -53,7 +53,7 @@ import stat
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from finishup.client.targets import (
     TargetError,
@@ -87,6 +87,7 @@ __all__ = [
     "ConnectionAuthorization",
     "Grant",
     "authorize_active_root",
+    "bind_prebuilt_check",
     "bump_credential_generation",
     "credential_generation_path",
     "gate",
@@ -379,6 +380,71 @@ def authorize_active_root() -> ConnectionAuthorization | None:
         selection_bound=selection_bound,
     )
     return ConnectionAuthorization(grant, generation)
+
+
+class _BoundCheck:
+    """An admission and a prebuilt workspace binding's own check, both asked before every frame.
+
+    The first refusal wins: the admission's (the selection, the record, the key, zero-network),
+    then the binding's (its repository's hold). A check that cannot be made refuses nothing new.
+    """
+
+    __slots__ = ("_admission", "_binding")
+
+    def __init__(self, admission: ConnectionAuthorization, binding: _Check) -> None:
+        self._admission = admission
+        self._binding = binding
+
+    @property
+    def grant(self) -> Grant:
+        return self._admission.grant
+
+    def refusal(self) -> str | None:
+        phase = self._admission.refusal()
+        if phase is not None:
+            return phase
+        try:
+            return self._binding.refusal()
+        except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
+            return None
+
+
+class _Check(Protocol):
+    def refusal(self) -> str | None: ...
+
+
+def _checked_target(check: object) -> str | None:
+    """The target a binding's check was made for, when it names one."""
+
+    from finishup.client.repository_hold import SendHold
+
+    if isinstance(check, SendHold):
+        return check.target_id
+    if isinstance(check, (ConnectionAuthorization, _BoundCheck)):
+        return check.grant.target_id
+    return None
+
+
+def bind_prebuilt_check(
+    admission: ConnectionAuthorization, check: _Check | None
+) -> ConnectionAuthorization | _BoundCheck:
+    """What a connection with a prebuilt workspace binding is checked against (ADR-052).
+
+    The binding was made earlier, with its own check (its repository's hold, or an earlier
+    admission bound to that repository): the connection keeps that check beside the admission
+    just made, so a repository held after the binding was made is still refused before the dial
+    and ends the connection afterwards. A binding made for another target than the one admitted
+    now is refused ``server_authorization_changed``: its claim and its hold are that target's.
+    A binding with no check names no repository the client knows, and only the admission is
+    checked.
+    """
+
+    if check is None or check is admission:
+        return admission
+    target = _checked_target(check)
+    if target is not None and target != admission.grant.target_id:
+        raise TargetError(CHANGED)
+    return _BoundCheck(admission, check)
 
 
 def preflight_refusal() -> str | None:

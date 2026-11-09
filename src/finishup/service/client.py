@@ -2215,7 +2215,10 @@ async def _admit_remote(
     Once admitted, ``workspace_locator`` becomes the target's claim, normalized to its worktree's
     top level, with the agent when ``serve_workspace`` (``remote_binding.binding_for_active_root``,
     which decides the repository hold); the locator itself is never sent. A workspace the shared
-    root rule cannot resolve is not claimed and the connection names no workspace.
+    root rule cannot resolve is not claimed and the connection names no workspace. A prebuilt
+    ``workspace_binding`` keeps its own check (its repository's hold) beside the admission
+    (``client.authorization.bind_prebuilt_check``); one made for another target is refused
+    ``server_authorization_changed``.
     """
 
     from finishup.client.targets import TargetError, TargetRecordUnreadable, active_target_record
@@ -2239,8 +2242,17 @@ async def _admit_remote(
     if authorization is None:
         # The root stopped being remote while it was admitted: refuse rather than guess.
         raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
-    if workspace_binding is not None or workspace_locator is None:
-        return _RemoteAdmission(authorization, workspace_binding)
+    if workspace_binding is not None:
+        # A binding made earlier keeps its own repository check beside this admission.
+        from finishup.client.authorization import bind_prebuilt_check
+
+        try:
+            check = bind_prebuilt_check(authorization, workspace_binding.authorization)
+        except TargetError as error:
+            raise _remote_target_refusal(error) from None
+        return _RemoteAdmission(check, workspace_binding)
+    if workspace_locator is None:
+        return _RemoteAdmission(authorization, None)
     from finishup.adapters.workspace_binding import canonical_workspace_locator
     from finishup.adapters.workspace_root import RepositoryIdentityError
     from finishup.client.remote_binding import binding_for_active_root

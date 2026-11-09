@@ -266,6 +266,75 @@ async def test_a_change_to_what_a_connection_was_admitted_under_ends_it(
 
 
 @pytest.mark.anyio
+async def test_a_prebuilt_binding_keeps_its_repository_check(
+    remote: targets.ServerTarget,
+    workspace: WorkspaceLocator,
+    nothing_started: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binding made earlier carries its repository's hold: a hold that came after it was made
+    refuses the connection before anything is dialled, and ends one made before it."""
+
+    from finishup.client.remote_binding import binding_for_active_root
+
+    open_remote_kinds(monkeypatch, remote.kind)
+    daemon = scripted_service(monkeypatch)
+    key = repository_key(await canonical_workspace_root(workspace))
+    binding = await binding_for_active_root(workspace, serve_workspace=False)
+    assert binding is not None and binding.authorization is not None
+    client = await connect_service(ControlClientKind.CLI, workspace_binding=binding)
+    try:
+        await client.service_status()
+        record_repository_report(key, workspace.path, no_network=True)
+        with pytest.raises(ControlError) as ended:
+            await client.service_status()
+        assert ended.value.reason == "service_unavailable"
+        assert ended.value.phase in {"repository_egress_held", "server_authorization_changed"}
+    finally:
+        await client.close()
+    # The hello and the one call before the hold, nothing after it.
+    assert len(daemon.received(0)) == 2
+    with pytest.raises(ControlError) as refused:
+        await connect_service(ControlClientKind.CLI, workspace_binding=binding)
+    assert (refused.value.reason, refused.value.phase) == (
+        "service_unavailable",
+        "repository_egress_held",
+    )
+    await asyncio.gather(*daemon.serving, return_exceptions=True)
+    assert daemon.connections == 1
+
+
+@pytest.mark.anyio
+async def test_a_binding_made_for_another_server_is_refused_before_a_dial(
+    remote: targets.ServerTarget,
+    workspace: WorkspaceLocator,
+    nothing_started: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from finishup.client.remote_binding import binding_for_active_root
+
+    open_remote_kinds(monkeypatch, remote.kind)
+    daemon = scripted_service(monkeypatch)
+    binding = await binding_for_active_root(workspace, serve_workspace=False)
+    assert binding is not None
+    with targets.registry_lock():
+        if remote.kind == "ssh":
+            other, _root = targets.new_remote_target("other", "ssh", host="other.example", port=22)
+        else:
+            other, _root = targets.new_remote_target(
+                "other", remote.kind, base_url="https://127.0.0.1:9443"
+            )
+        targets.write_selection(other)
+    with pytest.raises(ControlError) as refused:
+        await connect_service(ControlClientKind.CLI, workspace_binding=binding)
+    assert (refused.value.reason, refused.value.phase) == (
+        "service_unavailable",
+        "server_authorization_changed",
+    )
+    assert daemon.connections == 0
+
+
+@pytest.mark.anyio
 async def test_a_local_root_connects_exactly_as_before(
     home: Path, monkeypatch: pytest.MonkeyPatch, workspace: WorkspaceLocator
 ) -> None:
