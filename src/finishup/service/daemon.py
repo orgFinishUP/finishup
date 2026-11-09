@@ -14,7 +14,8 @@ import signal
 import stat
 import struct
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -175,7 +176,7 @@ from finishup.protocol.models import (
 from finishup.protocol.publish_boilerplate import server_filled_from_json
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 from finishup.protocol.schemas import schema_manifest_digest, use_full_schema_catalog
-from finishup.protocol.server_profile import ServerProfileRevision
+from finishup.protocol.server_profile import ServerProfile, ServerProfileRevision
 from finishup.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckReadWindow, CheckWaits
 from finishup.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
@@ -247,6 +248,7 @@ from finishup.service.installation_recovery import (
     PreparedInstallationSnapshot,
 )
 from finishup.service.lifecycle import (
+    IDLE_STOP_SECONDS,
     SINGLETON_LOCK_NAME,
     Admission,
     LifecycleError,
@@ -262,7 +264,7 @@ from finishup.service.owner_view import (
 )
 from finishup.service.ready_composition import build_ready_application_factory
 from finishup.service.secret_ingress import SecretIngressService
-from finishup.service.server_profile import ServerProfileSource
+from finishup.service.server_profile import ProfileUnavailable, ServerProfileSource
 from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRouteMemory
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -901,6 +903,44 @@ class _StagedReconcileTracker:
         return True
 
 
+class _RestEdge(Protocol):
+    """The native REST edge a composition may serve (``service.rest_native.NativeRestEdge``)."""
+
+    async def start(self, daemon: ServiceDaemon) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRestBindings:
+    """What this daemon gives its native REST backend (ADR-053, ``service.rest_native``).
+
+    ``dispatch`` serves one call as the control socket does (presentation facts never come from
+    the network: the fail-safe machine-readable projection), bound to the consented revision;
+    ``resolve_claim`` keys a claim with the installation MAC exactly as a claim-bound hello is
+    keyed (never a path); ``hub`` is the same agent hub claim-bound connections register with;
+    ``activity`` holds idle relock for one request or one registered agent, as an open control
+    connection does; ``profile`` is this service's own profile.
+    """
+
+    status: Callable[[], ServiceStatus]
+    current_revision: Callable[[], ServerProfileRevision | None]
+    profile: Callable[[], ServerProfile]
+    dispatch: Callable[
+        [
+            ControlClientKind,
+            ControlCallRequest,
+            RepositoryPrivacyContext | None,
+            bool,
+            ServerProfileRevision,
+        ],
+        Awaitable[ControlResult],
+    ]
+    resolve_claim: Callable[[WorkspaceClaim], Awaitable[RepositoryPrivacyContext | None]]
+    hub: WorkspaceAgentHub
+    activity: Callable[[], AbstractAsyncContextManager[None]]
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceComposition:
     """One generation's service-owned components, redacted by construction."""
@@ -951,6 +991,9 @@ class ServiceComposition:
     # configuration cannot be stated exactly) refuses that method too, and every hello that names
     # a revision or a claim.
     server_profile: ServerProfileSource | None = None
+    # The native REST edge (ADR-053): set only when the owner runs ``finishup service rest run
+    # --edge native``. None keeps the service exactly as before: no network listener of any kind.
+    rest_edge: _RestEdge | None = None
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -1243,7 +1286,10 @@ class ServiceDaemon:
         heartbeat = asyncio.create_task(watchdog.run())
         stop_wait = asyncio.create_task(self._stop_event.wait())
         stop_reason = "shutdown_requested"
+        rest_edge = self._composition.rest_edge
         try:
+            if rest_edge is not None:
+                await rest_edge.start(self)
             done, _pending = await asyncio.wait(
                 {idle, stop_wait}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -1252,6 +1298,10 @@ class ServiceDaemon:
                 stop_reason = "idle_shutdown"
         finally:
             try:
+                if rest_edge is not None:
+                    # Stop answering the network before the drain; its calls end cancelled.
+                    with contextlib.suppress(Exception):
+                        await rest_edge.close()
                 await self.stop(stop_reason)
             finally:
                 watchdog.close()
@@ -1261,6 +1311,52 @@ class ServiceDaemon:
                 for task in (idle, control, human, stop_wait, heartbeat):
                     if task is not None:
                         await asyncio.gather(task, return_exceptions=True)
+
+    def native_rest_bindings(self) -> NativeRestBindings:
+        """What this daemon gives its native REST backend (ADR-053, ``NativeRestBindings``)."""
+
+        async def dispatch(
+            client_kind: ControlClientKind,
+            request: ControlCallRequest,
+            context: RepositoryPrivacyContext | None,
+            claim_unkeyed: bool,
+            revision: ServerProfileRevision,
+        ) -> ControlResult:
+            with live_call_scope():
+                return await self.dispatch(
+                    client_kind,
+                    request,
+                    repository_privacy_context=context,
+                    claim_unkeyed=claim_unkeyed,
+                    bound_profile=revision,
+                    _defer_stop=True,
+                )
+
+        @contextlib.asynccontextmanager
+        async def activity() -> AsyncGenerator[None]:
+            lifecycle = self._composition.lifecycle
+            await lifecycle.client_connected()
+            try:
+                yield
+            finally:
+                with contextlib.suppress(LifecycleError):
+                    await lifecycle.client_disconnected()
+
+        def profile() -> ServerProfile:
+            source = self._composition.server_profile
+            if source is None:
+                raise ProfileUnavailable("review_provider_unrepresentable")
+            return source.profile(self.status(), schema_manifest_digest())
+
+        return NativeRestBindings(
+            status=self.status,
+            current_revision=self.current_profile_revision,
+            profile=profile,
+            dispatch=dispatch,
+            resolve_claim=self._resolve_claim_context,
+            hub=self._composition.workspace_hub,
+            activity=activity,
+        )
 
     async def dispatch(
         self,
@@ -5445,8 +5541,14 @@ async def _production_composition(
     _binders: _ListenerBinders | None = None,
     _ready_application_factory: _ReadyApplicationFactory | None = None,
     _startup_bundle_upgrade: _StartupBundleUpgrade | None = None,
+    rest_edge: _RestEdge | None = None,
 ) -> ServiceComposition:
-    """Build the real locked-first service graph without opening ready-only state."""
+    """Build the real locked-first service graph without opening ready-only state.
+
+    ``rest_edge`` is the native REST edge the owner runs this service with (ADR-053): the service
+    then does not stop when idle (it is a network server its supervisor runs); idle relock is
+    unchanged.
+    """
 
     config = _config or load_config({}, os.environ, None)
     root = active_root()
@@ -5506,6 +5608,9 @@ async def _production_composition(
         endpoint_cleanup=listeners.close,
         close_ready_composition=ready_close_relay,
         holder_identity=holder_identity,
+        # A service serving the native REST edge is a network server its owner's supervisor runs
+        # (ADR-053): it never stops for idleness (about 31 years); every other bound is unchanged.
+        idle_stop_seconds=float(IDLE_STOP_SECONDS) if rest_edge is None else float(2**30),
     )
     secret_memory: LocalSecretMemory | None = None
     vault: VaultService | None = None
@@ -5700,6 +5805,7 @@ async def _production_composition(
             workspace_hub=workspace_hub,
             # What this server offers a client elsewhere, and its revision (ADR-052).
             server_profile=ServerProfileSource.load(config, paths.state),
+            rest_edge=rest_edge,
         )
     except BaseException:
         await listeners.close()
@@ -5956,10 +6062,13 @@ def _unnamed_refusal_token(exc: Exception) -> str | None:
     return None
 
 
-async def run_service(startup_correlation_id: str | None = None) -> Never:
+async def run_service(
+    startup_correlation_id: str | None = None, *, rest_edge: _RestEdge | None = None
+) -> Never:
     """Run one foreground service process until a signal requests bounded shutdown.
 
-    ``startup_correlation_id`` is the id a spawning process will look a startup failure up under.
+    ``startup_correlation_id`` is the id a spawning process will look a startup failure up under;
+    ``rest_edge`` the native REST edge it serves (``finishup service rest run --edge native``).
     """
 
     # The long-lived service keeps validating against the full schema catalog it has always built;
@@ -5971,7 +6080,11 @@ async def run_service(startup_correlation_id: str | None = None) -> Never:
         config = load_config({}, os.environ, None)
         configure_logging(config.logging, LogMode.SERVICE)
         stage = "composition"
-        composition = await _production_composition(_config=config)
+        composition = await (
+            _production_composition(_config=config)
+            if rest_edge is None
+            else _production_composition(_config=config, rest_edge=rest_edge)
+        )
         stage = "activation"
         daemon = ServiceDaemon(_composition=composition)
         await daemon.serve()
