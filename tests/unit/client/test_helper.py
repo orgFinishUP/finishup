@@ -263,6 +263,7 @@ def test_zero_network_stops_the_helper_without_a_last_delivery(
 
     class Agent:
         alive = True
+        client = None
 
         async def drain(self, *, may_send: object) -> None:
             delivered.append("drain")
@@ -303,6 +304,7 @@ def test_a_delivery_pass_never_holds_up_the_zero_network_stop(
 
     class SlowAgent:
         alive = True
+        client = None
 
         async def drain(self, *, may_send: object) -> None:
             started.set()
