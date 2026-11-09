@@ -777,15 +777,16 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
     ),
-    # A root that names a server elsewhere, chosen by the saved selection: 'finishup server use
-    # local' switches new processes, and an open agent session (its MCP bridge) keeps the root it
-    # started with until a new one starts.
+    # A root that names a server elsewhere, chosen by the saved selection, refused here: a kind
+    # this release does not reach (HTTPS, a port), a record that cannot be read, or any server
+    # elsewhere for this computer's own setup, menu and first run. 'finishup server use local'
+    # switches new processes; an open agent session keeps the root it started with.
     RecoveryDirective(
         token="remote_target_no_local_service",
         directive=(
-            "The selected FinishUP server is an HTTPS or port server, which this release does not "
-            "reach, or its record is unreadable, so nothing was sent or started. Ask the owner to "
-            "run 'finishup server use local', then start a new session."
+            "The selected FinishUP server is elsewhere: this release reaches none over HTTPS or a "
+            "port, and setup here never acts on one, so nothing was sent or started. Ask the owner "
+            "to run 'finishup server use local', then start a new session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select a FinishUP server for the owner, or start a service for this.",

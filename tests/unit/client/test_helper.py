@@ -169,7 +169,7 @@ def test_a_hello_that_may_not_leave_this_computer_is_never_forwarded(
         from finishup.protocol.canonical import canonical_encode
 
         document = json.loads(hello_frame(server_profile=TEST_REVISION)[4:])
-        document["workspace_locator"] = {"schema_version": "1.0.0", "path": "/home/owner/repo"}
+        document["workspace_locator"] = {"schema_version": "1.0.0", "path": "/srv/work/repo"}
         payload = canonical_encode(document)
         frame = struct.pack(">I", len(payload)) + payload
     elif hello == "no_profile":
