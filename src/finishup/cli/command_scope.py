@@ -270,19 +270,28 @@ def server_host_refusal_line(error: ServerHostRequired, command: str | None = No
         ),
         "",
     )
+    from finishup.client.targets import root_named_explicitly
+
+    # An isolation variable or a pinned launcher outranks the selection: 'finishup server use
+    # local' answers ``selection_overridden`` there, so the way back is to clear that override.
+    back = (
+        "or unset FINISHUP_ISOLATED_ROOT (or YOETZ_ISOLATED_ROOT), or use an unpinned launcher, "
+        "which names that root for this process"
+        if root_named_explicitly()
+        else "or select this machine's server with 'finishup server use local'"
+    )
     if isinstance(error, ServerTargetUnreadable):
         which = "" if error.target_id is None else f" {error.target_id}"
         return (
             f"{error.reason}: this command runs only on the FinishUP server host, and the server "
             f"target record of this process's FinishUP root{which} cannot be read, so it was not "
-            "run; repair or remove that target, or select this machine's server with "
-            "'finishup server use local'"
+            f"run; repair or remove that target, {back}"
         )
+    chosen = "named" if root_named_explicitly() else "selected"
     return (
         f"{REQUIRES_SERVER_HOST}: this command runs on the FinishUP server host, and the "
-        f"selected server target {error.target_id} ({error.kind}) is not this machine; run it "
-        "on the server host, or select this machine's server with 'finishup server use local'"
-        f"{meaning}"
+        f"{chosen} server target {error.target_id} ({error.kind}) is not this machine; run it "
+        f"on the server host, {back}{meaning}"
     )
 
 

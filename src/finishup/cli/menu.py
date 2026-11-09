@@ -745,8 +745,55 @@ def _service_menu() -> None:
         _run_ceremony(unlock.initialize_passphrase_vault)
     elif choice == "4":
         _run(lambda: _service_simple("lock"))
-    elif typer.confirm("Stop the local service now?", default=False):
-        _run(lambda: _service_simple("stop"))
+    else:
+        question = _stop_question()
+        if question is not None and typer.confirm(question, default=False):
+            _run(lambda: _service_simple("stop"))
+
+
+def _stop_question() -> str | None:
+    """The question before stopping the service this process uses; ``None`` when it is refused.
+
+    A server elsewhere the shared gate refuses now is named, with its way back, before any
+    question (L1's known edge: the menu asked first and only then found the connection refused);
+    one it admits is named by its generated id, since stopping it stops that server for every
+    client that uses it.
+    """
+
+    from finishup.client.targets import (
+        TargetError,
+        TargetRecordUnreadable,
+        active_target_record,
+    )
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        record = None
+        remote = True
+    except TargetError:
+        record, remote = None, False
+    else:
+        remote = record is not None and record.is_remote
+    if not remote:
+        return "Stop the local service now?"
+    from finishup.client.authorization import preflight_refusal
+
+    phase = preflight_refusal()
+    if phase is not None or record is None:
+        typer.echo(
+            _control_guidance(
+                ControlError(
+                    "service_unavailable", retryable=True, phase=phase or "target_root_is_remote"
+                )
+            ),
+            err=True,
+        )
+        return None
+    return (
+        f"Stop the FinishUP service of the selected server {record.target_id} ({record.kind}) "
+        "now? It stops that server for every client that uses it"
+    )
 
 
 def run_menu() -> int:

@@ -104,6 +104,7 @@ __all__ = [
     "reauthorized",
     "registry_lock",
     "remote_root_continuation",
+    "root_named_explicitly",
     "reconcile_remote_presence",
     "remote_target_recorded",
     "remove_leftover_root",
@@ -1349,6 +1350,16 @@ def _root_named_explicitly() -> bool:
         return isolated_root_variable() is not None or read_runtime_pin() is not None
     except PathSafetyError:
         return True
+
+
+def root_named_explicitly() -> bool:
+    """Whether an isolation variable or a runtime pin, not the selection, names this root.
+
+    Then 'finishup server use local' answers ``selection_overridden``: the way back to this
+    computer's own server is to unset that variable or use an unpinned launcher.
+    """
+
+    return _root_named_explicitly()
 
 
 def active_root_may_be_remote() -> bool:
