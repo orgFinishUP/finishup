@@ -35,16 +35,31 @@ _CASE = json.loads((_REPO / "fixtures" / "service" / "rest.case.json").read_text
 _MANIFESTS = json.loads(
     (_REPO / "fixtures" / "service" / "rest-api-manifests.case.json").read_text()
 )
+
+
+def _parse_rest_error(body: bytes) -> str:
+    reason = contract.parse_rest_error(body)
+    if reason is None:
+        raise RestDocumentError
+    return reason
+
+
+def _parse_agent_work(body: bytes) -> contract.AgentWork:
+    return contract.parse_agent_work(body, max_bytes=65_536)
+
+
+def _encode_agent_work(work: contract.AgentWork) -> bytes:
+    return contract.agent_work_document(work.calls)
+
+
 _PARSERS: dict[str, Any] = {
-    "rest-error": lambda body: (
-        contract.parse_rest_error(body) or (_ for _ in ()).throw(RestDocumentError())
-    ),
+    "rest-error": _parse_rest_error,
     "rest-discovery": contract.parse_discovery,
     "rest-session": contract.parse_session,
     "rest-operation": contract.parse_operation_pending,
     "rest-agent-declaration": contract.parse_agent_declaration,
     "rest-agent": contract.parse_agent_registration,
-    "rest-agent-work": lambda body: contract.parse_agent_work(body, max_bytes=65_536),
+    "rest-agent-work": _parse_agent_work,
 }
 
 
@@ -66,7 +81,7 @@ def test_every_valid_vector_parses_validates_and_encodes_back_byte_for_byte(
         "rest-operation": contract.operation_pending_document,
         "rest-agent-declaration": contract.agent_declaration_document,
         "rest-agent": contract.agent_registration_document,
-        "rest-agent-work": lambda work: contract.agent_work_document(work.calls),
+        "rest-agent-work": _encode_agent_work,
     }
     assert encoders[vector["schema"]](parsed) == body
 
