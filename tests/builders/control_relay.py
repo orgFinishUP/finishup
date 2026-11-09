@@ -27,6 +27,7 @@ from typing import Final, cast
 
 import pytest
 
+from builders.server_profiles import TEST_REVISION
 from finishup.domain.values import JsonObject
 from finishup.ports.control import (
     ControlCallRequest,
@@ -39,6 +40,7 @@ from finishup.ports.control import (
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.schemas import load_schema_catalog
+from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.control_protocol import (
     ControlProtocolError,
     ControlStream,
@@ -209,6 +211,10 @@ class ScriptedDaemon:
         # once one arrives, so a test acts while a request is in flight without waiting on time.
         self.hold_calls = False
         self.held = asyncio.Event()
+        # The server-profile revision this service issues (ADR-052): a remote hello is admitted
+        # only under it. The default is the revision of the test profile a consented target
+        # names (``builders.server_profiles``).
+        self.profile_revision: ServerProfileRevision | None = TEST_REVISION
 
     def received(self, connection: int = -1) -> list[bytes]:
         """Every frame payload one connection sent the daemon, its hello first."""
@@ -232,7 +238,15 @@ class ScriptedDaemon:
         tasks: set[asyncio.Task[None]] = set()
         workspace_called = False
         try:
-            session = await server_handshake(stream, stream.peer_identity, service_status())
+            session = await server_handshake(
+                stream,
+                stream.peer_identity,
+                service_status(),
+                # A service that issues no revision admits a claim as layer 1 did.
+                profile_revision=None
+                if self.profile_revision is None
+                else (lambda: self.profile_revision),
+            )
             while True:
                 try:
                     frame = await read_control_frame(stream)

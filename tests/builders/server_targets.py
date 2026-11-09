@@ -154,14 +154,34 @@ def record_remote_target(name: str = "elsewhere") -> ServerTarget:
     return record
 
 
-def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str) -> None:
+def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: bool = True) -> None:
     """Open ``kinds`` to connections, in this process and for this test only.
 
     This release opens no remote kind (``client.authorization.OPEN_REMOTE_KINDS`` is empty, and an
     architecture test keeps it so); a test that exercises an admitted connection opens one here.
+
+    With ``consent`` (the default) every remote target recorded now or later in the test is
+    consented to the default test profile (``builders.server_profiles``), as ``finishup server
+    add`` records it after the owner's typed confirmation, so the gate's consent step (ADR-052)
+    admits it with real records. A test of the consent itself passes ``consent=False``.
     """
 
     from finishup.client import authorization
 
     assert set(kinds) <= targets.REMOTE_KINDS
     monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset(kinds))
+    if not consent:
+        return
+    from builders.server_profiles import consent_to
+
+    for record in targets.list_targets():
+        if record.is_remote and record.consent is None:
+            consent_to(record)
+    original = targets.new_remote_target
+
+    def consented(*args: object, **kwargs: object) -> tuple[ServerTarget, Path]:
+        # Callers hold the registry lock around ``new_remote_target``, as ``server add`` does.
+        record, root = original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        return consent_to(record, lock=False), root
+
+    monkeypatch.setattr(targets, "new_remote_target", consented)

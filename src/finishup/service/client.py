@@ -108,7 +108,12 @@ from finishup.protocol.models import (
     StatusRequest,
     StatusResult,
 )
-from finishup.protocol.server_profile import ProfileError, ServerProfile, profile_from_json
+from finishup.protocol.server_profile import (
+    ProfileError,
+    ServerProfile,
+    ServerProfileRevision,
+    profile_from_json,
+)
 from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     ControlProtocolError,
@@ -684,6 +689,13 @@ def _transport_error(error: LocalControlTransportError) -> ControlError:
     if error.reason == "endpoint_unsafe":
         return ControlError("endpoint_unsafe")
     return ControlError("service_unavailable", retryable=True)
+
+
+def _server_profile_of(authorization: AuthorizationCheck | None) -> ServerProfileRevision | None:
+    """The server-profile revision an admitted remote connection names in its hello (ADR-052)."""
+
+    revision = getattr(authorization, "server_profile", None)
+    return revision if type(revision) is ServerProfileRevision else None
 
 
 def _protocol_error(error: ControlProtocolError) -> ControlError:
@@ -2223,6 +2235,7 @@ async def _connect_service_attempt(
                 workspace_agent=None if agent is None else agent.declaration,
                 projection_render_mode=projection_render_mode,
                 output_is_controlling_tty=output_is_controlling_tty,
+                server_profile=_server_profile_of(authorization),
             )
         )
         try:

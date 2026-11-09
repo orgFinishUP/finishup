@@ -9,13 +9,17 @@ the owner makes ends it before more is sent.
 
 1. the record is readable (an unreadable one may name a remote kind: ``target_root_is_remote``);
 2. ``zero_network_remote_selected``: this computer last reported a zero-network policy;
-3. ``target_reauthorization_required``: the owner authorized it under an older disclosure
-   (layer 3 adds the consent-envelope comparison here);
-4. the kind is open in this release (``OPEN_REMOTE_KINDS``); layer 2 opens none, so every remote
-   root stops here as ``target_root_is_remote``, the refusal layer 1 gave every connection and
-   spawn path for a remote root;
-5. (layer 5) a credential is present for a kind that needs one;
-6. ``repository_egress_held`` or ``repository_egress_kept``: the repository hold
+3. ``target_reauthorization_required``: the owner authorized it under an older disclosure;
+4. the kind is open in this release (``OPEN_REMOTE_KINDS``); this release opens none, so every
+   remote root stops here as ``target_root_is_remote``, the refusal layer 1 gave every connection
+   and spawn path for a remote root;
+5. the consent (``client.server_profile.consent_verdict``, ADR-052): the server's current profile,
+   compared with the envelope the owner consented to, is the same or narrower (admitted under its
+   revision), requires a level the owner did not agree to (``server_level_unavailable``), or is
+   anything else (``server_profile_changed``). After the kind step, because its way on (``finishup
+   server use NAME`` on the trusted console) exists only for a kind that is open;
+6. (layer 5) a credential is present for a kind that needs one;
+7. ``repository_egress_held`` or ``repository_egress_kept``: the repository hold
    (``client.repository_hold``), when the repository is known.
 
 ``preflight_refusal`` is its hook-safe, record-only form for the root this process uses.
@@ -28,7 +32,9 @@ reports and the target's repository choices. Every FinishUP writer renames a new
 so each write changes a stamp; so does a hand edit. ``ConnectionAuthorization.refusal`` compares
 the current generation with the one it accepted: unchanged is a pass; a selection that no longer
 names the target, a replaced or removed target, or a new credential generation is
-``server_authorization_changed``; anything else re-runs gate steps 2 to 6 and accepts the new
+``server_authorization_changed``; anything else re-runs gate steps 2 to 7 (a consent now under
+another profile revision than the one the connection named in its hello is
+``server_authorization_changed`` too) and accepts the new
 generation when they pass, so a rewrite with the same content never ends a connection. A check
 that cannot be made keeps the last decision. A refusal is final for that connection. An open
 connection (``service.client``) ends with ``server_authorization_changed`` whatever the refusal
@@ -79,6 +85,7 @@ from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
 
 if TYPE_CHECKING:
     from finishup.client.targets import ServerTarget
+    from finishup.protocol.server_profile import ServerProfileRevision
 
 __all__ = [
     "AUTHORIZATION_REFUSALS",
@@ -146,6 +153,8 @@ class AuthorizationGeneration:
     credential: Stamp
     policy: Stamp
     hold: tuple[Stamp, Stamp]
+    # The consented envelope and the last profile fetched (ADR-052, ``client.server_profile``).
+    consent: tuple[Stamp, Stamp] = (None, None)
 
 
 def credential_generation_path(root: Path) -> Path:
@@ -162,6 +171,7 @@ def read_generation(root: Path, *, selection_bound: bool) -> AuthorizationGenera
 
     from finishup.client.everyday_policy import marker_path, reports_path
     from finishup.client.repository_hold import overrides_path
+    from finishup.client.server_profile import CACHE_NAME, ENVELOPE_NAME
 
     return AuthorizationGeneration(
         selection=_stamp(selection_path()) if selection_bound else "pinned",
@@ -169,6 +179,7 @@ def read_generation(root: Path, *, selection_bound: bool) -> AuthorizationGenera
         credential=_stamp(credential_generation_path(root)),
         policy=_stamp(marker_path()),
         hold=(_stamp(reports_path()), _stamp(overrides_path(root))),
+        consent=(_stamp(root / "config" / ENVELOPE_NAME), _stamp(root / "state" / CACHE_NAME)),
     )
 
 
@@ -199,11 +210,15 @@ def _identity_digest(record: ServerTarget) -> str:
 
 
 def _consent_digest(record: ServerTarget) -> str:
-    """What the owner confirmed for it (layer 3 adds the consented envelope and revision)."""
+    """What the owner confirmed for it: the authorization and the consent to a server profile."""
 
     return _digest(
         _CONSENT_DOMAIN,
-        {"authorized_at": record.authorized_at, "disclosure_version": record.disclosure_version},
+        {
+            "authorized_at": record.authorized_at,
+            "disclosure_version": record.disclosure_version,
+            "consent": None if record.consent is None else record.consent.body(),
+        },
     )
 
 
@@ -217,30 +232,42 @@ class Grant:
     consent_digest: str
     repository_key: str | None
     selection_bound: bool
+    # The server-profile revision the consent admitted this connection under, named in its hello
+    # (ADR-052); ``None`` only where no consent step ran.
+    profile_revision: ServerProfileRevision | None = None
 
 
 def _phase(error: TargetError) -> str:
     return error.reason if error.reason in AUTHORIZATION_REFUSALS else "target_root_is_remote"
 
 
-def gate(record: ServerTarget, *, repository_key: str | None = None) -> None:
+def gate(
+    record: ServerTarget, *, repository_key: str | None = None
+) -> ServerProfileRevision | None:
     """Refuse a connection to remote ``record`` with the first closed reason, in one order.
 
-    Steps 2 to 6 of the module text (step 1, reading the record, is the caller's). Raises
-    ``TargetError``; a local record passes. File reads only, never a service.
+    Steps 2 to 7 of the module text (step 1, reading the record, is the caller's). Raises
+    ``TargetError``; a local record passes (``None``). File reads only, never a service. Returns
+    the server-profile revision the consent admits the connection under.
     """
 
     if not record.is_remote:
-        return
+        return None
     require_current_authorization(record)
     if record.kind not in OPEN_REMOTE_KINDS:
         raise TargetError("target_root_is_remote")
+    from finishup.client.server_profile import consent_verdict
+
+    verdict = consent_verdict(record)
+    if verdict.phase is not None:
+        raise TargetError(verdict.phase)
     if repository_key is not None:
         from finishup.client.repository_hold import decide
 
         phase = decide(target_root(record.target_id), record.target_id, repository_key).phase
         if phase is not None:
             raise TargetError(phase)
+    return verdict.revision
 
 
 class ConnectionAuthorization:
@@ -261,6 +288,12 @@ class ConnectionAuthorization:
     @property
     def grant(self) -> Grant:
         return self._grant
+
+    @property
+    def server_profile(self) -> ServerProfileRevision | None:
+        """The profile revision this connection names in its hello (ADR-052)."""
+
+        return self._grant.profile_revision
 
     def for_repository(self, key: str) -> ConnectionAuthorization:
         """The same admission, now also bound to repository ``key``'s hold."""
@@ -314,9 +347,13 @@ class ConnectionAuthorization:
         ):
             return CHANGED
         try:
-            gate(record, repository_key=grant.repository_key)
+            revision = gate(record, repository_key=grant.repository_key)
         except TargetError as error:
             return _phase(error)
+        if revision != grant.profile_revision:
+            # The consent now admits connections under another revision than the one this
+            # connection named in its hello: what it was admitted under changed (ADR-052).
+            return CHANGED
         return None
 
 
@@ -375,7 +412,7 @@ def authorize_active_root() -> ConnectionAuthorization | None:
         # selection on disk, read after the generation, must name the admitted target; a change
         # after this read changes the stamp and is seen at the first check.
         raise TargetError(CHANGED)
-    gate(admitted)
+    revision = gate(admitted)
     grant = Grant(
         target_id=admitted.target_id,
         kind=admitted.kind,
@@ -383,6 +420,7 @@ def authorize_active_root() -> ConnectionAuthorization | None:
         consent_digest=_consent_digest(admitted),
         repository_key=None,
         selection_bound=selection_bound,
+        profile_revision=revision,
     )
     return ConnectionAuthorization(grant, generation)
 
@@ -403,6 +441,10 @@ class _BoundCheck:
     @property
     def grant(self) -> Grant:
         return self._admission.grant
+
+    @property
+    def server_profile(self) -> ServerProfileRevision | None:
+        return self._admission.server_profile
 
     def refusal(self) -> str | None:
         phase = self._admission.refusal()

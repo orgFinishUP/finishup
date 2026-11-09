@@ -13,6 +13,14 @@ A *target* is one root beneath ``<ambient state dir>/servers/t_<8 hex>/`` holdin
 Non-local kinds also record a per-target ``claim_salt`` (32 random bytes) and the owner's
 authorization (``authorized_at``, ``disclosure_version``). A remote root holds client state only.
 
+A remote record the owner consented to under a server profile (ADR-052, layer 3) is
+``yoetz.server-target/2``: the same fields plus an exact ``consent`` object (``ServerConsent``:
+the level, the profile digest and the issuer and number of its revision, the retention chosen,
+the digest of the consented envelope kept beside it in ``config/consent-envelope.json``, and
+whether a narrowed profile adjusted it since). A local record is always ``/1``, byte for byte as
+before; a remote ``/1`` record (written before profiles) still reads, and is refused
+``target_reauthorization_required`` (its disclosure is older than this release's).
+
 The owner-only selection file ``<ambient config dir>/server-selection.json``
 (``yoetz.server-selection/1``) names one target; absent, the everyday server is used exactly as
 before. ``config.paths.active_root()`` reads it. Names match ``[a-z0-9][a-z0-9-]{0,15}``, ``local``
@@ -111,13 +119,17 @@ __all__ = [
 ]
 
 TARGET_SCHEMA: Final = "yoetz.server-target/1"
+# A remote record with the owner's consent to a server profile (ADR-052).
+CONSENTED_TARGET_SCHEMA: Final = "yoetz.server-target/2"
 TARGET_KINDS: Final = ("local", "local_port", "ssh", "https")
 REMOTE_KINDS: Final = frozenset({"local_port", "ssh", "https"})
 RESERVED_NAMES: Final = frozenset({"local"})
 # The versioned disclosure the owner confirmed for a remote target (design section 6). A new
 # version forces the owner to confirm again before the target is used. Version 2 names the hook
 # observations sent to the server, the captured content among them (ADR-051 decision 12).
-DISCLOSURE_VERSION: Final = 2
+# Version 3 names the level of use and the server's AI-review egress from its profile, and binds
+# the consent to that profile's revision (ADR-052).
+DISCLOSURE_VERSION: Final = 3
 CLAIM_SALT_BYTES: Final = 32
 
 type TargetKind = Literal["local", "local_port", "ssh", "https"]
@@ -154,6 +166,14 @@ _REGISTRY_LOCK_NAME: Final = ".registry.lock"
 _REMOTE_PRESENCE_NAME: Final = "remote-target-recorded"
 _COMMON_FIELDS: Final = frozenset({"schema", "target_id", "name", "kind", "created_at"})
 _REMOTE_FIELDS: Final = frozenset({"claim_salt", "authorized_at", "disclosure_version"})
+_CONSENT_FIELDS: Final = frozenset(
+    {"level", "profile_digest", "profile_revision", "retention", "envelope_digest", "adjusted"}
+)
+_LEVELS: Final = ("L1", "L2")
+_RETENTION_KINDS: Final = frozenset({"task_close", "days", "until_forgotten"})
+_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
+_ISSUER: Final = re.compile(r"^[0-9a-f]{32}$", re.ASCII)
+_COVERAGE: Final = frozenset({"level", "code_sync", "exclusions", "review"})
 _HTTPS_FIELDS: Final = frozenset({"base_url", "ca_file", "tls_pin", "credential"})
 _SSH_FIELDS: Final = frozenset(
     {"user", "host", "port", "remote_root", "remote_endpoint", "remote_launcher"}
@@ -364,8 +384,143 @@ def parse_ssh_url(raw: str) -> tuple[str | None, str, int]:
 
 
 @dataclass(frozen=True, slots=True)
+class ServerConsent:
+    """What the owner consented to for a remote target, under which server profile (ADR-052).
+
+    ``level`` (``L1``; ``L2`` arrives with the server copy), the ``profile_digest`` and the
+    ``issuer`` and ``revision`` of the server's profile revision the consent was given or last
+    adjusted under, the ``retention`` chosen (``None`` at L1: nothing is kept), the digest of the
+    consented envelope (``config/consent-envelope.json``), and, when a narrowed profile adjusted
+    the consent since the owner last confirmed it, when (``adjusted_at``) and which coverage it
+    reduced (``coverage_reduced``). The disclosure version is the record's own.
+    """
+
+    level: str
+    profile_digest: str
+    issuer: str
+    revision: int
+    retention_kind: str | None
+    retention_days: int | None
+    envelope_digest: str
+    adjusted_at: str | None = None
+    coverage_reduced: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.level not in _LEVELS:
+            raise TargetError("target_record_invalid")
+        for digest in (self.profile_digest, self.envelope_digest):
+            if type(digest) is not str or not _DIGEST.match(digest):
+                raise TargetError("target_record_invalid")
+        if type(self.issuer) is not str or not _ISSUER.match(self.issuer):
+            raise TargetError("target_record_invalid")
+        if type(self.revision) is not int or not 1 <= self.revision <= 2**53 - 1:
+            raise TargetError("target_record_invalid")
+        if self.retention_kind is None:
+            if self.retention_days is not None:
+                raise TargetError("target_record_invalid")
+        elif self.retention_kind not in _RETENTION_KINDS or (
+            (self.retention_kind == "days")
+            != (type(self.retention_days) is int and 1 <= self.retention_days <= 36_500)
+        ):
+            raise TargetError("target_record_invalid")
+        if (self.level == "L1") != (self.retention_kind is None):
+            # Level L1 keeps no copy, so nothing is retained; L2 always names a retention.
+            raise TargetError("target_record_invalid")
+        if self.adjusted_at is None:
+            if self.coverage_reduced:
+                raise TargetError("target_record_invalid")
+        else:
+            try:
+                parse_rfc3339_ms(self.adjusted_at)
+            except (TypeError, ValueError):
+                raise TargetError("target_record_invalid") from None
+            if (
+                type(self.coverage_reduced) is not tuple
+                or list(self.coverage_reduced) != sorted(set(self.coverage_reduced))
+                or not set(self.coverage_reduced) <= _COVERAGE
+            ):
+                raise TargetError("target_record_invalid")
+
+    def body(self) -> dict[str, JsonValue]:
+        """The exact ``consent`` object of a ``/2`` record."""
+
+        return {
+            "level": self.level,
+            "profile_digest": self.profile_digest,
+            "profile_revision": {"issuer": self.issuer, "revision": self.revision},
+            "retention": None
+            if self.retention_kind is None
+            else {"kind": self.retention_kind, "days": self.retention_days},
+            "envelope_digest": self.envelope_digest,
+            "adjusted": None
+            if self.adjusted_at is None
+            else {"at": self.adjusted_at, "coverage_reduced": list(self.coverage_reduced)},
+        }
+
+
+def _consent_from(value: JsonValue) -> ServerConsent:
+    if type(value) is not dict:
+        raise ValueError("consent")
+    source = cast(dict[str, JsonValue], value)
+    if frozenset(source) != _CONSENT_FIELDS:
+        raise ValueError("consent")
+    revision = source["profile_revision"]
+    if type(revision) is not dict or set(cast(dict[str, JsonValue], revision)) != {
+        "issuer",
+        "revision",
+    }:
+        raise ValueError("consent")
+    revision_source = cast(dict[str, JsonValue], revision)
+    retention = source["retention"]
+    kind: object = None
+    days: object = None
+    if retention is not None:
+        if type(retention) is not dict or set(cast(dict[str, JsonValue], retention)) != {
+            "kind",
+            "days",
+        }:
+            raise ValueError("consent")
+        kind = cast(dict[str, JsonValue], retention)["kind"]
+        days = cast(dict[str, JsonValue], retention)["days"]
+        if type(kind) is not str or (days is not None and type(days) is not int):
+            raise ValueError("consent")
+    adjusted = source["adjusted"]
+    adjusted_at: object = None
+    reduced: tuple[str, ...] = ()
+    if adjusted is not None:
+        if type(adjusted) is not dict or set(cast(dict[str, JsonValue], adjusted)) != {
+            "at",
+            "coverage_reduced",
+        }:
+            raise ValueError("consent")
+        adjusted_at = cast(dict[str, JsonValue], adjusted)["at"]
+        fields = cast(dict[str, JsonValue], adjusted)["coverage_reduced"]
+        if type(fields) is not list or any(type(item) is not str for item in fields):
+            raise ValueError("consent")
+        reduced = tuple(cast(list[str], fields))
+    for name in ("level", "profile_digest", "envelope_digest"):
+        if type(source[name]) is not str:
+            raise ValueError(name)
+    if type(revision_source["issuer"]) is not str or type(revision_source["revision"]) is not int:
+        raise ValueError("consent")
+    if adjusted_at is not None and type(adjusted_at) is not str:
+        raise ValueError("consent")
+    return ServerConsent(
+        cast(str, source["level"]),
+        cast(str, source["profile_digest"]),
+        revision_source["issuer"],
+        revision_source["revision"],
+        kind,
+        days,
+        cast(str, source["envelope_digest"]),
+        adjusted_at,
+        reduced,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ServerTarget:
-    """One validated ``yoetz.server-target/1`` record."""
+    """One validated ``yoetz.server-target/1`` (or, with a consent, ``/2``) record."""
 
     target_id: str
     name: str
@@ -384,6 +539,8 @@ class ServerTarget:
     claim_salt: str | None = None
     authorized_at: str | None = None
     disclosure_version: int | None = None
+    # The owner's consent to a server profile (ADR-052): remote kinds only, ``/2`` records only.
+    consent: ServerConsent | None = None
 
     def __post_init__(self) -> None:
         if type(self.target_id) is not str or not _TARGET_ID.match(self.target_id):
@@ -405,10 +562,17 @@ class ServerTarget:
         if self.kind == "local":
             if any(
                 value is not None
-                for value in (self.claim_salt, self.authorized_at, self.disclosure_version)
+                for value in (
+                    self.claim_salt,
+                    self.authorized_at,
+                    self.disclosure_version,
+                    self.consent,
+                )
             ):
                 raise TargetError("target_record_invalid")
             return
+        if self.consent is not None and type(self.consent) is not ServerConsent:
+            raise TargetError("target_record_invalid")
         self._validate_authorization()
         if self.kind == "ssh":
             if self.host is None or self.port is None:
@@ -466,11 +630,17 @@ class ServerTarget:
 
         return self.is_remote and self.disclosure_version != DISCLOSURE_VERSION
 
+    @property
+    def schema(self) -> str:
+        """``/2`` for a record with a consent to a server profile, else ``/1``."""
+
+        return TARGET_SCHEMA if self.consent is None else CONSENTED_TARGET_SCHEMA
+
     def body(self) -> dict[str, JsonValue]:
         """The exact ``target.json`` object for this kind."""
 
         values: dict[str, JsonValue] = {
-            "schema": TARGET_SCHEMA,
+            "schema": self.schema,
             "target_id": self.target_id,
             "name": self.name,
             "kind": self.kind,
@@ -490,7 +660,10 @@ class ServerTarget:
             "disclosure_version": self.disclosure_version,
         }
         fields = _FIELDS_BY_KIND[self.kind]
-        return {key: value for key, value in values.items() if key in fields}
+        body = {key: value for key, value in values.items() if key in fields}
+        if self.consent is not None:
+            body["consent"] = self.consent.body()
+        return body
 
     def encode(self) -> bytes:
         return canonical_encode(cast(JsonValue, self.body())) + b"\n"
@@ -507,7 +680,14 @@ def _decode_target(encoded: bytes) -> ServerTarget:
         kind = source.get("kind")
         if type(kind) is not str or kind not in _FIELDS_BY_KIND:
             raise ValueError("kind")
-        if frozenset(source) != _FIELDS_BY_KIND[kind] or source["schema"] != TARGET_SCHEMA:
+        consented = source.get("schema") == CONSENTED_TARGET_SCHEMA and kind in REMOTE_KINDS
+        expected: frozenset[str] = _FIELDS_BY_KIND[kind] | (
+            frozenset({"consent"}) if consented else frozenset[str]()
+        )
+        if frozenset(source) != expected or source["schema"] not in {
+            TARGET_SCHEMA,
+            CONSENTED_TARGET_SCHEMA,
+        }:
             raise ValueError("fields")
         if canonical_encode(cast(JsonValue, source)) != encoded[:-1]:
             raise ValueError("canonical")
@@ -545,6 +725,7 @@ def _decode_target(encoded: bytes) -> ServerTarget:
             claim_salt=text("claim_salt"),
             authorized_at=text("authorized_at"),
             disclosure_version=version,
+            consent=_consent_from(source["consent"]) if consented else None,
         )
     except TargetError:
         raise TargetError("target_record_invalid") from None
