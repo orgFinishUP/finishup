@@ -99,8 +99,10 @@ __all__ = [
     "authorize_active_root",
     "bind_prebuilt_check",
     "bump_credential_generation",
+    "consent_digest",
     "credential_generation_path",
     "gate",
+    "identity_digest",
     "preflight_refusal",
     "read_generation",
     "refusal_summary",
@@ -220,6 +222,18 @@ def _consent_digest(record: ServerTarget) -> str:
             "consent": None if record.consent is None else record.consent.body(),
         },
     )
+
+
+def identity_digest(record: ServerTarget) -> str:
+    """What makes ``record`` the same server (its grant's identity digest)."""
+
+    return _identity_digest(record)
+
+
+def consent_digest(record: ServerTarget) -> str:
+    """What the owner confirmed for ``record`` (its grant's consent digest)."""
+
+    return _consent_digest(record)
 
 
 @dataclass(frozen=True, slots=True)
