@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from builders.control_relay import (
+    MemoryStream,
     ScriptedDaemon,
     call_request,
     hello_frame,
@@ -526,7 +527,7 @@ class _ChangingUpstream(FakeUpstream):
         self.change = change
         self.during = during
 
-    async def open_stream(self):  # noqa: ANN201
+    async def open_stream(self):  # noqa: ANN201  # pyright: ignore[reportIncompatibleMethodOverride]
         stream = await super().open_stream()
         if self.during == "open":
             self.change()  # type: ignore[operator]
@@ -697,8 +698,8 @@ class _SilentUpstream(FakeUpstream):
 
     def __init__(self) -> None:
         super().__init__(ScriptedDaemon())
-        self.streams: list[object] = []
-        self.ends: list[object] = []
+        self.streams: list[MemoryStream] = []
+        self.ends: list[MemoryStream] = []
 
     async def open_stream(self):  # noqa: ANN201
         self.opened += 1
@@ -726,7 +727,7 @@ def test_an_upstream_that_never_answers_the_hello_ends_the_relay_within_its_boun
         async with asyncio.timeout(10):
             answered = await client.receive(65_536)
         await client.aclose()
-        closed = [stream.closed for stream in upstream.streams]  # type: ignore[attr-defined]
+        closed = [stream.closed for stream in upstream.streams]
         return relay in done, closed, helper._active, answered  # pyright: ignore[reportPrivateUsage]
 
     ended, closed, active, answered = asyncio.run(run())
@@ -758,7 +759,7 @@ def test_a_relay_cancelled_while_it_waits_for_the_server_closes_its_stream(
         done, _ = await asyncio.wait((relay,), timeout=10)
         assert done == {relay}
         await client.aclose()
-        closed = [stream.closed for stream in upstream.streams]  # type: ignore[attr-defined]
+        closed = [stream.closed for stream in upstream.streams]
         return closed, helper._active  # pyright: ignore[reportPrivateUsage]
 
     closed, active = asyncio.run(run())
@@ -811,6 +812,7 @@ def test_the_refresh_still_waits_for_zero_network_and_an_older_disclosure(
     """A6: what the refresh does still ask: no fetch while either refuses (gate steps 2-3)."""
 
     from dataclasses import replace
+    from typing import cast
 
     record, root = ssh_target
     fetches: list[str] = []
@@ -820,9 +822,8 @@ def test_the_refresh_still_waits_for_zero_network_and_an_older_disclosure(
 
     if refusal == "disclosure":
         with targets.registry_lock():
-            targets.write_target(
-                root, replace(record, disclosure_version=record.disclosure_version - 1)
-            )  # type: ignore[operator]
+            older = cast(int, record.disclosure_version) - 1
+            targets.write_target(root, replace(record, disclosure_version=older))
     else:
         from finishup.client.everyday_policy import record_reported_policy
 
