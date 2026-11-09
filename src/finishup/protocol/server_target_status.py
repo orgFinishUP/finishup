@@ -26,6 +26,7 @@ __all__ = [
     "SERVER_TARGET_STATUS_SCHEMA_VERSION",
     "ServerTargetAllowedRepository",
     "ServerTargetAuthorization",
+    "ServerTargetConsent",
     "ServerTargetDescription",
     "ServerTargetHeldRepository",
     "ServerTargetKeptRepository",
@@ -65,6 +66,43 @@ class ServerTargetAuthorization(BaseModel):
     authorized_at: Timestamp
     disclosure_version: int = Field(ge=1)
     current: bool
+
+
+class ServerTargetConsent(BaseModel):
+    """The owner's consent to a remote target's server profile (ADR-052; amended in place, as
+    1.0.0 is unreleased).
+
+    ``level`` agreed and the ``profile_revision`` number it stands under now; ``state`` is what
+    the consent step decides from this computer's records alone: ``current`` (the server's last
+    known profile is the one agreed to, or narrower), ``changed`` (only the owner agrees again:
+    ``server_profile_changed``) or ``level_unavailable`` (it requires more than agreed:
+    ``server_level_unavailable``). ``adjusted_at`` is when a narrowed profile adjusted the consent
+    since the owner last confirmed it (the ``server_profile_narrowed`` notice), and
+    ``coverage_reduced`` what that narrowing no longer covers; both null and empty otherwise.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        json_schema_extra={
+            "if": {"properties": {"adjusted_at": {"type": "null"}}, "required": ["adjusted_at"]},
+            "then": {"properties": {"coverage_reduced": {"maxItems": 0}}},
+        },
+    )
+
+    level: Literal["L1", "L2"]
+    profile_revision: int = Field(ge=1)
+    state: Literal["current", "changed", "level_unavailable"]
+    adjusted_at: Timestamp | None
+    coverage_reduced: list[Literal["code_sync", "exclusions", "level", "review"]] = Field(
+        max_length=4
+    )
+
+    @model_validator(mode="after")
+    def _reduction_comes_with_an_adjustment(self) -> "ServerTargetConsent":
+        if self.adjusted_at is None and self.coverage_reduced:
+            raise ValueError("consent_reduction_without_adjustment")
+        return self
 
 
 class ServerTargetOutsideReads(BaseModel):
@@ -199,6 +237,8 @@ class ServerTargetDescription(BaseModel):
     location: Annotated[str, Field(min_length=1, max_length=2048)] | None
     credential: Literal["keyring", "file", "none", "not_applicable"]
     authorization: ServerTargetAuthorization | None
+    # Null for a target that is not remote, or one never consented to a server profile (ADR-052).
+    consent: ServerTargetConsent | None
     # Null for a target that is not remote: a local server reads under its own privacy policy.
     outside_reads: ServerTargetOutsideReads | None
     # Null for a target that is not remote: a server on this computer applies this computer's

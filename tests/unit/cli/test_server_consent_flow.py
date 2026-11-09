@@ -347,3 +347,81 @@ def test_use_of_a_closed_kind_is_refused_before_anything(home: Path) -> None:
     assert targets.read_selected_target_id() is None
     document = json.loads((targets.target_root(_only().target_id) / "target.json").read_bytes())
     assert document["schema"] == "yoetz.server-target/1"
+
+
+# --- what server status says of the consent (server_profile_narrowed) ---------------------------
+
+
+def _status(name: str = "lab") -> tuple[dict[str, Any], str]:
+    from finishup.protocol.schemas import validate_schema_instance
+
+    result = _invoke("status", name, "--json")
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    validate_schema_instance("server-target-status", "1.0.0", document)
+    # The owner display (a terminal shows it; a pipe gets the JSON).
+    return document["target"], "\n".join(server_cli.status_lines(document))
+
+
+def test_status_shows_the_consent_a_narrowing_adjusted_and_a_change_that_asks_again(
+    source: _Source,
+) -> None:
+    from builders.server_profiles import refreshed
+
+    record = _remote(source)
+    target, text = _status()
+    assert target["consent"] == {
+        "level": "L1",
+        "profile_revision": 1,
+        "state": "current",
+        "adjusted_at": None,
+        "coverage_reduced": [],
+    }
+    assert "Consent: level L1 under that server's profile revision 1." in text
+    assert "server_profile_narrowed" not in text
+
+    # Agreed under review egress, then the server stopped sending to a provider: narrowed.
+    record = consent_to(record, profile_document(review=ReviewEgress("server_policy", "openai")))
+    refreshed(record, profile_document(revision=2))
+    target, text = _status()
+    consent = target["consent"]
+    assert (consent["state"], consent["profile_revision"], consent["coverage_reduced"]) == (
+        "current",
+        2,
+        ["review"],
+    )
+    assert consent["adjusted_at"] is not None
+    assert "server_profile_narrowed:" in text and "(no longer covered: review)" in text
+
+    # Then it widens again: nothing is sent until the owner agrees again.
+    stored = targets.read_target(targets.target_root(record.target_id))
+    assert stored is not None
+    refreshed(stored, profile_document(review=ReviewEgress("server_policy", "openai"), revision=3))
+    target, text = _status()
+    assert target["consent"]["state"] == "changed"
+    assert "server_profile_changed:" in text and "'finishup server use lab'" in text
+
+
+def test_status_names_a_level_the_owner_did_not_agree_to(source: _Source) -> None:
+    from builders.server_profiles import refreshed
+
+    record = _remote(source)
+    refreshed(record, profile_document(levels=ProfileLevels(("L1", "L2"), "L2"), revision=2))
+
+    target, text = _status()
+
+    assert target["consent"]["state"] == "level_unavailable"
+    assert "server_level_unavailable:" in text
+
+
+def test_status_of_a_target_with_no_consent_or_a_local_one_shows_none(home: Path) -> None:
+    del home
+    with targets.registry_lock():
+        targets.new_remote_target("lab", "https", base_url="https://lab.example")
+        targets.new_local_target("work")
+
+    remote, text = _status("lab")
+    local, _text = _status("work")
+
+    assert remote["consent"] is None and local["consent"] is None
+    assert "Consent:" not in text

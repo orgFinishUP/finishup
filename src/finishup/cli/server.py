@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from finishup.client.repository_hold import HoldDecision, RepositoryChoice
     from finishup.client.server_folders import FolderRecord, OutsideReadMode
     from finishup.client.server_profile import FetchedProfile
+    from finishup.client.targets import ServerConsent
     from finishup.protocol.consent_envelope import ConsentEnvelope
 
 __all__ = [
@@ -1618,6 +1619,9 @@ def build_status_document(
             "disclosure_version": cast(int, record.disclosure_version),
             "current": not record.needs_reauthorization,
         }
+    consent: JsonValue = None
+    if record is not None and record.is_remote and record.consent is not None:
+        consent = _consent_document(record)
     credential: str = "not_applicable"
     if record is not None and record.kind in {"https", "local_port"}:
         credential = record.credential or "none"
@@ -1648,6 +1652,7 @@ def build_status_document(
         "location": _location(record),
         "credential": credential,
         "authorization": authorization,
+        "consent": consent,
         "outside_reads": outside_reads,
         "repositories": repositories,
     }
@@ -1667,6 +1672,59 @@ def build_status_document(
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _consent_document(record: ServerTarget) -> JsonValue:
+    """What ``server status`` says of a remote target's consent (ADR-052): file reads only."""
+
+    from finishup.client.server_profile import consent_verdict
+
+    consent = cast("ServerConsent", record.consent)
+    phase = consent_verdict(record).phase
+    state = {
+        None: "current",
+        "server_level_unavailable": "level_unavailable",
+    }.get(phase, "changed")
+    return {
+        "level": consent.level,
+        "profile_revision": consent.revision,
+        "state": state,
+        "adjusted_at": consent.adjusted_at,
+        "coverage_reduced": list(consent.coverage_reduced),
+    }
+
+
+def consent_lines(target: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Owner-display lines of a remote target's consent, the narrowed notice among them."""
+
+    consent = target.get("consent")
+    if not isinstance(consent, Mapping):
+        return ()
+    found = cast(Mapping[str, JsonValue], consent)
+    name = target.get("name") or "NAME"
+    lines = [
+        f"Consent: level {found['level']} under that server's profile revision "
+        f"{found['profile_revision']}."
+    ]
+    if found["adjusted_at"] is not None:
+        reduced = ", ".join(cast(list[str], found["coverage_reduced"])) or "nothing"
+        lines.append(
+            f"server_profile_narrowed: that server asks for less than you agreed to, so FinishUP "
+            f"narrowed this computer's consent at {found['adjusted_at']} (no longer covered: "
+            f"{reduced}); if it asks for more again, you are asked again."
+        )
+    if found["state"] == "changed":
+        lines.append(
+            "server_profile_changed: what that server offers or needs changed since you agreed, "
+            f"so nothing is sent to it; agree again with 'finishup server use {name}'."
+        )
+    elif found["state"] == "level_unavailable":
+        lines.append(
+            "server_level_unavailable: that server requires more of this computer than you "
+            f"agreed to, so nothing is sent to it; 'finishup server use {name}' shows what it "
+            "requires."
+        )
+    return tuple(lines)
 
 
 def _repositories_document(
@@ -1841,6 +1899,7 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
         lines.append(
             f"Round trip p95: {probe['round_trip_p95_ms']} ms over {probe['samples']} status calls"
         )
+    lines.extend(consent_lines(target))
     lines.extend(outside_read_lines(target))
     lines.extend(repository_lines(target))
     if document["selection_overridden"]:
