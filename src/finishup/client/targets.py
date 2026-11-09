@@ -183,6 +183,10 @@ _REASONS: Final = frozenset(
         # (``finishup.client.repository_hold``).
         "repository_egress_held",
         "repository_egress_kept",
+        # The authorization gate (``client.authorization``, ADR-052): a remote root no connection
+        # may reach in this release, and a connection whose selection, record or key changed.
+        "target_root_is_remote",
+        "server_authorization_changed",
     }
 )
 # The refusals ``require_current_authorization`` makes before anything is sent to a remote target.

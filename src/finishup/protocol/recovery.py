@@ -854,6 +854,19 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Only the user changes this, with 'finishup server repositories add' in their own terminal.",
     ),
+    # A connection to a server elsewhere ended because what it was made under changed (ADR-052):
+    # the selection, the server's record or its key. Repeating the request makes a new connection
+    # under the current authorization, or names the refusal that now applies.
+    RecoveryDirective(
+        token="server_connection_renew",
+        directive=(
+            "The server selection, record or key this connection was made under changed, so "
+            "FinishUP ended it before sending more. Repeat the same request with the same "
+            "identity; it runs under the current selection or names the refusal now."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never change the server selection or a key for the owner.",
+    ),
     RecoveryDirective(
         token="server_on_this_computer_required",
         directive=(

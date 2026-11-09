@@ -169,6 +169,9 @@ _REASONS: Final = frozenset(
         # owner decides, or kept here as they chose; its observations wait in the outbox.
         "repository_egress_held",
         "repository_egress_kept",
+        # ADR-052: a connection to a server elsewhere ended because the selection, the server
+        # record or the key it was made under changed.
+        "server_authorization_changed",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",

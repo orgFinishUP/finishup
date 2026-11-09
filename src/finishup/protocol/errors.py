@@ -412,6 +412,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "selector_conflict",
     "semantic_provenance_json_shape_invalid",
     "semantic_redacted_values_invalid",
+    "server_authorization_changed",
     "service_draining",
     "service_generation_changed",
     "service_handshake_failed",
@@ -477,8 +478,10 @@ SERVICE_START_TIMEOUT_PHASE: str = "handshake_timeout"
 # (``zero_network_remote_selected``, maintainer decision of 2026-11-07). It also holds a
 # repository whose privacy policy on this computer allows no network use from a server elsewhere
 # until the owner allows it (``repository_egress_held``), and names the owner's choice to keep it
-# on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. Every
-# phase is retryable: the same request succeeds once that phase's own repair is made.
+# on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. A
+# connection the client admitted ends when the selection, server record or key it was made under
+# changes (``server_authorization_changed``, ADR-052). Every phase is retryable: the same request
+# succeeds once that phase's own repair is made.
 REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
     {
         "remote_auth_failed",
@@ -488,6 +491,7 @@ REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
         "remote_unreachable",
         "repository_egress_held",
         "repository_egress_kept",
+        "server_authorization_changed",
         "target_reauthorization_required",
         "target_root_is_remote",
         "zero_network_remote_selected",
@@ -505,8 +509,9 @@ assert REMOTE_ROOT_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
 # disclosure refusal (``target_reauthorization_required``), the zero-network refusal
 # (``zero_network_remote_selected``) and the remote kinds this release keeps closed
 # (``remote_kind_unavailable``); then the repository hold and the owner's kept choice
-# (``repository_egress_held``, ``repository_egress_kept``).
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 373
+# (``repository_egress_held``, ``repository_egress_kept``) and the end of a connection whose
+# authorization changed (``server_authorization_changed``, ADR-052).
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 374
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -689,6 +694,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "zero_network_local_server_required",
         "repository_send_decision_required",
         "repository_kept_on_this_computer",
+        "server_connection_renew",
     }
 )
 
@@ -886,6 +892,9 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         # server elsewhere is selected: held until the owner decides, or kept here as they chose.
         "repository_egress_held": "repository_send_decision_required",
         "repository_egress_kept": "repository_kept_on_this_computer",
+        # A connection to a server elsewhere ended because the selection, the server record or
+        # the key it was made under changed (ADR-052): repeat the request under the current one.
+        "server_authorization_changed": "server_connection_renew",
     }
 )
 if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:

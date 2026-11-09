@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, NoReturn, cast
 import typer
 
 from finishup import __version__
+from finishup.client.authorization import bump_credential_generation
 from finishup.client.target_runtime import (
     ProbeResult,
     TargetRuntimeError,
@@ -1403,6 +1404,9 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
     from finishup.client.targets import remove_target_root
 
     _stop_for_remove(record, root)
+    # An owner action on the key: a connection made under it ends even if the folder outlives
+    # this remove (ADR-052, O8).
+    bump_credential_generation(root)
     key_left = _delete_key_for_remove(record, root)
     key_deleted = record.credential is not None and not key_left
     try:
@@ -1557,6 +1561,8 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
             current = read_target(root)
             if current is not None:  # one removed meanwhile keeps no record to update
                 write_target(root, replace(current, credential=None))
+                # An owner action on the key: every connection made under it ends (ADR-052, O8).
+                bump_credential_generation(root)
     except CredentialError as error:
         kept = error.reason == "credential_store_unavailable" and record.credential == "keyring"
         raise ServerCommandRefused(error.reason, message=_KEY_KEPT if kept else None) from None

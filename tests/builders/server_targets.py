@@ -33,6 +33,7 @@ from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, reset_selection_memo
 __all__ = [
     "StandInRuntime",
     "ambient_home",
+    "open_remote_kinds",
     "record_remote_target",
     "remote_runtime",
     "short_home_base",
@@ -151,3 +152,16 @@ def record_remote_target(name: str = "elsewhere") -> ServerTarget:
             name, "https", base_url="https://finishup.example"
         )
     return record
+
+
+def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str) -> None:
+    """Open ``kinds`` to connections, in this process and for this test only.
+
+    This release opens no remote kind (``client.authorization.OPEN_REMOTE_KINDS`` is empty, and an
+    architecture test keeps it so); a test that exercises an admitted connection opens one here.
+    """
+
+    from finishup.client import authorization
+
+    assert set(kinds) <= targets.REMOTE_KINDS
+    monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset(kinds))

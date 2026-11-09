@@ -1003,6 +1003,7 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
     server stays and is printed, and a key deleted before the second stop is recorded as gone
     (``server status`` never reports a key that no longer exists) and named in the refusal."""
 
+    from finishup.client.authorization import credential_generation_path
     from finishup.client.target_runtime import TargetRuntimeError
 
     keyring = _MemoryKeyring()
@@ -1042,6 +1043,8 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
             "stop in time, so nothing was removed; run the same command again\n"
         )
         assert (kept.credential, len(keyring.entries)) == ("keyring", 1)
+        # Nothing was done to the key, so no connection made under it is ended (ADR-052, O8).
+        assert not credential_generation_path(root).exists()
     else:
         assert result.stderr == (
             "target_still_connected: the connection this client runs for that target started "
@@ -1051,6 +1054,8 @@ def test_remove_clears_the_selection_first_and_stops_again_right_before_the_fold
         )
         # ``server status`` reports the record's credential: "none", not a key that is gone.
         assert (kept.credential, len(keyring.entries)) == (None, 0)
+        # The key went, so every connection made under it ends (ADR-052, O8).
+        assert credential_generation_path(root).exists()
 
 
 @pytest.mark.parametrize("record_left", [True, False])
@@ -1195,6 +1200,28 @@ def test_remove_deletes_a_key_from_the_platform_store(
     assert targets.list_targets()[0].credential == "keyring"
     assert _invoke("remove", "fu").exit_code == 0
     assert keyring.entries == {}
+
+
+def test_logout_is_an_owner_action_that_bumps_the_credential_generation(
+    home: Path, no_platform_store: None
+) -> None:
+    """ADR-052 (O8): every connection made under a key ends once the owner logs out."""
+
+    from finishup.client.authorization import credential_generation_path
+
+    record, root = _another_builds_target("fu", key=True)
+    path = credential_generation_path(root)
+    assert not path.exists()
+    assert _invoke("logout", "fu").exit_code == 0
+    first = path.read_bytes()
+    assert b"yoetz.credential-generation/1" in first
+    assert _invoke("logout", "fu").exit_code == 0
+    assert path.read_bytes() != first
+    # An SSH target holds no key: logout refuses and bumps nothing.
+    _ssh, ssh_root = _another_builds_target("lab", "ssh")
+    assert _invoke("logout", "lab").exit_code != 0
+    assert not credential_generation_path(ssh_root).exists()
+    del record
 
 
 def test_removing_the_last_server_elsewhere_deletes_the_repository_reports(

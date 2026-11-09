@@ -573,6 +573,7 @@ class TestWorkspaceBindingAndServerTargetReasons:
         "remote_kind_unavailable": "server_on_this_computer_required",
         "repository_egress_held": "repository_send_decision_required",
         "repository_egress_kept": "repository_kept_on_this_computer",
+        "server_authorization_changed": "server_connection_renew",
     }
 
     @pytest.mark.parametrize("reason", sorted(_EXPECTED))
@@ -641,6 +642,7 @@ class TestWorkspaceBindingAndServerTargetReasons:
             "zero_network_remote_selected",
             "repository_egress_held",
             "repository_egress_kept",
+            "server_authorization_changed",
         }
         assert REMOTE_CONNECTION_PHASES <= PROTOCOL_REASON_CODES
         for phase in REMOTE_CONNECTION_PHASES:
@@ -710,6 +712,17 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert "'finishup server repositories add'" in kept.nudge
         for entry in (held, kept):
             assert entry.guidance_uri is not None
+
+    def test_a_changed_authorization_says_what_changed_and_to_repeat_the_request(self) -> None:
+        # ADR-052: a connection to a server elsewhere ends when its selection, record or key
+        # changes; the agent repeats the request, never changes the selection or a key itself.
+        entry = directive_for("server_connection_renew")
+        assert entry is not None and entry.nudge is not None
+        assert "server selection, record or key" in entry.directive
+        assert "ended it before sending more" in entry.directive
+        assert "Repeat the same request with the same identity" in entry.directive
+        assert entry.nudge == "Never change the server selection or a key for the owner."
+        assert entry.guidance_uri is not None
 
     def test_the_new_tokens_are_protocol_tokens_not_local_ones(self) -> None:
         tokens = set(self._EXPECTED.values())

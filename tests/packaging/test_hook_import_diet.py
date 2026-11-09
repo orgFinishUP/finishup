@@ -120,12 +120,14 @@ def test_client_targets_module_is_hook_safe() -> None:
         "finishup.client.everyday_policy",
         "finishup.client.repository_hold",
         "finishup.client.everyday_repository",
+        "finishup.client.authorization",
     ],
 )
 def test_the_repository_hold_modules_are_hook_safe(module: str) -> None:
     """ADR-051 decision 8 (2026-11-07, round 4): a SessionStart hook reads and records what this
     computer's FinishUP said about the session's repository; importing the modules costs no more
-    than the target records (the service client loads only when a read runs)."""
+    than the target records (the service client loads only when a read runs). The shared
+    authorization gate a hook asks before any dial (ADR-052) is as light."""
 
     loaded = set(_modules(f"import {module}"))
     offenders = sorted(loaded & set(_FORBIDDEN))

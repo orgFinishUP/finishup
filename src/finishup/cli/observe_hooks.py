@@ -3488,12 +3488,13 @@ async def _try_auto_start(
 
     if workspace_locator is None:
         return AutoAttachOutcome(None, "auto_attach_workspace_unbound")
-    from finishup.client.targets import active_remote_refusal
+    from finishup.client.authorization import preflight_refusal
 
-    refusal = active_remote_refusal()
+    refusal = preflight_refusal()
     if refusal is not None:
-        # This computer refuses the selected server before any dial (ADR-051 decision 8); naming
-        # it here sends nothing and keeps the closed reason for the context and diagnostics.
+        # This computer refuses the selected server before any dial (ADR-051 decision 8; the
+        # shared authorization gate, ADR-052); naming it here sends nothing and keeps the closed
+        # reason for the context and diagnostics.
         return AutoAttachOutcome(None, refusal)
 
     from pydantic import ValidationError
@@ -3572,10 +3573,11 @@ async def _try_auto_start(
             # A running service of this installation closed the hello (#1040 follow-up): not a
             # service that still has to start, and not another installation to replace.
             return AutoAttachOutcome(None, "service_handshake_failed")
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS
+        from finishup.client.authorization import AUTHORIZATION_REFUSALS
 
-        if error.phase in REMOTE_ROOT_REFUSALS:
-            # A selection that changed after the check above: the connect seam refused it.
+        if error.phase in AUTHORIZATION_REFUSALS:
+            # A selection that changed after the check above, or a repository held once its root
+            # was resolved: the connect seam refused it before anything was sent.
             return AutoAttachOutcome(None, error.phase)
         return AutoAttachOutcome(
             None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
