@@ -434,13 +434,72 @@ def test_the_first_server_elsewhere_switches_the_reads_on(
     assert report is not None and report.no_network
 
 
-def test_a_registry_that_cannot_be_read_switches_the_reads_on(home: Path) -> None:
-    folder = targets.servers_dir() / "t_0badf00d"
-    folder.mkdir(mode=0o700, parents=True)
-    (folder / "target.json").write_bytes(b"not a record")
-    (folder / "target.json").chmod(0o600)
-    # A damaged record may name a server elsewhere: the hold fails toward reading.
+def test_a_registry_that_cannot_be_examined_switches_the_reads_on(home: Path) -> None:
+    # A remote record FinishUP wrote, later damaged: its presence was recorded first.
+    record = record_remote_target()
+    (targets.target_root(record.target_id) / "target.json").write_bytes(b"not a record")
     assert targets.remote_target_recorded() is True
+    # A registry folder that is not one (a link to elsewhere) fails toward the hold too.
+    servers = targets.servers_dir()
+    moved = servers.with_name("servers-moved")
+    servers.rename(moved)
+    servers.symlink_to(moved)
+    assert targets.remote_target_recorded() is True
+
+
+def test_the_dormancy_check_is_a_bounded_presence_check(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session start asks it: it reads no record and lists no folder, however many named local
+    servers or leftover folders the registry holds (Codex review B4)."""
+
+    with targets.registry_lock():
+        for number in range(3):
+            targets.new_local_target(f"work{number}")
+    for number in range(40):
+        (targets.servers_dir() / f"t_{number:08x}").mkdir(mode=0o700)
+
+    def no_record_read(*_args: object) -> object:
+        raise AssertionError("the dormancy check reads no record")
+
+    def no_listing(*_args: object) -> object:
+        raise AssertionError("the dormancy check lists no folder")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(targets, "read_target", no_record_read)
+        patch.setattr(targets.os, "scandir", no_listing)
+        assert targets.remote_target_recorded() is False
+    first = record_remote_target("first")
+    second = record_remote_target("second")
+    with monkeypatch.context() as patch:
+        patch.setattr(targets, "read_target", no_record_read)
+        patch.setattr(targets.os, "scandir", no_listing)
+        assert targets.remote_target_recorded() is True
+    # Removing one keeps it on; removing the last switches it off (the reports' way out).
+    with targets.registry_lock():
+        targets.remove_target_root(first)
+    assert targets.remote_target_recorded() is True
+    with targets.registry_lock():
+        targets.remove_target_root(second)
+    assert targets.remote_target_recorded() is False
+
+
+def test_a_remote_record_is_never_written_before_its_presence(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The presence comes first: an add interrupted between the two fails toward the hold."""
+
+    def interrupted(_path: Path, _encoded: bytes) -> None:
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(targets, "_write_owner_only", interrupted)
+    with pytest.raises(OSError), targets.registry_lock():
+        targets.new_remote_target("lab", "https", base_url="https://lab.example")
+    assert targets.remote_target_recorded() is True
+    assert targets.list_targets() == ()
+    # The owner's way back from that state: the next removal finds no remote record left.
+    assert targets.reconcile_remote_presence() is False
+    assert targets.remote_target_recorded() is False
 
 
 # --- nothing on the session-start path waits on a special file (Codex review B3) ---------------

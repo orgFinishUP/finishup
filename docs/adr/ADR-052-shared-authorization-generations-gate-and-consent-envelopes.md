@@ -178,7 +178,10 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
   for the everyday server, a named local server or an isolated root that is not a target.
 - **O3 — dormant until a server elsewhere exists.** The session-start live read and the owner-only
   repository reports do nothing until the first remote target record exists
-  (`targets.remote_target_recorded`; a registry that cannot be read switches them on). With none, a
+  (`targets.remote_target_recorded`: a bounded presence check, two `lstat` calls however many
+  targets or leftover folders exist, of `servers/remote-target-recorded`, which is made before any
+  remote record is written and removed once the last one is; a registry folder or presence file
+  that cannot be examined switches them on). With none, a
   session start, a privacy ceremony, `provider status` and a policy change are byte for byte as
   before the hold (tested on every host). Once one exists they switch on; there is no report from
   before then, and `server repositories list` says so. Removing the last server elsewhere deletes

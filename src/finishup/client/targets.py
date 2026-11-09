@@ -96,6 +96,7 @@ __all__ = [
     "reauthorized",
     "registry_lock",
     "remote_root_continuation",
+    "reconcile_remote_presence",
     "remote_target_recorded",
     "remove_leftover_root",
     "remove_target_root",
@@ -149,6 +150,8 @@ _REMOTE_CLIENT_SOCKETS: Final = (
     (Path("run") / "api.sock", 0),
 )
 _REGISTRY_LOCK_NAME: Final = ".registry.lock"
+# Present while any remote target record is (``remote_target_recorded``, ADR-052 O3).
+_REMOTE_PRESENCE_NAME: Final = "remote-target-recorded"
 _COMMON_FIELDS: Final = frozenset({"schema", "target_id", "name", "kind", "created_at"})
 _REMOTE_FIELDS: Final = frozenset({"claim_salt", "authorized_at", "disclosure_version"})
 _HTTPS_FIELDS: Final = frozenset({"base_url", "ca_file", "tls_pin", "credential"})
@@ -679,6 +682,9 @@ def write_target(root: Path, record: ServerTarget) -> None:
         ensure_owner_only_dir(root)
     except PathSafetyError:
         raise TargetError("target_root_unsafe") from None
+    if record.is_remote:
+        # First, so the hold's dormancy check never misses a remote record (ADR-052, O3).
+        _note_remote_recorded()
     _write_owner_only(root / SERVER_TARGET_FILE_NAME, record.encode())
 
 
@@ -739,20 +745,73 @@ def list_targets() -> tuple[ServerTarget, ...]:
     return tuple(sorted(records, key=lambda record: record.name))
 
 
+def _remote_presence_path() -> Path:
+    """``<ambient state dir>/servers/remote-target-recorded``: present while a remote record is."""
+
+    return servers_dir() / _REMOTE_PRESENCE_NAME
+
+
 def remote_target_recorded() -> bool:
     """Whether this computer records any server elsewhere (a ``local_port``, ``ssh`` or ``https``
     target), selected or not.
 
     The repository hold's own reads and records stay dormant until it is true (ADR-052, the
     owner's answer O3): with no remote target, a session start, a privacy ceremony and a policy
-    change behave exactly as before the hold existed. A registry that cannot be read fails toward
-    the hold (true), since a damaged record may name a remote kind. File reads only; never raises.
+    change behave exactly as before the hold existed. A session-start hook asks, so the answer is
+    a bounded presence check, two ``lstat`` calls however many targets or leftover folders the
+    registry holds: the presence file every remote record is written after
+    (``write_target``) and that goes once the last one is removed (``remove_target_root``). A
+    registry folder or presence file that cannot be examined fails toward the hold (true). Never
+    raises.
     """
 
     try:
-        return any(record.is_remote for record in _remote_scan())
+        directory = servers_dir()
+        facts = os.lstat(directory)
+    except FileNotFoundError:
+        return False
     except Exception:
         return True
+    if not stat.S_ISDIR(facts.st_mode):
+        return True
+    try:
+        os.lstat(directory / _REMOTE_PRESENCE_NAME)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+    return True
+
+
+def _note_remote_recorded() -> None:
+    """Make the presence file before a remote record is written, so a crash in between fails
+    toward the hold. Refused as ``target_root_unsafe`` when it cannot be made."""
+
+    try:
+        descriptor = os.open(
+            _remote_presence_path(),
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+        )
+    except OSError:
+        raise TargetError("target_root_unsafe") from None
+    os.close(descriptor)
+
+
+def reconcile_remote_presence() -> bool:
+    """After a remote target is removed: drop the presence file once no remote record is left.
+
+    Whether a remote target is still recorded. The whole registry is read here (an owner command,
+    never a hook); a registry that cannot be read keeps the file. Never raises.
+    """
+
+    try:
+        if any(record.is_remote for record in _remote_scan()):
+            return True
+        _remote_presence_path().unlink(missing_ok=True)
+    except Exception:
+        return True
+    return False
 
 
 def _remote_scan() -> Generator[ServerTarget]:
@@ -957,6 +1016,7 @@ def remove_target_root(record: ServerTarget) -> None:
     if root.is_symlink() or not root.is_dir():
         raise TargetError("target_root_unsafe")
     shutil.rmtree(root)
+    reconcile_remote_presence()
 
 
 def remove_leftover_root(target_id: str) -> bool:

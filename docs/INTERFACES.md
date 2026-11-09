@@ -5749,7 +5749,9 @@ unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`,
   record (`add_override`, `add_kept`, `remove_override`, `clear_overrides`, `read_overrides`).
   `client.everyday_repository`: `read_everyday_repository`, `remember_repository_setup`,
   `refresh_at_session_start`, `session_start_hold_phase`, `report_needs_refresh`.
-  `client.targets.remote_target_recorded()` switches the reads on (O3).
+  `client.targets.remote_target_recorded()` switches the reads on (O3): a bounded presence check
+  of `servers/remote-target-recorded` (`write_target` makes it before a remote record;
+  `remove_target_root` drops it with the last one through `reconcile_remote_presence`).
 - `protocol.consent_envelope` (SHARED): `ConsentEnvelope` and its parts, `envelope_from_json`,
   `envelope_to_json`, `canonical_bytes`, `envelope_digest`, `consentable`, `precedes`,
   `compare(consented, current) -> EnvelopeComparison` (`same`, `narrower`, `ask_again`,
