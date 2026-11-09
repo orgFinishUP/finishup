@@ -150,6 +150,135 @@ def test_past_the_bound_the_oldest_permitted_entry_goes_first_then_the_oldest(ho
     assert _key(0) not in {report.key for report in reading}
 
 
+def _long_worktrees(number: int) -> tuple[str, ...]:
+    """Eight worktree paths of the longest length the record keeps."""
+
+    from finishup.client.everyday_policy import MAX_WORKTREE_CHARS
+
+    return tuple(
+        (f"/srv/{number:04x}-{index}/" + "w" * MAX_WORKTREE_CHARS)[:MAX_WORKTREE_CHARS]
+        for index in range(MAX_WORKTREES_PER_REPORT)
+    )
+
+
+def _full_record(*, no_network: bool) -> tuple[RepositoryReport, ...]:
+    """As many entries with eight longest worktrees as fit the byte bound, written as the record.
+
+    Every entry is one the writer accepts (count, worktree count and length within bounds), so
+    the record itself is a state the code can reach.
+    """
+
+    from finishup.client.everyday_policy import MAX_REPORTS_BYTES
+
+    encode = everyday_policy._encode_reports  # pyright: ignore[reportPrivateUsage]
+    reports: list[RepositoryReport] = []
+    # Entries with eight longest worktrees, then with one, until not even that fits: no entry
+    # with a long worktree fits beside them.
+    for count in (MAX_WORKTREES_PER_REPORT, 1):
+        while len(reports) < MAX_REPORTED_REPOSITORIES:
+            number = len(reports)
+            stamp = f"2026-11-07T09:{number // 60:02d}:{number % 60:02d}.000Z"
+            candidate = RepositoryReport(
+                _key(number),
+                no_network,
+                stamp if no_network else None,
+                stamp,
+                _long_worktrees(number)[:count],
+            )
+            if len(encode((*reports, candidate))) > MAX_REPORTS_BYTES:
+                break
+            reports.append(candidate)
+    assert 0 < len(reports) < MAX_REPORTED_REPOSITORIES
+    _write_raw(reports_path(), encode(reports))
+    assert read_repository_reports() == tuple(sorted(reports, key=lambda item: item.key))
+    return tuple(reports)
+
+
+def test_an_update_past_the_byte_bound_keeps_every_hold_and_records_the_overflow(
+    home: Path,
+) -> None:
+    """Accepted worktree paths can pass the reader's byte bound long before the count bound. A
+    write past it would make the whole record unreadable, and every held repository with it."""
+
+    from finishup.client.everyday_policy import read_overflow
+    from finishup.client.repository_hold import decide
+
+    held = _full_record(no_network=True)
+    before = reports_path().read_bytes()
+    assert read_overflow() is None
+    newcomer = _key(10_000)
+    assert (
+        record_repository_report(
+            newcomer, _long_worktrees(10_000)[0], no_network=True, now=_AT + timedelta(days=1)
+        )
+        is False
+    )
+    # The record keeps what it said, byte for byte; every hold it names still holds.
+    assert reports_path().read_bytes() == before
+    reading = read_repository_reports()
+    assert not isinstance(reading, str) and len(reading) == len(held)
+    root = targets.servers_dir() / "t_0000abcd"
+    for report in held:
+        assert decide(root, "t_0000abcd", report.key).state == "held"
+    # The overflow is recorded, owner-only and canonical, and the newcomer is unknown.
+    assert read_overflow() == "2026-11-08T09:30:00.000Z"
+    overflow = reports_path().with_name("everyday-repositories-overflow.json")
+    assert stat.S_IMODE(overflow.stat().st_mode) == 0o600
+    assert decide(root, "t_0000abcd", newcomer).state == "not_reported"
+    # An update that fits clears the overflow; removing the record removes it too.
+    assert forget_repository_reports([held[0].key]) is True
+    assert read_overflow() is None
+    assert record_repository_report(newcomer, "/srv/new", no_network=True) is True
+    assert repository_report(newcomer) is not None
+    _full_record(no_network=True)
+    assert record_repository_report(_key(10_001), _long_worktrees(1)[0], no_network=True) is False
+    assert read_overflow() is not None
+    assert remove_repository_reports() is True
+    assert read_overflow() is None and not overflow.exists()
+
+
+def test_past_the_byte_bound_the_oldest_permitted_entries_make_room(home: Path) -> None:
+    from finishup.client.everyday_policy import MAX_REPORTS_BYTES, read_overflow
+
+    permitted = _full_record(no_network=False)
+    assert record_repository_report(
+        _key(10_000), _long_worktrees(10_000)[0], no_network=True, now=_AT + timedelta(days=1)
+    )
+    reading = read_repository_reports()
+    assert not isinstance(reading, str)
+    keys = {report.key for report in reading}
+    # The new held entry is kept; the oldest permitted entry went to make room, no other.
+    assert _key(10_000) in keys
+    assert permitted[0].key not in keys
+    assert {report.key for report in permitted[1:]} <= keys
+    assert len(reports_path().read_bytes()) <= MAX_REPORTS_BYTES
+    assert read_overflow() is None
+
+
+def test_every_record_the_writer_accepts_is_one_the_reader_reads(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writer and reader bounds agree: an accepted write is never unreadable. The bound is
+    lowered here so a few dozen writes cross it many times over."""
+
+    bound = 16 * 1_024
+    monkeypatch.setattr(everyday_policy, "_MAX_REPORTS_BYTES", bound)
+    for number in range(48):
+        for worktree in _long_worktrees(number)[:3]:
+            record_repository_report(
+                _key(number),
+                worktree,
+                no_network=number % 3 == 0,
+                now=_AT + timedelta(seconds=number),
+            )
+            assert not isinstance(read_repository_reports(), str)
+            assert len(reports_path().read_bytes()) <= bound
+    reading = read_repository_reports()
+    assert not isinstance(reading, str)
+    # Entries that allow network use made room; every held one recorded before the bound stayed.
+    assert any(report.no_network for report in reading)
+
+
 def _write_raw(path: Path, data: bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_bytes(data)

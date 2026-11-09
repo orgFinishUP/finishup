@@ -465,6 +465,30 @@ def test_list_says_folder_not_found_and_forgets_reports_of_gone_repositories(
     assert f"    {tmp_path / 'gone'}  — folder not found" in result.stdout.splitlines()
 
 
+def test_list_says_when_a_report_did_not_fit_and_that_no_hold_was_dropped(
+    remote: targets.ServerTarget, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import finishup.client.everyday_policy as everyday_policy
+
+    held = "sha256:" + "6" * 64
+    assert record_repository_report(held, os.fspath(tmp_path), no_network=True, now=_AT)
+    # Room for the record as it is, not for one more entry.
+    bound = len(everyday_policy.reports_path().read_bytes()) + 16
+    monkeypatch.setattr(everyday_policy, "_MAX_REPORTS_BYTES", bound)
+    late = datetime(2026, 11, 8, 10, 0, tzinfo=UTC)
+    newcomer = "sha256:" + "7" * 64
+    assert not record_repository_report(newcomer, os.fspath(tmp_path), no_network=True, now=late)
+    result = _invoke("list")
+    assert result.exit_code == 0, result.output
+    assert (
+        "This computer's record of what its FinishUP reported about repositories is full: a "
+        "report at 2026-11-08T10:00:00.000Z did not fit, so that repository is not held until a "
+        "report of it fits. The record was kept as it was, and no repository it holds was dropped."
+    ) in result.stdout
+    assert repository_report(held) is not None and repository_report(newcomer) is None
+    assert "cannot be read" not in result.stdout
+
+
 def test_list_shows_damaged_records_without_refusing(
     remote: targets.ServerTarget, tmp_path: Path
 ) -> None:

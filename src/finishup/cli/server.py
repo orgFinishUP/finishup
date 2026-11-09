@@ -2665,6 +2665,11 @@ def _damaged_record_line(record: ServerTarget) -> str:
     )
 
 
+_REPORTS_FULL_LINE: Final = (
+    "This computer's record of what its FinishUP reported about repositories is full: a report "
+    "at {at} did not fit, so that repository is not held until a report of it fits. The record "
+    "was kept as it was, and no repository it holds was dropped."
+)
 _DAMAGED_REPORTS_LINE: Final = (
     "This computer's record of what its FinishUP reported about repositories cannot be read, so "
     "FinishUP holds no repository from it now; it is written again the next time this "
@@ -2731,7 +2736,7 @@ def repository_list_lines(record: ServerTarget) -> tuple[str, ...]:
 def server_repositories_list(name: _NAME_ARGUMENT = None) -> None:
     """Show which repositories each server elsewhere holds, keeps here, or receives anyway."""
 
-    from finishup.client.everyday_policy import read_repository_reports
+    from finishup.client.everyday_policy import read_overflow, read_repository_reports
 
     _require_no_explicit_source()
     if name is not None:
@@ -2744,6 +2749,9 @@ def server_repositories_list(name: _NAME_ARGUMENT = None) -> None:
     _forget_gone_reports()
     if read_repository_reports() == "unreadable":
         typer.echo(_DAMAGED_REPORTS_LINE)
+    overflow = read_overflow()
+    if overflow is not None:
+        typer.echo(_REPORTS_FULL_LINE.format(at=overflow))
     if not records:
         typer.echo("No server on another machine, a port or the web was added.")
     for record in records:

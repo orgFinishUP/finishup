@@ -1282,7 +1282,11 @@ repository identity, so every linked worktree shares it.
 **Records.** `<ambient state dir>/servers/everyday-repositories.json`
 (`yoetz.everyday-repository-policy/1`, owner-only, atomic): per repository key, whether it allows
 network use, when the current no-network stretch began (`no_network_since`), when it was reported
-and up to eight worktrees; at most 256 entries, permitted entries evicted first. It is written by a
+and up to eight worktrees; at most 256 entries and 256 KiB, permitted entries evicted first, a
+bound the writer keeps as the reader does. An update that still would not fit is not written (the
+record keeps what it said, so no held entry is dropped for its size), and
+`everyday-repositories-overflow.json` (`yoetz.everyday-repository-overflow/1`, the time) records it
+until an update fits; `server repositories list` says so. It is written by a
 live read at session start (at most 0.5 s, once per repository per day or when older than the last
 machine report, in a fresh context on its own event loop, before any attach, status or drain), by
 every privacy ceremony and `provider status` from what the service already answered, and after a
@@ -1318,7 +1322,10 @@ the choices; the group is hidden and `add` refuses `remote_kind_unavailable` whi
 1. In this release no server elsewhere can be used, so nothing is held yet.
 2. Unknown is not held: a grant never reported since this release (or since the first server
    elsewhere was recorded) is not held until it is reported.
-3. Past 256 entries the oldest are evicted; an evicted held entry becomes unknown.
+3. Past 256 entries the oldest are evicted; an evicted held entry becomes unknown. Past 256 KiB
+   (long worktree paths) entries that allow network use are evicted first; a report that still
+   does not fit is not recorded, so its repository stays unknown until one fits, and no held
+   entry is dropped for its size.
 4. A request already under way may finish; open connections end within about a second. "Nothing
    more", never "never sent"; what the server received stays there.
 5. Fencing covers recorded worktrees only (at most eight per repository), and a fenced read is not

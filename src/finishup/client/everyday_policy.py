@@ -75,7 +75,10 @@ __all__ = [
     "MARKER_NAME",
     "MAX_REPORTED_REPOSITORIES",
     "MAX_WORKTREES_PER_REPORT",
+    "MAX_REPORTS_BYTES",
     "MAX_WORKTREE_CHARS",
+    "OVERFLOW_NAME",
+    "OVERFLOW_SCHEMA",
     "REPORTS_NAME",
     "REPORTS_SCHEMA",
     "SCHEMA",
@@ -87,6 +90,7 @@ __all__ = [
     "marker_path",
     "note_repository_worktree",
     "read_marker",
+    "read_overflow",
     "read_repository_reports",
     "record_reported_policy",
     "record_repository_report",
@@ -297,7 +301,16 @@ MAX_WORKTREES_PER_REPORT: Final = 8
 # A worktree path longer than this is not stored: the hold still applies by key, but owner
 # displays cannot show it and the workspace agent cannot fence it.
 MAX_WORKTREE_CHARS: Final = 1_024
-_MAX_REPORTS_BYTES: Final = 256 * 1_024
+# The record's byte bound, which the writer keeps as well as the reader: an update that would pass
+# it first drops the oldest entries whose policy allows network use, and otherwise is not written
+# at all (the record keeps what it said, and the overflow is recorded): never a held entry dropped,
+# never a record too large to read.
+MAX_REPORTS_BYTES: Final = 256 * 1_024
+_MAX_REPORTS_BYTES: Final = MAX_REPORTS_BYTES
+# When an update last did not fit (``read_overflow``); cleared by the next update that does.
+OVERFLOW_NAME: Final = "everyday-repositories-overflow.json"
+OVERFLOW_SCHEMA: Final = "yoetz.everyday-repository-overflow/1"
+_MAX_OVERFLOW_BYTES: Final = 256
 _REPORT_FIELDS: Final = frozenset(
     {"key", "no_network", "no_network_since", "reported_at", "worktrees"}
 )
@@ -401,6 +414,9 @@ def _encode_reports(reports: Iterable[RepositoryReport]) -> bytes:
         ],
     }
     return canonical_encode(body) + b"\n"
+
+
+_EMPTY_RECORD_BYTES: Final = len(_encode_reports(()))
 
 
 def _read_reports_file() -> ReportsReading:
@@ -515,11 +531,16 @@ def _update_reports(
     change: Callable[[tuple[RepositoryReport, ...]], tuple[RepositoryReport, ...] | None],
     *,
     lock_wait_seconds: float,
+    keep: str | None = None,
+    now: datetime | None = None,
 ) -> bool:
     """Apply ``change`` to the current reports under the lock; whether a record was written.
 
     ``change`` returns the new reports, or None to leave the record as it is. A record that cannot
-    be read is treated as empty, so the next report replaces it. Never raises.
+    be read is treated as empty, so the next report replaces it. The result is held to the
+    reader's byte bound (``_fitted``; ``keep`` is the entry being recorded, never dropped to make
+    room): one that cannot fit is not written, the record keeps what it said, and the overflow is
+    recorded (``read_overflow``) until an update fits again. Never raises.
     """
 
     if not _everyday_scope():
@@ -537,13 +558,106 @@ def _update_reports(
         path = reports_path()
         if not updated:
             path.unlink(missing_ok=True)
+            _overflow_path().unlink(missing_ok=True)
             return True
-        _write_owner_only(path, _encode_reports(updated))
+        encoded = _fitted(updated, keep)
+        if encoded is None:
+            _record_overflow(now)
+            return False
+        _write_owner_only(path, encoded)
+        _overflow_path().unlink(missing_ok=True)
         return True
     except (OSError, PathSafetyError, ValueError):
         return False
     finally:
         os.close(descriptor)
+
+
+def _fitted(reports: Iterable[RepositoryReport], keep: str | None) -> bytes | None:
+    """The canonical record of ``reports`` within the byte bound, or None when it cannot fit.
+
+    Past the bound the oldest entries whose policy allows network use go first (as past the
+    count bound), never ``keep`` and never one that allows no network use: dropping a held entry
+    would end its hold. None when only such entries are left and it still does not fit.
+    """
+
+    entries = sorted(reports, key=lambda report: report.key)
+    sizes = {
+        report.key: len(_encode_reports((report,))) - _EMPTY_RECORD_BYTES for report in entries
+    }
+
+    def total() -> int:
+        return (
+            _EMPTY_RECORD_BYTES
+            + sum(sizes[report.key] for report in entries)
+            + max(0, len(entries) - 1)
+        )
+
+    while total() > _MAX_REPORTS_BYTES:
+        permitted = [report for report in entries if not report.no_network and report.key != keep]
+        if not permitted:
+            return None
+        entries.remove(min(permitted, key=lambda report: (report.reported_at, report.key)))
+    encoded = _encode_reports(entries)
+    return encoded if len(encoded) <= _MAX_REPORTS_BYTES else None
+
+
+def _overflow_path() -> Path:
+    return reports_path().with_name(OVERFLOW_NAME)
+
+
+def _record_overflow(now: datetime | None) -> None:
+    """Record that an update did not fit; best effort (the record itself is already safe)."""
+
+    stamp = format_rfc3339_ms((now or datetime.now(UTC)).astimezone(UTC))
+    body: dict[str, JsonValue] = {"overflowed_at": stamp, "schema": OVERFLOW_SCHEMA}
+    try:
+        _write_owner_only(_overflow_path(), canonical_encode(body) + b"\n")
+    except (OSError, PathSafetyError):
+        pass
+
+
+def read_overflow() -> str | None:
+    """When an update of the reports last did not fit within their byte bound, or None.
+
+    ``None`` too when nothing overflowed since the last update that fit, outside the everyday
+    scope, and for a marker that cannot be read. Never raises; never blocks on a special file.
+    """
+
+    if not _everyday_scope():
+        return None
+    try:
+        path = _overflow_path()
+        facts = path.lstat()
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+            or facts.st_size > _MAX_OVERFLOW_BYTES
+        ):
+            return None
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return None
+            encoded = os.read(descriptor, _MAX_OVERFLOW_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        parsed = strict_json_parse(encoded.rstrip(b"\n"))
+    except (OSError, PathSafetyError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    document = cast(dict[str, object], parsed)
+    stamp = document.get("overflowed_at")
+    if (
+        frozenset(document) != frozenset({"overflowed_at", "schema"})
+        or document.get("schema") != OVERFLOW_SCHEMA
+        or not _timestamp(stamp)
+        or canonical_encode(cast(JsonValue, document)) + b"\n" != encoded
+    ):
+        return None
+    return cast(str, stamp)
 
 
 def _evict(reports: list[RepositoryReport], keep: str) -> list[RepositoryReport]:
@@ -604,7 +718,7 @@ def record_repository_report(
         others = [report for report in reports if report.key != key]
         return tuple(_evict([*others, entry], key))
 
-    return _update_reports(change, lock_wait_seconds=lock_wait_seconds)
+    return _update_reports(change, lock_wait_seconds=lock_wait_seconds, keep=key, now=now)
 
 
 def note_repository_worktree(
@@ -626,7 +740,7 @@ def note_repository_worktree(
         entry = replace(previous, worktrees=_merged_worktrees(previous.worktrees, worktree))
         return tuple(report if report.key != key else entry for report in reports)
 
-    return _update_reports(change, lock_wait_seconds=lock_wait_seconds)
+    return _update_reports(change, lock_wait_seconds=lock_wait_seconds, keep=key)
 
 
 def forget_repository_reports(
@@ -652,9 +766,13 @@ def remove_repository_reports() -> bool:
     """Delete the whole record; whether one was removed. A link is removed, never what it names.
 
     For when the everyday installation no longer exists. Anything but a file or a link is left
-    in place. Never raises.
+    in place. The overflow record goes with it. Never raises.
     """
 
+    try:
+        _overflow_path().unlink(missing_ok=True)
+    except (OSError, PathSafetyError):
+        pass
     try:
         path = reports_path()
         facts = path.lstat()
