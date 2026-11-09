@@ -181,7 +181,9 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
   (`targets.remote_target_recorded`: a bounded presence check, two `lstat` calls however many
   targets or leftover folders exist, of `servers/remote-target-recorded`, which is made before any
   remote record is written and removed once the last one is; a registry folder or presence file
-  that cannot be examined switches them on). With none, a
+  that cannot be examined switches them on). The shared live read itself
+  (`read_everyday_repository`) is dormant at its own boundary, so no surface (`server repositories
+  list`, `server status`, a privacy change, a session start) asks or records anything. With none, a
   session start, a privacy ceremony, `provider status` and a policy change are byte for byte as
   before the hold (tested on every host). Once one exists they switch on; there is no report from
   before then, and `server repositories list` says so. Removing the last server elsewhere deletes

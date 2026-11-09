@@ -2493,6 +2493,8 @@ def test_the_repository_read_records_a_grant_that_allows_no_network_use(
 
     worktree = _git_repository(tmp_path / "repository")
     requests = _everyday_repository_service(home, monkeypatch)
+    # The reads are switched on by a server elsewhere being recorded (ADR-052, O3).
+    record_remote_target()
 
     assert zero_network.everyday_repository_state(worktree) == "no_network"
 
@@ -2509,6 +2511,7 @@ def test_the_repository_read_works_from_a_cli_commands_event_loop(
 
     worktree = _git_repository(tmp_path / "repository")
     _everyday_repository_service(home, monkeypatch, grant="missing", permitted=True)
+    record_remote_target()
 
     async def command() -> str:
         return await asyncio.to_thread(zero_network.everyday_repository_state, worktree)

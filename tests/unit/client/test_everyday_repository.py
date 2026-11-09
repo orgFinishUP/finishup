@@ -139,7 +139,7 @@ def _key(locator: str) -> str:
 
 
 def test_a_granted_forbidding_repository_is_recorded_as_allowing_no_network_use(
-    home: Path, repository: str
+    home: Path, elsewhere: None, repository: str
 ) -> None:
     calls: list[str] = []
     reads = _read(repository, _connector(True, _setup("granted", False), calls))
@@ -155,7 +155,7 @@ def test_a_granted_forbidding_repository_is_recorded_as_allowing_no_network_use(
     "setup", [_setup("missing", False), _setup("missing", True), _setup("granted", True)]
 )
 def test_no_grant_or_a_permitting_grant_is_recorded_as_allowing_it(
-    home: Path, repository: str, setup: dict[str, object]
+    home: Path, elsewhere: None, repository: str, setup: dict[str, object]
 ) -> None:
     reads = _read(repository, _connector(True, setup, []))
     assert reads.repository == "network_permitted"
@@ -164,7 +164,7 @@ def test_no_grant_or_a_permitting_grant_is_recorded_as_allowing_it(
 
 
 def test_while_this_computer_forbids_all_network_use_the_entry_is_forgotten(
-    home: Path, repository: str
+    home: Path, elsewhere: None, repository: str
 ) -> None:
     key = _key(repository)
     record_repository_report(key, repository, no_network=False, now=_AT)
@@ -195,7 +195,7 @@ def test_a_slow_service_is_bounded_by_the_budget(home: Path, repository: str) ->
 
 
 def test_a_setup_view_that_cannot_be_classified_records_no_repository(
-    home: Path, repository: str
+    home: Path, elsewhere: None, repository: str
 ) -> None:
     reads = _read(repository, _connector(True, {"grant_state": "granted"}, []))
     assert reads == EverydayReads("network_permitted", "unreadable")
@@ -204,7 +204,7 @@ def test_a_setup_view_that_cannot_be_classified_records_no_repository(
 
 
 def test_a_computer_never_set_up_has_no_policy_and_keeps_no_record(
-    home: Path, repository: str
+    home: Path, elsewhere: None, repository: str
 ) -> None:
     record_reported_policy(zero_network=False, now=_AT)
     record_repository_report(_key(repository), repository, no_network=True, now=_AT)
@@ -419,6 +419,34 @@ def test_with_no_server_elsewhere_nothing_is_asked_or_recorded(
     assert refresh_at_session_start(repository, budget_seconds=5.0) is False
     assert live == []
     assert not reports_path().exists()
+
+
+def test_with_no_server_elsewhere_the_shared_read_asks_and_records_nothing(
+    home: Path, repository: str
+) -> None:
+    """The one read every surface uses (``server repositories list`` and ``status``, a privacy
+    change, a session start) is dormant at its own boundary, not only where a caller checks."""
+
+    calls: list[str] = []
+    assert _read(repository, _connector(True, _setup("granted", False), calls)) == EverydayReads(
+        "unreadable", "unreadable"
+    )
+    assert calls == []
+    assert not reports_path().exists()
+    assert read_marker() == "absent"
+    # Not even the clean-up of a computer never set up runs while it is dormant.
+    record_reported_policy(zero_network=False, now=_AT)
+
+    async def never_set_up() -> EverydayReads:
+        return await read_everyday_repository(
+            repository,
+            connect=_connector(True, {}, calls),  # type: ignore[arg-type]
+            installation_exists=lambda: False,
+        )
+
+    assert asyncio.run(never_set_up()) == EverydayReads("unreadable", "unreadable")
+    assert read_marker() == ReportedPolicy(False, _STAMP)
+    assert calls == []
 
 
 def test_the_first_server_elsewhere_switches_the_reads_on(

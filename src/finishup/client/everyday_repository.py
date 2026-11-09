@@ -218,14 +218,16 @@ async def read_everyday_repository(
     ``locator`` is the worktree's top (absolute, normal); ``key`` its report key when the caller
     already derived it. Records what it learns and returns it; never raises (see the module
     text). Runs on the caller's event loop: call it in a fresh ``contextvars`` context, so its
-    ``selection_override(None)`` stays its own.
+    ``selection_override(None)`` stays its own. Dormant until a server elsewhere is recorded
+    (``_hold_active``, O3): before then nothing is asked or recorded, on any surface, and the
+    answer is ``unreadable``.
     """
 
     from finishup.config.paths import PathSafetyError, selection_override
     from finishup.ports.control import ControlClientKind, WorkspaceLocator
 
     worktree = _worktree(locator)
-    if worktree is None or not everyday_scope():
+    if worktree is None or not everyday_scope() or not _hold_active():
         return _UNREADABLE
     try:
         with selection_override(None):

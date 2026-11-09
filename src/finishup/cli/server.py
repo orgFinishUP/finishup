@@ -68,6 +68,7 @@ from finishup.client.targets import (
     read_selected_target_id,
     read_target,
     registry_lock,
+    remote_target_recorded,
     remove_leftover_root,
     require_current_authorization,
     selection_source,
@@ -2743,9 +2744,11 @@ def server_repositories_list(name: _NAME_ARGUMENT = None) -> None:
         records = (_repository_target(name),)
     else:
         records = tuple(record for record in list_targets() if record.is_remote)
-    # This folder's repository is read again first, when this computer's FinishUP can answer.
-    with contextlib.suppress(ServerCommandRefused):
-        _live_state(repository_here())
+    # This folder's repository is read again first, when this computer's FinishUP can answer;
+    # never while no server elsewhere is recorded (O3: nothing is asked or recorded before then).
+    if remote_target_recorded():
+        with contextlib.suppress(ServerCommandRefused):
+            _live_state(repository_here())
     _forget_gone_reports()
     if read_repository_reports() == "unreadable":
         typer.echo(_DAMAGED_REPORTS_LINE)

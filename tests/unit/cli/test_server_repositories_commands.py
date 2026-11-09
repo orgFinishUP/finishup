@@ -489,6 +489,62 @@ def test_list_says_when_a_report_did_not_fit_and_that_no_hold_was_dropped(
     assert "cannot be read" not in result.stdout
 
 
+def test_list_with_no_server_elsewhere_asks_and_records_nothing(
+    home: Path, repository: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O3: before the first server elsewhere is recorded, no surface asks this computer's
+    FinishUP about a repository or keeps what it says, so there is no history from before then.
+    The everyday service here is up and would answer."""
+
+    import finishup.client.everyday_repository as everyday_repository
+    from finishup.client.everyday_policy import marker_path, reports_path
+
+    asked: list[str] = []
+
+    class _Service:
+        async def privacy_get_effective(self, request: object) -> object:
+            asked.append("effective")
+            return {"policy": {"network_egress_permitted": True}}
+
+        async def privacy_get_setup(self, request: object) -> object:
+            asked.append("setup")
+            return {
+                "schema_version": "2.0.0",
+                "grant_state": "granted",
+                "composed_policy": {"network_egress_permitted": False},
+            }
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(*_args: object, **_kwargs: object) -> object:
+        asked.append("connect")
+        return _Service()
+
+    # The real read (the suite replaces it with one that reaches nothing), against a stand-in
+    # for this computer's running service.
+    monkeypatch.setattr(zero_network, "_repository_reader", zero_network._read_repository)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(everyday_repository, "_connect", connect)
+    monkeypatch.setattr(zero_network, "_everyday_installation_exists", lambda: True)
+    monkeypatch.setattr(
+        "finishup.cli.provider_status.machine_scope_request", lambda: {"scope": "machine"}
+    )
+    result = _invoke("list")
+    assert result.exit_code == 0, result.output
+    assert "No server on another machine, a port or the web was added." in result.stdout
+    assert asked == []
+    assert not reports_path().exists() and not marker_path().exists()
+    # The shared read itself is dormant too, whichever surface asks.
+    assert zero_network.everyday_repository_state(repository) == "unreadable"
+    assert asked == [] and not reports_path().exists()
+    # Once one is recorded, the same list asks and records.
+    _remote(select=False)
+    result = _invoke("list")
+    assert result.exit_code == 0, result.output
+    assert asked == ["connect", "effective", "setup"]
+    assert repository_report(_key(repository)) is not None
+
+
 def test_list_shows_damaged_records_without_refusing(
     remote: targets.ServerTarget, tmp_path: Path
 ) -> None:
