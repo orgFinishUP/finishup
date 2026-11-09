@@ -87,7 +87,13 @@ accepted generation. `refusal()`:
   the refusal now in force);
 - anything else re-runs gate steps 2 to 6 on the re-read record and accepts the new generation
   when they pass, so a rewrite with the same content never ends a connection;
-- a refusal is final for that connection; a check that cannot be made keeps the last decision.
+- a refusal is final for that connection; a check that cannot be made keeps the last decision;
+- before anything is written the phase itself refuses the connection, and its words say it was
+  refused before anything was sent; once a connection is open (its hello, at least, was sent) any
+  phase ends it as **`server_authorization_changed`**, whose words say FinishUP stopped sending
+  over it and that what the server received stays there, never that nothing was sent (design v2
+  section 8.10: no hold reaches back over what was already sent). The next connection's admission
+  names the refusal now in force, before anything is sent.
 
 ### 3. Where the checks run
 
@@ -99,7 +105,7 @@ before the hello (which carries the claim and the agent declaration) is written,
 later frame, by `connect()` (the MCP bridge's reuse check), before a workspace
 reply leaves (a reply computed while it lapsed is not sent), and by a watch every
 `GENERATION_RECHECK_SECONDS` (1 s; an injectable tick for tests). A lapse fails pending calls with
-the phase and later calls with the same stored failure. The workspace agent of that connection
+`server_authorization_changed` and later calls with the same stored failure. The workspace agent of that connection
 checks it on every call (`own_authorization`) and answers `workspace_unavailable` once it refuses,
 so background work between the connection's own checks reads nothing more. **Local roots get no
 authorization, no check and no watch** (the owner's answer O2): a connection to a server on this

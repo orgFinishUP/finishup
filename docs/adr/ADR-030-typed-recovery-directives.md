@@ -317,6 +317,8 @@ connection to a server elsewhere that the shared gate refuses or ends:
 `finishup server repositories add`; on a decline run `keep` and do not ask again),
 `repository_kept_on_this_computer` (`repository_egress_kept`: continue without FinishUP for that
 repository and do not ask again) and `server_connection_renew` (`server_authorization_changed`:
-the selection, record or key the connection was made under changed; repeat the same request with
-the same identity). Each is a protocol reason code with its continuation, rendered on every
+what an open connection was authorized under changed, so FinishUP stopped sending over it and what
+the server received stays there; repeat the request under the current selection). The first two
+say the request was refused before anything from the repository was sent, never that nothing was
+ever sent (design v2 section 8.10). Each is a protocol reason code with its continuation, rendered on every
 surface like the other remote phases; none names a path, server name or host.

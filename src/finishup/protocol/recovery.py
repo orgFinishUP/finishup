@@ -834,35 +834,37 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="repository_send_decision_required",
         directive=(
-            "This repository's privacy policy here allows no network use, so nothing from it was "
-            "sent to the selected server elsewhere. Ask the user once; only they can allow it "
-            "('finishup server repositories add'), then repeat this request."
+            "This repository's policy here allows no network use, so this request was refused "
+            "before anything from it was sent to the selected server elsewhere. Ask the user once; "
+            "only they can allow it ('finishup server repositories add')."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge=(
-            "If they decline, run 'finishup server repositories keep' and do not ask again. Never "
-            "run 'add' for them."
+            "Then repeat it. If they decline, run 'finishup server repositories keep'; do not ask "
+            "again. Never run 'add' for them."
         ),
     ),
     RecoveryDirective(
         token="repository_kept_on_this_computer",
         directive=(
-            "This repository's work is kept on this computer, as the user chose, so nothing from "
-            "it was sent to the selected server elsewhere. Continue without FinishUP for this "
-            "repository and do not ask about it again."
+            "This repository's work is kept on this computer, as the user chose, so this request "
+            "was refused before anything from it was sent to the selected server elsewhere. "
+            "Continue without FinishUP for it; do not ask about it again."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Only the user changes this, with 'finishup server repositories add' in their own terminal.",
     ),
-    # A connection to a server elsewhere ended because what it was made under changed (ADR-052):
-    # the selection, the server's record or its key. Repeating the request makes a new connection
-    # under the current authorization, or names the refusal that now applies.
+    # A connection to a server elsewhere ended because what it was authorized under changed
+    # (ADR-052): the selection, the server's record or key, this computer's policy or a
+    # repository's hold. It had sent something, so it says FinishUP stopped sending and that what
+    # the server received stays there (design v2 section 8.10). Repeating the request makes a new
+    # connection under the current authorization, or names the refusal that now applies.
     RecoveryDirective(
         token="server_connection_renew",
         directive=(
-            "The server selection, record or key this connection was made under changed, so "
-            "FinishUP ended it before sending more. Repeat the same request with the same "
-            "identity; it runs under the current selection or names the refusal now."
+            "What this connection to a server elsewhere was authorized under changed, so FinishUP "
+            "stopped sending over it; what that server received stays there. Repeat the request: "
+            "it runs under the current selection or names the refusal now."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never change the server selection or a key for the owner.",

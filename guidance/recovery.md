@@ -46,8 +46,9 @@ A selected FinishUP server elsewhere can refuse or end a connection with a retry
 here allows no network use; ask the user once, never run `finishup server repositories add` for
 them, and repeat the same request after they allow it; if they decline, run `finishup server
 repositories keep` and do not ask again. `repository_kept_on_this_computer`: continue without
-FinishUP for this repository. `server_connection_renew`: repeat the same request with the same
-identity. Never switch servers or change a privacy policy for the user.
+FinishUP for this repository. `server_connection_renew`: FinishUP stopped sending over a
+connection whose authorization changed, and what that server received stays there; repeat the
+request. Never switch servers or change a privacy policy for the user.
 
 Typed continuation pointers resolve to these small topics: startup and identity to
 [`startup.md`](startup.md), publication field ownership to [`publication.md`](publication.md),

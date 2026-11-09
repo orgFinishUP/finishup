@@ -75,6 +75,37 @@ def test_the_matrix_covers_every_phase_and_each_has_a_summary_and_a_directive() 
     assert refusal_summary("remote_unreachable") is None
 
 
+def test_the_words_say_refused_before_sending_or_stopped_sending_never_both() -> None:
+    """Design v2 section 8.10: a refusal before anything was sent says so; a connection that
+    ended after it was open says FinishUP stopped sending and what the server received stays
+    there, and never implies that a hold reaches back over what was already sent."""
+
+    for phase in _PHASES:
+        summary = cast(str, refusal_summary(phase))
+        directive = directive_for(_continuation_token(phase))
+        assert directive is not None
+        if phase == "server_authorization_changed":
+            assert "stopped sending over it" in summary
+            assert "already received stays there" in summary
+            assert "stopped sending over it" in directive.directive
+            for text in (summary, directive.directive):
+                assert "nothing" not in text and "before anything" not in text
+        else:
+            assert "before anything" in summary
+            assert "stopped sending" not in summary and "stays there" not in summary
+            if phase.startswith("repository_egress_"):
+                assert "before anything from it was sent" in summary
+                assert "before anything from it was sent" in directive.directive
+
+
+def _continuation_token(phase: str) -> str:
+    from finishup.protocol.recovery import continuation_for_reason
+
+    token = continuation_for_reason(phase)
+    assert token is not None
+    return token
+
+
 @pytest.mark.parametrize("phase", _PHASES)
 def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
     selected: tuple[Path, targets.ServerTarget], phase: str

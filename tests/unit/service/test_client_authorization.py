@@ -179,7 +179,13 @@ def _phase(error: ControlError) -> tuple[str, bool, str | None]:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("phase", _PHASES)
-async def test_a_pending_call_fails_with_the_phase_within_one_check(phase: str) -> None:
+async def test_a_pending_call_fails_as_a_changed_authorization_within_one_check(
+    phase: str,
+) -> None:
+    """Whatever the check names, an open connection has already sent something: it ends as
+    ``server_authorization_changed`` (FinishUP stopped sending over it), never with a phase whose
+    words say nothing was sent (design v2 section 8.10)."""
+
     stream, check, tick = _FakeStream(), _Check(), _Tick()
     client = _client(stream, check, tick)
     pending = asyncio.create_task(client.service_status())
@@ -194,16 +200,31 @@ async def test_a_pending_call_fails_with_the_phase_within_one_check(phase: str) 
     with pytest.raises(ControlError) as raised:
         await asyncio.wait_for(pending, _WAIT_SECONDS)
 
-    assert _phase(raised.value) == ("service_unavailable", True, phase)
+    ended = ("service_unavailable", True, "server_authorization_changed")
+    assert _phase(raised.value) == ended
     assert _closed(client) and stream.closed
-    # A later call is refused with the same phase, and nothing more is sent.
+    # A later call is refused the same way, and nothing more is sent.
     with pytest.raises(ControlError) as later:
         await client.service_status()
-    assert _phase(later.value) == ("service_unavailable", True, phase)
+    assert _phase(later.value) == ended
     with pytest.raises(ControlError) as reused:
         await client.connect()
-    assert _phase(reused.value) == ("service_unavailable", True, phase)
+    assert _phase(reused.value) == ended
     assert len(stream.sent) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", _PHASES)
+async def test_a_frame_refused_on_an_open_connection_is_a_changed_authorization(
+    phase: str,
+) -> None:
+    stream, check, tick = _FakeStream(), _Check(), _Tick()
+    client = _client(stream, check, tick)
+    check.current = phase
+    with pytest.raises(ControlError) as raised:
+        await client.service_status()
+    assert _phase(raised.value) == ("service_unavailable", True, "server_authorization_changed")
+    assert stream.sent == [] and _closed(client)
 
 
 @pytest.mark.anyio

@@ -30,7 +30,10 @@ the current generation with the one it accepted: unchanged is a pass; a selectio
 names the target, a replaced or removed target, or a new credential generation is
 ``server_authorization_changed``; anything else re-runs gate steps 2 to 6 and accepts the new
 generation when they pass, so a rewrite with the same content never ends a connection. A check
-that cannot be made keeps the last decision. A refusal is final for that connection.
+that cannot be made keeps the last decision. A refusal is final for that connection. An open
+connection (``service.client``) ends with ``server_authorization_changed`` whatever the refusal
+names: it already sent something, so FinishUP says it stopped sending; the next connection's
+admission names the refusal now in force, before anything is sent.
 
 **The credential generation** (``<target root>/config/credential-generation``,
 ``yoetz.credential-generation/1``) is bumped only by the owner's own commands: ``server login``
@@ -470,7 +473,9 @@ def preflight_refusal() -> str | None:
 
 
 # What stopped, in fixed words, for every authorization refusal: the line every CLI surface shows
-# before the phase's directive (``<phase>: <summary>``). No path, name or host.
+# before the phase's directive (``<phase>: <summary>``). No path, name or host. Every phase but
+# ``server_authorization_changed`` refuses a connection before anything is sent over it, and says
+# so; that one ends a connection that was open, and says FinishUP stopped sending over it.
 _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
     "zero_network_remote_selected": (
         "FinishUP refused the selected server's connection before anything was sent"
@@ -482,16 +487,19 @@ _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
         "FinishUP refused the selected server's connection before anything was sent"
     ),
     "repository_egress_held": (
-        "this repository's privacy policy on this computer allows no network use, so nothing "
-        "from it was sent to the selected FinishUP server"
+        "this repository's privacy policy on this computer allows no network use, so FinishUP "
+        "refused this connection to the selected FinishUP server before anything from it was sent"
     ),
     "repository_egress_kept": (
-        "this repository's work is kept on this computer, as its owner chose, so nothing from it "
-        "was sent to the selected FinishUP server"
+        "this repository's work is kept on this computer, as its owner chose, so FinishUP refused "
+        "this connection to the selected FinishUP server before anything from it was sent"
     ),
+    # An open connection ends with this phase whatever changed (``service.client``): it already
+    # sent something, so it says FinishUP stopped sending, never that nothing was sent, and that
+    # what the server received stays there (design v2 section 8.10).
     CHANGED: (
-        "the server selection, record or key this connection was made under changed, so FinishUP "
-        "ended it before sending more"
+        "what this connection to the selected FinishUP server was authorized under changed, so "
+        "FinishUP stopped sending over it; what that server already received stays there"
     ),
 }
 assert set(_REFUSAL_SUMMARIES) == AUTHORIZATION_REFUSALS

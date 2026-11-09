@@ -693,34 +693,40 @@ class TestWorkspaceBindingAndServerTargetReasons:
         # Maintainer decision of 2026-11-07, round 4: a repository whose privacy policy here
         # allows no network use is held from a server elsewhere; the agent asks the user once,
         # only the user allows it, and a decline is remembered with 'keep', which an agent may
-        # run. A kept repository is never asked about again. Both say nothing was sent.
+        # run. A kept repository is never asked about again. Both refuse a request before
+        # anything from the repository was sent, and say only that (never "nothing was sent",
+        # which could read as a hold over what that server received before; design v2 8.10).
         held = directive_for("repository_send_decision_required")
         assert held is not None and held.nudge is not None
         assert "allows no network use" in held.directive
-        assert "nothing from it was sent" in held.directive
+        assert "this request was refused before anything from it was sent" in held.directive
         assert "Ask the user once" in held.directive
         assert "'finishup server repositories add'" in held.directive
-        assert held.directive.endswith("then repeat this request.")
+        assert held.nudge.startswith("Then repeat it.")
         assert "'finishup server repositories keep'" in held.nudge
         assert "do not ask again" in held.nudge and "Never run 'add'" in held.nudge
         kept = directive_for("repository_kept_on_this_computer")
         assert kept is not None and kept.nudge is not None
         assert "kept on this computer" in kept.directive
-        assert "nothing from it was sent" in kept.directive
+        assert "this request was refused before anything from it was sent" in kept.directive
         assert "do not ask about it again" in kept.directive
+        for entry in (held, kept):
+            assert "nothing from it was sent" not in entry.directive
         assert "Ask" not in kept.directive
         assert "'finishup server repositories add'" in kept.nudge
         for entry in (held, kept):
             assert entry.guidance_uri is not None
 
-    def test_a_changed_authorization_says_what_changed_and_to_repeat_the_request(self) -> None:
-        # ADR-052: a connection to a server elsewhere ends when its selection, record or key
-        # changes; the agent repeats the request, never changes the selection or a key itself.
+    def test_a_changed_authorization_says_sending_stopped_and_to_repeat_the_request(self) -> None:
+        # ADR-052: an open connection to a server elsewhere ends when what it was authorized
+        # under changes; it already sent something, so the words say FinishUP stopped sending and
+        # that what the server received stays there, never that nothing was sent (design v2 8.10).
         entry = directive_for("server_connection_renew")
         assert entry is not None and entry.nudge is not None
-        assert "server selection, record or key" in entry.directive
-        assert "ended it before sending more" in entry.directive
-        assert "Repeat the same request with the same identity" in entry.directive
+        assert "authorized under changed" in entry.directive
+        assert "stopped sending over it" in entry.directive
+        assert "what that server received stays there" in entry.directive
+        assert "nothing" not in entry.directive
         assert entry.nudge == "Never change the server selection or a key for the owner."
         assert entry.guidance_uri is not None
 

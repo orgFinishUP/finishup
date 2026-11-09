@@ -254,7 +254,9 @@ async def test_a_change_to_what_a_connection_was_admitted_under_ends_it(
                 workspace.path,
                 no_network=True,
             )
-            expected = "repository_egress_held"
+            # An open connection ends as a changed authorization whatever changed (it already
+            # sent something); the next connection names the hold before anything is sent.
+            expected = "server_authorization_changed"
         with pytest.raises(ControlError) as raised:
             await client.service_status()
         assert (raised.value.reason, raised.value.phase) == ("service_unavailable", expected)
@@ -263,6 +265,13 @@ async def test_a_change_to_what_a_connection_was_admitted_under_ends_it(
         await asyncio.gather(*daemon.serving, return_exceptions=True)
     # The hello and the one call before the change, nothing after it.
     assert len(daemon.received(0)) == 2
+    if change == "hold":
+        with pytest.raises(ControlError) as refused:
+            await connect_service(
+                ControlClientKind.CLI, workspace_locator=workspace, serve_workspace=False
+            )
+        assert refused.value.phase == "repository_egress_held"
+        assert daemon.connections == 1
 
 
 @pytest.mark.anyio
@@ -330,8 +339,10 @@ async def test_a_prebuilt_binding_keeps_its_repository_check(
         record_repository_report(key, workspace.path, no_network=True)
         with pytest.raises(ControlError) as ended:
             await client.service_status()
-        assert ended.value.reason == "service_unavailable"
-        assert ended.value.phase in {"repository_egress_held", "server_authorization_changed"}
+        assert (ended.value.reason, ended.value.phase) == (
+            "service_unavailable",
+            "server_authorization_changed",
+        )
     finally:
         await client.close()
     # The hello and the one call before the hold, nothing after it.

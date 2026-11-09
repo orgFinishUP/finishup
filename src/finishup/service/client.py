@@ -157,6 +157,11 @@ _MAX_IN_FLIGHT: Final = 32
 # seconds; ``finishup.client.repository_hold.HOLD_RECHECK_SECONDS``, spelled here so the service
 # package imports no client code. A connection whose authorization lapses ends within one check.
 GENERATION_RECHECK_SECONDS: Final = 1.0
+# The phase every lapse of an open connection's authorization ends it with, whatever changed: it
+# has already sent something (its hello, at least), so what FinishUP can say is that it stopped
+# sending over it, never that nothing was sent (design v2 section 8.10, ADR-052). The refusal now
+# in force is named before anything is sent, by the next connection's admission.
+_LAPSED_PHASE: Final = "server_authorization_changed"
 # The hidden ``service run`` option a spawner whose root is the everyday installation passes, so the
 # service never reads a server selection its spawner did not use (``config.paths``).
 _AMBIENT_ROOT_OPTION: Final = "--ambient-root"
@@ -430,9 +435,11 @@ class AuthorizationCheck(Protocol):
     ``finishup.client.authorization.ConnectionAuthorization`` is the production check (and
     ``finishup.client.repository_hold.SendHold`` the hold alone); declared structurally here so
     the service package imports no client code. ``refusal()`` is None while the connection may go
-    on, else the closed remote phase that ends it (``server_authorization_changed``, a zero-network
-    report, the repository hold). It reads small owner-only files and never raises; a long-lived
-    holder re-checks it before every frame and at least once a second.
+    on, else the closed remote phase that refuses it (``server_authorization_changed``, a
+    zero-network report, the repository hold). It reads small owner-only files and never raises; a
+    long-lived holder re-checks it before every frame and at least once a second. Before anything
+    is written the phase itself refuses the connection; once it is open, any phase ends it as
+    ``server_authorization_changed``.
     """
 
     def refusal(self) -> str | None: ...
@@ -1211,8 +1218,10 @@ class ServiceClient(ControlClientPort):
     def _lapsed(self) -> ControlError | None:
         """The retryable refusal once this connection's authorization lapsed; else None.
 
-        ``AuthorizationCheck.refusal`` names the phase (ADR-052). A check that cannot be made
-        refuses nothing new.
+        Whatever ``AuthorizationCheck.refusal`` names, an open connection ends with
+        ``server_authorization_changed`` (``_LAPSED_PHASE``): it stopped sending over a
+        connection that already sent something (ADR-052). A check that cannot be made refuses
+        nothing new.
         """
 
         authorization = self._authorization
@@ -1224,7 +1233,7 @@ class ServiceClient(ControlClientPort):
             return None
         if phase is None:
             return None
-        return ControlError("service_unavailable", retryable=True, phase=phase)
+        return ControlError("service_unavailable", retryable=True, phase=_LAPSED_PHASE)
 
     async def _end_if_lapsed(self) -> None:
         """End this connection with its authorization's phase once it lapsed, and raise it."""
@@ -1238,8 +1247,9 @@ class ServiceClient(ControlClientPort):
     async def _watch_authorization(self, recheck: Callable[[], Awaitable[None]]) -> None:
         """Re-check the authorization after each ``recheck`` while the connection is open.
 
-        Once it lapses, the connection ends at once: every pending call fails with the phase, the
-        server's workspace calls go unanswered, and later calls are refused with it. The check
+        Once it lapses, the connection ends at once: every pending call fails with
+        ``server_authorization_changed``, the server's workspace calls go unanswered, and later
+        calls are refused with it. The check
         runs in a worker thread (a few ``lstat`` calls). ``recheck`` waits
         ``GENERATION_RECHECK_SECONDS`` in production; a test injects an event-driven tick.
         """

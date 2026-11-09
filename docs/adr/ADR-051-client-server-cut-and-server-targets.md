@@ -961,7 +961,10 @@ authorization lapsed answers every call `workspace_unavailable` (ADR-052).
   one of six phases — `zero_network_remote_selected`, `target_reauthorization_required`,
   `target_root_is_remote`, `repository_egress_held`, `repository_egress_kept`,
   `server_authorization_changed` — each with its own continuation, rendered alike by the CLI, MCP,
-  hooks, the terminal interface and the menu. A task whose agent's authorization lapsed records
+  hooks, the terminal interface and the menu. The first five refuse a connection before anything
+  is sent over it, and say so; an open connection that ends, whatever changed, is
+  `server_authorization_changed`, which says FinishUP stopped sending over it and that what the
+  server received stays there. A task whose agent's authorization lapsed records
   the existing `workspace_agent_unavailable` gap; no receipt field is added.
 
 ### 7. Credentials are pluggable and never on an agent-facing surface

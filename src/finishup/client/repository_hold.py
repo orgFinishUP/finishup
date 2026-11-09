@@ -115,12 +115,12 @@ KEPT_CONTINUATION: Final = "repository_kept_on_this_computer"
 # The one-line summaries a client surface shows for the two phases, before the directive; the
 # same shape as the zero-network summary, for every remote kind.
 SUMMARY: Final = (
-    "this repository's privacy policy on this computer allows no network use, so nothing from it "
-    "was sent to the selected FinishUP server"
+    "this repository's privacy policy on this computer allows no network use, so FinishUP "
+    "refused this connection to the selected FinishUP server before anything from it was sent"
 )
 KEPT_SUMMARY: Final = (
-    "this repository's work is kept on this computer, as its owner chose, so nothing from it was "
-    "sent to the selected FinishUP server"
+    "this repository's work is kept on this computer, as its owner chose, so FinishUP refused "
+    "this connection to the selected FinishUP server before anything from it was sent"
 )
 HOLD_PHASES: Final = frozenset({HELD, KEPT})
 

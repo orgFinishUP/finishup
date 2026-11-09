@@ -479,9 +479,9 @@ SERVICE_START_TIMEOUT_PHASE: str = "handshake_timeout"
 # (``zero_network_remote_selected``, maintainer decision of 2026-11-07). It also holds a
 # repository whose privacy policy on this computer allows no network use from a server elsewhere
 # until the owner allows it (``repository_egress_held``), and names the owner's choice to keep it
-# on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. A
-# connection the client admitted ends when the selection, server record or key it was made under
-# changes (``server_authorization_changed``, ADR-052). Every phase is retryable: the same request
+# on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. An
+# open connection the client admitted ends, whatever changed in what it was authorized under, with
+# ``server_authorization_changed`` (ADR-052). Every phase is retryable: the same request
 # succeeds once that phase's own repair is made.
 REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
     {
@@ -901,8 +901,8 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         # server elsewhere is selected: held until the owner decides, or kept here as they chose.
         "repository_egress_held": "repository_send_decision_required",
         "repository_egress_kept": "repository_kept_on_this_computer",
-        # A connection to a server elsewhere ended because the selection, the server record or
-        # the key it was made under changed (ADR-052): repeat the request under the current one.
+        # An open connection to a server elsewhere ended because what it was authorized under
+        # changed (ADR-052): FinishUP stopped sending over it; repeat the request.
         "server_authorization_changed": "server_connection_renew",
     }
 )
