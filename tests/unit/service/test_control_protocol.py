@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import struct
 from collections.abc import Buffer
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -38,6 +40,7 @@ from finishup.protocol.schemas import (
     load_schema_catalog,
     validate_schema_instance,
 )
+from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_ACTIVE_REQUESTS_PER_SESSION,
@@ -827,6 +830,10 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
         # The refusal is emitted by the active 2.7 service.  The released 2.5/2.6
         # hello-result schemas remain byte-frozen and cannot describe the new project method.
         validate_schema_instance("control-hello-result", "2.7.0", result)
+        # ADR-052: the unreleased ``server_profile`` method stays out of it, so the released
+        # 2.9.0 peer still decodes it and names ``manifest_mismatch`` (#436).
+        validate_schema_instance("control-hello-result", "2.9.0", result)
+        assert "server_profile" not in cast(tuple[str, ...], result["allowed_methods"])
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 
@@ -1444,3 +1451,214 @@ def test_the_workspace_agent_declaration_is_closed_and_sorted() -> None:
             WorkspaceClaim("directory", "sha256:" + "c" * 64, digest)
     with pytest.raises(ValueError, match="workspace_claim_identity_kind_invalid"):
         WorkspaceClaim(cast(Any, "client_claim"), "sha256:" + "c" * 64, _WORKTREE)
+
+
+# --- ADR-052: the server-profile revision on the claim-bound hello ----------------------------
+
+_REVISION = ServerProfileRevision("0" * 32, 4, "sha256:" + "a" * 64)
+_OTHER_REVISION = ServerProfileRevision("0" * 32, 5, "sha256:" + "b" * 64)
+
+
+def _profile_exchange(
+    presented: ServerProfileRevision | None,
+    current: ServerProfileRevision | None,
+    *,
+    claim: bool = True,
+) -> tuple[list[object], list[WorkspaceClaim], list[bytes]]:
+    """One handshake; the outcome of each side, the claims keyed, and the frames the service sent."""
+
+    sent: list[bytes] = []
+
+    class _Recording(_MemoryStream):
+        async def send_all(self, data: Buffer) -> None:
+            sent.append(bytes(data))
+            await super().send_all(data)
+
+    async def exercise() -> tuple[list[object], list[WorkspaceClaim]]:
+        client_peer = object()
+        client = _MemoryStream(object())
+        server = _Recording(client_peer)
+        client.other, server.other = server, client
+        keyed: list[WorkspaceClaim] = []
+
+        async def resolve_claim(value: WorkspaceClaim) -> RepositoryPrivacyContext:
+            keyed.append(value)
+            return _claim_context()
+
+        outcomes = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_claim=_claim() if claim else None,
+                workspace_agent=_agent() if claim else None,
+                server_profile=presented,
+            ),
+            server_handshake(
+                server,
+                client_peer,
+                _status(),
+                claim_context_resolver=resolve_claim,
+                profile_revision=lambda: current,
+            ),
+            return_exceptions=True,
+        )
+        return list(outcomes), keyed
+
+    outcomes, keyed = asyncio.run(exercise())
+    return outcomes, keyed, sent
+
+
+def test_a_claim_bound_hello_under_the_current_revision_is_admitted_and_bound_to_it() -> None:
+    outcomes, keyed, sent = _profile_exchange(_REVISION, _REVISION)
+
+    client_session, server_session = cast(list[ControlSession], outcomes)
+    assert client_session.server_profile == server_session.server_profile == _REVISION
+    assert client_session.workspace_handle == _CLAIM_HANDLE
+    assert keyed == [_claim()]
+    answer = decode_control_frame(sent[0])
+    assert answer["server_profile"] == {
+        "issuer": "0" * 32,
+        "revision": 4,
+        "profile_digest": "sha256:" + "a" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    ("presented", "current"),
+    [(_REVISION, _OTHER_REVISION), (None, _REVISION), (_REVISION, None)],
+    ids=["stale", "claim_without_revision", "service_issues_none"],
+)
+def test_a_claim_bound_hello_under_any_other_revision_is_not_admitted_before_any_work(
+    presented: ServerProfileRevision | None, current: ServerProfileRevision | None
+) -> None:
+    outcomes, keyed, sent = _profile_exchange(presented, current)
+
+    client_outcome, server_outcome = outcomes
+    assert isinstance(client_outcome, ControlProtocolError)
+    assert client_outcome.reason == "server_profile_changed"
+    assert isinstance(server_outcome, ControlProtocolError)
+    assert server_outcome.reason == "server_profile_changed"
+    # Nothing was keyed (no claim commitment, no handle, no agent) and one answer was sent: the
+    # service's current revision, with no binding.
+    assert keyed == []
+    assert len(sent) == 1
+    answer = decode_control_frame(sent[0])
+    assert "workspace_binding" not in answer and "workspace_handle" not in answer
+    assert ("server_profile" in answer) is (current is not None)
+
+
+def test_a_remote_hello_with_no_claim_is_still_held_to_its_revision() -> None:
+    admitted, _keyed, _sent = _profile_exchange(_REVISION, _REVISION, claim=False)
+    refused, _keyed, _sent = _profile_exchange(_REVISION, _OTHER_REVISION, claim=False)
+
+    assert cast(list[ControlSession], admitted)[1].server_profile == _REVISION
+    assert isinstance(refused[0], ControlProtocolError)
+    assert refused[0].reason == "server_profile_changed"
+
+
+def test_a_local_hello_names_no_revision_and_is_answered_without_one() -> None:
+    outcomes, keyed, sent = _profile_exchange(None, _REVISION, claim=False)
+
+    client_session, server_session = cast(list[ControlSession], outcomes)
+    assert client_session.server_profile is None and server_session.server_profile is None
+    assert keyed == []
+    assert "server_profile" not in decode_control_frame(sent[0])
+
+
+def test_a_remote_client_refuses_an_answer_that_names_no_revision() -> None:
+    """A service that issues no revisions (no resolver) admits the hello; the client does not
+    take a session the server never bound to its consent."""
+
+    async def exercise() -> list[object]:
+        client, server, client_peer = _stream_pair()
+        return list(
+            await asyncio.gather(
+                client_handshake(
+                    client,
+                    ControlClientKind.CLI,
+                    "0.1.0",
+                    workspace_claim=_claim(),
+                    server_profile=_REVISION,
+                ),
+                server_handshake(server, client_peer, _status()),
+                return_exceptions=True,
+            )
+        )
+
+    client_outcome = asyncio.run(exercise())[0]
+    assert isinstance(client_outcome, ControlProtocolError)
+    assert client_outcome.reason == "server_profile_changed"
+
+
+def test_a_background_agent_declares_its_role_and_a_connection_agent_sends_none() -> None:
+    async def exercise(role: str) -> tuple[ControlSession, bytes]:
+        frames: list[bytes] = []
+
+        class _Recording(_MemoryStream):
+            async def send_all(self, data: Buffer) -> None:
+                frames.append(bytes(data))
+                await super().send_all(data)
+
+        client_peer = object()
+        client = _Recording(object())
+        server = _MemoryStream(client_peer)
+        client.other, server.other = server, client
+        declaration = WorkspaceAgentDeclaration(("capture",), 1_024, role=cast(Any, role))
+        _client_session, server_session = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_claim=_claim(),
+                workspace_agent=declaration,
+            ),
+            server_handshake(server, client_peer, _status()),
+        )
+        return server_session, frames[0]
+
+    background, hello = asyncio.run(exercise("background"))
+    assert background.workspace_agent is not None
+    assert background.workspace_agent.role == "background"
+    assert decode_control_frame(hello)["workspace_agent"]["role"] == "background"
+    connection, hello = asyncio.run(exercise("connection"))
+    assert (
+        connection.workspace_agent is not None and connection.workspace_agent.role == "connection"
+    )
+    assert "role" not in decode_control_frame(hello)["workspace_agent"]
+    with pytest.raises(ValueError, match="workspace_agent_role_invalid"):
+        WorkspaceAgentDeclaration(("capture",), 1_024, role=cast(Any, "both"))
+
+
+def test_the_server_profile_method_and_its_refusal_are_on_the_wire() -> None:
+    request = {
+        "kind": "call",
+        "protocol_version": "1.0",
+        "rpc_id": _rpc_id(7),
+        "service_instance_id": _SERVICE_ID,
+        "service_generation": "1",
+        "method": "server_profile",
+        "body": {},
+    }
+    validate_schema_instance("control-request", "2.10.0", cast(JsonValue, request))
+    profile = json.loads(
+        (Path(__file__).parents[3] / "fixtures/service/server-profile.case.json").read_bytes()
+    )["valid"][0]["document"]
+    ok = {
+        "protocol_version": "1.0",
+        "rpc_id": _rpc_id(7),
+        "service_instance_id": _SERVICE_ID,
+        "service_generation": "1",
+        "method": "server_profile",
+        "outcome": "ok",
+        "body": profile,
+    }
+    validate_schema_instance("control-result", "2.10.0", cast(JsonValue, ok))
+    refused = {**ok, "method": "status", "outcome": "error"}
+    refused["body"] = {"code": "server_profile_changed", "retryable": False}
+    validate_schema_instance("control-result", "2.10.0", cast(JsonValue, refused))
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance(
+            "control-result", "2.10.0", cast(JsonValue, {**ok, "body": {"release": "0.1.0"}})
+        )
+    assert ControlMethod.SERVER_PROFILE.value == "server_profile"

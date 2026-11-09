@@ -686,6 +686,10 @@ def _transport_error(error: LocalControlTransportError) -> ControlError:
 
 
 def _protocol_error(error: ControlProtocolError) -> ControlError:
+    if error.reason == "server_profile_changed":
+        # The service did not admit this remote client's hello: the profile revision it consented
+        # to is not the one the server issues now (ADR-052). Nothing more was sent.
+        return ControlError("service_unavailable", retryable=True, phase="server_profile_changed")
     if error.reason == "manifest_mismatch":
         # The peer is a live FinishUP service from another installation: it answered with a
         # different schema-manifest digest. Retryable: it heals once the endpoint is owned by a
@@ -1617,9 +1621,26 @@ class ServiceClient(ControlClientPort):
                 settled.exception()
 
         if result.outcome == "error" and isinstance(result.body, ControlError):
-            # Only generation skew forces connection teardown. Projection errors
-            # (privacy_projection_unavailable / privacy_projection_blocked) must propagate so the
-            # agent can switch format or widen policy on the same connection.
+            # Only generation skew and a changed server profile force connection teardown.
+            # Projection errors (privacy_projection_unavailable / privacy_projection_blocked)
+            # must propagate so the agent can switch format or widen policy on the same connection.
+            if result.body.reason == "server_profile_changed":
+                # The service refused this request before any work: the profile revision this
+                # connection was admitted under is no longer the one it issues (ADR-052). The
+                # connection ends; every surface names the phase and its way back.
+                refused = ControlError(
+                    "service_unavailable", retryable=True, phase="server_profile_changed"
+                )
+                await self._fail_connection(refused)
+                return ControlResult(
+                    protocol_version=result.protocol_version,
+                    rpc_id=result.rpc_id,
+                    service_instance_id=result.service_instance_id,
+                    service_generation=result.service_generation,
+                    method=result.method,
+                    outcome="error",
+                    body=refused,
+                )
             if result.body.reason == "service_generation_changed":
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
                 return ControlResult(

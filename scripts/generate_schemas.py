@@ -10340,7 +10340,138 @@ def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 "type": "object",
             }
         )
+    _add_server_profile(entry, document)
     return document
+
+
+_SERVER_PROFILE_SCHEMA_ID: Final = SCHEMA_NAMESPACE + "service/server-profile-1.0.0.schema.json"
+
+
+def _server_profile_revision_schema() -> dict[str, JsonValue]:
+    """The consented profile revision triple (ADR-052): issuer, revision number, digest."""
+
+    return {
+        "additionalProperties": False,
+        "properties": {
+            "issuer": {
+                "maxLength": 32,
+                "minLength": 32,
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string",
+            },
+            "profile_digest": {
+                "maxLength": 71,
+                "minLength": 71,
+                "pattern": _CONTROL_DIGEST_PATTERN,
+                "type": "string",
+            },
+            "revision": {"maximum": 2**53 - 1, "minimum": 1, "type": "integer"},
+        },
+        "required": ["issuer", "revision", "profile_digest"],
+        "type": "object",
+    }
+
+
+def _add_server_profile(entry: _RegistryEntry, document: dict[str, JsonValue]) -> None:
+    """The server profile on the control wire (ADR-052, in place on the unreleased 2.10.0).
+
+    ``control-hello`` gains ``server_profile``, the profile revision a remote client consented to
+    (the service admits a claim-bound hello only with its current one), and its
+    ``workspace_agent`` an optional ``role`` (``connection``, the default, or ``background``: the
+    helper's agent, which answers background work). ``control-hello-result`` gains
+    ``server_profile``, the service's current revision, answered to a hello that carried one or a
+    claim, and the method ``server_profile`` in the full method list. ``control-request`` and
+    ``control-result`` gain that method, whose answer is a ``server-profile`` 1.0.0 document,
+    and the error code ``server_profile_changed``.
+    """
+
+    invalid = SchemaGenerationError(
+        "control_server_profile_template_invalid", entries=(entry.relative_path,)
+    )
+    if entry.schema_name == "control-hello":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        agent = cast(dict[str, JsonValue], properties.get("workspace_agent"))
+        if "server_profile" in properties or not isinstance(agent, dict):
+            raise invalid
+        properties["server_profile"] = _server_profile_revision_schema()
+        cast(dict[str, JsonValue], agent["properties"])["role"] = {
+            "enum": ["background", "connection"],
+            "type": "string",
+        }
+        return
+    if entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        allowed = cast(dict[str, JsonValue], properties["allowed_methods"])
+        lists = cast(list[JsonValue], allowed["enum"])
+        released = cast(list[JsonValue], lists[1])
+        items = cast(list[JsonValue], cast(dict[str, JsonValue], allowed["items"])["enum"])
+        if "server_profile" in properties or "server_profile" in released or len(lists) != 2:
+            raise invalid
+        # The released full list stays admitted: the manifest-mismatch answer still lists only
+        # what a released peer knows (#436). An admitted session's answer lists the method.
+        full = [*released, "server_profile"]
+        full.sort(key=lambda value: str(value).encode("ascii"))
+        lists.append(full)
+        items.append("server_profile")
+        items.sort(key=lambda value: str(value).encode("ascii"))
+        allowed["maxItems"] = len(full)
+        properties["server_profile"] = _server_profile_revision_schema()
+        return
+    branches = cast(list[JsonValue], document["oneOf"])
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+
+    def method_of(branch: JsonValue) -> str | None:
+        properties = cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])
+        method = properties.get("method")
+        return cast(str, cast(dict[str, JsonValue], method)["const"]) if method else None
+
+    templates = [branch for branch in branches if method_of(branch) == "service_status"]
+    if not templates or any(method_of(branch) == "server_profile" for branch in branches):
+        raise invalid
+    added: list[JsonValue] = []
+    for template in templates:
+        branch = copy.deepcopy(cast(dict[str, JsonValue], template))
+        properties = cast(dict[str, JsonValue], branch["properties"])
+        properties["method"] = {"const": "server_profile"}
+        body = cast(dict[str, JsonValue], properties["body"])
+        if body.get("$ref") == "#/$defs/service_status_body":
+            properties["body"] = (
+                {"$ref": "#/$defs/server_profile_body"}
+                if entry.schema_name == "control-request"
+                else {"$ref": _SERVER_PROFILE_SCHEMA_ID}
+            )
+        added.append(branch)
+    position = min(
+        index for index, branch in enumerate(branches) if method_of(branch) == "service_lock"
+    )
+    branches[position:position] = added
+    if entry.schema_name == "control-request":
+        if "server_profile_body" in definitions:
+            raise invalid
+        definitions["server_profile_body"] = copy.deepcopy(definitions["service_status_body"])
+        document["$defs"] = dict(sorted(definitions.items()))
+        return
+    error_body = cast(dict[str, JsonValue], definitions["error_body"])
+    generic = [
+        branch
+        for branch in cast(list[JsonValue], error_body["oneOf"])
+        if "enum"
+        in cast(
+            dict[str, JsonValue],
+            cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])["code"],
+        )
+    ]
+    if len(generic) != 1:
+        raise invalid
+    code = cast(
+        dict[str, JsonValue],
+        cast(dict[str, JsonValue], cast(dict[str, JsonValue], generic[0])["properties"])["code"],
+    )
+    codes = cast(list[JsonValue], code["enum"])
+    if "server_profile_changed" in codes:
+        raise invalid
+    codes.append("server_profile_changed")
+    codes.sort(key=lambda value: str(value).encode("ascii"))
 
 
 def _add_observation_client_attestation(
