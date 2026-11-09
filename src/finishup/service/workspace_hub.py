@@ -22,8 +22,16 @@ waiting, and the daemon ends a connection whose write was interrupted.
 
 A handle names one worktree (the server derives it from the claim's commitment and its worktree
 digest), so every channel under one handle serves the same tree. A channel whose claim names
-another worktree is never admitted under a handle that already has a live one. A live control
-call prefers the agent its own connection offered, when that connection offered one.
+another worktree is never admitted under a handle that already has a live one.
+
+Which agent answers (ADR-052, design v2 section 8.5): each call goes to exactly one channel, so a
+connection's agent and the helper's never compete. An agent declares its ``role``: ``connection``
+(the agent of the connection in front of the workspace) or ``background`` (the helper's, which
+stays when the connections that started work have gone). A live control call goes to the agent
+its own connection offered, else the newest live background agent, else the newest connection
+agent. Background work (a detached review, a verification sweep, a timer) goes to the newest
+live background agent, else the newest connection agent, so a client with no helper is still
+answered as before.
 """
 
 from __future__ import annotations
@@ -531,6 +539,13 @@ class WorkspaceAgentHub:
             return preferred
         live = [channel for channel in self._channels.get(handle, ()) if not channel.closed]
         declaring = [channel for channel in live if channel.declares(operation)]
+        background = [
+            channel for channel in declaring if channel.declaration.role == "background"
+        ]
+        if background:
+            # The helper's agent (ADR-052): it answers every call no connection's own agent
+            # takes, live or background, so a connection's agent is never raced for it.
+            return background[-1]
         if declaring:
             # Every channel under a handle serves its one worktree; the newest connection is the
             # agent most likely still in front of it.

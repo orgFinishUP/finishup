@@ -750,3 +750,81 @@ async def test_an_agent_whose_authorization_lapsed_mid_task_leaves_the_typed_gap
     sentence = check_time_change_gap_sentence(check_time_change_unavailable_reason_gap(reason))
     assert sentence is not None and "workspace agent on the client machine" in sentence
     assert os.fspath(root) not in sentence
+
+
+# --- ADR-052: a connection's agent and the helper's background agent never compete -------------
+
+
+def _background(*operations: str) -> WorkspaceAgentDeclaration:
+    names = operations or WORKSPACE_OPERATION_NAMES
+    return WorkspaceAgentDeclaration(
+        tuple(sorted(names, key=str.encode)), 6_291_456, role="background"
+    )
+
+
+async def test_background_work_goes_to_the_helpers_agent_over_a_newer_connection() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    connection: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert (len(helper), len(connection)) == (1, 0)
+
+
+async def test_a_live_call_goes_to_its_own_connections_agent_never_the_helpers() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    own: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    channel = await _register(hub, lambda call: _ok(call, _BASE), sent=own)
+
+    with live_call_scope(channel):
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0)
+
+    assert (len(helper), len(own)) == (0, 1)
+
+
+async def test_a_live_call_whose_connection_offered_no_agent_goes_to_the_helper() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    other: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    await _register(hub, lambda call: _ok(call, _BASE), sent=other)
+
+    with live_call_scope(None):
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0)
+
+    assert (len(helper), len(other)) == (1, 0)
+
+
+async def test_with_no_helper_background_work_is_answered_by_a_connection_as_before() -> None:
+    hub = _hub()
+    connection: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    base = await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert base == _BASE and len(connection) == 1
+
+
+async def test_a_helper_that_does_not_declare_the_operation_leaves_it_to_a_connection() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    connection: list[WorkspaceCall] = []
+    await _register(
+        hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background("capture")
+    )
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert (len(helper), len(connection)) == (0, 1)
