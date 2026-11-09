@@ -272,7 +272,7 @@ class HelperAgent:
         self._binding = binding
         self._drain = drain
         self._dial = dial
-        self._transport = transport
+        self._transport: ConnectionTransport = transport
         self._on_profile_changed = on_profile_changed
         self._reconnect_wait = reconnect_wait
         self._client: ServiceClient | None = None

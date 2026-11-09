@@ -196,7 +196,11 @@ def test_a_cli_connection_registers_its_workspace_once_and_starts_a_helper_only_
         targets.write_selection(record)
     reset_selection_memo()
     spawned: list[str] = []
-    monkeypatch.setattr(helper_status, "spawn_helper", lambda _root, target: spawned.append(target))
+
+    def spawn(_root: Path, target: str) -> None:
+        spawned.append(target)
+
+    monkeypatch.setattr(helper_status, "spawn_helper", spawn)
     worktree = tmp_path / "repo"
     worktree.mkdir()
     subprocess.run(("git", "init", "-q", str(worktree)), check=True)  # noqa: S607

@@ -520,9 +520,11 @@ async def build_service_client(
         output_is_controlling_tty=output_is_controlling_tty,
         serve_workspace=True,
     )
+    import asyncio
+
     from finishup.client.helper_runtime import register_for_background
 
-    await anyio.to_thread.run_sync(register_for_background, client, "cli")
+    await asyncio.to_thread(register_for_background, client, "cli")
     return client
 
 

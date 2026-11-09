@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
@@ -105,7 +105,7 @@ _QUESTION: contextvars.ContextVar[HostKeyQuestion | None] = contextvars.ContextV
 
 
 @contextmanager
-def host_key_question(question: HostKeyQuestion | None) -> Iterator[None]:
+def host_key_question(question: HostKeyQuestion | None) -> Generator[None]:
     """Let ``SshProfileSource.fetch`` ask about an unknown host key inside this block."""
 
     token = _QUESTION.set(question)

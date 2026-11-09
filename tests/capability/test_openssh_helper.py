@@ -236,7 +236,7 @@ def server_root() -> Iterator[Path]:
 
 def _ssh_record(sshd: Sshd, endpoint: Path) -> tuple[ServerTarget, Path]:
     with targets.registry_lock():
-        record, root = targets.new_remote_target(
+        _record, root = targets.new_remote_target(
             "lab",
             "ssh",
             user=sshd.user,

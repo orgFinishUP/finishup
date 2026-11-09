@@ -278,7 +278,7 @@ def read_helper_status(root: Path) -> HelperStatus | None:
         if type(parsed) is not dict:
             return None
         source = cast(dict[str, JsonValue], parsed)
-        if set(source) != _STATUS_FIELDS or source["schema"] != HELPER_STATUS_SCHEMA:
+        if frozenset(source) != _STATUS_FIELDS or source["schema"] != HELPER_STATUS_SCHEMA:
             return None
         status = HelperStatus(
             cast(int, source["generation"]),

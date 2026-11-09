@@ -87,7 +87,6 @@ from finishup.protocol.canonical import JsonValue, canonical_encode
 if TYPE_CHECKING:
     from finishup.cli.trusted_console import TrustedForegroundConsole
     from finishup.cli.zero_network_selection import ZeroNetworkSelection
-    from finishup.client.helper_status import ConnectionStyle
     from finishup.client.repository_hold import HoldDecision, RepositoryChoice
     from finishup.client.server_folders import FolderRecord, OutsideReadMode
     from finishup.client.server_profile import FetchedProfile
@@ -2821,7 +2820,7 @@ def server_set(
                 raise ServerCommandRefused("style_not_applicable")
             # What this client runs for the target ends first, so nothing keeps the old style.
             _stop_for_remove(stored, root)
-            write_connection_style(root, cast("ConnectionStyle", style))
+            write_connection_style(root, style)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     except OSError:

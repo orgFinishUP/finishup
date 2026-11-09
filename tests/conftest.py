@@ -270,7 +270,7 @@ def _no_real_openssh(  # pyright: ignore[reportUnusedFunction]
     real one against a private ``sshd``.
     """
 
-    if "capability" in Path(str(request.node.fspath)).parts:
+    if "capability" in request.path.parts:
         return
     try:
         import finishup.client.ssh_transport as ssh_transport
