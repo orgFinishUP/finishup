@@ -207,12 +207,14 @@ async def read_everyday_repository(
     installation_exists: Callable[[], bool] | None = None,
     machine_request: Callable[[], JsonObject] | None = None,
     now: datetime | None = None,
+    key: str | None = None,
 ) -> EverydayReads:
     """Ask this computer's everyday FinishUP about the repository whose worktree is ``locator``.
 
-    ``locator`` is the worktree's top (absolute, normal). Records what it learns and returns it;
-    never raises (see the module text). Runs on the caller's event loop: call it in a fresh
-    ``contextvars`` context, so its ``selection_override(None)`` stays its own.
+    ``locator`` is the worktree's top (absolute, normal); ``key`` its report key when the caller
+    already derived it. Records what it learns and returns it; never raises (see the module
+    text). Runs on the caller's event loop: call it in a fresh ``contextvars`` context, so its
+    ``selection_override(None)`` stays its own.
     """
 
     from finishup.config.paths import PathSafetyError, selection_override
@@ -231,7 +233,8 @@ async def read_everyday_repository(
                 request = (machine_request or _machine_request)()
             except Exception:  # noqa: BLE001 - MachineScopeError and friends: not readable now
                 return _UNREADABLE
-            key = await repository_key_for(worktree)
+            if key is None:
+                key = await repository_key_for(worktree)
             if key is None:
                 return _UNREADABLE
             dial = connect or cast(Connect, _connect)
@@ -375,7 +378,14 @@ def _root_kind() -> Literal["everyday", "remote", "other"]:
 async def _session_start_refresh(worktree: str, budget_seconds: float) -> bool:
     from finishup.client.everyday_policy import HOOK_LOCK_WAIT_SECONDS, note_repository_worktree
 
-    key = await repository_key_for(worktree)
+    loop = asyncio.get_running_loop()
+    expires = loop.time() + budget_seconds
+    try:
+        # The whole pass is bounded, the repository's one Git read included.
+        async with asyncio.timeout_at(expires):
+            key = await repository_key_for(worktree)
+    except TimeoutError:
+        return False
     if key is None:
         return False
     if not report_needs_refresh(key):
@@ -385,8 +395,14 @@ async def _session_start_refresh(worktree: str, budget_seconds: float) -> bool:
             # fenced and shown as well.
             note_repository_worktree(key, worktree, lock_wait_seconds=HOOK_LOCK_WAIT_SECONDS)
         return False
+    remaining = expires - loop.time()
+    if remaining <= 0:
+        return False
     reads = await _live_read(
-        worktree, budget_seconds=budget_seconds, lock_wait_seconds=HOOK_LOCK_WAIT_SECONDS
+        worktree,
+        budget_seconds=remaining,
+        lock_wait_seconds=HOOK_LOCK_WAIT_SECONDS,
+        key=key,
     )
     return reads.repository in {"no_network", "network_permitted"}
 

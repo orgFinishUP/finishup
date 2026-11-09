@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import math
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -51,10 +52,13 @@ def live(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
 
     asked: list[tuple[str, float]] = []
 
-    async def read(locator: str, *, budget_seconds: float, lock_wait_seconds: float) -> object:
-        asked.append((locator, budget_seconds))
-        key = await repository_key_for(locator)
-        assert key is not None
+    async def read(
+        locator: str, *, budget_seconds: float, lock_wait_seconds: float, key: str | None
+    ) -> object:
+        # The key the session start already derived is passed on, never derived again.
+        assert key is not None and key == await repository_key_for(locator)
+        # What is left of the half second (or the hook's budget) once the key was derived.
+        asked.append((locator, math.ceil(budget_seconds * 10) / 10))
         record_repository_report(key, locator, no_network=True)
         return EverydayReads("network_permitted", "no_network")
 
@@ -194,6 +198,9 @@ def test_a_clear_or_local_only_session_start_asks_nothing(
     _session_start(tmp_path, workspace, source=source, skip_service=skip_service)
     assert live == []
     assert repository_report(_key(workspace)) is None
+    # The same session start, of the asking kind, asks.
+    _session_start(tmp_path, workspace)
+    assert live == [(workspace, 0.5)]
 
 
 def test_a_named_local_server_asks_nothing(
@@ -209,3 +216,12 @@ def test_a_named_local_server_asks_nothing(
     reset_selection_memo()
     _session_start(tmp_path, workspace)
     assert live == []
+    # A server on this computer asks nothing; one elsewhere does.
+    with targets.registry_lock():
+        remote, _remote_root = targets.new_remote_target(
+            "lab", "ssh", user="owner", host="lab.example", port=22
+        )
+    targets.write_selection(remote)
+    reset_selection_memo()
+    _session_start(tmp_path, workspace)
+    assert live == [(workspace, 0.5)]
