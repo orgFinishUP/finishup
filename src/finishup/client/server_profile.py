@@ -33,7 +33,12 @@ profile and compares it with the consented one (``consent_envelope.compare``):
 down to it (stricter: a later widening, even back to what the owner once confirmed, asks again)
 and keeps the notice ``server status`` shows (``server_profile_narrowed``); on the same offer under
 a new revision it records only the revision. It changes only the consent of the record as stored
-now, under the registry lock (SRV-12).
+now, under the registry lock (SRV-12). A narrower profile is cached only after the reduced consent
+is committed (the envelope, then the record): readers never admit the narrower revision under the
+broader consent, so a refresh that stops part way can never let the broader offer back as
+``same`` later. Stopping between the two consent writes leaves them disagreeing, which refuses
+(``server_profile_changed``) until the owner agrees again; stopping after them leaves the older
+cache, wider than the consent now, which refuses until the next refresh records the profile.
 
 In this release no profile source is registered for any kind (``PROFILE_SOURCES``), so nothing is
 fetched: layer 4 registers SSH (``service profile --json`` on the server), layer 5 HTTPS.
@@ -367,6 +372,14 @@ def consent_verdict(record: ServerTarget) -> ConsentVerdict:
         return ConsentVerdict(_PROFILE_CHANGED)
     if consented is None or cached is None:
         return ConsentVerdict(_PROFILE_CHANGED)
+    return _verdict_against(record, consent, consented, cached)
+
+
+def _verdict_against(
+    record: ServerTarget, consent: ServerConsent, consented: ConsentEnvelope, cached: _Cached
+) -> ConsentVerdict:
+    """``consent_verdict`` for a given consented envelope and profile (cached or just fetched)."""
+
     if cached.profile.revision.issuer != consent.issuer:
         # Another issuer is another server installation's revisions (its state was made anew):
         # whatever it offers, the owner agrees again.
@@ -479,33 +492,52 @@ def refresh_profile(
 ) -> ConsentVerdict:
     """Record a newly fetched profile and adjust the consent to it where that is quiet.
 
-    The cache is written first. Then, compared with the consent as stored now: the same offer
-    under a new revision records the revision; a narrower one adjusts the consent down to it and
-    keeps the notice; anything else leaves the consent as it is (the next connection is refused
-    and only the owner agrees again). The caller holds the registry lock. Returns the verdict.
+    Compared with the consent as stored now: the same offer under a new revision records the
+    revision; a narrower one adjusts the consent down to it and keeps the notice; anything else
+    leaves the consent as it is (the next connection is refused and only the owner agrees again).
+    The profile is cached last when it narrows the consent, after the reduced consent is
+    committed, and first otherwise (see the module text). The caller holds the registry lock.
+    Returns the verdict.
     """
 
     stamp = now or _now()
     root = target_root(record.target_id)
     cached = _cached_from(fetched, stamp)
-    _write(_cache_path(root), _encode_cache(cached))
     stored = read_target(root)
     if stored is None or stored.target_id != record.target_id:
         raise TargetError("target_unknown")
-    verdict = consent_verdict(stored)
     consent = stored.consent
+    try:
+        consented = None if consent is None else read_consented_envelope(root, consent)
+    except Exception:  # noqa: BLE001 - a consent that cannot be read is no consent
+        consented = None
+    if consent is None or consented is None:
+        verdict = ConsentVerdict(_PROFILE_CHANGED)
+    else:
+        verdict = _verdict_against(stored, consent, consented, cached)
     if verdict.phase is not None or consent is None:
+        # Refused either way: caching it only makes the next connection refuse before the dial.
+        _write(_cache_path(root), _encode_cache(cached))
         return verdict
     current = _current_envelope(stored, consent, cached)
     if isinstance(current, str):  # pragma: no cover - the verdict already passed
         return ConsentVerdict(current)
     if verdict.narrowed:
-        _write(_envelope_path(root), canonical_bytes(current) + b"\n")
+        # Never exposed before the reduced consent is committed: a reader would admit the
+        # narrower revision under the broader consent, and a refresh that stopped here would let
+        # the broader offer back later as ``same`` (D8).
         reduced = verdict.coverage_reduced | frozenset(consent.coverage_reduced)
         adjusted = _consent_for(
             current, cached.profile, adjusted_at=stamp, coverage_reduced=reduced
         )
-    elif (consent.issuer, consent.revision) != (
+        _write(_envelope_path(root), canonical_bytes(current) + b"\n")
+        write_target(root, replace(stored, consent=adjusted))
+        _write(_cache_path(root), _encode_cache(cached))
+        return verdict
+    # The same offer: cached first, so a reader never names a revision the server no longer
+    # issues; the record then follows it.
+    _write(_cache_path(root), _encode_cache(cached))
+    if (consent.issuer, consent.revision) != (
         cached.profile.revision.issuer,
         cached.profile.revision.revision,
     ) or consent.profile_digest != cached.profile.profile_digest:
@@ -515,7 +547,5 @@ def refresh_profile(
             issuer=cached.profile.revision.issuer,
             revision=cached.profile.revision.revision,
         )
-    else:
-        return verdict
-    write_target(root, replace(stored, consent=adjusted))
+        write_target(root, replace(stored, consent=adjusted))
     return verdict

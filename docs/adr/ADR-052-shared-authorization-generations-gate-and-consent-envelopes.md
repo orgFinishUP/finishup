@@ -318,7 +318,12 @@ counted on its own, section 2.4) and its revision.
   widening, even back to what the owner once confirmed, asks again; `server status` shows the
   `server_profile_narrowed` notice until the owner next confirms. The same offer under a new
   revision records only the revision. The record is changed field by field as stored, under the
-  registry lock (SRV-12).
+  registry lock (SRV-12). A narrower profile is cached only after the reduced consent is committed
+  (the envelope, then the record), so no reader admits the narrower revision under the broader
+  consent and a refresh that stops part way never lets the broader offer back as `same` (review of
+  layer 3, B1): stopped between the two consent writes, they disagree and refuse until the owner
+  agrees again; stopped after them, the older cache is wider than the consent and refuses until
+  the next refresh records the profile.
 - **The server holds it before any work.** A hello that names a revision or a claim is admitted
   only under the revision the service issues now; otherwise the service answers its current one
   and closes, before the claim is keyed, an agent registered or a request read. Every request

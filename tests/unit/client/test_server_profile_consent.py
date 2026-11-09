@@ -285,3 +285,77 @@ def test_another_endpoint_identity_asks_again(remote: ServerTarget) -> None:
     verdict = refreshed(consented, profile_document(revision=2), identity="sha256:" + "9" * 64)
 
     assert verdict.phase == "server_profile_changed"
+
+
+# --- a narrowing that stops part way (review of layer 3: B1) -------------------------------------
+
+
+class _Stop:
+    """Stops a refresh when it writes the file called ``name`` (a crash, as readers see it), while
+    ``armed``; ``written`` names what it wrote before. Disarmed, every write goes through (never
+    ``monkeypatch.undo()``: it would also restore this test's isolated home)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        from finishup.client import server_profile as module
+
+        self.name = name
+        self.armed = True
+        self.written: list[str] = []
+        real = module._write  # pyright: ignore[reportPrivateUsage]
+
+        def write(path: Path, encoded: bytes) -> None:
+            if self.armed:
+                if path.name == self.name:
+                    raise TargetError("target_root_unsafe")
+                self.written.append(path.name)
+            real(path, encoded)
+
+        monkeypatch.setattr(module, "_write", write)
+
+
+def test_a_narrowing_stopped_before_its_consent_is_committed_exposes_nothing_narrower(
+    remote: ServerTarget, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Readers never admit the narrower revision under the broader consent: nothing of it is
+    cached before the reduced consent is (D8)."""
+
+    consented = consent_to(remote, profile_document(review=_POLICY))
+    before = _stored(remote)
+    stop = _Stop(monkeypatch, "consent-envelope.json")
+
+    with pytest.raises(TargetError):
+        refreshed(consented, profile_document(revision=2))
+
+    verdict = consent_verdict(_stored(remote))
+    assert verdict.phase is None and not verdict.narrowed
+    assert verdict.revision is not None and verdict.revision.revision == 1
+    assert _stored(remote) == before
+    assert stop.written == []
+
+
+def test_a_narrowing_stopped_after_its_consent_is_committed_never_lets_the_wider_offer_back(
+    remote: ServerTarget, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reduced consent is committed first; until the narrower profile is cached, the older
+    one is wider than it and refuses. Restoring the wider offer later asks the owner again; the
+    narrower one is admitted under its own revision."""
+
+    consented = consent_to(remote, profile_document(review=_POLICY))
+    stop = _Stop(monkeypatch, "server-profile.json")
+
+    with pytest.raises(TargetError):
+        refreshed(consented, profile_document(revision=2))
+
+    adjusted = _stored(remote)
+    assert _phase(adjusted) == "server_profile_changed"
+    assert adjusted.consent is not None
+    assert (adjusted.consent.revision, adjusted.consent.coverage_reduced) == (2, ("review",))
+    assert stop.written == ["consent-envelope.json"]
+    stop.armed = False
+    assert refreshed(adjusted, profile_document(review=_POLICY, revision=3)).phase == (
+        "server_profile_changed"
+    )
+    again = refreshed(adjusted, profile_document(revision=2))
+    assert again.phase is None and not again.narrowed
+    revision = gate(_stored(remote))
+    assert revision is not None and revision.revision == 2
