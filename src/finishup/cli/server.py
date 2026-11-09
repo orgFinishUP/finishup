@@ -540,10 +540,9 @@ def _emit(lines: tuple[str, ...]) -> None:
 
 
 def _warn_open_sessions() -> None:
-    typer.echo(
-        "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP "
-        "MCP bridge keeps the server it started with."
-    )
+    from finishup.cli.zero_network_selection import OPEN_SESSIONS_LINE
+
+    typer.echo(OPEN_SESSIONS_LINE)
 
 
 @server_app.command("add")

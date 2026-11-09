@@ -3101,7 +3101,8 @@ class FinishUpTui(App[int]):
             (
                 *(() if switch.left_open else switch.left_lines),
                 "New hooks and commands use it now. Restart open agent sessions: a running",
-                "FinishUP MCP bridge keeps the server it started with.",
+                "FinishUP MCP bridge keeps a server on this computer it started with, and ends a",
+                "connection to a server elsewhere to follow the new selection.",
             ),
         )
         if switch.left_open:

@@ -27,6 +27,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final, cast
 
 from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
+from finishup.client.authorization import ConnectionAuthorization, authorize_active_root
 from finishup.client.repository_hold import require_sendable
 from finishup.client.targets import (
     TargetError,
@@ -35,7 +36,7 @@ from finishup.client.targets import (
 )
 from finishup.client.workspace_claim import workspace_claim_for_root
 from finishup.ports.control import WorkspaceLocator
-from finishup.service.client import ClientWorkspaceBinding
+from finishup.service.client import AuthorizationCheck, ClientWorkspaceBinding
 
 if TYPE_CHECKING:
     from finishup.client.targets import ServerTarget
@@ -53,6 +54,7 @@ async def remote_workspace_binding(
     serve_workspace: bool = True,
     protected: Sequence[str] | None = None,
     target: ServerTarget | None = None,
+    authorization: ConnectionAuthorization | None = None,
 ) -> ClientWorkspaceBinding:
     """The claim on ``workspace`` under ``claim_salt``, with its agent when ``serve_workspace``.
 
@@ -65,9 +67,12 @@ async def remote_workspace_binding(
     with a path instead.
 
     With ``target`` (the remote record whose salt ``claim_salt`` is), the repository's hold is
-    decided once the root is resolved (its one Git read) and before the claim:
-    ``repository_hold.require_sendable`` raises ``TargetError("repository_egress_held")`` or
-    ``TargetError("repository_egress_kept")``, and otherwise the binding carries its ``hold``.
+    decided once the root is resolved (its one Git read) and before the claim (the gate's last
+    step, ``client.authorization``): ``repository_hold.require_sendable`` raises
+    ``TargetError("repository_egress_held")`` or ``TargetError("repository_egress_kept")``.
+    Otherwise the binding carries the check a long-lived holder makes before every frame and on
+    its watch: ``authorization`` (the connection's admission) bound to this repository, or the
+    repository's hold alone when no admission was passed.
     """
 
     if type(workspace) is not WorkspaceLocator:
@@ -77,9 +82,12 @@ async def remote_workspace_binding(
         raise RepositoryIdentityError("repository_locator_invalid")
     root = await canonical_workspace_root(workspace)
     hold = None if target is None else require_sendable(target, root)
+    check: AuthorizationCheck | None = hold
+    if authorization is not None:
+        check = authorization if hold is None else authorization.for_repository(hold.key)
     claim = workspace_claim_for_root(root, claim_salt, worktree)
     if not serve_workspace:
-        return ClientWorkspaceBinding(claim, hold=hold)
+        return ClientWorkspaceBinding(claim, authorization=check)
     from finishup.client.server_folders import outside_reads_reader
     from finishup.client.workspace_agent import WorkspaceAgentHandler
 
@@ -95,7 +103,7 @@ async def remote_workspace_binding(
         WorkspaceAgentHandler(
             workspace, protected=protected, opened_handle_key=opened_key, outside_reads=outside
         ),
-        hold=hold,
+        authorization=check,
     )
 
 
@@ -116,7 +124,10 @@ def is_remote_active_root() -> bool:
 
 
 async def binding_for_active_root(
-    locator: WorkspaceLocator | None, *, serve_workspace: bool
+    locator: WorkspaceLocator | None,
+    *,
+    serve_workspace: bool,
+    authorization: ConnectionAuthorization | None = None,
 ) -> ClientWorkspaceBinding | None:
     """The workspace binding a connection from this process sends, or None to send the locator.
 
@@ -133,16 +144,26 @@ async def binding_for_active_root(
     ``RepositoryIdentityError``; the caller must not fall back to sending the locator. Then a
     repository held from that target, or kept on this computer, raises
     ``repository_egress_held`` or ``repository_egress_kept`` (``remote_workspace_binding``).
+
+    For a remote root the shared gate runs first (``client.authorization``; steps 1 to 4), unless
+    the caller passes the ``authorization`` it already admitted: in this release no remote kind is
+    open, so every remote root is refused there as ``target_root_is_remote``.
     """
 
     record = active_target_record()
     require_current_authorization(record)
-    if record is None or not record.is_remote or locator is None:
+    if record is None or not record.is_remote:
+        return None
+    if authorization is None:
+        authorization = authorize_active_root()
+        if authorization is None:
+            raise TargetError("target_root_is_remote")
+    if locator is None:
         return None
     try:
         salt = base64.b64decode(cast(str, record.claim_salt), validate=True)
     except (TypeError, ValueError, binascii.Error):
         raise TargetError("target_record_invalid") from None
     return await remote_workspace_binding(
-        locator, salt, serve_workspace=serve_workspace, target=record
+        locator, salt, serve_workspace=serve_workspace, target=record, authorization=authorization
     )

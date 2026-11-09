@@ -672,6 +672,11 @@ class SendHold:
     def held(self) -> bool:
         return self.phase() is not None
 
+    def refusal(self) -> str | None:
+        """The hold as a connection's authorization check (``service.client.AuthorizationCheck``)."""
+
+        return self.phase()
+
 
 def require_sendable(record: ServerTarget | None, root: CanonicalWorkspaceRoot) -> SendHold | None:
     """Refuse a connection that would send a held or kept repository to remote ``record``.

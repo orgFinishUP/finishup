@@ -68,7 +68,6 @@ from finishup.client.targets import (
 from finishup.config.paths import (
     SERVER_TARGET_FILE_NAME,
     PathSafetyError,
-    active_root,
     ensure_owner_only_dir,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
@@ -311,45 +310,46 @@ class ConnectionAuthorization:
         return None
 
 
+def _active_record() -> ServerTarget | None:
+    """The active root's record; an unreadable one (which may name a remote kind) refuses."""
+
+    from finishup.client import targets
+
+    try:
+        # Looked up on the module at call time, like every other reader of the active record.
+        return targets.active_target_record()
+    except TargetRecordUnreadable:
+        raise TargetError("target_root_is_remote") from None
+
+
 def authorize_active_root() -> ConnectionAuthorization | None:
     """Admit a connection from this process to its root, or refuse it before anything is sent.
 
     ``None`` for a local root: nothing is checked and nothing watched (O2). For a remote root,
-    the generation is read first (so a change made while the gate runs is seen at the first
-    frame), then the record and the gate (steps 1 to 4); a refusal raises ``TargetError`` with
-    its closed phase. A root that cannot be resolved raises ``target_root_unsafe``.
+    the generation is read, then the record again and the gate (steps 1 to 4), so the record
+    admitted is never newer than the generation and a change made while the gate runs is seen at
+    the first check; a refusal raises ``TargetError`` with its closed phase. A root that cannot
+    be resolved at all raises its own ``TargetError`` (``target_root_unsafe``).
     """
 
-    try:
-        root = active_root()
-    except PathSafetyError:
-        raise TargetError("target_root_unsafe") from None
-    if root is None:
-        return None
-    try:
-        record = read_target(root)
-    except TargetError:
-        raise TargetError("target_root_is_remote") from None
+    record = _active_record()
     if record is None or not record.is_remote:
         return None
     selection_bound = selection_source() == "selection"
     try:
-        generation = read_generation(root, selection_bound=selection_bound)
+        generation = read_generation(target_root(record.target_id), selection_bound=selection_bound)
     except (OSError, PathSafetyError):
         raise TargetError("target_root_is_remote") from None
-    # Read again after the stamps: the record admitted is never newer than the generation.
-    try:
-        record = read_target(root)
-    except TargetError:
-        raise TargetError("target_root_is_remote") from None
-    if record is None or not record.is_remote:
+    admitted = _active_record()
+    if admitted is None or not admitted.is_remote or admitted.target_id != record.target_id:
+        # The root changed while it was being admitted: refuse rather than guess.
         raise TargetError("target_root_is_remote")
-    gate(record)
+    gate(admitted)
     grant = Grant(
-        target_id=record.target_id,
-        kind=record.kind,
-        identity_digest=_identity_digest(record),
-        consent_digest=_consent_digest(record),
+        target_id=admitted.target_id,
+        kind=admitted.kind,
+        identity_digest=_identity_digest(admitted),
+        consent_digest=_consent_digest(admitted),
         repository_key=None,
         selection_bound=selection_bound,
     )

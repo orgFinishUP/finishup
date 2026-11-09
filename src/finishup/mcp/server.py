@@ -1027,6 +1027,23 @@ async def ensure_service_client(
         raise _call_timeout() from None
 
 
+def _follow_selection_after(error: BaseException) -> None:
+    """After a connection to a server elsewhere ended because its authorization changed, follow
+    the current selection (ADR-052, the owner's answer O1).
+
+    ``server_authorization_changed``: the selection, the server's record or its key changed. The
+    bridge forgets the root it started with, so its next connection, made at once for the same
+    request or on the next one, reads the selection as it is now and passes the gate under it.
+    Any other failure, and every change between servers on this computer, keeps the root the
+    bridge started with, as before (a local connection is never ended by a selection change).
+    """
+
+    if isinstance(error, ControlError) and error.phase == "server_authorization_changed":
+        from finishup.config.paths import reset_selection_memo
+
+        reset_selection_memo()
+
+
 async def _ensure_service_client(
     runtime: BridgeRuntime,
     *,
@@ -1072,10 +1089,11 @@ async def _ensure_service_client(
             if existing is not None:
                 try:
                     await existing.connect()
-                except Exception:
+                except Exception as error:
                     if slot.client is existing:
                         slot.client = None
                     await _close_client(existing)
+                    _follow_selection_after(error)
                     continue
                 async with slot.lock:
                     if _slot_retired_since(runtime, generation, workspace_locator):
@@ -1088,22 +1106,27 @@ async def _ensure_service_client(
                 continue
             connected_attempt: ServiceClient | None = None
             try:
+                # A connection to a server elsewhere answers its workspace calls while the
+                # bridge keeps it (ADR-051); a local one ignores it.
                 connected_attempt = (
                     await connect_service_on_demand(
                         ControlClientKind.MCP_BRIDGE,
                         workspace_locator=workspace_locator,
+                        serve_workspace=True,
                     )
                     if start_timeout_seconds is None
                     else await connect_service_on_demand(
                         ControlClientKind.MCP_BRIDGE,
                         workspace_locator=workspace_locator,
                         timeout_seconds=start_timeout_seconds,
+                        serve_workspace=True,
                     )
                 )
                 await connected_attempt.connect()
             except BaseException as exc:
                 if connected_attempt is not None:
                     await _close_client(connected_attempt)
+                _follow_selection_after(exc)
                 budget = _CALL_BUDGET.get()
                 if (
                     budget is not None
@@ -2964,6 +2987,7 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     except ControlError as error:
         if error.reason in _DISCARD_CLIENT_REASONS:
             await _discard_client(runtime, client)
+        _follow_selection_after(error)
         if not error.retryable or error.reason not in _RECONNECT_REASONS:
             raise
         replacement = await ensure_service_client(

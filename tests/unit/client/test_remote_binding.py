@@ -4,6 +4,10 @@ A local root — the everyday installation, an isolated root that is not a targe
 server — gets no binding and sends its locator exactly as before. A remote root (``local_port``,
 ``ssh``, ``https``) claims the workspace under its own target's salt, with the workspace agent
 when asked, and never sends a path. A root or record that cannot be read fails closed.
+
+The shared authorization gate runs first (ADR-052), and in this release it opens no remote kind:
+these tests open every kind in process (``open_remote_kinds``) to exercise the binding a later
+layer reaches, and one test shows the binding refused while they are closed.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from typing import cast
 
 import pytest
 
-from builders.server_targets import ambient_home
+from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.client import targets
 from finishup.client.remote_binding import binding_for_active_root, is_remote_active_root
 from finishup.client.server_folders import OutsideReadMode
@@ -36,6 +40,13 @@ def anyio_backend() -> str:
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
         yield root
+
+
+@pytest.fixture(autouse=True)
+def opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every remote kind open, in process, so the binding past the gate is exercised."""
+
+    open_remote_kinds(monkeypatch, "ssh", "https", "local_port")
 
 
 @pytest.fixture
@@ -429,8 +440,8 @@ async def test_a_kept_repository_is_refused_as_kept_and_an_allowed_one_binds(
     with targets.registry_lock():
         add_override(root, record.target_id, key, workspace.path, _HELD_AT)
     binding = await binding_for_active_root(workspace, serve_workspace=True)
-    assert binding is not None and binding.hold is not None
-    assert binding.hold.held() is False
+    assert binding is not None and binding.authorization is not None
+    assert binding.authorization.refusal() is None
 
 
 @pytest.mark.anyio
@@ -481,12 +492,34 @@ async def test_the_root_is_resolved_once_and_the_binding_carries_a_live_hold(
     monkeypatch.setattr(remote_binding, "canonical_workspace_root", counted)
     binding = await binding_for_active_root(workspace, serve_workspace=True)
     assert len(calls) == 1
-    assert binding is not None and binding.hold is not None
+    assert binding is not None and binding.authorization is not None
     salt = base64.b64decode(record.claim_salt or "", validate=True)
     assert binding.claim == await workspace_claim(workspace, salt)
-    assert binding.hold.held() is False and binding.hold.phase() is None
-    # A report that arrives later is seen by the hold the connection keeps.
+    assert binding.authorization.refusal() is None
+    # A report that arrives later is seen by the authorization the connection keeps.
     monkeypatch.setattr(remote_binding, "canonical_workspace_root", real)
     await _report_no_network(workspace)
-    assert binding.hold.held() is True
-    assert binding.hold.phase() == "repository_egress_held"
+    assert binding.authorization.refusal() == "repository_egress_held"
+
+
+@pytest.mark.anyio
+async def test_while_no_kind_is_open_a_remote_root_is_refused_before_anything_is_claimed(
+    home: Path, workspace: WorkspaceLocator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This release: the gate's kind step refuses before the claim (ADR-052)."""
+
+    import finishup.client.remote_binding as remote_binding
+
+    open_remote_kinds(monkeypatch)
+    _select(_remote("https"))
+    claimed: list[object] = []
+
+    def claim(*args: object) -> None:
+        claimed.append(args)
+
+    monkeypatch.setattr(remote_binding, "workspace_claim_for_root", claim)
+    for locator in (workspace, None):
+        with pytest.raises(TargetError) as refused:
+            await binding_for_active_root(locator, serve_workspace=True)
+        assert refused.value.reason == "target_root_is_remote"
+    assert claimed == []

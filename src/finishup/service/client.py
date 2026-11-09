@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -129,6 +129,8 @@ if TYPE_CHECKING:
     from finishup.service.lifecycle import SingletonHolder
 
 __all__ = [
+    "GENERATION_RECHECK_SECONDS",
+    "AuthorizationCheck",
     "ClientWorkspaceBinding",
     "GetPrivacyReceiptRequest",
     "ListPrivacyReceiptsRequest",
@@ -137,7 +139,6 @@ __all__ = [
     "PrivacyReceiptFound",
     "PrivacyReceiptGetResult",
     "PrivacyReceiptNotFound",
-    "SendHoldCheck",
     "ServiceClient",
     "WorkspaceCallHandler",
     "accepted_but_unresponsive",
@@ -152,6 +153,10 @@ __all__ = [
 ]
 
 _MAX_IN_FLIGHT: Final = 32
+# How often a connection admitted to a server elsewhere re-checks its authorization (ADR-052), in
+# seconds; ``finishup.client.repository_hold.HOLD_RECHECK_SECONDS``, spelled here so the service
+# package imports no client code. A connection whose authorization lapses ends within one check.
+GENERATION_RECHECK_SECONDS: Final = 1.0
 # The hidden ``service run`` option a spawner whose root is the everyday installation passes, so the
 # service never reads a server selection its spawner did not use (``config.paths``).
 _AMBIENT_ROOT_OPTION: Final = "--ambient-root"
@@ -419,19 +424,18 @@ class WorkspaceCallHandler(Protocol):
     def answer(self, call: WorkspaceCall, *, workspace_handle: str | None) -> WorkspaceReply: ...
 
 
-class SendHoldCheck(Protocol):
-    """Whether a connection's repository may still be sent to its server (ADR-051 decision 8).
+class AuthorizationCheck(Protocol):
+    """Whether a connection to a server elsewhere may go on (ADR-052).
 
-    ``finishup.client.repository_hold.SendHold`` is the production check; declared structurally
-    here so the service package imports no client code. ``held`` is true while nothing of the
-    repository may be sent (held from that server, or kept on this computer); ``phase`` names
-    which (``repository_egress_held`` or ``repository_egress_kept``), or is None. Both read small
-    owner-only files and never raise; a long-lived holder re-checks at least once a second.
+    ``finishup.client.authorization.ConnectionAuthorization`` is the production check (and
+    ``finishup.client.repository_hold.SendHold`` the hold alone); declared structurally here so
+    the service package imports no client code. ``refusal()`` is None while the connection may go
+    on, else the closed remote phase that ends it (``server_authorization_changed``, a zero-network
+    report, the repository hold). It reads small owner-only files and never raises; a long-lived
+    holder re-checks it before every frame and at least once a second.
     """
 
-    def held(self) -> bool: ...
-
-    def phase(self) -> str | None: ...
+    def refusal(self) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,14 +444,15 @@ class ClientWorkspaceBinding:
 
     ``claim`` takes the place of the workspace locator in the hello, so no path is sent. ``agent``,
     when set, is declared in the hello and answers the server's workspace calls on this
-    connection; without one the connection answers none. ``hold``, when set, is the repository's
-    send hold (ADR-051 decision 8): the binding was made while it was sendable, and a long-lived
-    holder of the connection re-checks it.
+    connection; without one the connection answers none. ``authorization``, when set, is the
+    check the connection was admitted under (ADR-052), bound to this repository's hold: the
+    binding was made while it passed, and the connection re-checks it before every frame and on
+    its watch.
     """
 
     claim: WorkspaceClaim
     agent: WorkspaceCallHandler | None = None
-    hold: SendHoldCheck | None = None
+    authorization: AuthorizationCheck | None = None
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
@@ -1128,8 +1133,10 @@ class ServiceClient(ControlClientPort):
         "_agent",
         "_agent_busy",
         "_agent_calls",
+        "_authorization",
         "_client_kind",
         "_closed",
+        "_failure",
         "_last_project_request",
         "_pending",
         "_pid",
@@ -1138,6 +1145,7 @@ class ServiceClient(ControlClientPort):
         "_session",
         "_stream",
         "_transport",
+        "_watch",
         "_write_lock",
     )
 
@@ -1150,6 +1158,8 @@ class ServiceClient(ControlClientPort):
         _token: object,
         workspace_agent: WorkspaceCallHandler | None = None,
         transport: ConnectionTransport = "unix",
+        authorization: AuthorizationCheck | None = None,
+        recheck: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if _token is not _PRIVATE_CONSTRUCTOR_TOKEN:
             raise TypeError("service_client_constructor_private")
@@ -1176,14 +1186,74 @@ class ServiceClient(ControlClientPort):
         self._pending: dict[str, asyncio.Future[ControlResult]] = {}
         self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
+        # Why this connection ended when its authorization did: a later call is refused with that
+        # phase, not as a lost connection.
+        self._failure: ControlError | None = None
+        # What a connection to a server elsewhere was admitted under (ADR-052): re-checked before
+        # every frame it sends and on its watch. A local connection has none, and no watch (O2).
+        self._authorization = authorization
         self._receiver = asyncio.create_task(self._receive_results())
+        self._watch = (
+            None
+            if authorization is None
+            else asyncio.create_task(self._watch_authorization(recheck or _recheck_after_interval))
+        )
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
             self._closed = True
             raise ControlError("service_unavailable")
         if self._closed:
+            if self._failure is not None:
+                raise self._failure
             raise ControlError("service_unavailable", retryable=True)
+
+    def _lapsed(self) -> ControlError | None:
+        """The retryable refusal once this connection's authorization lapsed; else None.
+
+        ``AuthorizationCheck.refusal`` names the phase (ADR-052). A check that cannot be made
+        refuses nothing new.
+        """
+
+        authorization = self._authorization
+        if authorization is None:
+            return None
+        try:
+            phase = authorization.refusal()
+        except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
+            return None
+        if phase is None:
+            return None
+        return ControlError("service_unavailable", retryable=True, phase=phase)
+
+    async def _end_if_lapsed(self) -> None:
+        """End this connection with its authorization's phase once it lapsed, and raise it."""
+
+        failure = self._lapsed()
+        if failure is not None:
+            self._failure = self._failure or failure
+            await self._fail_connection(failure)
+            raise failure
+
+    async def _watch_authorization(self, recheck: Callable[[], Awaitable[None]]) -> None:
+        """Re-check the authorization after each ``recheck`` while the connection is open.
+
+        Once it lapses, the connection ends at once: every pending call fails with the phase, the
+        server's workspace calls go unanswered, and later calls are refused with it. The check
+        runs in a worker thread (a few ``lstat`` calls). ``recheck`` waits
+        ``GENERATION_RECHECK_SECONDS`` in production; a test injects an event-driven tick.
+        """
+
+        try:
+            while not self._closed:
+                await recheck()
+                failure = await asyncio.to_thread(self._lapsed)
+                if failure is not None and not self._closed:
+                    self._failure = self._failure or failure
+                    await self._fail_connection(failure)
+                    return
+        except asyncio.CancelledError:
+            return
 
     def _admit(self, method: ControlMethod) -> None:
         if self._client_kind is ControlClientKind.MCP_BRIDGE and method not in _WORKFLOW_METHODS:
@@ -1192,9 +1262,15 @@ class ServiceClient(ControlClientPort):
             raise ControlError("method_forbidden")
 
     async def connect(self) -> None:
-        """Confirm that this already-handshaken session remains locally usable."""
+        """Confirm that this already-handshaken session remains locally usable.
+
+        A connection to a server elsewhere also re-checks its authorization here (ADR-052): the
+        MCP bridge asks before it reuses one, so a lapsed one is named before a request is sent.
+        """
 
         self._ensure_live()
+        if self._authorization is not None:
+            await self._end_if_lapsed()
 
     @property
     def hello_service_status(self) -> ServiceStatus | None:
@@ -1246,6 +1322,10 @@ class ServiceClient(ControlClientPort):
         validate_request(request)
         async with self._write_lock:
             self._ensure_live()
+            # Nothing more is sent once the authorization a connection to a server elsewhere was
+            # admitted under lapsed: it is checked before every frame (ADR-052).
+            if self._authorization is not None:
+                await self._end_if_lapsed()
             try:
                 await write_control_frame(self._stream, request)
             except LocalControlTransportError as exc:
@@ -1329,6 +1409,12 @@ class ServiceClient(ControlClientPort):
         async with self._write_lock:
             if self._closed:
                 return
+            if self._authorization is not None:
+                # A reply computed while the authorization lapsed is never sent (ADR-052).
+                try:
+                    await self._end_if_lapsed()
+                except ControlError:
+                    return
             try:
                 await self._stream.send_all(encoded)
             except LocalControlTransportError as exc:
@@ -1413,6 +1499,10 @@ class ServiceClient(ControlClientPort):
                 # Their daemon workers finish (or end with the process) without being waited for.
                 if task is not current:
                     task.cancel()
+            watch = self._watch
+            if watch is not None and watch is not current and not watch.done():
+                watch.cancel()
+                watch.add_done_callback(_consume_background_task)
             await _best_effort_close_stream(self._stream)
         if not from_receiver and self._receiver is not asyncio.current_task():
             self._receiver.cancel()
@@ -1909,6 +1999,10 @@ def _answer_in_worker(
     return encoded
 
 
+async def _recheck_after_interval() -> None:
+    await asyncio.sleep(GENERATION_RECHECK_SECONDS)
+
+
 def _connected_client(
     stream: AuthenticatedUnixStream,
     session: ControlSession,
@@ -1916,6 +2010,8 @@ def _connected_client(
     workspace_agent: WorkspaceCallHandler | None = None,
     *,
     transport: ConnectionTransport = "unix",
+    authorization: AuthorizationCheck | None = None,
+    recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> ServiceClient:
     return ServiceClient(
         stream,
@@ -1924,6 +2020,8 @@ def _connected_client(
         _token=_PRIVATE_CONSTRUCTOR_TOKEN,
         workspace_agent=workspace_agent,
         transport=transport,
+        authorization=authorization,
+        recheck=recheck,
     )
 
 
@@ -2008,13 +2106,20 @@ async def _connect_service_attempt(
     output_is_controlling_tty: bool,
     timeout_seconds: float,
     workspace_binding: ClientWorkspaceBinding | None = None,
+    authorization: AuthorizationCheck | None = None,
 ) -> ServiceClient:
     """Connect and handshake within one attempt budget, preserving accepted-socket identity.
 
-    A ``workspace_binding`` sends its claim (and declares its agent) in place of a locator.
+    A ``workspace_binding`` sends its claim (and declares its agent) in place of a locator. An
+    ``authorization`` (a connection to a server elsewhere, ADR-052) is checked once more right
+    before the dial, and the connection keeps it.
     """
 
     agent = None if workspace_binding is None else workspace_binding.agent
+    if authorization is not None:
+        phase = authorization.refusal()
+        if phase is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=phase)
     stream: AuthenticatedUnixStream | None = None
     deadline = time.monotonic() + timeout_seconds
     try:
@@ -2046,7 +2151,7 @@ async def _connect_service_attempt(
             handshake.add_done_callback(_consume_background_task)
             raise TimeoutError
         session = handshake.result()
-        return _connected_client(stream, session, client_kind, agent)
+        return _connected_client(stream, session, client_kind, agent, authorization=authorization)
     except TimeoutError as exc:
         accepted = stream is not None
         if stream is not None:
@@ -2085,6 +2190,79 @@ def _check_workspace_binding(
         raise ValueError("workspace_binding_conflict")
 
 
+@dataclass(frozen=True, slots=True)
+class _RemoteAdmission:
+    """What the shared gate admitted a connection to a server elsewhere under (ADR-052)."""
+
+    authorization: AuthorizationCheck
+    workspace_binding: ClientWorkspaceBinding | None
+
+
+async def _admit_remote(
+    workspace_locator: WorkspaceLocator | None,
+    workspace_binding: ClientWorkspaceBinding | None,
+    *,
+    serve_workspace: bool,
+) -> _RemoteAdmission | None:
+    """The shared authorization gate every connection from a remote root passes first (ADR-052).
+
+    ``None`` for a local root (the everyday server, a named local server, an isolated root that is
+    not a target, or one that cannot be resolved, whose own path reports it): the connection is
+    made exactly as before, with no authorization and no watch (O2). For a remote root the gate
+    runs before any claim, dial or spawn (``client.authorization.authorize_active_root``); a
+    refusal is a retryable ``service_unavailable`` naming its closed phase, and in this release,
+    where no remote kind is open, every remote root is refused as ``target_root_is_remote``.
+    Once admitted, ``workspace_locator`` becomes the target's claim, normalized to its worktree's
+    top level, with the agent when ``serve_workspace`` (``remote_binding.binding_for_active_root``,
+    which decides the repository hold); the locator itself is never sent. A workspace the shared
+    root rule cannot resolve is not claimed and the connection names no workspace.
+    """
+
+    from finishup.client.targets import TargetError, TargetRecordUnreadable, active_target_record
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="target_root_is_remote"
+        ) from None
+    except TargetError:
+        return None
+    if record is None or not record.is_remote:
+        return None
+    from finishup.client.authorization import authorize_active_root
+
+    try:
+        authorization = authorize_active_root()
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    if authorization is None:
+        # The root stopped being remote while it was admitted: refuse rather than guess.
+        raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
+    if workspace_binding is not None or workspace_locator is None:
+        return _RemoteAdmission(authorization, workspace_binding)
+    from finishup.adapters.workspace_binding import canonical_workspace_locator
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.client.remote_binding import binding_for_active_root
+
+    # One worktree, one claim: a connection made from a subfolder claims its worktree's top level,
+    # as the hooks and the CLI already do, so every surface reaches the same handle.
+    canonical = canonical_workspace_locator(workspace_locator.path)
+    if canonical is not None and canonical != workspace_locator.path:
+        workspace_locator = WorkspaceLocator(canonical)
+    try:
+        binding = await binding_for_active_root(
+            workspace_locator, serve_workspace=serve_workspace, authorization=authorization
+        )
+    except RepositoryIdentityError:
+        return _RemoteAdmission(authorization, None)
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    if binding is None or binding.authorization is None:
+        return _RemoteAdmission(authorization, binding)
+    return _RemoteAdmission(binding.authorization, binding)
+
+
 async def connect_service(
     client_kind: ControlClientKind,
     *,
@@ -2092,14 +2270,20 @@ async def connect_service(
     projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
     output_is_controlling_tty: bool = False,
     workspace_binding: ClientWorkspaceBinding | None = None,
+    serve_workspace: bool = False,
 ) -> ServiceClient:
     """Connect only to the verified fixed ordinary endpoint and perform the handshake.
 
     ``workspace_binding`` is for a FinishUP server on another machine: the hello carries its claim
     instead of a locator, and its agent, if any, answers the server's workspace calls.
 
-    A remote server target's root is refused before anything is sent
-    (``_refuse_remote_target_root``): this release connects to no server on another machine.
+    A remote server target's root passes the shared authorization gate first (``_admit_remote``,
+    ADR-052): nothing is claimed, dialled or started before it, and in this release, where no
+    remote kind is open, it refuses every remote root. Once admitted (in a later release), the
+    connection checks its authorization before every frame and watches it; with
+    ``serve_workspace`` it answers the server's workspace calls (set it in a process whose calls
+    run workspace work while they are live, never in a short-lived hook). A local root ignores
+    ``serve_workspace``.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -2111,7 +2295,21 @@ async def connect_service(
         raise TypeError("projection_render_mode_invalid")
     if type(output_is_controlling_tty) is not bool:
         raise TypeError("projection_tty_fact_invalid")
-    _refuse_remote_target_root()
+    if type(serve_workspace) is not bool:
+        raise TypeError("serve_workspace_invalid")
+    admission = await _admit_remote(
+        workspace_locator, workspace_binding, serve_workspace=serve_workspace
+    )
+    if admission is not None:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=_CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+        )
     return await _connect_service_attempt(
         client_kind,
         workspace_locator=workspace_locator,
@@ -2270,6 +2468,7 @@ async def connect_service_on_demand(
     timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS,
     supersede_incompatible: bool = True,
     workspace_binding: ClientWorkspaceBinding | None = None,
+    serve_workspace: bool = False,
 ) -> ServiceClient:
     """Connect to the fixed service, starting one detached successor only when absent.
 
@@ -2292,7 +2491,9 @@ async def connect_service_on_demand(
 
     ``workspace_binding`` sends a claim (and declares an agent) in place of the locator, as for
     ``connect_service``; every connection this call opens carries it. A remote server target's
-    root is refused at once, before anything is sent or started (``_refuse_remote_target_root``).
+    root passes the shared authorization gate first (``_admit_remote``, ADR-052), which refuses
+    it in this release; an admitted one is dialled once within the budget and never supersedes
+    or starts a service of this computer.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -2302,7 +2503,21 @@ async def connect_service_on_demand(
     _check_workspace_binding(workspace_locator, workspace_binding)
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
         raise ValueError("service_start_timeout_invalid")
-    _refuse_remote_target_root()
+    if type(serve_workspace) is not bool:
+        raise TypeError("serve_workspace_invalid")
+    admission = await _admit_remote(
+        workspace_locator, workspace_binding, serve_workspace=serve_workspace
+    )
+    if admission is not None:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, timeout_seconds),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+        )
     deadline = time.monotonic() + timeout_seconds
 
     async def connect_with_remaining_budget() -> ServiceClient:

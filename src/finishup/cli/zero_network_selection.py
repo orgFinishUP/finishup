@@ -105,9 +105,13 @@ type PolicyRead = Literal["live", "last_reported"]
 REMOTE_SELECTED: Final = "zero_network_remote_selected"
 SELECTION_UNREADABLE: Final = "zero_network_selection_unreadable"
 SWITCH_COMMAND: Final = "finishup server use local"
+# A running MCP bridge keeps a server on this computer it started with; a connection it made to
+# a server elsewhere ends once the selection changes, and the bridge follows the new selection on
+# its next request (ADR-052, the owner's answer O1).
 OPEN_SESSIONS_LINE: Final = (
     "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP MCP "
-    "bridge keeps the server it started with."
+    "bridge keeps a server on this computer it started with, and ends a connection to a server "
+    "elsewhere to follow the new selection."
 )
 
 # Written once, when the everyday installation's vault is initialized.

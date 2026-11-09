@@ -578,8 +578,10 @@ def _selected_root(probe: _PathProbe) -> Path | None:
     everyday service silently. Ambiguous ambient naming reads no selection: every ambient path
     already fails closed with ``installation_root_ambiguous`` there.
 
-    The memo keeps a process on the target it started with (an MCP bridge never switches), never
-    on one removed since: every answer, remembered or overridden, still needs the root's record,
+    The memo keeps a process on the target it started with (an MCP bridge never switches between
+    servers on this computer; one whose connection to a server elsewhere ended because its
+    authorization changed resets it with ``reset_selection_memo``, ADR-052), never on one removed
+    since: every answer, remembered or overridden, still needs the root's record,
     and once ``finishup server remove`` deleted it the answer fails closed exactly as a fresh read
     would. No path helper therefore recreates a removed target's folder (SRV-1).
     """

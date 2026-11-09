@@ -25,6 +25,8 @@ import struct
 from collections.abc import Buffer
 from typing import Final, cast
 
+import pytest
+
 from finishup.domain.values import JsonObject
 from finishup.ports.control import (
     ControlCallRequest,
@@ -60,6 +62,7 @@ __all__ = [
     "memory_pair",
     "rpc_id",
     "run_scripted_session",
+    "scripted_service",
     "service_status",
 ]
 
@@ -200,6 +203,8 @@ class ScriptedDaemon:
         self.replies: list[JsonObject] = []
         # Set when a workspace reply arrives, so a test waits on it rather than on time.
         self.replied = asyncio.Event()
+        # The connections ``scripted_service`` serves, one task each.
+        self.serving: list[asyncio.Task[None]] = []
 
     def received(self, connection: int = -1) -> list[bytes]:
         """Every frame payload one connection sent the daemon, its hello first."""
@@ -509,3 +514,24 @@ def as_json(payload: bytes) -> dict[str, JsonValue]:
 
 def canonical(value: dict[str, JsonValue]) -> bytes:
     return canonical_encode(value)
+
+
+def scripted_service(monkeypatch: pytest.MonkeyPatch) -> ScriptedDaemon:
+    """Answer every dial of ``finishup.service.client.connect_control`` with a ``ScriptedDaemon``.
+
+    Each dial gets its own in-memory pair, served until the client ends it (``serving`` keeps
+    the tasks); ``connections`` counts dials, so a refusal test asserts it stays 0: nothing was
+    dialled, let alone sent. Call it from a test that runs an event loop.
+    """
+
+    from finishup.service import client as client_module
+
+    daemon = ScriptedDaemon()
+
+    async def dial() -> MemoryStream:
+        client_end, server_end = memory_pair()
+        daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
+        return client_end
+
+    monkeypatch.setattr(client_module, "connect_control", dial)
+    return daemon

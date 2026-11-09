@@ -986,7 +986,8 @@ def test_login_is_refused_before_anything_is_read_and_logout_deletes_a_key_offli
 _SWITCHED_BACK: Final = (
     "Using this computer's everyday FinishUP server.\n"
     "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP MCP "
-    "bridge keeps the server it started with.\n"
+    "bridge keeps a server on this computer it started with, and ends a connection to a server "
+    "elsewhere to follow the new selection.\n"
 )
 
 
