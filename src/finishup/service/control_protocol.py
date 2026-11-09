@@ -94,6 +94,8 @@ __all__ = [
     "read_control_frame",
     "schema_for_method",
     "server_handshake",
+    "service_status_from_wire",
+    "service_status_wire",
     "validate_request",
     "validate_result",
     "workspace_call_frame",
@@ -785,6 +787,18 @@ def _service_status_from_wire(value: object) -> ServiceStatus:
         )
     except (KeyError, TypeError, ValueError):
         raise ControlProtocolError("frame_invalid") from None
+
+
+def service_status_wire(status: ServiceStatus) -> JsonObject:
+    """``status`` as its validated ``service-status`` wire object (the REST session, ADR-053)."""
+
+    return _status_wire(status)
+
+
+def service_status_from_wire(value: object) -> ServiceStatus:
+    """A ``service-status`` wire object as the typed status; ``frame_invalid`` otherwise."""
+
+    return _service_status_from_wire(value)
 
 
 def parse_control_request(frame: ControlFrame) -> ControlRequest:

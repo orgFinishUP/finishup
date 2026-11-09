@@ -143,7 +143,9 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # ADR-051 decision 5 (open question 2): +2 schemas (check-recorded 1.7.0 and receipt-document
 # 1.4.0, carrying the counts listed mode kept back).
 # ADR-052: +1 schema (server-profile 1.0.0).
-REVIEWED_RESOURCE_COUNT: Final = 360
+# ADR-053: +7 schemas (the REST v1 documents rest-agent, rest-agent-declaration, rest-agent-work,
+# rest-discovery, rest-error, rest-operation and rest-session 1.0.0).
+REVIEWED_RESOURCE_COUNT: Final = 367
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -199,6 +201,13 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("review-packet-row", "2.0.0"),
     ("review-result", "7.0.0"),
     ("reviewer-reply", "1.0.0"),
+    ("rest-agent", "1.0.0"),
+    ("rest-agent-declaration", "1.0.0"),
+    ("rest-agent-work", "1.0.0"),
+    ("rest-discovery", "1.0.0"),
+    ("rest-error", "1.0.0"),
+    ("rest-operation", "1.0.0"),
+    ("rest-session", "1.0.0"),
     ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.1.0"),
     ("semantic-provenance", "1.2.0"),

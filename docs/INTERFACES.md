@@ -998,7 +998,8 @@ runtime category `request_result|event|config|version_manifest`.
 `common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
 `event-payload`, `configuration`, `finding`, `provider-judgment`, `semantic-provenance`,
 `receipt-document`, `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`,
-`local-control`, `service-status`, or `version-report`. `SchemaDocument` contains both
+`local-control`, `service-status`, `version-report`, or `network-control` (the REST v1
+documents `service/rest-*`, ADR-053). `SchemaDocument` contains both
 `schema_kind` and `artifact_role: SchemaArtifactRole`; neither value is inferred from the other.
 The reviewed `schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog
 loading fails closed on an unknown or path-incompatible role.

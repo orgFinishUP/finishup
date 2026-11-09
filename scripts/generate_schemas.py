@@ -14329,6 +14329,77 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).IsolationReportContract
         ),
     ),
+    # ADR-053: the REST v1 public contract's own documents (design v2 U9, section 6).
+    _RegistryEntry(
+        "service/rest-agent-1.0.0.schema.json",
+        "rest-agent",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestAgentContract"]).RestAgentContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-agent-declaration-1.0.0.schema.json",
+        "rest-agent-declaration",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestAgentDeclarationContract"]).RestAgentDeclarationContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-agent-work-1.0.0.schema.json",
+        "rest-agent-work",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestAgentWorkContract"]).RestAgentWorkContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-discovery-1.0.0.schema.json",
+        "rest-discovery",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestDiscoveryContract"]).RestDiscoveryContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-error-1.0.0.schema.json",
+        "rest-error",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestErrorContract"]).RestErrorContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-operation-1.0.0.schema.json",
+        "rest-operation",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestOperationContract"]).RestOperationContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-session-1.0.0.schema.json",
+        "rest-session",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__("finishup.rest.contract_models", fromlist=["RestSessionContract"]).RestSessionContract
+        ),
+    ),
     # ADR-052: what a FinishUP server offers and requires (design v2 section 2.2).
     _RegistryEntry(
         "service/server-profile-1.0.0.schema.json",

@@ -3426,8 +3426,8 @@ def test_schema_catalog_reports_complete_registry() -> None:
     # ADR-051: the four control envelopes 2.10.0, isolation-report 1.1.0, server-target-status 1.0.0,
     # and the HTTPS binding v1's rest-error 1.0.0 and server-info 1.0.0; ADR-051 decision D4:
     # receipt-result 1.5.0; ADR-051 decision 5: check-recorded 1.7.0 and receipt-document 1.4.0;
-    # ADR-052: server-profile 1.0.0
-    assert SCHEMA_MEMBER_COUNT == 255
+    # ADR-052: server-profile 1.0.0; ADR-053: the seven REST v1 documents (rest-*)
+    assert SCHEMA_MEMBER_COUNT == 262
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3440,7 +3440,8 @@ def test_schema_catalog_reports_complete_registry() -> None:
         SchemaKind.CONFIG,
         SchemaKind.VERSION_MANIFEST,
     }
-    assert len(SchemaArtifactRole) == 18
+    # ADR-053: +1 network-control (the REST v1 documents).
+    assert len(SchemaArtifactRole) == 19
 
 
 def test_schema_uri_and_path_resolution_are_stable() -> None:
@@ -3514,8 +3515,9 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_894
-    )  # ADR-052 +3 (server-target-status target.connection, its helper and the helper's reason
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_904
+    )  # ADR-053 +10 (the REST v1 documents: the session's status and revision, the error's, the
+    # discovery's, the operation's, the agent's and the declaration's own defs); ADR-052 +3 (server-target-status target.connection, its helper and the helper's reason
     # token, layer 4) +18 (server-profile 1.0.0) +1 (its review's fallback_disclosure token, review
     # of layer 3: A1) +3 (control 2.10.0: the server_profile request body
     # and its result's error and profile bodies) +2 (server-target-status target.consent and its
@@ -3566,7 +3568,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
     # #1118 unit 2: reviewer-reply; #1119: batch, ai-status; ADR-051: server-target-status
-    assert len(request_versions) == 59
+    assert len(request_versions) == 66
     assert len(event_versions) == 30  # #1239 +1 contact_expectation_declared
     assert request_versions["ai-status"] == "1.0.0"
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
