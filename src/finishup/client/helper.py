@@ -1039,7 +1039,8 @@ class Helper:
 
         Zero-network first (a stop, at once); then the admission (a lapse ends every relay and
         every agent); the registrations when their folder changed or every 30 seconds; the drain
-        and the profile refresh when due, each as its own task; the idle exit.
+        and the profile refresh when due, each as its own task (the refresh under gate steps 2 to
+        4 only, so it also runs while the consent refuses the cached profile); the idle exit.
         """
 
         if self._stop.is_set() or self._refuse_zero_network():
@@ -1062,7 +1063,10 @@ class Helper:
             # Its own task: the tick keeps checking zero-network and idleness every second, and
             # a stop cancels the pass instead of waiting for it (A-ZN-DRAIN).
             self._delivery = asyncio.create_task(self._drain())
-        if admission is not None and self._refresh_due():
+        # Not under the admission: the refresh is how a consent that no longer admits the cached
+        # profile (an interrupted narrowing, a changed offer) catches up, so it asks only gate
+        # steps 2 to 4 (``_may_refresh``), and is asked first so a marker waits while it refuses.
+        if self._may_refresh() and self._refresh_due():
             self._start_refresh()
         if self._idle():
             self.request_stop("idle_timeout")
@@ -1082,9 +1086,9 @@ class Helper:
         if listener is not None:
             running.append(asyncio.create_task(self._accept(listener)))
         running.append(asyncio.create_task(self._watch()))
-        if self._admitted() is not None:
-            if self._style == "direct":
-                self._write_status("ready", None)
+        if self._admitted() is not None and self._style == "direct":
+            self._write_status("ready", None)
+        if self._may_refresh():
             self._start_refresh()
         try:
             await self._stop.wait()

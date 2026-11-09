@@ -761,3 +761,77 @@ def test_a_relay_cancelled_while_it_waits_for_the_server_closes_its_stream(
 
     closed, active = asyncio.run(run())
     assert closed == [True] and active == 0
+
+
+def test_a_consent_that_refuses_the_cached_profile_is_refreshed_back_into_admission(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A6: the refresh is not under the admission it exists to repair.
+
+    The cached profile no longer agrees with the consent (here a wider offer was fetched; an
+    interrupted narrowing leaves the same state): the gate refuses ``server_profile_changed``.
+    The server offers what was agreed to again, and only the helper's refresh can record that.
+    """
+
+    from builders.server_profiles import fetched, profile_document, refreshed
+    from finishup.client.server_profile import refresh_profile
+    from finishup.client.targets import registry_lock
+    from finishup.protocol.server_profile import ReviewEgress
+
+    record, root = ssh_target
+    refreshed(record, profile_document(review=ReviewEgress("server_policy", "openai"), revision=2))
+    fetches: list[str] = []
+
+    async def refresher(current: ServerTarget) -> None:
+        fetches.append("fetched")
+        with registry_lock():
+            refresh_profile(current, fetched(current, profile_document(revision=3)))
+
+    async def run() -> tuple[bool, bool]:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), refresher=refresher)
+        refused = helper._admitted() is None  # pyright: ignore[reportPrivateUsage]
+        await helper.step()
+        task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+        if task is not None:
+            await task
+        return refused, helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
+
+    refused, admitted = asyncio.run(run())
+    assert refused and fetches == ["fetched"] and admitted
+    status = read_helper_status(root)
+    assert status is not None and status.reason == "server_profile_changed"
+
+
+@pytest.mark.parametrize("refusal", ["zero_network", "disclosure"])
+def test_the_refresh_still_waits_for_zero_network_and_an_older_disclosure(
+    ssh_target: tuple[ServerTarget, Path], refusal: str
+) -> None:
+    """A6: what the refresh does still ask: no fetch while either refuses (gate steps 2-3)."""
+
+    from dataclasses import replace
+
+    record, root = ssh_target
+    fetches: list[str] = []
+
+    async def refresher(_current: ServerTarget) -> None:
+        fetches.append("fetched")
+
+    if refusal == "disclosure":
+        with targets.registry_lock():
+            targets.write_target(
+                root, replace(record, disclosure_version=record.disclosure_version - 1)
+            )  # type: ignore[operator]
+    else:
+        from finishup.client.everyday_policy import record_reported_policy
+
+        assert record_reported_policy(zero_network=True)
+
+    async def run() -> None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), refresher=refresher)
+        await helper.step()
+        task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+        if task is not None:
+            await task
+
+    asyncio.run(run())
+    assert fetches == []
