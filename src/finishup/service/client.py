@@ -90,7 +90,7 @@ from finishup.ports.privacy import (
     PrivacyReceiptView,
 )
 from finishup.ports.workspace_agent import outcome_for_reason
-from finishup.protocol.canonical import parse_canonical_integer_string
+from finishup.protocol.canonical import canonical_encode, parse_canonical_integer_string
 from finishup.protocol.errors import SERVICE_HANDSHAKE_PHASES, SERVICE_START_TIMEOUT_PHASE
 from finishup.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
 from finishup.protocol.models import (
@@ -108,6 +108,7 @@ from finishup.protocol.models import (
     StatusRequest,
     StatusResult,
 )
+from finishup.protocol.server_profile import ProfileError, ServerProfile, profile_from_json
 from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     ControlProtocolError,
@@ -1971,6 +1972,16 @@ class ServiceClient(ControlClientPort):
 
     async def service_status(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_STATUS, JsonObject({})))
+
+    async def server_profile(self) -> ServerProfile:
+        """What the service offers a client elsewhere (ADR-052), parsed and verified: a document
+        whose digest does not recompute is ``frame_invalid``."""
+
+        body = await self._invoke(ControlMethod.SERVER_PROFILE, JsonObject({}))
+        try:
+            return profile_from_json(canonical_encode(cast(JsonValue, body)))
+        except ProfileError:
+            raise ControlError("frame_invalid") from None
 
     async def lock(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_LOCK, JsonObject({})))

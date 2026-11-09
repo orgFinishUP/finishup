@@ -1837,6 +1837,49 @@ def test_service_start_is_an_on_demand_start_plus_status(
     assert calls == [(ControlClientKind.CLI, None)]
 
 
+def test_service_profile_is_hidden_and_prints_what_this_server_offers(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-052: ``finishup service profile`` (hidden until a server elsewhere can connect) starts
+    this root's service on demand, as ``service start`` does, and prints its verified profile."""
+
+    from finishup.cli.app import service_app
+    from finishup.ports.control import ControlClientKind
+    from finishup.protocol.server_profile import profile_from_json, profile_to_json
+
+    document = json.loads(
+        (Path(__file__).parents[3] / "fixtures/service/server-profile.case.json").read_bytes()
+    )["valid"][0]["document"]
+    profile = profile_from_json(document)
+    calls: list[tuple[ControlClientKind, object]] = []
+
+    class _Client:
+        async def server_profile(self) -> object:
+            return profile
+
+        async def close(self) -> None:
+            return None
+
+    async def on_demand(kind: ControlClientKind, *, workspace_locator: object = None) -> _Client:
+        calls.append((kind, workspace_locator))
+        return _Client()
+
+    monkeypatch.setattr("finishup.service.client.connect_service_on_demand", on_demand)
+    result = _RUNNER.invoke(cli.app, ["service", "profile", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == profile_to_json(profile)
+    assert calls == [(ControlClientKind.CLI, None)]
+    text = _RUNNER.invoke(cli.app, ["service", "profile"])
+    assert text.exit_code == 0, text.output
+    assert "profile_revision: " in text.stdout
+    hidden = {
+        command.name: command.hidden
+        for command in service_app.registered_commands
+        if command.name in {"profile", "endpoint", "status"}
+    }
+    assert hidden == {"profile": True, "endpoint": False, "status": False}
+
+
 def test_ambiguous_everyday_folders_are_a_bounded_refusal(home: Path) -> None:
     for app_name in ("finishup", "yoetz"):
         folder = home / "config" / app_name

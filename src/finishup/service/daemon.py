@@ -110,7 +110,7 @@ from finishup.domain.privacy import (
     LocalDisclosureSink,
 )
 from finishup.domain.values import JsonValue as DomainJsonValue
-from finishup.domain.values import frontier_from_json
+from finishup.domain.values import freeze_json, frontier_from_json
 from finishup.observability.logging import (
     LogMode,
     configure_logging,
@@ -174,7 +174,8 @@ from finishup.protocol.models import (
 )
 from finishup.protocol.publish_boilerplate import server_filled_from_json
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
-from finishup.protocol.schemas import use_full_schema_catalog
+from finishup.protocol.schemas import schema_manifest_digest, use_full_schema_catalog
+from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckReadWindow, CheckWaits
 from finishup.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
@@ -261,6 +262,7 @@ from finishup.service.owner_view import (
 )
 from finishup.service.ready_composition import build_ready_application_factory
 from finishup.service.secret_ingress import SecretIngressService
+from finishup.service.server_profile import ServerProfileSource
 from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRouteMemory
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -417,6 +419,8 @@ _STRUCTURAL_METHODS = frozenset(
         ControlMethod.SERVICE_STATUS,
         ControlMethod.SERVICE_LOCK,
         ControlMethod.SERVICE_STOP,
+        # What this server offers (ADR-052): no ledger, no vault, answered while locked.
+        ControlMethod.SERVER_PROFILE,
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
@@ -941,6 +945,10 @@ class ServiceComposition:
     # An edge that admits only claims (a network gateway, say) closes a hello that names a
     # workspace path on this machine. Off by default: local clients name their path.
     refuse_workspace_locators: bool = False
+    # What this server offers a client elsewhere and the profile revision it issued at start
+    # (ADR-052). With none, the ``server_profile`` method is refused and no hello is held to a
+    # revision (a composition that predates profiles).
+    server_profile: ServerProfileSource | None = None
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -1260,6 +1268,7 @@ class ServiceDaemon:
         projection_context: ClientProjectionContext | None = None,
         repository_privacy_context: RepositoryPrivacyContext | None = None,
         claim_unkeyed: bool = False,
+        bound_profile: ServerProfileRevision | None = None,
         _defer_stop: bool = False,
     ) -> ControlResult:
         """Validate, admit, execute, project, and correlate one ordinary call.
@@ -1268,6 +1277,11 @@ class ServiceDaemon:
         (ADR-051): it names no workspace, so no call that needs the ready service is served on it
         as if it were unbound; each is answered ``vault_locked`` and its client replaces the
         connection.
+
+        ``bound_profile`` is the server-profile revision the connection's hello was admitted under
+        (ADR-052): a call that does work is refused ``server_profile_changed`` before anything is
+        done once this service issues another; the structural methods and ``server_profile`` are
+        still answered, so the client can learn what changed.
         """
 
         try:
@@ -1293,8 +1307,20 @@ class ServiceDaemon:
                 # Only the validation prefix maps to frame_invalid. Runtime TypeError/ValueError
                 # from method dispatch must reach the correlated internal_error branch below.
                 return self._error_result(request, ControlError("frame_invalid"))
-            if request.method is ControlMethod.SERVICE_STATUS:
-                body: object = self.status()
+            if (
+                bound_profile is not None
+                and request.method not in _STRUCTURAL_METHODS
+                and bound_profile != self.current_profile_revision()
+            ):
+                # Before any work: this connection's consent is not the server's profile now.
+                return self._error_result(request, ControlError("server_profile_changed"))
+            if request.method is ControlMethod.SERVER_PROFILE:
+                source = self._composition.server_profile
+                if source is None:
+                    raise ControlError("method_forbidden")
+                body: object = freeze_json(source.document(self.status(), schema_manifest_digest()))
+            elif request.method is ControlMethod.SERVICE_STATUS:
+                body = self.status()
             elif request.method is ControlMethod.SERVICE_LOCK:
                 await self.lock("explicit_lock")
                 body = self.status()
@@ -2208,6 +2234,11 @@ class ServiceDaemon:
                             else self._resolve_repository_context
                         ),
                         claim_context_resolver=self._resolve_claim_context,
+                        profile_revision=(
+                            None
+                            if self._composition.server_profile is None
+                            else self.current_profile_revision
+                        ),
                     )
             except TimeoutError:
                 return
@@ -2218,6 +2249,7 @@ class ServiceDaemon:
                 if exc.reason in {
                     "manifest_mismatch",
                     "protocol_mismatch",
+                    "server_profile_changed",
                     "workspace_binding_conflict",
                 }:
                     record_public_error_without_raising(
@@ -2442,6 +2474,7 @@ class ServiceDaemon:
                     projection_context=projection_context,
                     claim_unkeyed=session.workspace_binding == "client_claim"
                     and session.workspace_handle is None,
+                    bound_profile=session.server_profile,
                     _defer_stop=True,
                 )
             else:
@@ -2450,6 +2483,7 @@ class ServiceDaemon:
                     request,
                     projection_context=projection_context,
                     repository_privacy_context=session.repository_privacy_context,
+                    bound_profile=session.server_profile,
                     _defer_stop=True,
                 )
         session.correlate(result)
@@ -2581,6 +2615,12 @@ class ServiceDaemon:
             instance.generation
         ):
             raise ControlError("service_generation_changed", retryable=True)
+
+    def current_profile_revision(self) -> ServerProfileRevision | None:
+        """The server-profile revision this service issues now (ADR-052); ``None`` for none."""
+
+        source = self._composition.server_profile
+        return None if source is None else source.revision
 
     @staticmethod
     def _validate_client_method(client_kind: ControlClientKind, method: ControlMethod) -> None:
@@ -5654,6 +5694,8 @@ async def _production_composition(
             observation_gate=observation_gate,
             owner_view_grants=owner_view_grants,
             workspace_hub=workspace_hub,
+            # What this server offers a client elsewhere, and its revision (ADR-052).
+            server_profile=ServerProfileSource.load(config, paths.state),
         )
     except BaseException:
         await listeners.close()

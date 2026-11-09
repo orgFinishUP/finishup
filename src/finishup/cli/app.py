@@ -2814,6 +2814,41 @@ def service_endpoint(json_output: _JSON = False) -> None:
     _finish(0)
 
 
+async def _service_profile(json_output: bool) -> int:
+    from finishup.protocol.server_profile import profile_to_json
+    from finishup.service.client import connect_service_on_demand
+
+    try:
+        client = await connect_service_on_demand(ControlClientKind.CLI, workspace_locator=None)
+        try:
+            profile = await client.server_profile()
+        finally:
+            await client.close()
+    except ControlError as error:
+        return _control_failure(error, json_output=json_output)
+    document = profile_to_json(profile)
+    if json_output:
+        _stdout_json(cast(JsonValue, document))
+    else:
+        for key, value in document.items():
+            typer.echo(f"{key}: {canonical_encode(value).decode('utf-8')}")
+    return 0
+
+
+# Hidden while no server elsewhere can connect (ADR-052, layer 3): the SSH discovery of the layer
+# that opens a remote kind runs it on the server, and that layer shows it.
+@service_app.command("profile", hidden=True)
+def service_profile(json_output: _JSON = False) -> None:
+    """Show what this FinishUP server offers a client on another computer (its server profile).
+
+    Starts this root's service on demand, as ``finishup service start`` does, and is answered
+    while the vault is locked. The JSON is the ``server-profile`` 1.0.0 document: the levels this
+    server offers, its AI-review egress and the profile revision a client's consent is bound to.
+    """
+
+    _finish(run_async(lambda: _service_profile(json_output)))
+
+
 async def _service_restart(json_output: bool) -> int:
     """Replace the running service, compatible or not, with one of this installation.
 
