@@ -460,6 +460,12 @@ async def test_zero_network_and_an_older_disclosure_are_refused_before_the_hold(
     with pytest.raises(TargetError) as zero:
         await binding_for_active_root(workspace, serve_workspace=True)
     assert zero.value.reason == "zero_network_remote_selected"
+    # Once neither applies, the hold is what refuses it.
+    record_reported_policy(zero_network=False)
+    monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION - 1)
+    with pytest.raises(TargetError) as held:
+        await binding_for_active_root(workspace, serve_workspace=True)
+    assert held.value.reason == "repository_egress_held"
 
 
 @pytest.mark.anyio
@@ -472,6 +478,11 @@ async def test_a_local_root_or_a_named_local_server_is_never_held(
         record, _root = targets.new_local_target("work")
     _select(record)
     assert await binding_for_active_root(workspace, serve_workspace=True) is None
+    # The same repository is held from a server elsewhere.
+    _select(_remote("local_port"))
+    with pytest.raises(TargetError) as held:
+        await binding_for_active_root(workspace, serve_workspace=True)
+    assert held.value.reason == "repository_egress_held"
 
 
 @pytest.mark.anyio

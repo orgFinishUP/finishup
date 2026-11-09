@@ -171,9 +171,12 @@ def test_every_repositories_command_renders_its_help(home: Path, command: str) -
 
 
 def test_the_command_runs_only_on_this_client() -> None:
-    from finishup.cli.command_scope import command_scope
+    """Named on its own, as 'server folders' is: this client's record, never sent anywhere."""
 
-    assert command_scope("server repositories") == "client_only"
+    from finishup.cli.command_scope import COMMAND_SCOPES, command_scope
+
+    assert COMMAND_SCOPES["server repositories"] == "client_only"
+    assert command_scope("server repositories keep") == "client_only"
 
 
 # --- add ------------------------------------------------------------------------------------------
