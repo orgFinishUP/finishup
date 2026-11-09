@@ -1058,6 +1058,10 @@ class Helper:
         if self._agents or self._served_count:
             # A served registration is a client: the helper stays while one is live.
             self._last_activity = now
+        if any(agent.client is not None for agent in self._agents.values()):
+            # A live agent connection uses the upstream (in the direct style its frames never
+            # pass the relay that counts them), so the periodic profile refresh stays due.
+            self._last_upstream_use = now
         delivering = self._delivery is not None and not self._delivery.done()
         if not delivering and now - self._last_drain >= self._drain_interval:
             # Its own task: the tick keeps checking zero-network and idleness every second, and

@@ -835,3 +835,53 @@ def test_the_refresh_still_waits_for_zero_network_and_an_older_disclosure(
 
     asyncio.run(run())
     assert fetches == []
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_a_live_direct_agent_keeps_the_periodic_refresh_due(
+    ssh_target: tuple[ServerTarget, Path], live: bool
+) -> None:
+    """A7: in the direct style an agent's traffic never passes the relay that counts use."""
+
+    record, root = ssh_target
+    fetched_at: list[float] = []
+
+    class Agent:
+        alive = True
+        client = object() if live else None
+
+        async def drain(self, *, may_send: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    async def run() -> list[float]:
+        clock = Clock()
+
+        async def refresher(_record: ServerTarget) -> None:
+            fetched_at.append(clock())
+
+        helper = _helper(
+            record,
+            root,
+            FakeUpstream(ScriptedDaemon()),
+            style="direct",
+            refresher=refresher,
+            clock=clock,
+        )
+        helper._sync_agents = _no_sync  # type: ignore[method-assign]
+        helper._agents[("x",)] = Agent()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+        # As when the agent was opened: the only use the direct style recorded before.
+        helper._last_upstream_use = clock()  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3):
+            await helper.step()
+            task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+            if task is not None:
+                await task
+            clock.now += 601
+        return fetched_at
+
+    # At start, then every 10 minutes while the agent's connection is live; with no live
+    # connection, the one use recorded at its opening is soon older than 10 minutes.
+    assert asyncio.run(run()) == ([1_000.0, 1_601.0, 2_202.0] if live else [1_000.0])
