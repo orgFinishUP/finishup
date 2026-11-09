@@ -1,6 +1,6 @@
 # ADR-046 — One closure verdict, printed by every surface
 
-**Status:** Accepted for [issue #1026](https://github.com/TheGaySupreme123/finishup/issues/1026)
+**Status:** Accepted for [issue #1026](https://github.com/orgFinishUP/finishup/issues/1026)
 (tb4n3 core issue RC-3, lane W2-A: sixteen of sixteen successful runs ended on "Nothing further to
 do" and then received a receipt below clean, and the same finding read four different ways on four
 surfaces). Maintainer acknowledgement (TheGaySupreme123, 2026-10-11 owner decisions Q1-Q4 on the

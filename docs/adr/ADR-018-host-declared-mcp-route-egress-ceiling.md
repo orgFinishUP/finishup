@@ -1,7 +1,7 @@
 # ADR-018 — Host-declared MCP route egress ceiling
 
 **Status:** Accepted (2026-07-29), acknowledged in
-[issue #84](https://github.com/TheGaySupreme123/finishup/issues/84), and amended 2026-08-30 for issue
+[issue #84](https://github.com/orgFinishUP/finishup/issues/84), and amended 2026-08-30 for issue
 #404 external-runtime dispatch.
 **Implemented by:** `src/finishup/mcp/`, `src/finishup/application/check.py`,
 `src/finishup/ports/control.py`, `src/finishup/service/`, and

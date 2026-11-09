@@ -26,8 +26,7 @@ __all__ = [
 # Where an install upgraded from Yoetz reads how its folders are kept and how to resolve two
 # installations (ADR-048). Shipped-product guide; no repository path or local file is named.
 UPGRADING_FROM_YOETZ_GUIDE: Final = (
-    "https://github.com/TheGaySupreme123/finishup/blob/main/docs/usage/upgrading.md"
-    "#upgrading-from-yoetz"
+    "https://github.com/orgFinishUP/finishup/blob/main/docs/usage/upgrading.md#upgrading-from-yoetz"
 )
 
 PUBLIC_EXIT_CODES: Final = MappingProxyType(

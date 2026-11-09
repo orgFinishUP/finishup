@@ -520,16 +520,16 @@ def _plugin_json() -> bytes:
         "$schema": _SCHEMA_ID,
         "author": {
             "name": "FinishUP contributors",
-            "url": "https://github.com/TheGaySupreme123/finishup",
+            "url": "https://github.com/orgFinishUP/finishup",
         },
         "description": (
             "FinishUP cooperative work-ledger guidance. Artifact validation or installation does "
             "not establish host activation, observation, provider dispatch, or completion."
         ),
-        "homepage": "https://github.com/TheGaySupreme123/finishup",
+        "homepage": "https://github.com/orgFinishUP/finishup",
         "license": "Apache-2.0",
         "name": "finishup",
-        "repository": "https://github.com/TheGaySupreme123/finishup",
+        "repository": "https://github.com/orgFinishUP/finishup",
         "version": __version__,
     }
     return canonical_encode(body) + b"\n"

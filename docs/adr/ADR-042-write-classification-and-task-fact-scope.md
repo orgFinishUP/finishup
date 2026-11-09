@@ -1,6 +1,6 @@
 # ADR-042 — Which edits make verification stale, and which task facts bear on a finding
 
-**Status:** Accepted for [issue #1018](https://github.com/TheGaySupreme123/finishup/issues/1018)
+**Status:** Accepted for [issue #1018](https://github.com/orgFinishUP/finishup/issues/1018)
 (tb4n2 core issue R4: ACTIONS P1-2, P1-3, P1-4b, P1-7 E4 parts, P1-16). Maintainer
 acknowledgement (TheGaySupreme123, 2026-10-08): "all r been agreed", approving R1-R10 including
 their design changes; the Stop-gate token set and the classification rule are the design-gated

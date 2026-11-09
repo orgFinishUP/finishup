@@ -1,7 +1,7 @@
 # ADR-025 — Versioned append-only claim correction
 
 **Status:** Accepted (2026-08-29), acknowledged in
-[issue #432](https://github.com/TheGaySupreme123/finishup/issues/432).
+[issue #432](https://github.com/orgFinishUP/finishup/issues/432).
 **Implemented by:** `src/finishup/domain/events.py`, `src/finishup/kernel/claims.py`,
 `src/finishup/kernel/observed_failures.py`, `src/finishup/kernel/reducers.py`, the local policy packs,
 AI-powered review case and receipt builders, and the public claim schema, guidance, descriptors,

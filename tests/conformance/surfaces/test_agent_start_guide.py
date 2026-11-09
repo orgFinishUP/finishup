@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from finishup.cli.agent_start import AGENT_START_GUIDE_URL
 from finishup.cli.entry import UNSUPPORTED_PLATFORM_MESSAGE
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -133,6 +134,37 @@ def test_agent_start_host_notes_cover_every_first_party_host_and_the_generic_rou
     assert "run in a sandbox with no network" in guide
     # Cursor Cloud stays unsupported, matching the install page.
     assert "Cursor Cloud agents are not supported" in guide
+
+
+def test_fetched_agent_guide_uses_the_org_repository() -> None:
+    """Agents fetch the guide from the repository that publishes it."""
+
+    assert AGENT_START_GUIDE_URL == (
+        "https://raw.githubusercontent.com/orgFinishUP/finishup/main/docs/usage/agent-start.md"
+    )
+    for path in (
+        "README.md",
+        "docs/usage/agent-start.md",
+        "landing/src/pages/index.astro",
+        "src/finishup/cli/agent_start.py",
+    ):
+        text = _text(path)
+        assert AGENT_START_GUIDE_URL in text, path
+        assert "TheGaySupreme123/" not in text, path
+
+
+def test_install_page_describes_the_live_setup_button() -> None:
+    """finishup.dev has one setup control; its confirmation names PyPI and npm as text."""
+
+    page = _text("docs/usage/install-and-first-run.md")
+    collapsed = " ".join(page.split())
+    assert "click **Set up with your agent**" in collapsed
+    assert (
+        "Copied the setup instructions for your agent. Paste them into Codex, Claude Code or "
+        "Cursor. Or install with PyPI or npm, as shown on GitHub."
+    ) in collapsed
+    assert "**Install with PyPI**" not in page
+    assert "**Install with npm**" not in page
 
 
 def test_copied_setup_prompt_matches_between_readme_and_landing() -> None:

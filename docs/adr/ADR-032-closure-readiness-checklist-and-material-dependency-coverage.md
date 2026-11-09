@@ -1,6 +1,6 @@
 # ADR-032 — Closure readiness as a checklist, and material-dependency coverage
 
-**Status:** Proposed for [issue #913](https://github.com/TheGaySupreme123/finishup/issues/913). The
+**Status:** Proposed for [issue #913](https://github.com/orgFinishUP/finishup/issues/913). The
 maintainer acknowledged the design-gated scope on 2026-09-30 and adopted option 2 of the issue (the
 agent-actionable / standing / acknowledged split with `ready_with_limitations`). The scoped local
 verdict in the amendment below is the narrow deterministic-only exception described by issue #971;

@@ -1,6 +1,6 @@
 # ADR-035 — The declared delivered set and a fact for a removed deliverable
 
-**Status:** Accepted for [issue #1005](https://github.com/TheGaySupreme123/finishup/issues/1005)
+**Status:** Accepted for [issue #1005](https://github.com/orgFinishUP/finishup/issues/1005)
 (proposal PL5-4). Maintainer acknowledgement (TheGaySupreme123, 2026-10-07): "declared delivered
 file set, with a deterministic fact for content moved out of it or a declared file deleted or
 renamed". It changes no wire schema, no egress and no storage. It grants no runtime, credential,

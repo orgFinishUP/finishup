@@ -1,7 +1,7 @@
 # ADR-019 — Declared completion scope
 
 **Status:** Accepted (2026-08-04), acknowledged in
-[issue #130](https://github.com/TheGaySupreme123/finishup/issues/130).
+[issue #130](https://github.com/orgFinishUP/finishup/issues/130).
 **Implemented by:** `src/finishup/domain/events.py`, `src/finishup/kernel/plan_scope.py`,
 `src/finishup/application/status.py`, `src/finishup/kernel/deterministic_checks.py`,
 `src/finishup/kernel/receipt_builder.py`, and the public event/status schemas and guidance.
@@ -83,7 +83,7 @@ coverage limitation and readiness fact, not a new actionable policy finding.
 
 ## Completion claim consistency (issue #679)
 
-Maintainer acknowledgement: [issue #679](https://github.com/TheGaySupreme123/finishup/issues/679#issuecomment-5761526859).
+Maintainer acknowledgement: [issue #679](https://github.com/orgFinishUP/finishup/issues/679#issuecomment-5761526859).
 Each readable effective completion claim is compared with the readable current plan. The shared
 pure comparison reports `completion_claim_outside_plan` for claim refs outside that plan and
 `completion_plan_not_claimed` for plan refs omitted by that claim. These are bounded coverage

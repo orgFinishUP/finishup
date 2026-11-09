@@ -1,6 +1,6 @@
 # ADR-045 — Derived facts carry history and lineage
 
-**Status:** Accepted for [issue #1028](https://github.com/TheGaySupreme123/finishup/issues/1028)
+**Status:** Accepted for [issue #1028](https://github.com/orgFinishUP/finishup/issues/1028)
 (tb4n3 core issue RC-5, lane LF: `declared_output_emptied` on files created empty, the
 formal-crypto S emptied solver, exact-string command identity, the dormant
 `edited_after_last_verification`, exact-value attempt matching and binary-by-suffix). Maintainer

@@ -6,7 +6,7 @@ operating-system approval is needed. This page is the agent's version of
 [Install and first run](install-and-first-run.md). Fetch the current version any time:
 
 ```text
-curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/finishup/main/docs/usage/agent-start.md
+curl -fsSL https://raw.githubusercontent.com/orgFinishUP/finishup/main/docs/usage/agent-start.md
 ```
 
 ## The short version

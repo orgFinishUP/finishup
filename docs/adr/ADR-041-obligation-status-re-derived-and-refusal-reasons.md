@@ -1,7 +1,7 @@
 # ADR-041 — Obligation status re-derived from current evidence, one obligation version rule, and refusals that say why
 
-**Status:** Accepted for [issue #1022](https://github.com/TheGaySupreme123/finishup/issues/1022)
-(tb4n2 R2) and [issue #1023](https://github.com/TheGaySupreme123/finishup/issues/1023) (tb4n2 R3,
+**Status:** Accepted for [issue #1022](https://github.com/orgFinishUP/finishup/issues/1022)
+(tb4n2 R2) and [issue #1023](https://github.com/orgFinishUP/finishup/issues/1023) (tb4n2 R3,
 R5). Maintainer acknowledgement (TheGaySupreme123, 2026-10-08): "all r been agreed" (R1-R10,
 design changes included). It loosens one ingest validation rule, adds one public-error detail key
 and two task-fact codes; it changes no egress and no storage, and grants no runtime, credential,

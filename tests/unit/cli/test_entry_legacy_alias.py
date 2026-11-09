@@ -148,6 +148,6 @@ def test_the_notice_tells_a_transitional_user_the_alias_still_runs_every_command
     assert "'yoetz upgrade'" in notice
     assert "removed in a later release" in notice
     assert notice.endswith(
-        "https://github.com/TheGaySupreme123/finishup/blob/main/docs/usage/upgrading.md"
+        "https://github.com/orgFinishUP/finishup/blob/main/docs/usage/upgrading.md"
         "#upgrading-from-yoetz"
     )

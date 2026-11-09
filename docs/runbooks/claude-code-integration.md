@@ -284,7 +284,7 @@ remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessi
 Installation evidence (2026-09-20, issue #767): the installed 0.2.4 wheel passed preview,
 connect, status, repeat/no-op, disconnect and reconnect with Claude Code `2.1.261` on Ubuntu
 24.04 x86-64 and Ubuntu 24.04 inside actual WSL 2. Real PAM approval succeeded with disposable
-local accounts. The [acceptance record](https://github.com/TheGaySupreme123/finishup/issues/767#issuecomment-5750168131)
+local accounts. The [acceptance record](https://github.com/orgFinishUP/finishup/issues/767#issuecomment-5750168131)
 binds the source, wheel digest and outcomes. Provider login and model runs were outside that
 installation acceptance.
 

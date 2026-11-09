@@ -1,7 +1,7 @@
 # ADR-028 — Instance identity and runtime-pinned isolated roots
 
 **Status:** Accepted (2026-09-05), maintainer-requested in
-[issue #604](https://github.com/TheGaySupreme123/finishup/issues/604); design decisions recorded on
+[issue #604](https://github.com/orgFinishUP/finishup/issues/604); design decisions recorded on
 that issue before implementation.
 **Implemented by:** `src/finishup/config/installation.py` (instance identity marker, runtime pin
 writer, service-start binding gate), `src/finishup/config/paths.py` (`read_runtime_pin()`,

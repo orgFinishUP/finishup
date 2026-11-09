@@ -1,6 +1,6 @@
 # ADR-047 — The inspection check, and an operating card instead of a startup reading list
 
-**Status:** Accepted for [issue #1048](https://github.com/TheGaySupreme123/finishup/issues/1048)
+**Status:** Accepted for [issue #1048](https://github.com/orgFinishUP/finishup/issues/1048)
 (tb4n4 D: FinishUP-only steps took a median 11.5 minutes per attempt, 38% of the arm's time: status
 4.6 minutes over 780 calls, publish 4.1 minutes over 651 calls of which 291 were dry runs, and
 guidance 2.8 minutes over 728 calls at a median of 82 KB per attempt; separately, payments D

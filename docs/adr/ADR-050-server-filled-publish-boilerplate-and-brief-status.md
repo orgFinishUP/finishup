@@ -1,6 +1,6 @@
 # ADR-050 — Server-filled publish boilerplate and brief status
 
-**Status:** Accepted for [issue #1084](https://github.com/TheGaySupreme123/finishup/issues/1084).
+**Status:** Accepted for [issue #1084](https://github.com/orgFinishUP/finishup/issues/1084).
 Design gate: protocol. Maintainer acknowledgement: "Maintainer approved 2026-10-16: server-filled
 publish boilerplate and slimmer status responses", recorded on #1084.
 **Amended 2026-10-17** (round-1 review of PR #1088, maintainer-approved fix loop): decision 2 no
@@ -15,7 +15,7 @@ and the record's own failure modes duplicated or suppressed publications. Each i
 gets a fresh, named id: retry means sending it, and an in-memory guard refuses an identical
 id-less resend instead of guessing. The `replay_notice` field is retired. Golden vectors are added
 (CAN-022).
-**Amended 2026-10-18** (n7 RC3, [issue #1103](https://github.com/TheGaySupreme123/yoetz/issues/1103);
+**Amended 2026-10-18** (n7 RC3, [issue #1103](https://github.com/orgFinishUP/finishup/issues/1103);
 design gate: protocol, requested by the maintainer's n7 brief, whose goal #1103 states): decision 7
 also fills an allowlisted omitted empty payload set and canonicalizes `respond` `evidence_refs`, and
 a `respond` payload refusal names its reason. No schema, golden vector or result version changes.
