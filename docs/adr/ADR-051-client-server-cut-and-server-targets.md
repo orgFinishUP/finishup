@@ -201,6 +201,25 @@ console; `keep`, `list` and `remove` work).
 
 **Not yet built:** the follow-ups ADR-052 lists for layers 3 to 7.
 
+### Built in layer 3, and not yet built
+
+**Built, live on the server side:** the server profile (`server-profile` 1.0.0) and the
+authenticated revision a service issues at start, answered by the structural `server_profile`
+operation and the hidden `finishup service profile [--json]`; a service admits a remote client's
+claim-bound hello only under its current revision and refuses work on a session bound to an older
+one (ADR-052 decision 9 and 10). A local client's hello names no revision and is unchanged.
+
+**Built, exercised in process, dormant on the network:** the consent binding (a `/2` target
+record, the consented envelope, the cached profile, the gate's consent step after the kind step,
+`server_profile_changed` and `server_level_unavailable` on every surface, the narrowing adjustment
+and `server status`'s notice), the open-kind `server add`/`server use` consent flows with SRV-3,
+SRV-6, SRV-11, SRV-12 and the add-time outside-read question back from layer 1's closure, the
+helper's workspace registration API and the bridge as its first registrant, and the connection and
+background agent roles (ADR-052 decisions 10 to 12). No profile source is registered for any kind
+and no kind is open, so no consent can be given.
+
+**Not yet built:** the follow-ups ADR-052 decision 8 lists for layers 4 to 7.
+
 ## Decisions
 
 ### 1. The cut line is an enforced contract, not a package move
@@ -1037,8 +1056,10 @@ is open. Two parts act already: the owner-only record of what this computer's ev
 last reported (*Remember*, below) is kept up to date, and the last line of defence still refuses
 a remote record that something other than `server use` selected. The unified model binds consent
 to the server's offer: a consent envelope compared by an explicit partial order (layer 2) and a
-profile revision carried on every request (layer 3) replace the disclosure-version check below
-for the kinds that need them; the trusted-console rule stays.
+profile revision carried on every request (layer 3, ADR-052 decision 10, built and dormant while
+no kind is open) add to the disclosure-version check below (now version 3, naming the level and
+the server's review egress); the trusted-console rule stays, and `server use` of a remote target
+asks every time.
 
 - `server add` and `server use` for a remote kind need the trusted foreground console, a versioned
   disclosure and the owner typing the target name. At `server add` the same confirmation first

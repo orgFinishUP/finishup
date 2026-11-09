@@ -4710,6 +4710,11 @@ never inside a repository, with exact field sets.
 | `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | The key set is exact per kind (`client.targets._FIELDS_BY_KIND`); every listed key is present, a nullable one as JSON `null`, and no other key is admitted. Every kind: `schema`, `target_id` (`t_` + 8 lowercase hex, the folder's own name), `name`, `kind`, `created_at` (RFC 3339, milliseconds). `local`: those five only. `https` and `local_port`: also `base_url` (normalized; loopback only for `local_port`), `ca_file` (absolute path or `null`), `tls_pin` (`sha256:<64 hex>` or `null`; at most one of `ca_file` and `tls_pin` is set, and both `null` means the system certificate store) and `credential` (`keyring`, `file` or `null` while no key is stored). `ssh`: also `user` (or `null`), `host`, `port`, `remote_root`, `remote_endpoint` (`<remote_root>/run/control.sock`, derived) and `remote_launcher`, the last three absolute paths or `null`. Every remote kind also has `claim_salt` (base64 of 32 random bytes), `authorized_at` and `disclosure_version` (an integer of at least 1), never `null`. |
 | `yoetz.server-selection/1` | `<ambient config dir>/server-selection.json` | `schema`, `target_id`. Absent means the ambient service. |
 | `yoetz.credential-generation/1` | `<target root>/config/credential-generation` (layer 2, ADR-052) | `schema`, `generation` (32 lowercase hex, random), canonical JSON and a newline. Written only by the owner's own commands on the target's key (`server logout`, `server remove`; `server login` once it stores a key), never by a token refresh; a change ends every connection admitted under the previous one (`server_authorization_changed`). Holds no secret. |
+| `yoetz.server-target/2` | `<ambient state dir>/servers/t_<8 hex>/target.json` (layer 3, ADR-052) | A remote record the owner consented to under a server profile: the `/1` key set of its kind plus `consent`, an exact object: `level` (`L1`; `L2` from layer 6), `profile_digest` (`sha256:<64 hex>`), `profile_revision` (`{issuer: 32 hex, revision: integer ≥ 1}`), `retention` (`null` at L1, else `{kind, days}`), `envelope_digest` (the digest of `config/consent-envelope.json`) and `adjusted` (`null`, or `{at, coverage_reduced}` once a narrowed profile adjusted it). Local records stay `/1`; a `/1` remote record still reads and is refused `target_reauthorization_required` (`DISCLOSURE_VERSION` 3). |
+| `yoetz.consent-envelope/1` | `<target root>/config/consent-envelope.json` (layer 3) | The consented envelope (`protocol.consent_envelope` canonical form) and a newline; written only by the owner's consent on the trusted console and by a narrowing adjustment; bound to `target.json` by `consent.envelope_digest`. |
+| `yoetz.server-profile-cache/1` | `<target root>/state/server-profile.json` (layer 3) | `schema`, `fetched_at`, `endpoint` (`{identity_type, identity}`: what the transport observed, never what the server says) and `profile` (a `server-profile` 1.0.0 document); written by whoever fetches a profile (`server add`/`use` here, the helper from layer 4); hooks only read it. |
+| `yoetz.helper-registration/1` | `<target root>/state/registrations/<claim hex>-<worktree hex>-<registrant>.json` (layer 3) | `schema`, `target_id`, `registrant` (16 hex), `source` (`cli`, `hook`, `mcp_bridge`, `mcp_roots`, `registered_project`, `ui`), `claim` (`{identity_kind, digest, worktree}`), `worktree` (absolute, never sent), `repository_key`, `grant` (`{identity_digest, consent_digest, credential_generation}`), `server_profile` (the revision triple), `registered_at`, `expires_at` (a 15-minute lease). At most 64 per target. See *Server profiles and consent*. |
+| `yoetz.server-profile-revision/1` | `<service state dir>/server-profile-revision.json` (server side, layer 3) | `schema`, `issuer` (32 hex, random), `revision` (integer ≥ 1), `profile_digest`; advanced at service start when the offer's digest changes; one that cannot be read is replaced under a new issuer. |
 | `yoetz.everyday-repository-policy/1` | `<ambient state dir>/servers/everyday-repositories.json` (layer 2, ADR-051 decision 8) | `schema` and `repositories`: per repository `key` (`sha256:` over the shared repository identity), `no_network`, `no_network_since` (the start of the current no-network stretch, or `null`), `reported_at` and up to 8 `worktrees`; at most 256 entries and 256 KiB (the writer keeps the reader's bound), permitted ones evicted first; an update that still would not fit is not written and is recorded in `yoetz.everyday-repository-overflow/1`. Written only while a remote target record exists (`targets.remote_target_recorded`, O3); deleted when the last one is removed. Never sent to a server. |
 | `yoetz.everyday-repository-overflow/1` | `<ambient state dir>/servers/everyday-repositories-overflow.json` (layer 2) | `schema` and `overflowed_at`: when an update of the repository reports last did not fit their 256 KiB bound; removed by the next update that fits and with the reports. `server repositories list` names it. Never sent to a server. |
 | `yoetz.server-repositories/1` | `<target root>/config/repositories.json` (remote kinds only, layer 2) | `schema`, `target_id` (the root's own) and `repositories`: per repository `key`, `choice` (`send`, with its `disclosure_version`, or `keep`), the `no_network_since` it was made in, `decided_at` and the `worktree` it was made from; at most 64. Written by `server repositories add` (trusted console), `keep`, and `remove [--all]`; never sent to a server. |
@@ -5701,6 +5706,8 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 | `repository_egress_held` | layer 2: the shared gate's last step (ADR-052) refuses a connection to a server elsewhere, before anything from it is sent, for a repository whose own grant on this computer allows no network use and for which the owner made no current choice; a long-lived connection that is already open ends as `server_authorization_changed` once the repository becomes held | continuation `repository_send_decision_required`: ask the user once; only they run `finishup server repositories add` on the trusted console; on a decline run `finishup server repositories keep` and do not ask again; then repeat the request |
 | `repository_egress_kept` | layer 2: as above, for a repository the owner kept on this computer for that target | continuation `repository_kept_on_this_computer`: continue without FinishUP for that repository; never ask again |
 | `server_authorization_changed` | layer 2: a connection admitted to a server elsewhere ends because what it was authorized under changed — the selection no longer names its target, the target's record was replaced or removed, the credential generation changed, or (for an open connection, whatever the gate now refuses) this computer's policy or the repository's hold changed (ADR-052); FinishUP stopped sending over it and what the server received stays there | continuation `server_connection_renew`: a request already sent over that connection may be recorded there and is never resent (no replay across targets), so its outcome is unknown; later requests run under the current selection or name the refusal now in force |
+| `server_profile_changed` | layer 3: the consent step (ADR-052 decision 10): what the selected server elsewhere offers or needs (its profile, as last fetched) is wider than, or not comparable with, what the owner consented to; or its revision is another issuer's, its endpoint identity changed, or a consent record is missing, unreadable or inconsistent; or the server refused the revision a hello or request named (control error code `server_profile_changed`). Refused before anything was sent | continuation `remote_reconsent`: only the owner agrees again, with `finishup server use NAME` in their own terminal; agents never do |
+| `server_level_unavailable` | layer 3: the server requires a level of use above the one the owner agreed to (never a silent upgrade); refused before anything was sent | continuation `server_level_decision_required`: only the owner decides (`finishup server use NAME` shows what it requires, or `finishup server use local`) |
 | `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): the owner uses a server on this computer, `finishup server use local` or a named local one (`finishup server add NAME --local`), then the request is repeated; SSH, HTTPS and port servers arrive in a later release, and nothing was added, selected or sent |
 | `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: while the remote kinds are closed, `finishup server use NAME` cannot confirm the current disclosure (it answers `remote_kind_unavailable`), so the owner runs `finishup server use local`, then starts a new agent session, and a later release can authorize that server again (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
 | `zero_network_remote_selected` | a connection would be opened to a remote target while this computer last reported a zero-network policy (`targets.require_current_authorization`, before the disclosure check; ADR-051 decision 8, 2026-11-07); also the CLI's refusal of a privacy change that would leave both in force | the owner runs `finishup server use local`, then restarts open sessions (and makes the refused change again) |
@@ -14525,6 +14532,60 @@ sits before the linked-check question, which stays last. On a channel whose prep
 most `SMALL_REVIEW_CHANNEL_BYTES` (16,384, the minimal policy's 4,096 tokens) it is not asked when
 the test-quality question rides, because that packet already has no room left (#1173). It is
 bound into `case_digest` with the rest of the question set and is never in the cached instruction.
+
+## Server profiles and consent (ADR-052, layer 3)
+
+**Schema.** `server-profile` 1.0.0 (`schemas/service/server-profile-1.0.0.schema.json`, generated
+from `protocol.server_profile_contract`; golden vectors `fixtures/service/server-profile.case.json`):
+`schema_version`, `release`, `schema_manifest_digest`, `service_instance_id`, `key` (`{id | null,
+scope: operator | agent | read, principal}`), `edges` (`rest-1`, `ssh-control`), `levels`
+(`{offered, required_min}`), `code_sync`, `retention` (`{options, default}`) and `exclusions`
+(`{always}`) — present exactly when L2 is offered, else `null` — `review` (`{ai_review: none |
+server_policy, provider_disclosure}`), `official` (a claim only), `profile_revision` (`{issuer,
+revision, profile_digest}`) and `profile_digest` (`sha256` over `yoetz/server-profile/v1` NUL and
+the canonical `{levels, code_sync, retention, exclusions, review}`, each shared member in the
+consent envelope's encoding). `protocol.server_profile` is the hook-safe strict parser; a document
+whose digest does not recompute, or with anything unknown, is refused (`ProfileError`, closed
+reasons `profile_member_unknown`, `profile_member_missing`, `profile_member_invalid`,
+`profile_value_unknown`, `profile_schema_unsupported`, `profile_digest_mismatch`,
+`profile_too_large`, `profile_not_json`).
+
+**Control wire 2.10.0 (amended in place, unreleased).** Method `server_profile` (body `{}`; result a
+`server-profile` document; structural: answered while locked, for `cli` and `ui` clients, not the
+MCP bridge). `control-hello.server_profile` and `control-hello-result.server_profile`: the revision
+triple. A hello naming a revision or a claim is admitted only under the revision the service
+issues now; otherwise the answer names the current one and the service closes before keying the
+claim or registering an agent (client: phase `server_profile_changed`). Control error code
+`server_profile_changed`: a request that does work on a session bound to an older revision.
+`control-hello.workspace_agent.role`: `connection` (default) or `background`. The manifest-mismatch
+answer lists only released methods (#436).
+
+**Where the offer comes from.** `service.server_profile`: levels pinned by the release (L1 offered
+and required); review from the service's `config.toml` (an external semantic provider →
+`server_policy` with its provider id; otherwise `none`); `official` false; edge `ssh-control`; the
+owner's key (`{null, operator, owner}`).
+
+**CLI.** `finishup service profile [--json]` (hidden in layer 3; server-host scope): starts this
+root's service on demand and prints the verified profile.
+
+**Client.** `client.server_profile`: `consent_verdict(record)` (the gate's step 5),
+`consent_envelope_for`, `record_consent`, `refresh_profile`, `PROFILE_SOURCES` (empty in layer 3).
+`server status --json` gains `target.consent` (`{level, profile_revision, state: current | changed |
+level_unavailable, adjusted_at, coverage_reduced}`; `null` for a local target or one never
+consented); the owner display shows `server_profile_narrowed` while a narrowing adjusted the
+consent.
+
+**Helper registration API.** `client.helper_registrations`: `register(authorization, claim,
+worktree, *, registrant, source)`, `renew`, `release`, `release_registrant`,
+`served_workspaces(record)` (async; drop reasons `expired`, `unreadable`, `target_changed`,
+`credential_changed`, `consent_changed`, `claim_mismatch`, or the gate's phase),
+`RegistrationError` (`registration_refused` with a phase, `registration_limit`,
+`registration_unsafe`, `registration_invalid`). The MCP bridge registers a claim-bound workspace,
+renews it at half-life and releases it on close and when Cursor's roots change.
+
+**Agent routing (`service.workspace_hub`).** A live call: its own connection's agent, else the
+newest background agent, else the newest connection agent. Background work: the newest background
+agent, else the newest connection agent.
 
 ## Lossless result delivery (issue #1139)
 

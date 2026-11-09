@@ -589,3 +589,16 @@ when the owner's own command acts on the target's key (`server logout`, `server 
 admitted under the previous generation ends with `server_authorization_changed` and must
 authenticate again under the key now current. A key changed in the platform credential store
 outside FinishUP is not seen. The vault, its states and the local ceremonies are unchanged.
+
+## Amendment proposed by ADR-052 (layer 3): the server's profile revision and the consent records
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) decisions 9 to 11
+add owner-only records outside the vault, none holding a secret or granting anything by itself:
+the service's `<state dir>/server-profile-revision.json` (a random issuer, a number and the digest
+of what it offers), and, beneath a remote target's client root, the consented envelope
+(`config/consent-envelope.json`), the last profile fetched (`state/server-profile.json`) and the
+helper's workspace registrations (`state/registrations/`). The service answers its profile and
+admits a remote client's hello only to a peer-authenticated session, as before; the profile is
+answered while the vault is locked and needs no vault handle. The vault, its states and the local
+ceremonies are unchanged. The narrow unauthenticated discovery exception of design v2 section 8.8
+belongs to layer 5 and is not made here.

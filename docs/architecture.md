@@ -159,7 +159,23 @@ and by a one-second watch; a local connection carries none. `client/repository_h
 the hold of a repository whose own grant forbids network egress from the reports
 `client/everyday_repository.py` records (dormant until a remote target exists), and the workspace
 agent fences held worktrees. `protocol/consent_envelope.py` (SHARED, pure) holds the consent
-envelope types, their canonical form and their partial order for layer 3's profiles.
+envelope types, their canonical form and their partial order.
+
+**Server profiles and consent (layer 3, ADR-052 decisions 9 to 12).** `protocol/server_profile.py`
+(SHARED, pure, hook-safe) parses and verifies `server-profile` 1.0.0 and builds the envelope of
+using a profile at a level; `protocol/server_profile_contract.py` is its schema contract.
+`service/server_profile.py` (SERVER) decides what this service offers (levels pinned by the
+release, review egress from its own config) and keeps the profile revision it issues at start;
+the daemon answers the structural `server_profile` method and admits a remote hello, and every
+request that does work, only under that revision (`service/control_protocol.py`,
+`service/daemon.py`). `client/server_profile.py` (CLIENT, hook-safe readers) keeps the consented
+envelope and the last profile fetched beside a `/2` `target.json` and decides the gate's consent
+step (after the kind step); `cli/server.py` asks for the consent on the trusted console once a
+kind opens, and `server status` shows it. `client/helper_registrations.py` is the API through
+which client processes register the workspaces a target's helper serves (layer 4 runs the
+helper); the MCP bridge registers its claimed workspace, and `service/workspace_hub.py` routes a
+live call to its own connection's agent and background work to a `background` agent first. No
+profile source is registered for any kind and no kind is open in this layer.
 
 ### Topology by target
 

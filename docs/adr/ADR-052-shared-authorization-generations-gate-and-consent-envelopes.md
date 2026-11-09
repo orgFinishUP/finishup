@@ -1,11 +1,12 @@
 # ADR-052 — Shared authorization: generations, the gate and consent envelopes
 
-**Status:** Proposed for [issue #1308](https://github.com/orgFinishUP/finishup/issues/1308), layer 2
-of the unified client/server model ([ADR-051](ADR-051-client-server-cut-and-server-targets.md),
+**Status:** Proposed for [issue #1308](https://github.com/orgFinishUP/finishup/issues/1308), layers 2
+and 3 of the unified client/server model ([ADR-051](ADR-051-client-server-cut-and-server-targets.md),
 *Delivery in layers*). It is the new decision record the unified design names for levels, server
-profiles and the server copy, started here with the parts layer 2 builds; the profile,
-registration and level-L2 sections are recorded as **not built** and are filled in by the layers
-that build them. Design gates: privacy/egress (what may reach a server elsewhere, and when it
+profiles and the server copy: layer 2 built generations, the gate and consent envelopes; layer 3
+builds the server profile, its revision, the consent binding and the helper's workspace
+registration API (decisions 9 to 12); the level-L2 sections are recorded as **not built** and are
+filled in by the layers that build them. Design gates: privacy/egress (what may reach a server elsewhere, and when it
 stops) and storage (three new owner-only client records). Maintainer acknowledgement: the
 maintainer accepted the unified design on 2026-11-08 and asked for its delivery as stacked pull
 requests, and on 2026-11-09 gave the answers O1 to O9 recorded below; under the intake rule in
@@ -19,9 +20,18 @@ repository reports in `src/finishup/client/everyday_policy.py`, `targets.remote_
 the `server repositories` group in `src/finishup/cli/server.py`, and the closed tokens
 `server_authorization_changed` / `server_connection_renew` in `src/finishup/protocol/errors.py` and
 `src/finishup/protocol/recovery.py`.
-**Amends:** ADR-051 (decision 8 gains the repository egress hold; decisions 5, 6 and 12 the
-fence, the phases and the waiting rows), ADR-008 (the credential generation), ADR-009 (the hold of
-a repository whose grant forbids network egress) and ADR-030 (two continuations).
+**Implemented by (layer 3):** `src/finishup/protocol/server_profile.py` (and its schema contract
+`server_profile_contract.py`), `src/finishup/service/server_profile.py`, the `server_profile`
+operation and the revision checks in `src/finishup/service/daemon.py` and
+`src/finishup/service/control_protocol.py`, `src/finishup/client/server_profile.py`, the `/2`
+records in `src/finishup/client/targets.py`, the consent step in
+`src/finishup/client/authorization.py`, the open-kind `server add`/`server use` flows in
+`src/finishup/cli/server.py`, `src/finishup/client/helper_registrations.py`, the agent roles in
+`src/finishup/service/workspace_hub.py`, and the bridge's registration in `src/finishup/mcp/server.py`.
+**Amends:** ADR-051 (decision 8 gains the repository egress hold and, in layer 3, the consent to a
+server profile; decisions 5, 6 and 12 the fence, the phases and the waiting rows), ADR-008 (the
+credential generation; the server's profile revision record), ADR-009 (the hold of a repository
+whose grant forbids network egress) and ADR-030 (two continuations in layer 2, two in layer 3).
 
 ## Context
 
@@ -42,11 +52,16 @@ elsewhere with the first closed reason, in this order:
 
 1. the record is readable (an unreadable one may name a remote kind: `target_root_is_remote`);
 2. `zero_network_remote_selected` (ADR-051 decision 8);
-3. `target_reauthorization_required` (layer 3 adds the consent-envelope comparison here);
-4. the kind is open in this release (`OPEN_REMOTE_KINDS`, empty in layer 2: every remote root is
-   refused as `target_root_is_remote`, the phase layer 1 gave every connection and spawn path);
-5. (layer 5) a credential is present for a kind that needs one;
-6. `repository_egress_held` or `repository_egress_kept`, once the repository is known.
+3. `target_reauthorization_required` (the disclosure version);
+4. the kind is open in this release (`OPEN_REMOTE_KINDS`, empty in layers 2 and 3: every remote
+   root is refused as `target_root_is_remote`, the phase layer 1 gave every connection and spawn
+   path);
+5. (layer 3) the consent to the server's profile (decision 10): `server_profile_changed` or
+   `server_level_unavailable`. It comes after the kind step, not with the disclosure as layer 2
+   planned, because its way on (`finishup server use NAME` on the trusted console) exists only for
+   an open kind: with the kind closed, the kind is the truthful first refusal;
+6. (layer 5) a credential is present for a kind that needs one;
+7. `repository_egress_held` or `repository_egress_kept`, once the repository is known.
 
 Both connect paths (`connect_service`, `connect_service_on_demand`) run it before any claim, dial,
 spawn or supersede (`service.client._admit_remote`); `remote_binding.binding_for_active_root` runs
@@ -156,9 +171,10 @@ exclusions, review egress and the disclosure version.
   reduces coverage (level, code sync, exclusions, review) for a receipt to name; anything else →
   `ask_again` with what widened or changed. L1 → L2 always widens.
 
-Nothing reads an envelope in layer 2: building one from a server profile, recording the consented
-digest and revision in `target.json`, and mapping the verdicts to `server_profile_changed`
-(`remote_reconsent`) and `server_level_unavailable` arrive with profiles (layer 3; O5).
+Layer 3 reads them (decision 10): an envelope is built from a server profile and the endpoint
+identity the client observed, the consented one is recorded beside `target.json`, and the verdicts
+map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailable`
+(`server_level_decision_required`) (O5).
 
 ### 7. The owner's answers of 2026-11-09 (O1 to O9)
 
@@ -193,7 +209,9 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
   before the console while no kind is open; `keep`, `list` and `remove` work. Reopened by the layer
   that opens remote kinds.
 - **O5 — profile tokens in layer 3.** `server_profile_changed` (with `remote_reconsent`) and
-  `server_level_unavailable` are not registered here; `compare` returns typed verdicts.
+  `server_level_unavailable` (with `server_level_decision_required`) are registered in layer 3,
+  with ADR-030 directives, on every surface (decision 10); layer 2's `compare` returned typed
+  verdicts.
 - **O6 — stricter everywhere.** Anything incomparable or unknown, `task_close` against `days:N`
   included, asks again; L2 → L1 is a narrowing that reduces coverage, typed so receipts can show it
   in a later layer; exclusions narrow only by an exact pattern superset; key scope only by subset.
@@ -207,21 +225,127 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
 
 ### 8. Not built (later layers)
 
-- **Profiles and registration (layer 3):** the server profile and its revision on every request,
-  registration and upload; consent fields in `target.json` (a record-schema change, since the field
-  sets are exact); `server_profile_changed`, `server_level_unavailable`; the helper's workspace
-  registration API, each registration bound to a grant and its generation.
 - **The helper and direct styles (layers 4 and 5):** every background agent the helper serves is
   built through `remote_workspace_binding(target=…)` with the fence and its own authorization
   (critic gap 1, follow-up FR-1); the direct SSH style and the single REST client carry, check and
   watch `ConnectionAuthorization`, and the helper's relay re-checks before each relayed frame
   (critic gap 2, FR-2); the helper's own handshake takes the authorization (FR-3); the line after a
-  remote `server use` or `server add` naming a held repository (FR-5).
+  remote `server use` or `server add` naming a held repository (FR-5). From layer 3: a profile
+  source per kind (SSH runs the server's `finishup service profile --json` through the recorded
+  launcher in layer 4; REST answers `GET /v1/server` in layer 5), the helper's profile refresh at
+  its start, every N minutes and on `server_profile_changed`, a direct process recording the
+  revision the server answered so later admissions refuse before the dial, the helper reading
+  `served_workspaces` and declaring `role: background`, `service profile` shown in help, the other
+  registrants (the terminal interface, long commands), REST requests carrying the revision, and
+  API-key principals and scopes in the profile.
 - **Level L2 (layer 6):** no sync while the gate refuses (the hold is checked before a bundle is
   built), and stopping future egress, cancelling server work and forgetting retained copies kept
-  apart (design v2 section 8.10; FR-7); the receipt count of fenced reads (O7).
+  apart (design v2 section 8.10; FR-7); the receipt count of fenced reads (O7). From layer 3: a
+  `[server]` configuration table offering L2 with its code sync, retention options and
+  exclusions; consent at L2 (a retention chosen among those offered); the per-repository L1/L2
+  consents in the per-target repository map; the revision on every sync upload; the receipt line
+  for a narrowing that reduced coverage.
 - **Lifecycle (layer 7):** upgrade over running bridges and helpers, the WAN gate, and the host ×
-  surface × operating system acceptance rows for the hold and the generation (FR-6).
+  surface × operating system acceptance rows for the hold and the generation (FR-6), and for a
+  service restarted under a new profile revision.
+
+### 9. The server profile and its revision (layer 3)
+
+`server-profile` 1.0.0 (design v2 section 2.2, `schemas/service/server-profile-1.0.0.schema.json`,
+golden vectors in `fixtures/service/server-profile.case.json`) is what a FinishUP server offers and
+requires: its release and schema manifest, the service instance, the caller's key, its edges, the
+levels offered and the minimum required, code sync, retention options and exclusions (level L2
+only, present exactly when L2 is offered), its AI-review egress, its `official` claim (never
+counted on its own, section 2.4) and its revision.
+
+- **The digest.** `profile_digest` is `sha256` over `yoetz/server-profile/v1` NUL and the canonical
+  JSON of `{levels, code_sync, retention, exclusions, review}`, each shared member encoded exactly
+  as a consent envelope encodes it. A client recomputes it and refuses a profile whose stated
+  digest differs; parsing is strict (`protocol.server_profile`, hook-safe, no pydantic): an
+  unknown member or value refuses the whole document, so nothing the client does not understand
+  can be agreed to.
+- **Where the offer comes from (layer 3's decision).** Levels are pinned by the release: L1
+  offered and required (a server elsewhere always keeps the tasks), L2 never offered before
+  layer 6, which adds a configuration table for it. Review egress is derived from the server's own
+  `config.toml` (its semantic capability and provider), the settings that decide whether it can
+  reach an AI provider at all, so the profile never understates it: an external provider states
+  `server_policy` (its owner's privacy policy decides) and names the provider by a closed token;
+  anything else states `none`. `official` is false (the official service is built in another
+  repository); the edge is `ssh-control`; a peer-authenticated session is the owner's.
+- **The revision.** The server keeps `<state dir>/server-profile-revision.json`
+  (`yoetz.server-profile-revision/1`, owner-only canonical JSON): a random issuer, a number and the
+  digest it stands for. At start a new offer advances the number; a record that cannot be read is
+  replaced under a new issuer (every consent asks again); one that cannot be written keeps the
+  revision in memory (the digest in the triple keeps a reused number from matching another offer).
+  It is "authenticated" in three ways: it is issued only by the `server_profile` operation and in
+  the hello result of a peer-authenticated session (never by unauthenticated discovery), it is
+  bound to this server's own state by its issuer, and the server compares the whole triple.
+- **Producing it.** The structural control operation `server_profile` (also while locked) and
+  `finishup service profile [--json]`, which starts this root's service on demand and is hidden
+  until layer 4's SSH discovery runs it. Control wire 2.10.0 (unreleased) is amended in place; the
+  manifest-mismatch answer keeps listing only the methods a released peer knows, so a 2.9.0
+  client still names `manifest_mismatch` (#436).
+
+### 10. The consent binding (layer 3)
+
+- **The records.** A consented remote `target.json` is `yoetz.server-target/2` with an exact
+  `consent` object: level, profile digest, the revision's issuer and number, retention, the
+  digest of the consented envelope kept beside it (`config/consent-envelope.json`), and whether a
+  narrowing adjusted it. A local record stays `/1` byte for byte; a `/1` remote record still
+  reads and is refused `target_reauthorization_required` (`DISCLOSURE_VERSION` 2 → 3: the
+  disclosure now names the level and the review egress). The last profile fetched is kept in
+  `state/server-profile.json` (`yoetz.server-profile-cache/1`) with the endpoint identity the
+  transport itself observed. The generation watches both new files.
+- **The consent step** (gate step 5, hook-safe, file reads only) builds the current envelope from
+  that profile within the consented level and compares it with the consented one: same or
+  narrower admits the connection under the profile's revision, which its hello names; a level
+  above the one agreed is `server_level_unavailable`, never a silent upgrade; anything wider,
+  changed or unknown, another issuer, another endpoint identity, or a record that is missing,
+  unreadable or inconsistent is `server_profile_changed`. An open connection whose consent moves to
+  another revision ends with `server_authorization_changed` (decision 2's rule).
+- **Narrowing adjusts (stricter).** Recording a newly fetched profile (`refresh_profile`) on a
+  narrowing rewrites the consent down to it and keeps when and what coverage it reduced, so a later
+  widening, even back to what the owner once confirmed, asks again; `server status` shows the
+  `server_profile_narrowed` notice until the owner next confirms. The same offer under a new
+  revision records only the revision. The record is changed field by field as stored, under the
+  registry lock (SRV-12).
+- **The server holds it before any work.** A hello that names a revision or a claim is admitted
+  only under the revision the service issues now; otherwise the service answers its current one
+  and closes, before the claim is keyed, an agent registered or a request read. Every request
+  that does work on a session bound to an older revision is refused `server_profile_changed`;
+  the structural methods and `server_profile` are still answered.
+- **Consent only on the trusted console.** With a kind open (a later layer; tests here) and a
+  profile source for it (none in this release), `server add` and `server use` check the address
+  and remote paths (SRV-11), this computer's zero-network state (SRV-3), fetch the profile, refuse
+  before any console what this release cannot agree to, show the versioned disclosure with what
+  the profile means in this release's own words only (design v2 section 8.8), ask the add-time
+  outside-read question, and take the typed name; the terminal interface reads it on its loop
+  thread (SRV-6). Agents only ever get the `remote_reconsent` directive.
+- **The per-repository override map** is the per-target `repositories.json` of decision 5's hold:
+  with one remote level its only override is L0 (`keep`); layer 6 adds L1/L2 entries with their
+  own consent.
+
+### 11. The helper's workspace registration API (layer 3)
+
+Design v2 section 8.5. `client.helper_registrations`: one owner-only canonical record per
+registering process and workspace, `<target root>/state/registrations/<claim>-<worktree>-
+<registrant>.json` (`yoetz.helper-registration/1`), at most 64 per target, leased for 15 minutes
+and renewed by its registrant, naming the claim, the worktree (never sent), the hold key and what
+the registering connection was admitted under (identity and consent digests, credential
+generation, profile revision). `register` writes only under an admission that refuses nothing
+now; `renew` re-admits or releases with the phase; `release_registrant` serves a bridge retiring
+and Cursor's roots changing. `served_workspaces`, the helper's read, serves a registration only
+while all of that still holds, the gate passes for its repository, and its claim derives again
+from its own worktree under the target's salt (a copied or edited record is never served). The MCP
+bridge is the first registrant; the helper process is layer 4.
+
+### 12. Which agent answers (layer 3)
+
+An agent declares its `role` in the hello: `connection` (default) or `background` (the helper's).
+The hub sends each call to one channel: a live call to its own connection's agent, else the newest
+background agent, else the newest connection agent; background work to the newest background
+agent, else the newest connection agent (layer 1's behaviour when there is no helper). They never
+compete.
 
 ## Honest limits
 
@@ -234,6 +358,13 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
 5. Same-user tampering with any record changes nothing FinishUP can prevent; a hand edit does
    change the generation.
 6. Processes older than this release keep their rules until they restart (critic gap 14).
+7. The profile is what the server states: a server that breaks FinishUP's rules can send more
+   than its profile says. The consent binds this client's own sending, the revision binds the
+   server's admission, and neither can bind a server that lies.
+8. In this release nothing fetches a profile, so no consent can be given and no revision is ever
+   sent; the server side is live (it issues a revision and answers `server_profile`).
+9. A client learns a changed profile only when it is fetched again (layer 4's helper) or the server
+   refuses its revision; until then the server's own check refuses the work.
 
 ## Reverse states
 
@@ -241,6 +372,9 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
 |---|---|---|
 | An owner command on a key (`server logout`, `server remove`; `server login` from layer 5) writes a new credential generation | `server remove` removes it with the root | its effect: a connection made under the old key ends with `server_authorization_changed` |
 | The first server elsewhere is recorded: the repository reads and reports switch on (O3) | removing the last server elsewhere deletes the reports | `server repositories list` |
+| The owner's consent to a server profile (`server add`/`server use`, a kind open) | `server remove` removes it with the root; `server use local` stops using it | `server status` (`target.consent`) |
+| A narrowing adjusts the consent | the owner's next consent (`server use`) clears the notice | `server status` (`server_profile_narrowed`) |
+| A bridge registers its workspace with the helper | closing the connection, Cursor's roots changing, or the lease expiring | the registrations folder of the target root |
 
 ## Consequences
 
@@ -249,4 +383,7 @@ Every remote path a later layer opens inherits the gate, the generation and the 
 through them (or carry `ConnectionAuthorization` itself, FR-2). The protocol registry gains one
 reason code and one continuation; `REMOTE_CONNECTION_PHASES` and the admitted `phase` safe details
 (`AUTHORIZATION_REFUSAL_PHASES`) gain the hold and the changed authorization, and every surface
-renders all six phases alike.
+renders all six phases alike. Layer 3 adds `server_profile_changed` and `server_level_unavailable`
+(eight phases), the continuations `remote_reconsent` and `server_level_decision_required`, the
+control error code `server_profile_changed`, the `server_profile` method and the `server-profile`
+schema.

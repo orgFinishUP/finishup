@@ -1497,6 +1497,12 @@ Connecting Codex while a target is selected does not stamp that target into a re
 existing ambient registrations do not show as drift. `finishup server use local` returns every
 later process to the default service.
 
+- **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host and
+  dormant until a remote kind opens: the gate's consent step names `server_profile_changed` or
+  `server_level_unavailable` in the same SessionStart texts, MCP shapes and drain records as the
+  other phases, and only the owner agrees again (`finishup server use NAME` on the trusted
+  console; the agent's own shell cannot). The MCP bridge registers its claimed workspace with the
+  target's helper and releases it when it closes. Nothing changes with no server elsewhere.
 - **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on
   every host, and dormant until remote kinds open. A held or kept repository gets one
   byte-identical SessionStart text per state (`repository_hold.hook_context`: the attach form in
