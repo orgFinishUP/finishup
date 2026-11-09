@@ -91,7 +91,11 @@ from finishup.ports.privacy import (
 )
 from finishup.ports.workspace_agent import outcome_for_reason
 from finishup.protocol.canonical import canonical_encode, parse_canonical_integer_string
-from finishup.protocol.errors import SERVICE_HANDSHAKE_PHASES, SERVICE_START_TIMEOUT_PHASE
+from finishup.protocol.errors import (
+    AUTHORIZATION_REFUSAL_PHASES,
+    SERVICE_HANDSHAKE_PHASES,
+    SERVICE_START_TIMEOUT_PHASE,
+)
 from finishup.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
 from finishup.protocol.models import (
     CheckRequest,
@@ -701,10 +705,26 @@ def _server_profile_of(authorization: AuthorizationCheck | None) -> ServerProfil
     return revision if type(revision) is ServerProfileRevision else None
 
 
+def _sent_outcome(error: ControlError) -> ControlError:
+    """What a call whose body was already sent fails with when its connection ends with ``error``.
+
+    A refusal phase says nothing was sent, or that the server did no work for that one request;
+    neither holds for another call already sent over the connection, which the server may have
+    recorded. Such a call ends as ``server_authorization_changed``: its outcome is unknown and it
+    is never sent again (ADR-052, review of layer 3: B2). Any other failure is its own.
+    """
+
+    if error.phase in AUTHORIZATION_REFUSAL_PHASES and error.phase != _LAPSED_PHASE:
+        return ControlError("service_unavailable", retryable=True, phase=_LAPSED_PHASE)
+    return error
+
+
 def _protocol_error(error: ControlProtocolError) -> ControlError:
     if error.reason == "server_profile_changed":
         # The service did not admit this remote client's hello: the profile revision it consented
-        # to is not the one the server issues now (ADR-052). Nothing more was sent.
+        # to is not the one the server issues now (ADR-052). The hello was sent, but the service
+        # did no work for it: it closed before keying the claim, registering an agent or reading a
+        # request, and nothing more was sent.
         return ControlError("service_unavailable", retryable=True, phase="server_profile_changed")
     if error.reason == "manifest_mismatch":
         # The peer is a live FinishUP service from another installation: it answered with a
@@ -1535,9 +1555,13 @@ class ServiceClient(ControlClientPort):
             self._closed = True
             self._session.close()
             self._retired_rpc_ids.clear()
+            # A pending call's body may have crossed the connection: it never fails with words
+            # that say nothing was sent (``_sent_outcome``). One still waiting to be written is
+            # refused by ``_ensure_live`` instead, with ``_failure`` or a lost connection.
+            sent_error = _sent_outcome(error)
             for pending in tuple(self._pending.values()):
                 if not pending.done():
-                    pending.set_exception(error)
+                    pending.set_exception(sent_error)
             current = asyncio.current_task()
             for task in tuple(self._agent_calls.values()):
                 # Unanswered workspace calls are the server's to fail when the connection drops.
@@ -1656,12 +1680,15 @@ class ServiceClient(ControlClientPort):
             # Projection errors (privacy_projection_unavailable / privacy_projection_blocked)
             # must propagate so the agent can switch format or widen policy on the same connection.
             if result.body.reason == "server_profile_changed":
-                # The service refused this request before any work: the profile revision this
-                # connection was admitted under is no longer the one it issues (ADR-052). The
-                # connection ends; every surface names the phase and its way back.
+                # The service refused this request before doing any work for it: the profile
+                # revision this connection was admitted under is no longer the one it issues
+                # (ADR-052). The connection ends. This request and every later one, never sent,
+                # name the phase and its way back; any other call already sent over it may have
+                # been recorded, so it ends as ``server_authorization_changed`` (``_sent_outcome``).
                 refused = ControlError(
                     "service_unavailable", retryable=True, phase="server_profile_changed"
                 )
+                self._failure = self._failure or refused
                 await self._fail_connection(refused)
                 return ControlResult(
                     protocol_version=result.protocol_version,

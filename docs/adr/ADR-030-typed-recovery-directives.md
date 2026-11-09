@@ -326,8 +326,10 @@ surface like the other remote phases; none names a path, server name or host.
 
 Layer 3 (ADR-052 decision 10, the owner's answer O5) registers two more, for the consent step:
 `remote_reconsent` (`server_profile_changed`: what the selected server elsewhere offers or needs
-changed since the owner agreed to use it, so the request was refused before anything was sent;
-only the owner agrees again, with `finishup server use` in their own terminal) and
+changed since the owner agreed to use it, so the request was refused before that server did any
+work for it, by this client before anything was sent or by the server itself; any other request
+already sent over a connection the server refused ends as `server_connection_renew`; only the
+owner agrees again, with `finishup server use` in their own terminal) and
 `server_level_decision_required` (`server_level_unavailable`: the server requires more of this
 computer than the owner agreed to for this repository; refused before anything was sent; only the
 owner decides). Neither lets an agent agree for the owner.

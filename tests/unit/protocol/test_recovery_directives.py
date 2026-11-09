@@ -661,13 +661,20 @@ class TestWorkspaceBindingAndServerTargetReasons:
     def test_a_changed_profile_or_level_asks_the_owner_and_never_agrees_for_them(
         self, phase: str, token: str
     ) -> None:
-        """ADR-052 (O5): both refuse before anything is sent; only the owner agrees again, on
-        their own terminal, with 'finishup server use'; the agent never does it for them."""
+        """ADR-052 (O5): only the owner agrees again, on their own terminal, with 'finishup
+        server use'; the agent never does it for them. A level above the consent is refused
+        before anything is sent; a changed profile may also be the server's own refusal of what
+        it was sent, so it says only that the server did no work for it (review of layer 3:
+        B2)."""
 
         assert continuation_for_reason(phase) == token
         entry = directive_for(token)
         assert entry is not None and entry.nudge is not None
-        assert "before anything was sent" in entry.directive
+        if phase == "server_profile_changed":
+            assert "before that server did any work for it" in entry.directive
+            assert "nothing" not in entry.directive
+        else:
+            assert "before anything was sent" in entry.directive
         assert "finishup server use" in entry.nudge
         assert "Never agree for them" in entry.nudge
         assert "stays there" not in entry.directive

@@ -318,3 +318,81 @@ async def test_a_local_connection_has_no_check_and_no_watch() -> None:
 
 def test_the_watch_checks_once_a_second() -> None:
     assert GENERATION_RECHECK_SECONDS == 1.0
+
+
+# --- the server refuses a request on an open connection (review of layer 3: B2) -----------------
+
+
+def _sent_rpc_ids(stream: _FakeStream) -> list[str]:
+    import json
+
+    return [json.loads(frame[4:])["rpc_id"] for frame in stream.sent]
+
+
+async def _refuse_with_changed_profile(stream: _FakeStream, rpc_id: str) -> None:
+    from finishup.service.control_protocol import ControlResult
+
+    result = ControlResult(
+        protocol_version="1.0",
+        rpc_id=rpc_id,
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        method=ControlMethod.SERVICE_STATUS,
+        outcome="error",
+        body=ControlError("server_profile_changed"),
+    )
+    await stream.feed(encode_control_frame(result))
+
+
+@pytest.mark.anyio
+async def test_a_request_the_server_refuses_ends_every_other_sent_call_as_an_unknown_outcome() -> (
+    None
+):
+    """The server refused one request before doing any work for it (``server_profile_changed``);
+    another call was already sent over the connection and may have been recorded, so it ends as
+    ``server_authorization_changed`` (its outcome is unknown), never with words that say nothing
+    was sent. A later call is refused before it is sent, under the refusal's own phase."""
+
+    stream = _FakeStream()
+    client = _client(stream, _Check())
+    first = asyncio.create_task(client.service_status())
+    await asyncio.wait_for(stream.sent_one.wait(), _WAIT_SECONDS)
+    stream.sent_one.clear()
+    second = asyncio.create_task(client.service_status())
+    await asyncio.wait_for(stream.sent_one.wait(), _WAIT_SECONDS)
+    sent_first, sent_second = _sent_rpc_ids(stream)
+
+    await _refuse_with_changed_profile(stream, sent_second)
+
+    with pytest.raises(ControlError) as refused:
+        await asyncio.wait_for(second, _WAIT_SECONDS)
+    assert _phase(refused.value) == ("service_unavailable", True, "server_profile_changed")
+    with pytest.raises(ControlError) as other:
+        await asyncio.wait_for(first, _WAIT_SECONDS)
+    assert _phase(other.value) == ("service_unavailable", True, "server_authorization_changed")
+    assert sent_first != sent_second and _closed(client) and stream.closed
+    with pytest.raises(ControlError) as later:
+        await client.service_status()
+    assert _phase(later.value) == ("service_unavailable", True, "server_profile_changed")
+    assert len(stream.sent) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["server_profile_changed", "server_level_unavailable"])
+async def test_a_connection_torn_down_with_a_refusal_phase_ends_sent_calls_as_unknown_outcomes(
+    phase: str,
+) -> None:
+    """Whatever phase ends an open connection, a call already sent over it never fails with a
+    refusal whose words say nothing was sent or no work was done."""
+
+    stream = _FakeStream()
+    client = _client(stream, _Check())
+    pending = asyncio.create_task(client.service_status())
+    await asyncio.wait_for(stream.sent_one.wait(), _WAIT_SECONDS)
+
+    teardown = ControlError("service_unavailable", retryable=True, phase=phase)
+    await client._fail_connection(teardown)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(ControlError) as ended:
+        await asyncio.wait_for(pending, _WAIT_SECONDS)
+    assert _phase(ended.value) == ("service_unavailable", True, "server_authorization_changed")

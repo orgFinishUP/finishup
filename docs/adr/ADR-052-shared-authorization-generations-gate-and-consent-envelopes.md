@@ -328,7 +328,12 @@ counted on its own, section 2.4) and its revision.
   only under the revision the service issues now; otherwise the service answers its current one
   and closes, before the claim is keyed, an agent registered or a request read. Every request
   that does work on a session bound to an older revision is refused `server_profile_changed`;
-  the structural methods and `server_profile` are still answered.
+  the structural methods and `server_profile` are still answered. The client says only what the
+  server guarantees (review of layer 3, B2): the refused hello or request is
+  `server_profile_changed`, "refused before that server did any work for it" (its hello or request
+  was sent, so never "nothing was sent"), and so is every later request on that connection, never
+  sent; every other call already sent over it ends as `server_authorization_changed`, whose
+  outcome is unknown and which is never resent.
 - **Consent only on the trusted console.** With a kind open (a later layer; tests here) and a
   profile source for it (none in this release), `server add` and `server use` check the address
   and remote paths (SRV-11), this computer's zero-network state (SRV-3), fetch the profile, refuse

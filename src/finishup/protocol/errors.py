@@ -483,10 +483,13 @@ SERVICE_START_TIMEOUT_PHASE: str = "handshake_timeout"
 # until the owner allows it (``repository_egress_held``), and names the owner's choice to keep it
 # on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. An
 # open connection the client admitted ends, whatever changed in what it was authorized under, with
-# ``server_authorization_changed`` (ADR-052). It refuses a server whose profile changed since the
-# owner consented (``server_profile_changed``) or that requires a level the owner did not agree to
-# (``server_level_unavailable``), before anything is sent (ADR-052, the owner's answer O5). Every
-# phase is retryable: the same request succeeds once that phase's own repair is made.
+# ``server_authorization_changed`` (ADR-052). It refuses a server that requires a level the owner
+# did not agree to (``server_level_unavailable``) before anything is sent, and one whose profile
+# changed since the owner consented (``server_profile_changed``) before that server did any work
+# for the request: before anything is sent, or by the server's own refusal of the hello or request
+# (ADR-052, the owner's answer O5); any other call already sent over a connection the server
+# refused ends as ``server_authorization_changed``. Every phase is retryable: the same request
+# succeeds once that phase's own repair is made.
 REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
     {
         "remote_auth_failed",

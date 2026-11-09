@@ -875,14 +875,16 @@ _DIRECTIVES: Final = (
         ),
     ),
     # What the selected server elsewhere offers or needs (its profile) changed since the owner
-    # consented, or it now requires a level they did not agree to (ADR-052, design v2 section
-    # 2.3): refused before anything was sent; only the owner agrees again, on their own terminal.
+    # consented (ADR-052, design v2 section 2.3): refused before that server did any work for the
+    # request, by this client before anything was sent or by the server itself; only the owner
+    # agrees again, on their own terminal. A request already sent over a connection the server
+    # refused this way ends as ``server_connection_renew`` instead (review of layer 3: B2).
     RecoveryDirective(
         token="remote_reconsent",
         directive=(
             "What the selected FinishUP server elsewhere offers or needs changed since the owner "
-            "agreed to use it, so FinishUP refused this request before anything was sent. Only "
-            "the owner can agree again."
+            "agreed to use it, so this request was refused before that server did any work for "
+            "it. Only the owner can agree again."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge=(

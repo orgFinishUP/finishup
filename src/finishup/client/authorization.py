@@ -532,8 +532,11 @@ def preflight_refusal() -> str | None:
 
 # What stopped, in fixed words, for every authorization refusal: the line every CLI surface shows
 # before the phase's directive (``<phase>: <summary>``). No path, name or host. Every phase but
-# ``server_authorization_changed`` refuses a connection before anything is sent over it, and says
-# so; that one ends a connection that was open, and says FinishUP stopped sending over it.
+# two refuses a connection before anything is sent over it, and says so. ``server_profile_changed``
+# is also the server's own refusal of a hello or request it was sent, before it did any work for
+# it, so it says only that no work was done. ``server_authorization_changed`` ends a connection
+# that was open (and every call already sent over one the server refused), and says FinishUP
+# stopped sending over it.
 _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
     "zero_network_remote_selected": (
         "FinishUP refused the selected server's connection before anything was sent"
@@ -554,7 +557,7 @@ _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
     ),
     "server_profile_changed": (
         "what the selected FinishUP server offers or needs changed since this computer agreed to "
-        "use it, so FinishUP refused this connection before anything was sent"
+        "use it, so this request was refused before that server did any work for it"
     ),
     "server_level_unavailable": (
         "the selected FinishUP server requires more of this computer than its owner agreed to, "

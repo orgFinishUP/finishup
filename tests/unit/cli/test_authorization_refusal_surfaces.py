@@ -93,6 +93,13 @@ def test_the_words_say_refused_before_sending_or_stopped_sending_never_both() ->
             assert "stopped sending over it" in directive.directive
             for text in (summary, directive.directive):
                 assert "nothing" not in text and "before anything" not in text
+        elif phase == "server_profile_changed":
+            # Also the server's own refusal of a hello or request it was sent: it says only what
+            # the server guarantees, that it did no work for it (review of layer 3: B2).
+            for text in (summary, directive.directive):
+                assert "before that server did any work for it" in text
+                assert "nothing" not in text and "before anything" not in text
+                assert "stopped sending" not in text and "stays there" not in text
         else:
             assert "before anything" in summary
             assert "stopped sending" not in summary and "stays there" not in summary
