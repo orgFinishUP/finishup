@@ -11,9 +11,18 @@ answers background work; the connection's own agent answers its live calls
 registering process and workspace, at most ``MAX_REGISTRATIONS`` per target. It names the claim,
 the worktree on this computer (it never leaves it), the repository's hold key, and what the
 registering connection was admitted under: the target's identity and consent digests, the
-credential generation, and the server-profile revision its hello named. It holds a lease
-(``LEASE_SECONDS``, the helper's idle exit), renewed by its registrant at half-life; an expired
-one is removed by whoever reads it.
+credential generation, the server-profile revision its hello named, and whether the connection
+follows the selection (``selection_bound``: a root the selection file named) or was pinned to its
+root on purpose (an isolation variable or pin). It holds a lease (``LEASE_SECONDS``, the helper's
+idle exit), renewed by its registrant at half-life; an expired one is removed by whoever reads it.
+
+**Written and pruned under the registry lock** (``targets.registry_lock``, the lock the owner's
+``server logout``, ``remove`` and ``use`` hold): ``register`` admits the connection again, checks
+its target still exists, reads the credential generation, counts the live registrations and
+publishes the record under one hold of it, so a logout or removal is either wholly before (the
+registration is refused) or wholly after (the helper drops it); the record is never written where
+its target's folder was removed. Pruning re-reads a record under the lock and removes it only when
+it is still the one judged, so a lease renewed meanwhile is kept.
 
 **Owner authentication.** Only the owner's processes can write beneath an owner-only target root;
 every read checks the folder and the file are owner-only, regular, not links, and bounded, and a
@@ -23,9 +32,10 @@ name another folder, is never served.
 
 **Served only while still authorized.** ``served_workspaces`` (the helper's read) serves a
 registration only while the target's record, credential generation and consent are those it was
-made under, the consent admits the same profile revision, and the gate passes for its repository
-(the hold included). Anything else drops it with a closed reason; its registrant renews (which
-admits again) or releases it.
+made under, the selection still names the target when the registering connection followed it
+(``selection_changed`` otherwise; a pinned one is exempt, O1), the consent admits the same profile
+revision, and the gate passes for its repository (the hold included). Anything else drops it with
+a closed reason; its registrant renews (which admits again) or releases it.
 
 Cursor's workspace-root invalidation is kept: a bridge whose host says its roots changed releases
 every registration it made (``release_registrant``) as it retires, so the helper stops serving the
@@ -36,21 +46,33 @@ File reads and writes only: never a service, never a network.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import os
 import re
 import secrets
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, overload
 
-from finishup.client.targets import TargetError, read_target, target_root
+from finishup.client.targets import (
+    TargetError,
+    read_selected_target_id,
+    read_target,
+    registry_lock,
+    target_root,
+)
 from finishup.config.installation import format_rfc3339_ms, parse_rfc3339_ms
-from finishup.config.paths import PathSafetyError, ensure_owner_only_dir
+from finishup.config.paths import (
+    PathSafetyError,
+    ensure_owner_only_dir,
+    existing_owner_only_dir,
+)
 from finishup.ports.control import WorkspaceClaim
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.server_profile import (
@@ -106,6 +128,7 @@ _FIELDS: Final = frozenset(
         "repository_key",
         "grant",
         "server_profile",
+        "selection_bound",
         "registered_at",
         "expires_at",
     }
@@ -146,6 +169,9 @@ class Registration:
     consent_digest: str
     credential_generation: str | None
     server_profile: ServerProfileRevision
+    # Whether the registering connection follows the selection file (it ends when the selection
+    # no longer names its target) or was pinned to its root on purpose (ADR-052, O1).
+    selection_bound: bool
     registered_at: str
     expires_at: str
 
@@ -167,6 +193,7 @@ class Registration:
                 and not _GENERATION.match(self.credential_generation)
             )
             or type(self.server_profile) is not ServerProfileRevision
+            or type(self.selection_bound) is not bool
         ):
             raise RegistrationError("registration_invalid")
         try:
@@ -194,6 +221,7 @@ class Registration:
                 "credential_generation": self.credential_generation,
             },
             "server_profile": revision_to_json(self.server_profile),
+            "selection_bound": self.selection_bound,
             "registered_at": self.registered_at,
             "expires_at": self.expires_at,
         }
@@ -278,7 +306,18 @@ def _owner_only_directory(path: Path) -> bool:
     )
 
 
-def _write(path: Path, encoded: bytes) -> None:
+def _write(root: Path, path: Path, encoded: bytes) -> None:
+    """Publish ``encoded`` at ``path`` beneath the existing target folder ``root``.
+
+    Creates the registrations folder beneath ``root`` only: a target folder that is gone is never
+    made again (``registration_refused``).
+    """
+
+    try:
+        if not existing_owner_only_dir(root):
+            raise RegistrationError("registration_refused", phase="server_authorization_changed")
+    except PathSafetyError:
+        raise RegistrationError("registration_unsafe") from None
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     try:
         ensure_owner_only_dir(path.parent)
@@ -336,6 +375,7 @@ def _decode(encoded: bytes) -> Registration | None:
             consent_digest=cast(str, grant["consent_digest"]),
             credential_generation=cast(str | None, grant["credential_generation"]),
             server_profile=revision_from_json(source["server_profile"]),
+            selection_bound=cast(bool, source["selection_bound"]),
             registered_at=cast(str, source["registered_at"]),
             expires_at=cast(str, source["expires_at"]),
         )
@@ -346,18 +386,58 @@ def _decode(encoded: bytes) -> Registration | None:
     return registration
 
 
-def _live_records(target_id: str) -> list[tuple[Path, Registration | None]]:
+def _live_records(target_id: str) -> list[tuple[Path, bytes | None, Registration | None]]:
+    """Every record file of ``target_id``: its path, the bytes read (``None`` when it could not be
+    read safely) and the registration they hold (``None`` when they hold none)."""
+
     directory = registrations_dir(target_id)
     if not _owner_only_directory(directory):
         return []
-    found: list[tuple[Path, Registration | None]] = []
+    found: list[tuple[Path, bytes | None, Registration | None]] = []
     for entry in sorted(os.scandir(directory), key=lambda item: item.name):
         if not entry.name.endswith(".json") or entry.name.startswith("."):
             continue
         path = Path(entry.path)
         encoded = _read(path)
-        found.append((path, None if encoded is None else _decode(encoded)))
+        found.append((path, encoded, None if encoded is None else _decode(encoded)))
     return found
+
+
+@contextmanager
+def _locked() -> Generator[None]:
+    """The registry lock; a lock that cannot be taken safely refuses (``registration_unsafe``)."""
+
+    try:
+        with registry_lock():
+            yield
+    except TargetError:
+        raise RegistrationError("registration_unsafe") from None
+
+
+@overload
+def register(
+    authorization: ConnectionAuthorization,
+    claim: WorkspaceClaim,
+    worktree: str,
+    *,
+    registrant: str,
+    source: str,
+    now: datetime | None = None,
+    wanted: None = None,
+) -> Registration: ...
+
+
+@overload
+def register(
+    authorization: ConnectionAuthorization,
+    claim: WorkspaceClaim,
+    worktree: str,
+    *,
+    registrant: str,
+    source: str,
+    now: datetime | None = None,
+    wanted: Callable[[], bool],
+) -> Registration | None: ...
 
 
 def register(
@@ -368,45 +448,70 @@ def register(
     registrant: str,
     source: str,
     now: datetime | None = None,
-) -> Registration:
+    wanted: Callable[[], bool] | None = None,
+) -> Registration | None:
     """Register ``worktree`` (claimed as ``claim``) for the helper of the connection's target.
 
-    Only under an admission that refuses nothing now and named a profile revision: otherwise
-    ``RegistrationError("registration_refused", phase=...)`` and nothing is written. Idempotent
-    for the same registrant and workspace (it renews). At most ``MAX_REGISTRATIONS`` live ones
-    per target (``registration_limit``).
+    Under the registry lock (see the module text): only under an admission that refuses nothing
+    now and named a profile revision, for a target that still exists as the one admitted;
+    otherwise ``RegistrationError("registration_refused", phase=...)`` and nothing is written.
+    The credential generation and consent recorded are read under the same hold. Idempotent for
+    the same registrant and workspace (it renews). At most ``MAX_REGISTRATIONS`` live ones per
+    target (``registration_limit``). ``wanted``, asked last under the lock, lets a registrant
+    that is releasing meanwhile keep a renewal from writing (``None`` is returned).
     """
 
-    phase = authorization.refusal()
+    from finishup.client.authorization import CHANGED, consent_digest, identity_digest
+
     grant = authorization.grant
-    if phase is not None or grant.profile_revision is None:
-        raise RegistrationError("registration_refused", phase=phase or "server_profile_changed")
     stamp = now or _now()
-    root = target_root(grant.target_id)
-    registration = Registration(
-        target_id=grant.target_id,
-        registrant=registrant,
-        source=source,
-        claim=claim,
-        worktree=worktree,
-        repository_key=grant.repository_key,
-        identity_digest=grant.identity_digest,
-        consent_digest=grant.consent_digest,
-        credential_generation=_credential_generation(root),
-        server_profile=grant.profile_revision,
-        registered_at=format_rfc3339_ms(stamp),
-        expires_at=format_rfc3339_ms(stamp + timedelta(seconds=LEASE_SECONDS)),
-    )
     path = _path(grant.target_id, claim, registrant)
-    live = [
-        item
-        for item_path, item in _live_records(grant.target_id)
-        if item is not None and item_path != path and not _expired(item, stamp)
-    ]
-    if len(live) >= MAX_REGISTRATIONS:
-        raise RegistrationError("registration_limit")
-    _write(path, canonical_encode(registration.body()) + b"\n")
+    with _locked():
+        phase = authorization.refusal()
+        if phase is not None or grant.profile_revision is None:
+            raise RegistrationError("registration_refused", phase=phase or "server_profile_changed")
+        root = target_root(grant.target_id)
+        try:
+            current = read_target(root)
+        except TargetError:
+            current = None
+        if (
+            current is None
+            or current.target_id != grant.target_id
+            or identity_digest(current) != grant.identity_digest
+        ):
+            # Removed, or replaced by another server, since the connection was admitted.
+            raise RegistrationError("registration_refused", phase=CHANGED)
+        registration = Registration(
+            target_id=grant.target_id,
+            registrant=registrant,
+            source=source,
+            claim=claim,
+            worktree=worktree,
+            repository_key=grant.repository_key,
+            identity_digest=grant.identity_digest,
+            consent_digest=consent_digest(current),
+            credential_generation=_credential_generation(root),
+            server_profile=grant.profile_revision,
+            selection_bound=grant.selection_bound,
+            registered_at=format_rfc3339_ms(stamp),
+            expires_at=format_rfc3339_ms(stamp + timedelta(seconds=LEASE_SECONDS)),
+        )
+        live = [
+            item
+            for item_path, _encoded, item in _live_records(grant.target_id)
+            if item is not None and item_path != path and not _expired(item, stamp)
+        ]
+        if len(live) >= MAX_REGISTRATIONS:
+            raise RegistrationError("registration_limit")
+        if wanted is not None and not wanted():
+            return None
+        _write(root, path, canonical_encode(registration.body()) + b"\n")
     return registration
+
+
+def _always() -> bool:
+    return True
 
 
 def _expired(registration: Registration, now: datetime) -> bool:
@@ -418,18 +523,16 @@ def renew(
     authorization: ConnectionAuthorization,
     *,
     now: datetime | None = None,
-) -> Registration | str:
+    wanted: Callable[[], bool] | None = None,
+) -> Registration | str | None:
     """Extend ``registration``'s lease under ``authorization`` as it stands now.
 
     When the authorization refuses now (the selection, the record, the key, the consent or the
     hold changed), the registration is released and the closed phase returned; otherwise the
-    renewed registration (re-made under the current admission).
+    renewed registration (re-made under the current admission). ``None`` when ``wanted`` said
+    the registrant no longer wants it (nothing written; its own release removes the record).
     """
 
-    phase = authorization.refusal()
-    if phase is not None:
-        release(registration.target_id, registration.claim, registration.registrant)
-        return phase
     try:
         return register(
             authorization,
@@ -438,6 +541,7 @@ def renew(
             registrant=registration.registrant,
             source=registration.source,
             now=now,
+            wanted=wanted or _always,
         )
     except RegistrationError as error:
         release(registration.target_id, registration.claim, registration.registrant)
@@ -461,7 +565,7 @@ def release_registrant(target_id: str, registrant: str) -> int:
 
     removed = 0
     try:
-        for path, registration in _live_records(target_id):
+        for path, _encoded, registration in _live_records(target_id):
             if registration is not None and registration.registrant == registrant:
                 path.unlink(missing_ok=True)
                 removed += 1
@@ -480,8 +584,10 @@ async def served_workspaces(
 
     Every other one is dropped: removed when expired, unreadable or no longer bound to what it was
     registered under; ``drop`` is told each closed reason (``expired``, ``unreadable``,
-    ``target_changed``, ``credential_changed``, ``consent_changed``, ``claim_mismatch``, or the
-    gate's own phase). Never raises for a record.
+    ``target_changed``, ``credential_changed``, ``consent_changed``, ``selection_changed``,
+    ``claim_mismatch``, or the gate's own phase). A record is removed only under the registry
+    lock and only while it is still the one judged (a lease renewed meanwhile is kept). Never
+    raises for a record.
     """
 
     from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
@@ -504,8 +610,9 @@ async def served_workspaces(
     except (TypeError, ValueError, binascii.Error):
         return ()
     generation = _credential_generation(root)
+    selected = _selected_now()
     served: list[ServedWorkspace] = []
-    for path, registration in _live_records(record.target_id):
+    for path, encoded, registration in _live_records(record.target_id):
         reason: str | None = None
         if registration is None:
             reason = "unreadable"
@@ -515,6 +622,11 @@ async def served_workspaces(
             reason = "target_changed"
         elif _expired(registration, stamp):
             reason = "expired"
+        elif registration.selection_bound and selected != registration.target_id:
+            # The registering connection followed the selection, which names another server now
+            # (or none): it ends there, and so does its background service (O1). A pinned one
+            # keeps its root.
+            reason = "selection_changed"
         elif registration.credential_generation != generation:
             reason = "credential_changed"
         elif registration.consent_digest != consent_digest(current):
@@ -540,8 +652,29 @@ async def served_workspaces(
             continue
         note(cast(str, reason))
         if reason in {"expired", "unreadable", "target_changed", "claim_mismatch"}:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            await asyncio.to_thread(_prune, path, encoded)
     return tuple(served)
+
+
+def _selected_now() -> str | None:
+    """The target id the selection file names now; ``None`` for none or one that cannot be read."""
+
+    try:
+        return read_selected_target_id()
+    except TargetError:
+        return None
+
+
+def _prune(path: Path, judged: bytes | None) -> None:
+    """Remove the record at ``path`` if it still holds ``judged`` (the bytes found to be dropped).
+
+    Under the registry lock, so no registration is written meanwhile: a record its registrant
+    renewed since it was judged is kept. Never raises.
+    """
+
+    try:
+        with registry_lock():
+            if _read(path) == judged:
+                path.unlink(missing_ok=True)
+    except (OSError, TargetError):
+        pass

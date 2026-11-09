@@ -352,12 +352,22 @@ registering process and workspace, `<target root>/state/registrations/<claim>-<w
 <registrant>.json` (`yoetz.helper-registration/1`), at most 64 per target, leased for 15 minutes
 and renewed by its registrant, naming the claim, the worktree (never sent), the hold key and what
 the registering connection was admitted under (identity and consent digests, credential
-generation, profile revision). `register` writes only under an admission that refuses nothing
+generation, profile revision) and whether it followed the selection (`selection_bound`) or was
+pinned to its root on purpose. `register` writes only under an admission that refuses nothing
 now; `renew` re-admits or releases with the phase; `release_registrant` serves a bridge retiring
 and Cursor's roots changing. `served_workspaces`, the helper's read, serves a registration only
-while all of that still holds, the gate passes for its repository, and its claim derives again
-from its own worktree under the target's salt (a copied or edited record is never served). The MCP
-bridge is the first registrant; the helper process is layer 4.
+while all of that still holds, the selection still names its target when it followed the
+selection (`selection_changed`; a pinned one is exempt, O1), the gate passes for its repository,
+and its claim derives again from its own worktree under the target's salt (a copied or edited
+record is never served). The MCP bridge is the first registrant; the helper process is layer 4.
+
+Registration and pruning take the registry lock, the one the owner's `server logout`, `remove`
+and `use` hold (review of layer 3, C2 and C4): `register` re-admits the connection, checks its
+target still exists as the one admitted, reads the credential generation and the consent, counts
+the live registrations and publishes the record under one hold, never creating a removed target's
+folder again, so an owner action is wholly before it (refused) or wholly after it (the helper
+drops it). The helper removes a dropped record only under the lock and only while it still holds
+the bytes judged, so a lease its registrant renewed meanwhile is kept.
 
 ### 12. Which agent answers (layer 3)
 

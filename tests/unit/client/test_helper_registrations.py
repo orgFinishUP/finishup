@@ -9,13 +9,15 @@ only while all of that still holds.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -23,7 +25,11 @@ from builders.server_profiles import profile_document, refreshed
 from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.adapters.workspace_root import canonical_workspace_root
 from finishup.client import targets
-from finishup.client.authorization import ConnectionAuthorization, bump_credential_generation
+from finishup.client.authorization import (
+    ConnectionAuthorization,
+    Grant,
+    bump_credential_generation,
+)
 from finishup.client.everyday_policy import record_reported_policy, record_repository_report
 from finishup.client.helper_registrations import (
     MAX_REGISTRATIONS,
@@ -261,3 +267,170 @@ def test_releasing_a_registrant_removes_only_its_own(admitted: _Admitted) -> Non
     assert served == [kept]
     assert release(admitted.record.target_id, admitted.claim, theirs)
     assert not release(admitted.record.target_id, admitted.claim, theirs)
+
+
+# --- review of layer 3: C1, C2 and C4 ------------------------------------------------------------
+
+
+def test_a_registration_follows_the_selection_unless_its_connection_was_pinned(
+    admitted: _Admitted,
+) -> None:
+    """C1: a connection that followed the selection registers ``selection_bound``; once the
+    selection names another server (or none) the helper no longer serves it. A connection pinned
+    to its root on purpose (an isolation variable, a pin, a named probe) keeps being served."""
+
+    from dataclasses import replace
+
+    from finishup.client.authorization import read_generation
+
+    bound = _register(admitted)
+    root = targets.target_root(admitted.record.target_id)
+    grant = replace(admitted.authorization.grant, selection_bound=False)
+    pinned_authorization = ConnectionAuthorization(
+        grant, read_generation(root, selection_bound=False)
+    )
+    pinned = register(
+        pinned_authorization,
+        admitted.claim,
+        admitted.worktree,
+        registrant=new_registrant(),
+        source="cli",
+        now=_AT,
+    )
+    with targets.registry_lock():
+        other, _other_root = targets.new_remote_target(
+            "elsewhere", "https", base_url="https://elsewhere.example"
+        )
+        targets.write_selection(other)
+    reset_selection_memo()
+
+    served, dropped = _served(admitted)
+    assert served == [pinned] and dropped == ["selection_changed"]
+    with targets.registry_lock():
+        targets.clear_selection()
+    served, dropped = _served(admitted)
+    assert served == [pinned] and dropped == ["selection_changed"]
+    documents = {
+        json.loads(path.read_bytes())["registrant"]: json.loads(path.read_bytes())
+        for path in registrations_dir(admitted.record.target_id).iterdir()
+    }
+    assert documents[bound.registrant]["selection_bound"] is True
+    assert documents[pinned.registrant]["selection_bound"] is False
+
+
+class _ConcurrentOwnerAction:
+    """An admission whose check is followed at once by an owner action from another process
+    (``server logout`` or ``server remove``), which takes the registry lock as those commands do:
+    when the registration holds the lock it waits (``waited``), and the test runs it after the
+    registration has let go, exactly where it would run. No timing is involved."""
+
+    def __init__(self, inner: ConnectionAuthorization, action: Callable[[], None]) -> None:
+        self.inner = inner
+        self.action = action
+        self.waited = False
+
+    @property
+    def grant(self) -> Grant:
+        return self.inner.grant
+
+    def refusal(self) -> str | None:
+        phase = self.inner.refusal()
+        descriptor = os.open(
+            targets.servers_dir() / ".registry.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+        )
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.waited = True
+                return phase
+            self.action()
+        finally:
+            os.close(descriptor)
+        return phase
+
+
+def _register_during(admitted: _Admitted, action: Callable[[], None]) -> _ConcurrentOwnerAction:
+    concurrent = _ConcurrentOwnerAction(admitted.authorization, action)
+    try:
+        register(
+            cast(ConnectionAuthorization, concurrent),
+            admitted.claim,
+            admitted.worktree,
+            registrant=new_registrant(),
+            source="mcp_bridge",
+            now=_AT,
+        )
+    except RegistrationError:
+        pass
+    if concurrent.waited:
+        with targets.registry_lock():
+            action()
+    return concurrent
+
+
+def test_a_logout_during_registration_never_lends_it_the_new_credential_generation(
+    admitted: _Admitted,
+) -> None:
+    """C2: the credential generation is read under the registry lock with the admission, so a
+    logout is wholly before (refused) or wholly after it (recorded under the old generation and
+    dropped by the helper); never an old connection stamped with the new generation."""
+
+    root = targets.target_root(admitted.record.target_id)
+
+    concurrent = _register_during(admitted, lambda: bump_credential_generation(root))
+
+    served, dropped = _served(admitted)
+    assert served == [] and dropped == ["credential_changed"]
+    assert concurrent.waited
+
+
+def test_a_target_removed_during_registration_is_never_made_again(admitted: _Admitted) -> None:
+    """C2: the target's existence is checked under the same lock as the write, which never
+    creates the target's folder again."""
+
+    root = targets.target_root(admitted.record.target_id)
+
+    def remove() -> None:
+        stored = targets.read_target(root)
+        assert stored is not None
+        targets.remove_target_root(stored)
+
+    concurrent = _register_during(admitted, remove)
+
+    assert not root.exists()
+    assert concurrent.waited
+    with pytest.raises(RegistrationError) as refused:
+        _register(admitted)
+    assert (refused.value.reason, refused.value.phase) == (
+        "registration_refused",
+        "server_authorization_changed",
+    )
+    assert not root.exists()
+
+
+def test_pruning_keeps_a_lease_its_registrant_renewed_after_it_was_judged(
+    admitted: _Admitted,
+) -> None:
+    """C4: a record judged expired is removed only if it is still the one judged; the registrant
+    renewing it in between (here, as the helper reports the drop) keeps its fresh lease."""
+
+    registration = _register(admitted)
+    later = _AT + timedelta(minutes=16)
+    renewed: list[Registration] = []
+
+    def renew_meanwhile(reason: str) -> None:
+        assert reason == "expired"
+        fresh = renew(registration, admitted.authorization, now=later)
+        assert isinstance(fresh, Registration)
+        renewed.append(fresh)
+
+    stored = targets.read_target(targets.target_root(admitted.record.target_id))
+    assert stored is not None
+    served = asyncio.run(served_workspaces(stored, now=later, drop=renew_meanwhile))
+
+    assert served == () and len(renewed) == 1
+    (path,) = registrations_dir(admitted.record.target_id).iterdir()
+    assert json.loads(path.read_bytes())["expires_at"] == renewed[0].expires_at
+    again, dropped = _served(admitted, now=later)
+    assert again == renewed and dropped == []
