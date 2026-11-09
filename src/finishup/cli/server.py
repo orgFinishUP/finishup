@@ -2735,8 +2735,11 @@ def repository_list_lines(record: ServerTarget) -> tuple[str, ...]:
     if groups.record == "unreadable":
         lines.append(_damaged_record_line(record))
     applying = [item for item in groups.chosen if item[1] == "applies"]
-    earlier = [item for item in groups.chosen if item[1] in {"not_needed", "not_reported"}]
-    if not groups.held and not applying and not earlier:
+    not_needed = [item for item in groups.chosen if item[1] == "not_needed"]
+    # A choice whose repository has no report now (forgotten, or the record could not be read):
+    # whether its policy allows network use is not known, so it is never said to.
+    unreported = [item for item in groups.chosen if item[1] == "not_reported"]
+    if not groups.held and not applying and not not_needed and not unreported:
         if groups.record == "readable":
             lines.append(
                 f"{who} holds nothing: this computer's FinishUP has reported no repository whose "
@@ -2759,9 +2762,15 @@ def repository_list_lines(record: ServerTarget) -> tuple[str, ...]:
     if sent:
         lines.append("  Sent anyway, as you allowed:")
         lines.extend(f"    {_shown(c.worktree)}  (allowed {c.decided_at})" for c, _state in sent)
-    if earlier:
+    if not_needed:
         lines.append("  Chosen earlier, not needed now (its policy here allows network use):")
-        lines.extend(f"    {_shown(c.worktree)}" for c, _state in earlier)
+        lines.extend(f"    {_shown(c.worktree)}" for c, _state in not_needed)
+    if unreported:
+        lines.append(
+            "  Chosen earlier, its policy here not reported now (this computer's FinishUP has no "
+            "report of it, so it is not held until one is made):"
+        )
+        lines.extend(f"    {_shown(c.worktree)}" for c, _state in unreported)
     keep_and_undo = (
         f"To keep one here without being asked again: 'finishup server repositories keep "
         f"{record.name} --repository FOLDER'. To undo a choice: 'finishup server repositories "

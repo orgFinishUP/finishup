@@ -460,6 +460,48 @@ def test_list_shows_every_group_and_the_reverse_commands(
     assert lines[-1].startswith("A repository this computer's FinishUP has not reported")
 
 
+def test_list_never_says_a_choice_without_a_report_allows_network_use(
+    remote: targets.ServerTarget, tmp_path: Path
+) -> None:
+    """A choice whose report was forgotten (or whose record cannot be read) is ``not_reported``:
+    its own state in the list, never "its policy here allows network use", which is unknown."""
+
+    root = targets.target_root(remote.target_id)
+    for name in ("open", "unknown"):
+        (tmp_path / name).mkdir()
+    opened = "sha256:" + "3" * 64
+    unknown = "sha256:" + "8" * 64
+    record_repository_report(opened, os.fspath(tmp_path / "open"), no_network=False, now=_AT)
+    record_repository_report(unknown, os.fspath(tmp_path / "unknown"), no_network=True, now=_AT)
+    with targets.registry_lock():
+        add_override(root, remote.target_id, opened, os.fspath(tmp_path / "open"), _STAMP)
+        add_kept(root, remote.target_id, unknown, os.fspath(tmp_path / "unknown"), _STAMP)
+    forget_repository_reports([unknown])
+    result = _invoke("list", "lab")
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    needed = lines.index("  Chosen earlier, not needed now (its policy here allows network use):")
+    assert lines[needed + 1] == f"    {tmp_path / 'open'}"
+    unreported = lines.index(
+        "  Chosen earlier, its policy here not reported now (this computer's FinishUP has no "
+        "report of it, so it is not held until one is made):"
+    )
+    assert lines[unreported + 1] == f"    {tmp_path / 'unknown'}"
+    assert f"    {tmp_path / 'unknown'}" not in lines[needed + 1 : unreported]
+    # The status document already said it apart; the list now agrees with it.
+    status = _RUNNER.invoke(cli.app, ["server", "status", "lab", "--json"])
+    kept = cast(
+        dict[str, JsonValue],
+        cast(dict[str, JsonValue], json.loads(status.stdout)["target"])["repositories"],
+    )["kept"]
+    assert cast(list[dict[str, JsonValue]], kept)[0]["state"] == "not_reported"
+    # Only a choice with no report at all: nothing else is listed as not reported.
+    forget_repository_reports([opened])
+    again = _invoke("list", "lab").stdout.splitlines()
+    assert "  Chosen earlier, not needed now (its policy here allows network use):" not in again
+    assert f"    {tmp_path / 'open'}" in again
+
+
 def test_list_says_folder_not_found_and_forgets_reports_of_gone_repositories(
     remote: targets.ServerTarget, tmp_path: Path
 ) -> None:
