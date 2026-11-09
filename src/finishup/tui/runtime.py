@@ -1704,16 +1704,32 @@ class FinishUpRuntime:
         was: the remote kinds are closed in this release. Returns the new header indicator text
         and what became of the connection to a remote server the switch left (stopped, as
         ``finishup server disconnect`` stops it).
+
+        Once a kind is open (a later layer), the switch, its policy read and the profile fetch run
+        in a worker thread, but the disclosure and the typed confirmation run on the loop thread,
+        where Ctrl-C reaches the read and cancels it as ``authorization_declined`` (SRV-6).
         """
 
         import asyncio
 
-        from finishup.cli.server import ServerCommandRefused, use_target
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            confirm_use_on_this_thread,
+            use_target,
+        )
         from finishup.client.targets import TargetError
         from finishup.config.paths import PathSafetyError
 
+        loop = asyncio.get_running_loop()
+
+        async def confirm_on_loop(target: str, kind: str, lines: tuple[str, ...]) -> None:
+            confirm_use_on_this_thread(target, kind, lines)
+
+        def authorize(target: str, kind: str, lines: tuple[str, ...]) -> None:
+            asyncio.run_coroutine_threadsafe(confirm_on_loop(target, kind, lines), loop).result()
+
         try:
-            switch = await asyncio.to_thread(use_target, name)
+            switch = await asyncio.to_thread(use_target, name, authorize=authorize)
         except (ServerCommandRefused, TargetError, PathSafetyError) as error:
             raise _server_failure(error) from None
         record = switch.record

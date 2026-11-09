@@ -57,6 +57,7 @@ from finishup.client.target_runtime import (
     runtime_for,
 )
 from finishup.client.targets import (
+    DISCLOSURE_VERSION,
     ServerTarget,
     TargetError,
     TargetKind,
@@ -82,9 +83,12 @@ from finishup.config.paths import PathSafetyError
 from finishup.protocol.canonical import JsonValue, canonical_encode
 
 if TYPE_CHECKING:
+    from finishup.cli.trusted_console import TrustedForegroundConsole
     from finishup.cli.zero_network_selection import ZeroNetworkSelection
     from finishup.client.repository_hold import HoldDecision, RepositoryChoice
-    from finishup.client.server_folders import FolderRecord
+    from finishup.client.server_folders import FolderRecord, OutsideReadMode
+    from finishup.client.server_profile import FetchedProfile
+    from finishup.protocol.consent_envelope import ConsentEnvelope
 
 __all__ = [
     "DISCLOSURE_LINES",
@@ -309,6 +313,17 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "'finishup service start'",
         _UNAVAILABLE,
     ),
+    # The consent step (ADR-052): what the server offers or needs, against the owner's consent.
+    "server_profile_changed": (
+        "what that server offers or needs could not be agreed to here (it changed, it is not one "
+        "this release understands, or it could not be read), so nothing was changed",
+        _USAGE,
+    ),
+    "server_level_unavailable": (
+        "that server requires more of this computer than this release can agree to (it keeps a "
+        "copy of the code, level L2, which arrives in a later release), so nothing was changed",
+        _USAGE,
+    ),
     "target_still_connected": (
         "the connection this client runs for that target did not stop in time, so nothing was "
         "removed; run the same command again",
@@ -370,8 +385,6 @@ DISCLOSURE_LINES: Final = (
     "Your project folder is named by a keyed label, not its path.",
     "A project whose privacy policy on this computer allows no network use is held: nothing from it",
     "is sent until you allow it with 'finishup server repositories add'.",
-    "That server's own privacy policy decides whether anything goes on to an AI-powered",
-    "review provider.",
     "This is your decision on this terminal, not a vault re-authentication. Undo it with",
     "'finishup server use local' or 'finishup server remove'.",
     "",
@@ -568,6 +581,311 @@ def zero_network_refusal(record: ServerTarget | None) -> ZeroNetworkRefusal | No
     )
 
 
+def _open_kind(kind: str) -> bool:
+    """Whether connections to ``kind`` are open in this release (none are: ADR-052)."""
+
+    from finishup.client import authorization
+
+    return kind in authorization.OPEN_REMOTE_KINDS
+
+
+def _zero_network_in_force() -> bool:
+    """Whether this computer is in the zero-network state that refuses a remote hop (ADR-051).
+
+    Every remote kind is a hop, ``local_port`` included: a loopback port can forward anywhere.
+    This computer's own FinishUP decides (``zero_network_selection.everyday_network_state``): its
+    everyday installation's effective machine-scope policy, when it was set up. A policy that does
+    not permit network egress is the zero-network state. One that cannot be read now (the service
+    is stopped, locked, or does not answer, or the installation's identity cannot be read) falls
+    back to what this computer last reported (``client.everyday_policy``, maintainer decision of
+    2026-11-07): last reported zero-network refuses as ``zero_network_in_force``, saying when;
+    anything else refuses with ``network_policy_unreadable``, never allows the hop. A computer
+    whose everyday FinishUP was never set up has no policy of its own, so nothing here refuses it.
+    Asked before any profile is fetched, any console opens or anything is written.
+    """
+
+    from finishup.cli.zero_network_selection import everyday_network_state
+
+    state = everyday_network_state()
+    if state == "unreadable":
+        from finishup.client.everyday_policy import last_reported_zero_network
+
+        reported = last_reported_zero_network()
+        if reported is not None:
+            raise ServerCommandRefused(
+                "zero_network_in_force",
+                message=(
+                    f"this computer's FinishUP last reported, at {reported.reported_at}, that it "
+                    "makes no network connections, and it cannot be asked now (its service is "
+                    "stopped or locked), so it cannot use a server on another machine; change "
+                    "the privacy policy on this computer first, with 'finishup privacy setup'"
+                ),
+            )
+        # While any server is selected, 'service start' and 'service unlock' never reach this
+        # computer's own FinishUP: they are refused (requires_server_host) for one elsewhere and
+        # act on a named local one. Name the way that works from this state (SRV-3).
+        raise ServerCommandRefused(
+            "network_policy_unreadable",
+            message=_POLICY_UNREADABLE_WHILE_SELECTED if _a_server_is_selected() else None,
+        )
+    return state == "zero_network"
+
+
+def _a_server_is_selected() -> bool:
+    """Whether this process uses a selected server, of any kind, rather than this computer's own.
+
+    Never raises: a root whose record cannot be read counts (it may name a server elsewhere), and
+    a root that cannot be resolved does not (the remedy every local root gets).
+    """
+
+    from finishup.client.targets import TargetRecordUnreadable
+
+    try:
+        return active_target_record() is not None
+    except TargetRecordUnreadable:
+        return True
+    except TargetError:
+        return False
+
+
+_POLICY_UNREADABLE_WHILE_SELECTED: Final = (
+    "this computer's FinishUP has its own privacy policy, which could not be read (its service "
+    "is stopped, locked, or did not answer), so a server on another machine is refused; start "
+    "it with 'finishup server connect local' and retry, or, if its vault is locked, run "
+    "'finishup server use local', then 'finishup service unlock', then choose the server again"
+)
+
+
+def check_remote_hop() -> None:
+    """Refuse a remote hop in the zero-network state, as ``server use`` does before its prompt.
+
+    Asks this computer's FinishUP for its policy through its own event loop: call it off any
+    running loop (the terminal interface runs it in a worker thread).
+    """
+
+    if _zero_network_in_force():
+        raise ServerCommandRefused("zero_network_in_force")
+
+
+def _absolute_option(value: str | None) -> str | None:
+    """An absolute remote path option, checked before any profile is fetched or console opens
+    (SRV-11)."""
+
+    if value is not None and (
+        not value.startswith("/")
+        or len(value) > 1_024
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ServerCommandRefused("target_path_invalid")
+    return value
+
+
+# What the owner is told of a server's profile, in this release's own words only (design v2
+# section 8.8: never the server's prose). Level L1 is the one level a server elsewhere offers here.
+_LEVEL_LINES: Final[dict[str, tuple[str, ...]]] = {
+    "L1": (
+        "Level of use: that server keeps your tasks, its ledger and reviews; your code stays on",
+        "this computer, and the server reads it only through the FinishUP workspace agent here.",
+    ),
+}
+_PROVIDER_NAMES: Final[dict[str, str]] = {
+    "openai": "OpenAI",
+    "openai-codex": "OpenAI Codex",
+    "openai-compatible": "an OpenAI-compatible endpoint its owner declared",
+}
+
+
+def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
+    """The disclosure lines of what using a server under ``envelope`` means (ADR-052)."""
+
+    review = envelope.review
+    if review.ai_review == "none":
+        review_lines: tuple[str, ...] = (
+            "That server states it sends nothing it reads to an AI-powered review provider.",
+        )
+    else:
+        provider = _PROVIDER_NAMES.get(
+            review.provider_disclosure or "", "a provider this release does not name"
+        )
+        review_lines = (
+            "That server's AI-powered review may send what it reads to a model provider",
+            f"({provider}), as that server's own privacy policy decides.",
+        )
+    return (
+        *_LEVEL_LINES[envelope.level],
+        *review_lines,
+        "Checks you approved still run on this computer.",
+        "",
+    )
+
+
+# The add-time question may be answered wrongly a few times before nothing is added.
+_MODE_ATTEMPTS: Final = 3
+
+
+def _confirm_on_trusted_console(
+    name: str,
+    kind: str,
+    profile_lines: tuple[str, ...],
+    *,
+    ask_mode: bool = False,
+    decided: OutsideReadMode | None = None,
+    official: bool = False,
+) -> OutsideReadMode | None:
+    """Show the versioned disclosure and require the owner to type the target name.
+
+    ``profile_lines`` say, in this release's words, what the server's profile means here (the
+    level and its review egress). At ``server add`` the owner also answers what the server may
+    read outside their projects here (ADR-051 decision 5), before typing the name, which then
+    authorizes both: with ``ask_mode`` the question is asked and the answer returned; otherwise the
+    mode already decided, by ``--outside-reads`` (``decided``) or as an ``official`` endpoint, is
+    shown. When the owner chooses ``local`` the notice of what that mode lets the server read
+    comes before the typed name. ``server use`` asks no mode. Returns the mode answered, or None.
+    """
+
+    from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+
+    answered: OutsideReadMode | None = None
+    try:
+        with TrustedForegroundConsole() as console:
+            for line in DISCLOSURE_LINES:
+                console.write(line.format(version=DISCLOSURE_VERSION) + "\n")
+            for line in profile_lines:
+                console.write(line + "\n")
+            console.write(f"Target: {name}, {_kind_label(kind)}.\n")
+            if ask_mode:
+                answered = _ask_outside_reads(console, name)
+            else:
+                mode_line = _decided_mode_line(decided, official=official)
+                if mode_line is not None:
+                    console.write(mode_line + "\n")
+            if (answered or decided) == "local":
+                console.write("\n")
+                for line in _LOCAL_MODE_BODY:
+                    console.write(line.format(name=name) + "\n")
+                console.write("\n")
+            console.read_choice(
+                "Type the target name to authorize it (anything else cancels): ",
+                (name.encode("ascii"),),
+            )
+    except TrustedConsoleError as error:
+        if error.reason == "trusted_console_required":
+            raise ServerCommandRefused("trusted_console_required") from None
+        raise ServerCommandRefused("authorization_declined") from None
+    return answered
+
+
+def _ask_outside_reads(console: TrustedForegroundConsole, name: str) -> OutsideReadMode:
+    """Ask which outside-read mode the new target gets; an explicit answer is required.
+
+    One plain line per mode, the same for every remote kind. Enter alone or another word asks
+    again, a few times; then, or at end of input or an interrupt, nothing is added
+    (``outside_reads_not_chosen``), with the way to answer next time.
+    """
+
+    from finishup.cli.trusted_console import TrustedConsoleError
+    from finishup.client.server_folders import OUTSIDE_READ_MODE_LINES, OUTSIDE_READ_QUESTION
+
+    console.write("\n" + OUTSIDE_READ_QUESTION + "\n")
+    for mode in ("local", "listed"):
+        console.write(f"  {mode.ljust(6)}  {OUTSIDE_READ_MODE_LINES[mode]}\n")
+    console.write(
+        f"You can change it later with 'finishup server folders mode {name} local' or "
+        f"'finishup server folders mode {name} listed'.\n"
+    )
+    for attempt in range(_MODE_ATTEMPTS):
+        if attempt:
+            console.write("Please type local or listed.\n")
+        try:
+            answer = console.read_choice("Type local or listed: ", (b"local", b"listed"))
+        except TrustedConsoleError as error:
+            if error.reason in {"empty_input", "input_invalid"}:
+                continue
+            if error.reason == "trusted_console_required":
+                raise
+            raise ServerCommandRefused("outside_reads_not_chosen") from None
+        return "local" if answer == b"local" else "listed"
+    raise ServerCommandRefused("outside_reads_not_chosen")
+
+
+def _decided_mode_line(mode: OutsideReadMode | None, *, official: bool) -> str | None:
+    """The console line for a mode decided before ``server add`` asks: by ``--outside-reads``,
+    or as an official FinishUP endpoint. None when the question is asked."""
+
+    if mode == "local":
+        return (
+            "Outside your projects it will read what FinishUP on this computer would read "
+            "(mode local, from --outside-reads)."
+        )
+    if mode == "listed":
+        return (
+            "Outside your projects it will read only folders you list for it (mode listed, from "
+            "--outside-reads)."
+        )
+    if official:
+        return (
+            "Outside your projects it will read what FinishUP on this computer would read "
+            "(mode local): it is an official FinishUP server."
+        )
+    return None
+
+
+def confirm_use_on_this_thread(name: str, kind: str, profile_lines: tuple[str, ...]) -> None:
+    """``server use``'s disclosure and typed confirmation, read on the calling thread (SRV-6).
+
+    Call it on the main thread (the terminal interface's event loop thread, with the terminal
+    handed over): Ctrl-C then reaches the read and cancels the confirmation, as it does for the
+    zero-network choice, instead of a read in a worker thread that no interrupt reaches while the
+    event loop tears the interface down.
+    """
+
+    from finishup.cli.zero_network_selection import interrupt_answers_the_prompt
+
+    try:
+        with interrupt_answers_the_prompt():
+            _confirm_on_trusted_console(name, kind, profile_lines)
+    except KeyboardInterrupt:
+        raise ServerCommandRefused("authorization_declined") from None
+
+
+def _fetch_profile(record: ServerTarget) -> FetchedProfile:
+    """The profile of ``record``'s server over its own transport, after the zero-network check.
+
+    No transport exists in this release for any kind (``client.server_profile.PROFILE_SOURCES``
+    is empty), so a kind opened in a test without a source refuses ``remote_kind_unavailable``.
+    """
+
+    from finishup.client.server_profile import PROFILE_SOURCES
+
+    loader = PROFILE_SOURCES.get(record.kind)
+    if loader is None:
+        raise ServerCommandRefused("remote_kind_unavailable")
+    try:
+        return loader().fetch(record)
+    except TargetRuntimeError as error:
+        _runtime_failure(error)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+
+
+def _consent_offer(
+    record: ServerTarget, fetched: FetchedProfile
+) -> tuple[ConsentEnvelope, tuple[str, ...]]:
+    """The envelope the owner is asked to consent to at level L1, and its disclosure lines.
+
+    Refused before any console: a profile this release cannot read or understand
+    (``server_profile_changed``), or one requiring more than level L1 (``server_level_unavailable``).
+    """
+
+    from finishup.client.server_profile import consent_envelope_for
+
+    try:
+        envelope, _profile = consent_envelope_for(record, fetched, level="L1", retention=None)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    return envelope, profile_disclosure_lines(envelope)
+
+
 def _emit(lines: tuple[str, ...]) -> None:
     for line in lines:
         typer.echo(line)
@@ -597,10 +915,24 @@ def server_add(
     """Add a named local server on this computer, with its own vault, tasks and settings."""
 
     if (port is not None or address is not None) and not local:
-        # The remote kinds are closed in this release (``ssh``, ``https``, ``local_port``): refused
-        # before the selection, the name, any prompt, policy check, probe or write. The kind is
-        # told by the arguments alone, so the address is never parsed.
-        raise ServerCommandRefused("remote_kind_unavailable")
+        from finishup.client import authorization
+
+        if not authorization.OPEN_REMOTE_KINDS:
+            # The remote kinds are closed in this release (``ssh``, ``https``, ``local_port``):
+            # refused before the selection, the name, any prompt, policy check, probe or write.
+            # The kind is told by the arguments alone, so the address is never parsed.
+            raise ServerCommandRefused("remote_kind_unavailable")
+        _add_remote(
+            name,
+            address,
+            port,
+            remote_root=remote_root,
+            remote_launcher=remote_launcher,
+            ca_file=ca_file,
+            tls_pin=tls_pin,
+            outside_reads=outside_reads,
+        )
+        return
     _require_selection_in_force()
     try:
         validate_name(name)
@@ -639,6 +971,218 @@ def server_add(
             f"Select it with 'finishup server use {record.name}', then run 'finishup setup' "
             "to set up its vault.",
         )
+    )
+
+
+def _remote_location(
+    address: str | None, port: int | None
+) -> tuple[TargetKind, str | None, str | None, str | None, int | None]:
+    """The kind and location fields an address names: ``(kind, base_url, user, host, port)``."""
+
+    from finishup.client.targets import normalize_https_url, parse_ssh_url
+
+    try:
+        if port is not None:
+            if address is not None:
+                raise ServerCommandRefused("usage")
+            return (
+                "local_port",
+                normalize_https_url(f"https://127.0.0.1:{port}", loopback_only=True),
+                None,
+                None,
+                None,
+            )
+        text = cast(str, address)
+        if text.startswith("ssh://"):
+            user, host, ssh_port = parse_ssh_url(text)
+            return "ssh", None, user, host, ssh_port
+        base_url = normalize_https_url(text)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    # ``https://127.0.0.1:PORT`` and ``https://[::1]:PORT`` are this computer's loopback ports.
+    loopback = base_url.startswith(("https://127.0.0.1:", "https://[::1]:"))
+    return ("local_port" if loopback else "https"), base_url, None, None, None
+
+
+def _add_remote(
+    name: str,
+    address: str | None,
+    port: int | None,
+    *,
+    remote_root: str | None,
+    remote_launcher: str | None,
+    ca_file: Path | None,
+    tls_pin: str | None,
+    outside_reads: str | None,
+) -> None:
+    """``server add`` for a server elsewhere, once its kind is open (none is in this release).
+
+    In order, before anything is written: the selection in force and the name; the address and
+    its options, remote paths absolute (SRV-11); the name not taken; this computer's zero-network
+    state (SRV-3); the server's profile over its own transport (a kind with none is
+    ``remote_kind_unavailable``); the envelope of using it at level L1, refused when this release
+    cannot agree to it. Then, on the trusted console only, the disclosure with what the profile
+    means here, the outside-read question (ADR-051 decision 5) and the typed name. Then, under the
+    registry lock, the record, its consent (ADR-052) and the mode answered.
+    """
+
+    from finishup.client.server_folders import OUTSIDE_READ_MODES, official_address
+    from finishup.client.targets import ServerTarget as _Target
+
+    _require_selection_in_force()
+    try:
+        validate_name(name)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    kind, base_url, user, host, ssh_port = _remote_location(address, port)
+    if not _open_kind(kind):
+        raise ServerCommandRefused("remote_kind_unavailable")
+    if outside_reads is not None and outside_reads not in OUTSIDE_READ_MODES:
+        raise ServerCommandRefused("outside_read_mode_invalid")
+    if (remote_root is not None or remote_launcher is not None) and kind != "ssh":
+        raise ServerCommandRefused("usage")
+    if (ca_file is not None or tls_pin is not None) and kind == "ssh":
+        raise ServerCommandRefused("target_tls_invalid")
+    if ca_file is not None and tls_pin is not None:
+        raise ServerCommandRefused("target_tls_invalid")
+    ca_text: str | None = None
+    if ca_file is not None:
+        resolved = ca_file.expanduser()
+        resolved = resolved if resolved.is_absolute() else Path.cwd() / resolved
+        if not resolved.is_file():
+            raise ServerCommandRefused("target_path_invalid")
+        ca_text = str(resolved)
+    # Checked before the consent and before anything runs on the server (SRV-11).
+    remote_root = _absolute_option(remote_root)
+    remote_launcher = _absolute_option(remote_launcher)
+    try:
+        taken = any(record.name == name for record in list_targets())
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    if taken:
+        raise ServerCommandRefused("target_name_taken")
+    check_remote_hop()
+    stamp = format_rfc3339_ms(datetime.now(UTC))
+    try:
+        # What the profile is fetched for: the location alone (nothing is written yet).
+        provisional = _Target(
+            "t_00000000",
+            name,
+            kind,
+            stamp,
+            base_url=base_url,
+            ca_file=ca_text,
+            tls_pin=tls_pin,
+            user=user,
+            host=host,
+            port=ssh_port,
+            remote_root=remote_root,
+            remote_endpoint=None
+            if remote_root is None
+            else f"{remote_root.rstrip('/')}/run/control.sock",
+            remote_launcher=remote_launcher,
+            claim_salt="A" * 43 + "=",
+            authorized_at=stamp,
+            disclosure_version=DISCLOSURE_VERSION,
+        )
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    fetched = _fetch_profile(provisional)
+    envelope, lines = _consent_offer(provisional, fetched)
+    mode = outside_reads
+    official = official_address(kind, base_url, ca_file=ca_text, tls_pin=tls_pin)
+    answered = _confirm_on_trusted_console(
+        name, kind, lines, ask_mode=mode is None and not official, decided=mode, official=official
+    )
+    mode = mode or answered
+    from finishup.client.server_profile import consent_envelope_for, record_consent
+    from finishup.client.targets import new_remote_target, remove_target_root
+
+    try:
+        with registry_lock():
+            if any(record.name == name for record in list_targets()):
+                raise ServerCommandRefused("target_name_taken")
+            record, _root = new_remote_target(
+                name,
+                kind,
+                base_url=base_url,
+                ca_file=ca_text,
+                tls_pin=tls_pin,
+                user=user,
+                host=host,
+                port=ssh_port,
+                remote_root=remote_root,
+                remote_launcher=remote_launcher,
+            )
+            try:
+                # The envelope again for the record as written (its own id): the same terms.
+                consented, _profile = consent_envelope_for(
+                    record, fetched, level="L1", retention=None
+                )
+                if consented != envelope:
+                    raise TargetError("server_profile_changed")
+                record = record_consent(record, fetched, consented)
+            except BaseException:
+                remove_target_root(record)
+                raise
+            recorded = _record_added_mode(record, mode)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    typer.echo(f"Added server target {record.name} ({record.target_id}, {record.kind}).")
+    _emit(_added_mode_lines(record, recorded=recorded))
+
+
+def _record_added_mode(record: ServerTarget, mode: OutsideReadMode | None) -> bool:
+    """Record the mode the owner answered for the new target; False when it could not be.
+
+    Never refuses the add: a mode that could not be written leaves the target ``listed``, the
+    fail-closed value of a target whose owner has not chosen, and ``server add`` says so and how
+    to choose. Called under ``registry_lock``.
+    """
+
+    from finishup.client.server_folders import FolderError, set_mode
+
+    if mode is None or not record.is_remote:
+        return True
+    try:
+        set_mode(target_root(record.target_id), record.target_id, mode)
+    except FolderError:
+        return False
+    return True
+
+
+def _added_mode_lines(record: ServerTarget, *, recorded: bool = True) -> tuple[str, ...]:
+    """What ``server add`` says of a new remote target's outside-read mode, and how to change it."""
+
+    from finishup.client.server_folders import outside_reads_of
+
+    found = outside_reads_of(target_root(record.target_id), record)
+    if not recorded:
+        return (
+            "Its choice of what it may read outside your projects could not be saved, so for now "
+            "it reads only folders you list there, none yet (mode listed).",
+            f"Choose again with 'finishup server folders mode {record.name} local' or "
+            f"'finishup server folders mode {record.name} listed'; trying again may help.",
+        )
+    origin = _mode_origin(found.source)
+    if found.mode == "local":
+        return (
+            f"Outside your projects it reads what FinishUP on this computer would read (mode "
+            f"local, {origin}).",
+            f"To let it read only folders you list: 'finishup server folders mode {record.name} "
+            "listed'.",
+        )
+    if found.source == "not_chosen":
+        return (
+            f"Outside your projects it reads only folders you list, none yet (mode listed, "
+            f"{origin}).",
+            _choose_line(record.name),
+        )
+    return (
+        f"Outside your projects it reads only folders you list, none yet (mode listed, {origin}).",
+        f"List one with 'finishup server folders add {record.name} FOLDER', or, if you trust it "
+        f"as you trust FinishUP on this computer: 'finishup server folders mode {record.name} "
+        "local'.",
     )
 
 
@@ -837,13 +1381,22 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
     return TargetSwitch(record, previous)
 
 
-def use_target(name: str) -> TargetSwitch:
+def use_target(
+    name: str, *, authorize: Callable[[str, str, tuple[str, ...]], None] | None = None
+) -> TargetSwitch:
     """Select ``name`` (``record`` ``None`` back means this computer's everyday server).
 
     A remote target (one another build wrote, or written by hand) is refused with
     ``remote_kind_unavailable`` before anything is asked or written: the remote kinds are closed
     in this release, so the selection stays as it was. A switch away from a remote target stops
     what this client runs for it (``TargetSwitch.left``); ``use local`` is always the way back.
+
+    Once a kind is open (a later layer; a test here), selecting a remote target is the owner's
+    consent to its server's current profile, asked every time: the zero-network state (SRV-3),
+    the profile over the target's own transport, the envelope of using it at level L1, then the
+    disclosure and the typed name on the trusted console (``authorize``, by default on this
+    thread; the terminal interface passes one that reads it on its loop thread, SRV-6). The
+    consent is then written onto the record as stored now, under the registry lock (SRV-12).
     """
 
     if name == "local":
@@ -860,7 +1413,9 @@ def use_target(name: str) -> TargetSwitch:
     _require_selection_in_force()
     record = _target_or_fail(name)
     if record.is_remote:
-        raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
+        if not _open_kind(record.kind):
+            raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
+        return _use_remote(record, authorize)
     try:
         with registry_lock():
             # Read again under the lock: a target removed meanwhile stays gone, and one whose
@@ -874,6 +1429,38 @@ def use_target(name: str) -> TargetSwitch:
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     return _leave(record, previous)
+
+
+def _use_remote(
+    record: ServerTarget, authorize: Callable[[str, str, tuple[str, ...]], None] | None
+) -> TargetSwitch:
+    """``use_target`` for a remote target of an open kind (see there)."""
+
+    from finishup.client.server_profile import consent_envelope_for, record_consent
+
+    check_remote_hop()
+    fetched = _fetch_profile(record)
+    envelope, lines = _consent_offer(record, fetched)
+    if authorize is None:
+        _confirm_on_trusted_console(record.name, record.kind, lines)
+    else:
+        authorize(record.name, record.kind, lines)
+    try:
+        with registry_lock():
+            # Read again: the confirmation may have taken minutes. Only the consent changes here
+            # (a key stored meanwhile stays recorded; a removed target stays gone, SRV-12).
+            stored = _stored_record(record)
+            if not stored.is_remote or stored.kind != record.kind:
+                raise ServerCommandRefused("server_profile_changed")
+            consented, _profile = consent_envelope_for(stored, fetched, level="L1", retention=None)
+            if consented != envelope:
+                raise ServerCommandRefused("server_profile_changed")
+            stored = record_consent(stored, fetched, consented)
+            previous = _selected_remote()
+            write_selection(stored)
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    return _leave(stored, previous)
 
 
 _USE_REFUSED: Final = f"{REMOTE_KIND_UNAVAILABLE}; the selected server is unchanged"
