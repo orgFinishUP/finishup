@@ -14198,6 +14198,19 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).IsolationReportContract
         ),
     ),
+    # ADR-052: what a FinishUP server offers and requires (design v2 section 2.2).
+    _RegistryEntry(
+        "service/server-profile-1.0.0.schema.json",
+        "server-profile",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "finishup.protocol.server_profile_contract", fromlist=["ServerProfileContract"]
+            ).ServerProfileContract
+        ),
+    ),
     # ADR-051: ``finishup server status --json``.
     _RegistryEntry(
         "service/server-target-status-1.0.0.schema.json",

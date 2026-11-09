@@ -303,6 +303,8 @@ def _write_pass(repo_root: Path) -> bool:
             "--only",
             "service/isolation-report-1.1.0.schema.json",
             "--only",
+            "service/server-profile-1.0.0.schema.json",
+            "--only",
             "service/server-target-status-1.0.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),

@@ -142,7 +142,8 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # ADR-051 decision D4: +1 schema (receipt-result 1.5.0 with ``workspace_provenance``).
 # ADR-051 decision 5 (open question 2): +2 schemas (check-recorded 1.7.0 and receipt-document
 # 1.4.0, carrying the counts listed mode kept back).
-REVIEWED_RESOURCE_COUNT: Final = 359
+# ADR-052: +1 schema (server-profile 1.0.0).
+REVIEWED_RESOURCE_COUNT: Final = 360
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -201,6 +202,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("routine-read-summary", "1.0.0"),
     ("runtime-attempt-evidence", "1.1.0"),
     ("semantic-provenance", "1.2.0"),
+    ("server-profile", "1.0.0"),
     ("server-target-status", "1.0.0"),
     ("service-status", "1.0.0"),
     ("session-health", "1.0.0"),

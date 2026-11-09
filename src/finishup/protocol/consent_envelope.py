@@ -60,12 +60,17 @@ __all__ = [
     "ReviewEgress",
     "Verdict",
     "canonical_bytes",
+    "code_sync_to_json",
     "compare",
     "consentable",
     "envelope_digest",
     "envelope_from_json",
     "envelope_to_json",
+    "exclusions_to_json",
+    "parse_shared_member",
     "precedes",
+    "retention_to_json",
+    "review_to_json",
 ]
 
 ENVELOPE_SCHEMA: Final = "yoetz.consent-envelope/1"
@@ -378,6 +383,30 @@ def _review(value: JsonValue, unknown: list[tuple[str, str, str]], paths: set[st
     return ReviewEgress(ai_review, disclosure)
 
 
+def parse_shared_member(name: str, value: JsonValue) -> CodeSync | Retention | ReviewEgress | None:
+    """Parse one member the server profile shares with the envelope, strictly.
+
+    ``name`` is ``code_sync``, ``retention`` or ``review``. Anything this release does not know
+    (an unknown member or enumerated value) raises ``EnvelopeError("envelope_value_unknown")``:
+    unlike an envelope, a profile with anything unknown in a shared member is refused outright.
+    """
+
+    unknown: list[tuple[str, str, str]] = []
+    paths: set[str] = set()
+    parsed: CodeSync | Retention | ReviewEgress | None
+    if name == "code_sync":
+        parsed = _code_sync(value, unknown)
+    elif name == "retention":
+        parsed = _retention(value, unknown, paths)
+    elif name == "review":
+        parsed = _review(value, unknown, paths)
+    else:
+        raise EnvelopeError("envelope_member_invalid")
+    if unknown or paths:
+        raise EnvelopeError("envelope_value_unknown")
+    return parsed
+
+
 def envelope_from_json(value: JsonValue | bytes) -> ConsentEnvelope:
     """Parse one envelope from its JSON value (or strict JSON bytes); malformed raises.
 
@@ -427,6 +456,38 @@ def _sorted(values: frozenset[str]) -> list[JsonValue]:
     return list(sorted(values, key=str.encode))
 
 
+def code_sync_to_json(code_sync: CodeSync | None) -> JsonValue:
+    """``code_sync`` in the envelope's canonical shape (shared with the server profile)."""
+
+    if code_sync is None:
+        return None
+    return {
+        "methods": _sorted(code_sync.methods),
+        "max_repo_bytes": code_sync.max_repo_bytes,
+        "max_file_bytes": code_sync.max_file_bytes,
+    }
+
+
+def retention_to_json(retention: Retention | None) -> JsonValue:
+    """``retention`` in the envelope's canonical shape (shared with the server profile)."""
+
+    if retention is None:
+        return None
+    return {"kind": retention.kind, "days": retention.days}
+
+
+def review_to_json(review: ReviewEgress) -> dict[str, JsonValue]:
+    """``review`` in the envelope's canonical shape (shared with the server profile)."""
+
+    return {"ai_review": review.ai_review, "provider_disclosure": review.provider_disclosure}
+
+
+def exclusions_to_json(exclusions: frozenset[str]) -> list[JsonValue]:
+    """Exclusion patterns in the envelope's canonical shape: byte-sorted, exact strings."""
+
+    return _sorted(exclusions)
+
+
 def envelope_to_json(envelope: ConsentEnvelope) -> dict[str, JsonValue]:
     """The envelope as a JSON object: sets as byte-sorted arrays, explicit nulls, unknown members
     restored where they were found."""
@@ -447,21 +508,10 @@ def envelope_to_json(envelope: ConsentEnvelope) -> dict[str, JsonValue]:
         "key_scope": _sorted(envelope.key_scope),
         "level": envelope.level,
         "required_min": envelope.required_min,
-        "code_sync": None
-        if envelope.code_sync is None
-        else {
-            "methods": _sorted(envelope.code_sync.methods),
-            "max_repo_bytes": envelope.code_sync.max_repo_bytes,
-            "max_file_bytes": envelope.code_sync.max_file_bytes,
-        },
-        "retention": None
-        if envelope.retention is None
-        else {"kind": envelope.retention.kind, "days": envelope.retention.days},
-        "exclusions": _sorted(envelope.exclusions),
-        "review": {
-            "ai_review": envelope.review.ai_review,
-            "provider_disclosure": envelope.review.provider_disclosure,
-        },
+        "code_sync": code_sync_to_json(envelope.code_sync),
+        "retention": retention_to_json(envelope.retention),
+        "exclusions": exclusions_to_json(envelope.exclusions),
+        "review": review_to_json(envelope.review),
         "disclosure_version": envelope.disclosure_version,
     }
     for parent, name, text in envelope.unknown_members:

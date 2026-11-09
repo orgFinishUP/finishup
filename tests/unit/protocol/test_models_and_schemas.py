@@ -3425,8 +3425,9 @@ def test_schema_catalog_reports_complete_registry() -> None:
     # #1139: four lossless result-delivery schemas; #1170: + result-recorded 1.1.0
     # ADR-051: the four control envelopes 2.10.0, isolation-report 1.1.0, server-target-status 1.0.0,
     # and the HTTPS binding v1's rest-error 1.0.0 and server-info 1.0.0; ADR-051 decision D4:
-    # receipt-result 1.5.0; ADR-051 decision 5: check-recorded 1.7.0 and receipt-document 1.4.0
-    assert SCHEMA_MEMBER_COUNT == 254
+    # receipt-result 1.5.0; ADR-051 decision 5: check-recorded 1.7.0 and receipt-document 1.4.0;
+    # ADR-052: server-profile 1.0.0
+    assert SCHEMA_MEMBER_COUNT == 255
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3513,8 +3514,8 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_867
-    )  # ADR-051 decision 8, 2026-11-07 round 4 +14 (server-target-status target.repositories: the
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_885
+    )  # ADR-052 +18 (server-profile 1.0.0); ADR-051 decision 8, 2026-11-07 round 4 +14 (server-target-status target.repositories: the
     # member, its held, kept, allowed and here refs, each entry's path, time and choice state, and
     # here's reported_at); ADR-051 decision 5 +146 (check-recorded 1.7.0 and receipt-document 1.4.0 repeat their
     # predecessors' refs); ADR-051 +47 (version-manifest 2.4.0); decision 5 +2 (server-target-status
@@ -3561,7 +3562,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
     # #1118 unit 2: reviewer-reply; #1119: batch, ai-status; ADR-051: server-target-status
-    assert len(request_versions) == 58
+    assert len(request_versions) == 59
     assert len(event_versions) == 30  # #1239 +1 contact_expectation_declared
     assert request_versions["ai-status"] == "1.0.0"
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
