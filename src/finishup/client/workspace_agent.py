@@ -70,6 +70,7 @@ import hashlib
 import hmac
 import os
 import posixpath
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -271,6 +272,74 @@ def _folded_within(path: str, directories: Iterable[str]) -> bool:
         if folded == root or folded.startswith(root + "/"):
             return True
     return False
+
+
+# How many directories above a candidate the alias check walks before it gives up (refusing).
+_MAX_ALIAS_DEPTH: Final = 512
+
+
+def _fence_identities(fenced: Iterable[str]) -> frozenset[tuple[int, int]] | None:
+    """The device and inode of each fenced directory that exists; None when one cannot be
+    examined (the fence is then unprovable and nothing is answered)."""
+
+    identities: set[tuple[int, int]] = set()
+    for directory in fenced:
+        try:
+            facts = os.stat(directory)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            return None
+        identities.add((facts.st_dev, facts.st_ino))
+    return frozenset(identities)
+
+
+def _reached_through_fence(
+    path: str, fenced: Sequence[str], identities: frozenset[tuple[int, int]] | None
+) -> bool:
+    """Whether ``path`` reaches a fenced directory under another spelling.
+
+    The lexical fence (``_folded_within``) compares spellings; ``lstat`` follows every symlink but
+    the last, and a bind mount or a case alias names the same directory differently. So the
+    directory ``path`` sits in is resolved (``realpath``), its resolved spelling is compared with
+    the fence, and every directory from it up to ``/`` is compared by identity (device and inode)
+    with each fenced directory, as is ``path`` itself when it is a directory. True, and nothing is
+    answered, when it reaches one or when that cannot be told.
+    """
+
+    if identities is None:
+        return True
+    try:
+        parent: str = os.path.realpath(posixpath.dirname(path))
+    except (OSError, ValueError):
+        return True
+    if _folded_within(posixpath.join(parent, posixpath.basename(path)), fenced):
+        return True
+    if not identities:
+        return False
+    try:
+        facts = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        facts = None
+    except (OSError, ValueError):
+        return True
+    if facts is not None and stat.S_ISDIR(facts.st_mode):
+        if (facts.st_dev, facts.st_ino) in identities:
+            return True
+    current: str = parent
+    for _level in range(_MAX_ALIAS_DEPTH):
+        try:
+            found = os.stat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            found = None
+        except (OSError, ValueError):
+            return True
+        if found is not None and (found.st_dev, found.st_ino) in identities:
+            return True
+        if current == "/":
+            return False
+        current = posixpath.dirname(current)
+    return True
 
 
 class _OwnAuthorization(Protocol):
@@ -724,6 +793,8 @@ class WorkspaceAgentHandler:
 
         if _folded_within(path, fence) or not _outside_candidate(path):
             return False
+        if _reached_through_fence(path, fence, _fence_identities(fence)):
+            return False
         try:
             os.lstat(path)
         except (OSError, ValueError):
@@ -1038,10 +1109,12 @@ class WorkspaceAgentHandler:
         """Metadata only. A candidate inside the claimed workspace, FinishUP's own directories or
         a held repository's recorded worktrees (the call's fence), not in normal form, or one the local outside-input rule would never look at (hidden,
         credential-named, a system directory, beneath no path an owner may admit) is reported
-        as not found: it is never an outside input, and the server learns nothing of it."""
+        as not found: it is never an outside input, and the server learns nothing of it. So is
+        one that reaches a fenced directory through a symlinked or bind-mounted component."""
 
         facts: list[LstatFacts | None] = []
         fenced = (self._root, *call.fence)
+        identities = _fence_identities(fenced)
         for path in arguments.paths:
             if call.expired():
                 raise _Outcome("read_deadline")
@@ -1049,6 +1122,9 @@ class WorkspaceAgentHandler:
                 posixpath.normpath(path) != path
                 or _folded_within(path, fenced)
                 or not _outside_candidate(path)
+                # A symlinked or bind-mounted component reaching a fenced directory under another
+                # spelling (``lstat`` follows every link but the last).
+                or _reached_through_fence(path, fenced, identities)
             ):
                 facts.append(None)
                 continue

@@ -1302,7 +1302,10 @@ for that target — `send` (allowed anyway, under disclosure version 1) or `keep
 
 **Fence and own hold.** The workspace agent of any other repository's connection to the same target
 fences the held repositories' recorded worktrees from outside reads, listed folders, outside read
-roots and `lstat_candidates`, read per call (decision 5). A held worktree that is, or contains, the
+roots and `lstat_candidates`, read per call (decision 5). Metadata and existence answers compare
+the candidate's spelling and, since `lstat` follows every link but the last, its resolved spelling
+and the device and inode of every directory above it, so a symlinked or bind-mounted component
+never reaches a fenced worktree. A held worktree that is, or contains, the
 claimed workspace is not fenced (that would empty its own reads), and a repository nested inside the
 claimed one is governed by the claimed repository's own grant (critic gap 7). An agent whose own
 connection's authorization lapsed — its repository held or kept among the causes — answers every

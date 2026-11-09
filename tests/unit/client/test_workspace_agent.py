@@ -2620,6 +2620,55 @@ def test_a_held_repository_is_fenced_from_every_other_repositorys_reads(
     ) == (LstatFacts.from_stat_result(os.lstat(secret)),)
 
 
+def test_a_symlinked_component_never_reaches_a_held_repository(
+    repository: Path, protected: Path, held_repository: Path, tmp_path: Path
+) -> None:
+    """``lstat`` follows every link but the last: a server naming a held repository through a
+    link to it, or to a folder inside it, learns nothing more than through its own name."""
+
+    area = tmp_path.resolve()
+    (area / "alias").symlink_to(held_repository)
+    (area / "inside").symlink_to(held_repository / "docs")
+    (area / "plain.txt").write_text("PLAIN\n", encoding="utf-8")
+    (area / "link.txt").symlink_to(held_repository / "docs" / "secret.md")
+    held = os.fspath(held_repository)
+    fenced = _held_handler(repository, protected, (held,))
+    unfenced = _held_handler(repository, protected, ())
+    through = (f"{area}/alias/docs/secret.md", f"{area}/inside/secret.md", f"{area}/alias/docs")
+    for path in through:
+        arguments = LstatCandidatesArguments((path,))
+        # Without the fence the link does reach the held repository's metadata.
+        assert _ok(unfenced, WorkspaceOperation.LSTAT_CANDIDATES, arguments) == (
+            LstatFacts.from_stat_result(os.lstat(path)),
+        )
+        assert _ok(fenced, WorkspaceOperation.LSTAT_CANDIDATES, arguments) == (None,)
+    # Everything else is answered as before: a plain file, and a link itself (its own metadata,
+    # never what it names).
+    plain, link = f"{area}/plain.txt", f"{area}/link.txt"
+    assert _ok(
+        fenced, WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments((plain, link))
+    ) == (
+        LstatFacts.from_stat_result(os.lstat(plain)),
+        LstatFacts.from_stat_result(os.lstat(link)),
+    )
+    # In listed mode a read beneath a root no folder admits says whether what it reaches exists
+    # (``root_not_admitted``) or reads as nothing: through the link, it is not even said to exist.
+    listed_fenced = _held_handler(repository, protected, (held,), mode="listed")
+    listed_unfenced = _held_handler(repository, protected, (), mode="listed")
+    arguments = ReadTextBeneathArguments(os.fspath(area), "alias/docs/secret.md")
+    assert _refused(listed_unfenced, WorkspaceOperation.READ_TEXT_BENEATH, arguments) == (
+        "refused",
+        "root_not_admitted",
+    )
+    assert _ok(listed_fenced, WorkspaceOperation.READ_TEXT_BENEATH, arguments) is None
+    # Something that exists outside the fence is still named, exactly as before.
+    plain_arguments = ReadTextBeneathArguments(os.fspath(area), "plain.txt")
+    assert _refused(listed_fenced, WorkspaceOperation.READ_TEXT_BENEATH, plain_arguments) == (
+        "refused",
+        "root_not_admitted",
+    )
+
+
 def test_a_listed_folder_holding_a_held_repository_never_admits_it(
     repository: Path, protected: Path, tmp_path: Path
 ) -> None:
