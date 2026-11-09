@@ -93,6 +93,11 @@ _CLIENT_TARGETS: Final = {
     # The zero-network guard and marker (ADR-051 decision 8) act only for a process whose
     # resolved root is this computer's everyday installation, not a selected server's.
     ("cli/zero_network_selection.py", "_on_everyday_root", "active_root"): 1,
+    # The repository hold's reports (ADR-051 decision 8, ADR-052) are made only for a process on
+    # this computer's everyday installation: a session start there, and a setup view its own
+    # service gave; a selected server, named local or elsewhere, answers for its own policy.
+    ("client/everyday_repository.py", "_root_kind", "active_root"): 1,
+    ("client/everyday_repository.py", "remember_repository_setup", "active_root"): 1,
 }
 
 
