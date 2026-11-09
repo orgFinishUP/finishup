@@ -1497,8 +1497,18 @@ Connecting Codex while a target is selected does not stamp that target into a re
 existing ambient registrations do not show as drift. `finishup server use local` returns every
 later process to the default service.
 
-- **Switching mid-session.** The MCP bridge keeps the target it started with; hooks and shell
-  calls follow a new selection at once. Restart open Codex sessions after `finishup server use`.
+- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on
+  every host, and dormant until remote kinds open. A held or kept repository gets one
+  byte-identical SessionStart text per state (`repository_hold.hook_context`: the attach form in
+  place of the start advice, an unconsented form, a mapped form on resume and compact); MCP returns
+  the phase with its continuation; the drain sites record the phase and leave rows pending. The
+  agent's own shell cannot confirm `server repositories add` (trusted console); a real terminal
+  can. The per-prompt cue is unchanged. With no remote target recorded, Codex's session start is
+  byte for byte as before (O3).
+- **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
+  connection it made to a server elsewhere ends with `server_authorization_changed` once the
+  selection, record or key changes, and its next request follows the new selection (ADR-052, O1);
+  hooks and shell calls follow a new selection at once. Restart open Codex sessions after `finishup server use`.
 - **Launcher.** The bare-`PATH` hook rule of issue #604 applies whichever server is selected: put
   the intended launcher first on `PATH`.
 - **Evidence.** Coverage at the time of writing is unit and integration tests; the remote seams

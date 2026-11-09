@@ -41,6 +41,14 @@ succeeded, with or without a named repair, goes to the choices below. A first no
 error alone does not qualify; the user's own choice in
 [When FinishUP is not working](#when-finishup-is-not-working) does.
 
+A selected FinishUP server elsewhere can refuse or end a connection with a retryable
+`service_unavailable` phase. `repository_send_decision_required`: this repository's privacy policy
+here allows no network use; ask the user once, never run `finishup server repositories add` for
+them, and repeat the same request after they allow it; if they decline, run `finishup server
+repositories keep` and do not ask again. `repository_kept_on_this_computer`: continue without
+FinishUP for this repository. `server_connection_renew`: repeat the same request with the same
+identity. Never switch servers or change a privacy policy for the user.
+
 Typed continuation pointers resolve to these small topics: startup and identity to
 [`startup.md`](startup.md), publication field ownership to [`publication.md`](publication.md),
 review/approval to [`review.md`](review.md), closure and wording to [`receipt.md`](receipt.md),

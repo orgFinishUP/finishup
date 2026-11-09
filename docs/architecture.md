@@ -148,6 +148,19 @@ non-local receipt rendering says so in one fixed line. When no agent can be reac
 carries a typed gap; nothing passes silently. Layer 1 ships all of this and tests it in process;
 no network reaches it until a remote kind opens.
 
+**Shared authorization (layer 2,
+[ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)).**
+`client/authorization.py` (hook-safe) is the one gate every connection from a remote root passes
+before any claim, dial or spawn — zero-network, the disclosure, an open kind
+(`OPEN_REMOTE_KINDS`, empty in layer 2), then the repository hold — and the authorization
+generation an admitted connection watches. `service/client.py` runs the gate in both connect paths
+(`_admit_remote`) and keeps the admission in `ServiceClient`, checked before every frame, on reuse
+and by a one-second watch; a local connection carries none. `client/repository_hold.py` decides
+the hold of a repository whose own grant forbids network egress from the reports
+`client/everyday_repository.py` records (dormant until a remote target exists), and the workspace
+agent fences held worktrees. `protocol/consent_envelope.py` (SHARED, pure) holds the consent
+envelope types, their canonical form and their partial order for layer 3's profiles.
+
 ### Topology by target
 
 ```

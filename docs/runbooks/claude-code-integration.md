@@ -484,8 +484,18 @@ explicit root; the selection never overrides it. Connecting Claude Code while a 
 does not record that target in the plugin, and `finishup server use local` returns every later
 process to the default service.
 
-- **Switching mid-session.** The MCP bridge reads the selection once per process and keeps that
-  target for the life of the session; hooks follow a new selection at once. Restart open Claude
+- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on
+  every host, and dormant until remote kinds open. A held or kept repository gets one
+  byte-identical SessionStart text per state (`repository_hold.hook_context`: the attach form in
+  place of the start advice, an unconsented form, a mapped form on resume and compact); MCP returns
+  the phase with its continuation; the drain sites record the phase and leave rows pending. The
+  agent's own shell cannot confirm `server repositories add` (trusted console); a real terminal
+  can. The per-prompt cue is unchanged. With no remote target recorded, Claude Code's session start is
+  byte for byte as before (O3).
+- **Switching mid-session.** The MCP bridge reads the selection once per process and keeps a
+  server on this computer for the life of the session; a connection it made to a server elsewhere
+  ends with `server_authorization_changed` once the selection, record or key changes, and its next
+  request follows the new selection (ADR-052, O1); hooks follow a new selection at once. Restart open Claude
   Code sessions after `finishup server use`. In required startup mode a target that cannot be
   reached denies tracked tools exactly as an unreachable local service does; it never falls back to
   the local service.

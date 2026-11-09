@@ -4709,6 +4709,9 @@ never inside a repository, with exact field sets.
 |---|---|---|
 | `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | The key set is exact per kind (`client.targets._FIELDS_BY_KIND`); every listed key is present, a nullable one as JSON `null`, and no other key is admitted. Every kind: `schema`, `target_id` (`t_` + 8 lowercase hex, the folder's own name), `name`, `kind`, `created_at` (RFC 3339, milliseconds). `local`: those five only. `https` and `local_port`: also `base_url` (normalized; loopback only for `local_port`), `ca_file` (absolute path or `null`), `tls_pin` (`sha256:<64 hex>` or `null`; at most one of `ca_file` and `tls_pin` is set, and both `null` means the system certificate store) and `credential` (`keyring`, `file` or `null` while no key is stored). `ssh`: also `user` (or `null`), `host`, `port`, `remote_root`, `remote_endpoint` (`<remote_root>/run/control.sock`, derived) and `remote_launcher`, the last three absolute paths or `null`. Every remote kind also has `claim_salt` (base64 of 32 random bytes), `authorized_at` and `disclosure_version` (an integer of at least 1), never `null`. |
 | `yoetz.server-selection/1` | `<ambient config dir>/server-selection.json` | `schema`, `target_id`. Absent means the ambient service. |
+| `yoetz.credential-generation/1` | `<target root>/config/credential-generation` (layer 2, ADR-052) | `schema`, `generation` (32 lowercase hex, random), canonical JSON and a newline. Written only by the owner's own commands on the target's key (`server logout`, `server remove`; `server login` once it stores a key), never by a token refresh; a change ends every connection admitted under the previous one (`server_authorization_changed`). Holds no secret. |
+| `yoetz.everyday-repository-policy/1` | `<ambient state dir>/servers/everyday-repositories.json` (layer 2, ADR-051 decision 8) | `schema` and `repositories`: per repository `key` (`sha256:` over the shared repository identity), `no_network`, `no_network_since` (the start of the current no-network stretch, or `null`), `reported_at` and up to 8 `worktrees`; at most 256 entries, permitted ones evicted first. Written only while a remote target record exists (`targets.remote_target_recorded`, O3); deleted when the last one is removed. Never sent to a server. |
+| `yoetz.server-repositories/1` | `<target root>/config/repositories.json` (remote kinds only, layer 2) | `schema`, `target_id` (the root's own) and `repositories`: per repository `key`, `choice` (`send`, with its `disclosure_version`, or `keep`), the `no_network_since` it was made in, `decided_at` and the `worktree` it was made from; at most 64. Written by `server repositories add` (trusted console), `keep`, and `remove [--all]`; never sent to a server. |
 | `yoetz.server-folders/1` | `<target root>/config/folders.json` (remote kinds only) | `schema`, `target_id` (the root's own), `folders` (sorted, unique, at most 32 absolute paths that pass `admitted_input_root_valid` and neither are nor hold the home directory), and `mode` (`local\|listed`) once the owner chose one (at `server add`, or with `server folders mode`). Every remote kind has the same two modes and no default: no `mode` means `listed` (`not_chosen`), except an HTTPS target whose exact hostname is in `client.server_folders.OFFICIAL_ENDPOINT_HOSTS` and that trusts the system certificate store, which is `local` (`official_endpoint`). An absent record means no folder and no mode; one that cannot be read means `listed` with no folder. In both modes the folders also admit task inputs for that target's claim-bound sessions, whatever the server's own input-root policy names (maintainer decision 2026-11-07). Written only by `server add` and `server folders add`/`remove`/`mode`, never sent to a server. |
 
 A target name matches `[a-z0-9][a-z0-9-]{0,15}` and `local` is reserved. The name appears in
@@ -5694,6 +5697,9 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 | `requires_server_host` | a `server_host` command runs while a remote target is active | run it on the server host (for SSH, through `ssh -t`) |
 | `target_root_is_remote` | a service is asked to run in a root whose `target.json` names a remote kind or cannot be read: the daemon refuses at composition, before any bundle, state or singleton exists (`LifecycleError`, recorded as a startup failure), and an on-demand start refuses to spawn one (`service_unavailable` with this phase, at once). A human `service run`/`service start` on a readable remote record meets the server-host guard first (`requires_server_host`) | continuation `remote_target_no_local_service`: this release reaches no server elsewhere, so the owner runs `finishup server use local`, then starts a new agent session; nothing was sent or started. When an isolation variable or a pinned launcher names the root, `remote_root_override_clear` instead: the owner unsets it or uses an unpinned launcher (`targets.remote_root_continuation`) |
 | `selection_overridden` | `server use` while the isolation variable or a runtime pin decides the root | unset the variable or use an unpinned runtime |
+| `repository_egress_held` | layer 2: the shared gate's last step (ADR-052) refuses a connection to a server elsewhere for a repository whose own grant on this computer allows no network use and for which the owner made no current choice; a long-lived connection ends with it once the repository becomes held | continuation `repository_send_decision_required`: ask the user once; only they run `finishup server repositories add` on the trusted console; on a decline run `finishup server repositories keep` and do not ask again; then repeat the request |
+| `repository_egress_kept` | layer 2: as above, for a repository the owner kept on this computer for that target | continuation `repository_kept_on_this_computer`: continue without FinishUP for that repository; never ask again |
+| `server_authorization_changed` | layer 2: a connection admitted to a server elsewhere ends because the selection no longer names its target, the target's record was replaced or removed, or the credential generation changed (ADR-052) | continuation `server_connection_renew`: repeat the same request with the same identity; it runs under the current selection or names the refusal now in force |
 | `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): the owner uses a server on this computer, `finishup server use local` or a named local one (`finishup server add NAME --local`), then the request is repeated; SSH, HTTPS and port servers arrive in a later release, and nothing was added, selected or sent |
 | `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: while the remote kinds are closed, `finishup server use NAME` cannot confirm the current disclosure (it answers `remote_kind_unavailable`), so the owner runs `finishup server use local`, then starts a new agent session, and a later release can authorize that server again (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
 | `zero_network_remote_selected` | a connection would be opened to a remote target while this computer last reported a zero-network policy (`targets.require_current_authorization`, before the disclosure check; ADR-051 decision 8, 2026-11-07); also the CLI's refusal of a privacy change that would leave both in force | the owner runs `finishup server use local`, then restarts open sessions (and makes the refused change again) |
@@ -5702,7 +5708,10 @@ The remote connection phases ride as `phase` on a retryable `service_unavailable
 (`REMOTE_CONNECTION_PHASES`) and are protocol reason codes too: `remote_unreachable`,
 `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running`,
 `remote_incompatible` (whose text names both releases), and the client's own refusals
-`target_reauthorization_required`, `target_root_is_remote` and `zero_network_remote_selected`. A client that catches that `TargetError` from the binding
+`target_reauthorization_required`, `target_root_is_remote` and `zero_network_remote_selected`, and,
+from layer 2, `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`
+(the six `AUTHORIZATION_REFUSAL_PHASES`, which a `phase` safe detail admits and every surface
+renders alike). A client that catches that `TargetError` from the binding
 helpers raises it as this phase, so every surface renders its directive. `remote_auth_failed` is
 a server that answered and refused this client's key, so no surface calls it unreachable or
 unanswered: `server status` and `server test` say "State: answered, key refused" with the fix for
@@ -5713,6 +5722,43 @@ unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`,
 `check_time_change_unavailable_workspace_agent_unavailable` and
 `check_time_change_unavailable_workspace_agent_refused` join
 `CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS`.
+
+**Shared authorization (layer 2, ADR-052).**
+
+- `client.authorization` (hook-safe): `OPEN_REMOTE_KINDS` (empty in layer 2; an architecture test
+  keeps it so), `AUTHORIZATION_REFUSALS`, `gate(record, *, repository_key=None)` (raises
+  `TargetError` in the order zero-network, disclosure, open kind, hold), `authorize_active_root()
+  -> ConnectionAuthorization | None` (None for a local root), `preflight_refusal() -> str | None`
+  (record-only; replaces `active_remote_refusal` in the SessionStart auto-attach, which
+  server-host actions keep asking), `ConnectionAuthorization.refusal()` / `.for_repository(key)` /
+  `.grant`, `AuthorizationGeneration`, `read_generation(root, *, selection_bound)`,
+  `bump_credential_generation(root) -> bool`, `credential_generation_path(root)`,
+  `refusal_summary(phase)`.
+- `service.client`: `AuthorizationCheck` (Protocol: `refusal() -> str | None`),
+  `ClientWorkspaceBinding.authorization` (replaces round 5's `hold`), `GENERATION_RECHECK_SECONDS`
+  (1.0), `connect_service(..., serve_workspace=False)` and `connect_service_on_demand(...,
+  serve_workspace=False)` (the MCP bridge passes true). A remote root's connection is admitted
+  before any claim, dial, spawn or supersede and then checked before every frame, by `connect()`,
+  before a workspace reply and by its watch; a local one carries no check.
+- `client.remote_binding`: `binding_for_active_root(locator, *, serve_workspace, authorization=None)`
+  and `remote_workspace_binding(..., target=None, authorization=None)`;
+  `client.workspace_agent.WorkspaceAgentHandler(..., held_roots=None, own_authorization=None)`.
+- `client.repository_hold`: `decide`, `require_sendable`, `SendHold` (`phase()`, `held()`,
+  `refusal()`), `held_worktrees`, `hook_context(phase, variant)`, `repository_key`, the choice
+  record (`add_override`, `add_kept`, `remove_override`, `clear_overrides`, `read_overrides`).
+  `client.everyday_repository`: `read_everyday_repository`, `remember_repository_setup`,
+  `refresh_at_session_start`, `session_start_hold_phase`, `report_needs_refresh`.
+  `client.targets.remote_target_recorded()` switches the reads on (O3).
+- `protocol.consent_envelope` (SHARED): `ConsentEnvelope` and its parts, `envelope_from_json`,
+  `envelope_to_json`, `canonical_bytes`, `envelope_digest`, `consentable`, `precedes`,
+  `compare(consented, current) -> EnvelopeComparison` (`same`, `narrower`, `ask_again`,
+  `level_unavailable`).
+- `cli.render.render_authorization_refusal(error)`; `server status --json` gains
+  `target.repositories` (null for a server on this computer, which asks no live read); `server
+  repositories add|keep|list|remove` is hidden and `client_only` in `cli.command_scope`, with the
+  `_REMEDIES` keys `repositories_not_applicable`, `repository_invalid`, `repository_limit`,
+  `repositories_record_invalid` and `repositories_record_unsafe`; hook diagnostics record
+  `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`.
 
 **Not yet built.** Layer 1 ships no remote runtime, no long-lived client process that holds a remote
 connection, no network protocol and no server edge. Server profiles and their consent binding arrive

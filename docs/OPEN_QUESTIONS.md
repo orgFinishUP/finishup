@@ -225,6 +225,11 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   [ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903), which
   delivers them in layers. Layer 1 opens named local servers only; every remote kind stays closed
   (`remote_kind_unavailable`) and stays in this deferral until the layer that opens it lands.
+  Layer 2 ([ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
+  adds the shared authorization gate, generations, consent-envelope types and the repository
+  egress hold, all closed with the kinds; its remaining follow-ups (the helper's background
+  agents and the direct clients carrying the authorization, profile binding, sync under the gate,
+  a receipt count of fenced reads, and the lifecycle acceptance rows) are listed there by layer.
   Multi-user or team hosting, remote human-control ceremonies and the rest of the multi-user
   bullet below stay deferred.)* *(Narrowed 2026-09-05: this bullet
   formerly also deferred Codex app-server integration and additional first-party harnesses. The exact digest-bound Codex

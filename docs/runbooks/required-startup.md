@@ -141,3 +141,12 @@ Still owed on #692: native success after real accepted bootstrap, native delegat
 pending recovery, regular Cursor desktop execution/approval behavior, and Linux/WSL 2 host runs.
 Test-vault initialization and host installation retain their own consent requirements. Codex,
 portable Cursor CLI, native Windows, mobile and cloud enforcement are not claimed.
+
+## A held repository (layer 2, ADR-052)
+
+Once remote kinds open, a repository held from the selected server elsewhere
+(`repository_egress_held`) or kept on this computer (`repository_egress_kept`) refuses `start` like
+any authorization refusal: under required startup, tools stay blocked until the owner allows the
+repository (`finishup server repositories add`, trusted console), switches to this computer's
+server (`finishup server use local`), or returns startup to optional. In this release no remote
+kind is open, so this never arises.

@@ -255,3 +255,10 @@ command's preview before applying it. Repair keeps your ChatGPT sign-in, model, 
 timeout, retries, and privacy permissions, and never signs in again on its own. Updating your
 everyday Codex later does not affect the evaluator: FinishUP uses its own verified copy of the admitted
 release. See [Providers](providers.md#keeping-the-evaluator-working-when-codex-updates).
+
+## Open sessions keep the rules they started with
+
+A FinishUP process that was already running when you upgraded keeps the older release's rules
+until it restarts: an open agent session's FinishUP tools, a terminal interface or a menu left
+open. Restart them after an upgrade, as after `finishup server use`, so they apply the new rules
+(for example the privacy rules for servers elsewhere, once those arrive).

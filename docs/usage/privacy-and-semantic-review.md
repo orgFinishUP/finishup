@@ -131,6 +131,10 @@ Enabling one channel authorizes no other. Telemetry, crash diagnostics, update c
 capability testing have their own separate policies. `local_only` governs LLM disclosure and can
 coexist with a separately consented bounded structural non-LLM channel.
 
+A project's own privacy policy also governs FinishUP servers elsewhere once they arrive: a project
+whose policy on this computer allows no network use is held from such a server until you allow it
+from your own terminal or keep it on this computer (see [FinishUP servers](servers.md)).
+
 **True zero-network mode** is the composite of `local_only`, the global ceiling off, and all five
 network channels disabled. Even then, exact release-profiled local IPC is permitted for the FinishUP
 service, the confidential helper, an approved local model, the OS credential service, and session

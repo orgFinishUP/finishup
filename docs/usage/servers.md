@@ -43,7 +43,9 @@ FinishUP tools, the `finishup` command and the terminal interface. `use local` g
 everyday FinishUP on this computer.
 
 Restart agent sessions that are already open. An open session's FinishUP tools keep the server
-they started with, while its hooks follow the new choice at once.
+on this computer they started with, while its hooks follow the new choice at once. Once servers
+elsewhere arrive, a session connected to one ends that connection when you choose another server,
+and its next FinishUP call follows your choice.
 
 Your agent hosts need nothing new: Claude Code, Codex and Cursor keep their existing connection and
 follow your choice. A test copy of FinishUP that runs in its own folder is not affected by the
@@ -106,6 +108,30 @@ servers and switches between them. Adding a server there offers a server on this
 prints the `finishup server add NAME --local` command for you to run in your shell; removing one
 happens in your shell too.
 
+## Servers elsewhere and your privacy policy
+
+These rules are built into this release and apply once servers on another machine, on the web or
+on a port arrive; until then none of them can stop anything you do.
+
+- **A project whose privacy policy here allows no network use is held.** While a server elsewhere
+  is selected, FinishUP sends nothing it reads or claims for such a project to that server until
+  you decide. Your agent asks you once; only you can allow it, from your own terminal, and you can
+  instead keep the project on this computer so FinishUP does not ask again. Observations captured
+  while it was held wait on this computer; after you allow it they are sent, without the content
+  captured while it was held.
+- **What this computer records for it.** FinishUP keeps, in a file only you can read beside its
+  server list, what its own privacy policy said of each project (whether it allows network use,
+  since when, and up to eight folders of each project). It starts keeping this only when you first
+  add a server elsewhere, so there is nothing from before then; removing your last server
+  elsewhere deletes it.
+- **A connection ends when what it was made under changes.** Choosing another server, removing
+  the server or signing out of it ends any open connection to it within about a second; a request
+  already under way may finish. The next request is made under your current choice.
+- **Honest limits.** A project FinishUP has not yet heard about is not held. The hold covers what
+  FinishUP itself reads and claims for the project, not what an agent working in another folder
+  reads and its hooks capture. A project inside another project follows the outer project's
+  policy.
+
 ## Troubleshooting
 
 FinishUP never quietly falls back to another FinishUP when the server in use cannot be reached,
@@ -121,5 +147,8 @@ now).
 | `selection_overridden` | An isolation setting or a pinned test copy decides which FinishUP is used, so `server use` cannot. | Unset `FINISHUP_ISOLATED_ROOT`, or run the command from your everyday installation. |
 | `isolation_root_invalid` | The server in use has a missing or unsafe folder on this computer, or an agent session that was open when you removed its server still uses it. | Run `finishup server use local` (or choose another server) and restart open agent sessions. For a damaged folder, also remove the server and add it again. |
 | `selection_invalid` | The saved server choice is damaged, or names a server whose folder on this computer is missing or unsafe. `finishup server` commands say this instead of `isolation_root_invalid`. | Run `finishup server use local`; it clears the choice even when it cannot be read. |
+| `repository_egress_held` | A server elsewhere is selected and this project's privacy policy on this computer allows no network use, so nothing from it was sent. (Servers elsewhere arrive in a later release.) | Decide once: allow it from your own terminal in that project, or keep it on this computer so FinishUP does not ask again. |
+| `repository_egress_kept` | You chose to keep this project on this computer for the selected server elsewhere. | Nothing to do; FinishUP does not ask again. |
+| `server_authorization_changed` | The server choice, the server's record or its key changed while a connection to a server elsewhere was open, so FinishUP ended it before sending more. | Repeat the same request; it uses your current choice. |
 | `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server that another FinishUP release added for another machine, the web or a port. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |
 | `workspace_binding_conflict` | A request named the project in a form its connection cannot use, such as a `client:` handle sent to a FinishUP on this computer. | Name the project by its folder path through FinishUP's own tools; a hand-written client must not send a `client:` handle to a server on this computer. |

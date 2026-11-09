@@ -129,6 +129,15 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - FinishUP remembers, in an owner-only file beside its server list and outside the vault, whether
   this computer's privacy policy last reported the zero-network mode and when (no path, name or
   policy content). It is the record the later remote servers check before sending anything.
+- **Protections for servers elsewhere, built before any can be used** (ADR-052). One check runs
+  before anything is sent to a server elsewhere, in one order, and every open connection to one
+  ends within about a second once the server choice, the server's record or its key changes
+  (`server_authorization_changed`). A project whose own privacy policy here allows no network use
+  is held from such a server until you allow it from your own terminal, or keep it on this
+  computer (`repository_egress_held`, `repository_egress_kept`). FinishUP starts recording what
+  this computer's policy says of each project only once you add a server elsewhere, so nothing
+  changes for you until then. No server elsewhere can be added in this release, so none of this
+  can stop anything you do yet.
 
 ### Added
 

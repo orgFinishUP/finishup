@@ -331,7 +331,10 @@ server there offers a named local server on this computer and shows the `finishu
 machine, on the web or on a port arrive in a later release: `/server` does not offer them, and a
 server another FinishUP release added for one shows as not available in this release and cannot
 be chosen. While a server other than the everyday one is in use, the header shows its kind and
-short id. See [FinishUP servers](servers.md).
+short id. Once servers elsewhere arrive, `/server` also says when this project's privacy policy
+here holds its work from the selected one (or keeps it here, as you chose), offers to send it
+anyway after you confirm in your terminal, and the header adds "this repository held" (or "kept
+here") while that lasts. See [FinishUP servers](servers.md).
 
 ### `/observe`
 
