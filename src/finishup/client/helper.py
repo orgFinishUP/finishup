@@ -653,16 +653,38 @@ class Helper:
         self._relays.add(task)
         task.add_done_callback(self._relays.discard)
 
-    async def _open_channel(self, hello: bytes, *, restart: bool) -> tuple[ControlStream, bytes]:
+    def _may_forward(self, admission: ConnectionAuthorization) -> bool:
+        """Whether something admitted under ``admission`` may leave this computer now.
+
+        Asked again right before every hello and every remote ``service start`` the helper makes
+        (the dial, the master and the service start all await, and the authorization may change
+        meanwhile), and before every relayed frame.
+        """
+
+        if self._refuse_zero_network():
+            return False
+        if self._stop.is_set() and self._stop_reason == _ZERO_NETWORK:
+            return False
+        return admission.refusal() is None
+
+    async def _open_channel(
+        self, hello: bytes, admission: ConnectionAuthorization, *, restart: bool
+    ) -> tuple[ControlStream, bytes]:
         """One upstream stream with the hello sent, and the first answered bytes.
 
         With ``restart`` (a client's connection) a remote service that is not running is started
         once with the server's own launcher; a background agent's connection never starts it.
+        ``admission`` is asked again right before the hello is sent and right before the remote
+        service is started: a refusal then sends nothing (``_RelayEnded``).
         """
 
         for attempt in range(2):
             await self._upstream.ensure()
             upstream = await self._upstream.open_stream()
+            if not self._may_forward(admission):
+                with contextlib.suppress(Exception):
+                    await upstream.aclose()
+                raise _RelayEnded
             try:
                 await upstream.send_all(hello)
                 first = await upstream.receive(_PUMP_CHUNK)
@@ -675,6 +697,8 @@ class Helper:
             # sshd could not reach the server's endpoint: its service is not running.
             now = self._clock()
             if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
+                if not self._may_forward(admission):
+                    raise _RelayEnded
                 self._last_restart = now
                 if await self._upstream.start_remote_service():
                     continue
@@ -707,7 +731,7 @@ class Helper:
                 return
             try:
                 upstream, first = await self._open_channel(
-                    encode_control_frame(hello), restart=not own
+                    encode_control_frame(hello), admission, restart=not own
                 )
             except UpstreamUnavailable as error:
                 self._write_status("unavailable", error.reason)

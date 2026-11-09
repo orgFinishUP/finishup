@@ -508,3 +508,102 @@ def test_a_registration_gets_one_background_agent_until_it_is_no_longer_served(
     assert b'"role":"background"' in hello
     assert b'"workspace_claim"' in hello and b'"server_profile"' in hello
     assert connections == 1 and served == 1 and remaining == 0
+
+
+class _ChangingUpstream(FakeUpstream):
+    """An upstream whose dial awaits while the owner acts.
+
+    ``change`` runs inside the await: with ``during="open"`` before the stream is handed back (the
+    moment a real master start or channel open takes); with ``during="answer"`` while the
+    helper waits for the server's first answer, which here never comes (the server's endpoint
+    refused the channel: its service is not running).
+    """
+
+    def __init__(self, daemon: ScriptedDaemon, change: object, *, during: str) -> None:
+        super().__init__(daemon)
+        self.change = change
+        self.during = during
+
+    async def open_stream(self):  # noqa: ANN201
+        stream = await super().open_stream()
+        if self.during == "open":
+            self.change()  # type: ignore[operator]
+            return stream
+        change = self.change
+
+        class Answering:
+            async def send_all(self, data: bytes) -> None:
+                await stream.send_all(data)
+
+            async def receive(self, max_bytes: int = 65_536) -> bytes:
+                answered = await stream.receive(max_bytes)
+                change()  # type: ignore[operator]
+                return answered
+
+            async def aclose(self) -> None:
+                await stream.aclose()
+
+        return Answering()
+
+
+def _act(root: Path, change: str) -> None:
+    if change == "credential":
+        bump_credential_generation(root)
+    elif change == "consent":
+        (root / "config" / "consent-envelope.json").unlink()
+    elif change == "zero_network":
+        from finishup.client.everyday_policy import record_reported_policy
+
+        assert record_reported_policy(zero_network=True)
+
+
+@pytest.mark.parametrize("change", ["credential", "consent", "zero_network"])
+def test_an_authorization_change_while_the_upstream_opens_sends_no_hello(
+    ssh_target: tuple[ServerTarget, Path], change: str
+) -> None:
+    """A1: the captured admission is asked again right before the hello leaves."""
+
+    record, root = ssh_target
+
+    async def run() -> tuple[ScriptedDaemon, bytes]:
+        daemon = ScriptedDaemon()
+        upstream = _ChangingUpstream(daemon, lambda: _act(root, change), during="open")
+        helper = _helper(record, root, upstream)
+        client, local = _pair()
+        relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(hello_frame(server_profile=TEST_REVISION))
+        async with asyncio.timeout(10):
+            answered = await client.receive(65_536)
+            await relay
+            await asyncio.gather(*daemon.serving, return_exceptions=True)
+        await client.aclose()
+        return daemon, answered
+
+    daemon, answered = asyncio.run(run())
+    assert answered == b""
+    # The stream was opened, but the hello never reached the server.
+    assert daemon.connections == 1 and daemon.received(0) == []
+
+
+@pytest.mark.parametrize("change", ["none", "credential", "consent", "zero_network"])
+def test_an_authorization_change_before_the_remote_start_starts_nothing(
+    ssh_target: tuple[ServerTarget, Path], change: str
+) -> None:
+    """A1: a retry's remote ``service start`` is asked for only under a live admission."""
+
+    record, root = ssh_target
+
+    async def run() -> int:
+        upstream = _ChangingUpstream(ScriptedDaemon(), lambda: _act(root, change), during="answer")
+        upstream.not_running = True
+        helper = _helper(record, root, upstream)
+        client, local = _pair()
+        relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(hello_frame(server_profile=TEST_REVISION))
+        async with asyncio.timeout(10):
+            await client.receive(65_536)
+            await relay
+        await client.aclose()
+        return upstream.started
+
+    assert asyncio.run(run()) == (1 if change == "none" else 0)
