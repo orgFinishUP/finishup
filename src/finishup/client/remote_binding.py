@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import posixpath
 from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Final, cast
 
 from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
@@ -73,6 +74,10 @@ async def remote_workspace_binding(
     Otherwise the binding carries the check a long-lived holder makes before every frame and on
     its watch: ``authorization`` (the connection's admission) bound to this repository, or the
     repository's hold alone when no admission was passed.
+    The agent then fences every other repository held from that target, or kept on this
+    computer (``repository_hold.held_worktrees``, read per call), and answers nothing once that
+    check lapses (``own_authorization``: its own repository held or kept, or, with an admission,
+    any change that ends the connection).
     """
 
     if type(workspace) is not WorkspaceLocator:
@@ -88,7 +93,9 @@ async def remote_workspace_binding(
     claim = workspace_claim_for_root(root, claim_salt, worktree)
     if not serve_workspace:
         return ClientWorkspaceBinding(claim, authorization=check)
+    from finishup.client.repository_hold import held_worktrees
     from finishup.client.server_folders import outside_reads_reader
+    from finishup.client.targets import target_root
     from finishup.client.workspace_agent import WorkspaceAgentHandler
 
     # Every agent of this client for this target keys its opened-workspace handles alike, so a
@@ -98,10 +105,24 @@ async def remote_workspace_binding(
     # decision 5): bound now to the target whose salt the claim was made under, never to whichever
     # target this process selects later; another target, or none, reads no folder outside.
     outside = outside_reads_reader(claim_salt=claim_salt)
+    # Every other repository held from that same target, or kept on this computer, is fenced
+    # from this agent's reads like FinishUP's own directories, read on every call; and once this
+    # connection's own authorization lapses (its repository held, say), the agent answers nothing
+    # (ADR-051 decision 8, ADR-052).
+    held = (
+        None
+        if target is None
+        else partial(held_worktrees, target_root(target.target_id), target.target_id)
+    )
     return ClientWorkspaceBinding(
         claim,
         WorkspaceAgentHandler(
-            workspace, protected=protected, opened_handle_key=opened_key, outside_reads=outside
+            workspace,
+            protected=protected,
+            opened_handle_key=opened_key,
+            outside_reads=outside,
+            held_roots=held,
+            own_authorization=check,
         ),
         authorization=check,
     )
