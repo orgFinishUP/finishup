@@ -434,14 +434,14 @@ def control_failure(
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
     if error.reason == "service_unavailable" and error.phase is not None:
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS
         from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-        if error.phase in AUTHORIZATION_REFUSALS:
+        if error.phase in REMOTE_CONNECTION_PHASES:
             # The shared authorization gate refused or ended a connection to a server elsewhere
-            # (ADR-051, ADR-052): nothing more was sent and nothing started, so the line names the
-            # phase and its fixed summary, then the directive of its way back (for a remote root,
-            # it follows what named the root), never a local service to start.
+            # (ADR-051, ADR-052), or that server could not be reached through its transport: the
+            # line names the phase and its fixed summary, then the directive of its way back (for
+            # a remote root, it follows what named the root), never a local service to start.
             from finishup.cli.render import recovery_directive_json, render_authorization_refusal
             from finishup.protocol.recovery import directive_for
 

@@ -2435,14 +2435,15 @@ def _control_error_result(
             safe_details={"reason_code": "service_draining"},
         )
     if error.reason == "service_unavailable":
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
+        from finishup.client.authorization import refusal_summary
         from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-        if error.phase in AUTHORIZATION_REFUSALS:
+        if error.phase in REMOTE_CONNECTION_PHASES:
             # The shared authorization gate refused or ended a connection to a server elsewhere
-            # (ADR-051, ADR-052): nothing more was sent and nothing started. Name the phase and
-            # the continuation of its way back (for a remote root, it follows what named this
-            # bridge's root), never a local service to run.
+            # (ADR-051, ADR-052), or that server could not be reached through its transport: name
+            # the phase and the continuation of its way back (for a remote root, it follows what
+            # named this bridge's root), never a local service to run.
             remote_details: dict[str, object] = {
                 "reason_code": "service_unavailable",
                 "phase": error.phase,

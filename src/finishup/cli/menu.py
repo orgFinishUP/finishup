@@ -131,9 +131,9 @@ def _remote_refusal_phase(error: ControlError) -> str | None:
     run one.
     """
 
-    from finishup.client.authorization import AUTHORIZATION_REFUSALS
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-    if error.reason == "service_unavailable" and error.phase in AUTHORIZATION_REFUSALS:
+    if error.reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
         return error.phase
     return None
 
@@ -142,11 +142,15 @@ def _control_guidance(error: ControlError) -> str:
     phase = _remote_refusal_phase(error)
     if phase is not None:
         from finishup.cli.render import render_remote_refusal
+        from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
 
-        return "service_unavailable: " + render_remote_refusal(
-            phase,
-            head="this computer refused the selected FinishUP server before anything was sent",
+        head = (
+            "this computer refused the selected FinishUP server before anything was sent"
+            if phase in AUTHORIZATION_REFUSALS
+            # A server elsewhere that could not be reached refused nothing: say what happened.
+            else refusal_summary(phase) or "the selected FinishUP server could not be reached"
         )
+        return "service_unavailable: " + render_remote_refusal(phase, head=head)
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (

@@ -1,4 +1,4 @@
-"""Every surface renders every authorization refusal the same way (ADR-051, ADR-052).
+"""Every surface renders every authorization refusal and remote outage the same way (ADR-052).
 
 One matrix over the shared gate's eight phases (``client.authorization.AUTHORIZATION_REFUSALS``):
 the zero-network refusal, a stale disclosure, a remote root this release does not connect to, a
@@ -6,7 +6,10 @@ held or kept repository, a changed authorization, and the consent step's two pro
 (a changed profile, a level not agreed to; ADR-052). For each, every surface names the closed
 phase, its fixed summary or text, and the continuation of its way back, as a retryable
 ``service_unavailable``; none tells the owner to start a local service, and none carries a path,
-a server name or a host (the public-boundary canary).
+a server name or a host (the public-boundary canary). Since SSH servers open (layer 4), the same
+holds for the five phases of a server elsewhere that could not be reached through its transport
+(``remote_unreachable``, ``remote_auth_failed``, ``remote_identity_changed``,
+``remote_service_not_running``, ``remote_incompatible``): each names its own repair.
 """
 
 from __future__ import annotations
@@ -26,10 +29,13 @@ from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summar
 from finishup.config.paths import reset_selection_memo
 from finishup.ports.control import ControlError
 from finishup.protocol.canonical import JsonValue
+from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 from finishup.protocol.recovery import directive_for
 from finishup.tui.runtime import _connect_failure  # pyright: ignore[reportPrivateUsage]
 
 _PHASES = sorted(AUTHORIZATION_REFUSALS)
+# Every phase a connection to a server elsewhere names: the refusals, and the transport outages.
+_ALL_PHASES = sorted(REMOTE_CONNECTION_PHASES)
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
 
 
@@ -73,9 +79,16 @@ def test_the_matrix_covers_every_phase_and_each_has_a_summary_and_a_directive() 
         "target_root_is_remote",
         "zero_network_remote_selected",
     }
-    for phase in _PHASES:
+    for phase in _ALL_PHASES:
         assert refusal_summary(phase)
-    assert refusal_summary("remote_unreachable") is None
+    assert set(_ALL_PHASES) - set(_PHASES) == {
+        "remote_auth_failed",
+        "remote_identity_changed",
+        "remote_incompatible",
+        "remote_service_not_running",
+        "remote_unreachable",
+    }
+    assert refusal_summary("service_unavailable") is None
 
 
 def test_the_words_say_refused_before_sending_or_stopped_sending_never_both() -> None:
@@ -116,7 +129,7 @@ def _continuation_token(phase: str) -> str:
     return token
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -153,7 +166,7 @@ def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
             assert out == []
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_mcp_names_the_phase_and_its_continuation(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -174,7 +187,7 @@ def test_mcp_names_the_phase_and_its_continuation(
     _clean(json.dumps(structured) + text, home, record)
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_hooks_name_the_phase_and_continuation_in_attach_and_mapped_texts(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -192,7 +205,7 @@ def test_hooks_name_the_phase_and_continuation_in_attach_and_mapped_texts(
         assert "before anything was sent" not in attach + mapped
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_service(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:

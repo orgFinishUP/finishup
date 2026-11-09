@@ -614,10 +614,38 @@ _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
 assert set(_REFUSAL_SUMMARIES) == AUTHORIZATION_REFUSALS
 
 
-def refusal_summary(phase: str) -> str | None:
-    """The fixed one-line summary of an authorization refusal ``phase``; None for any other."""
+# What happened, in fixed words, when a server elsewhere could not be reached through its
+# transport (an SSH target, ADR-052): not a refusal of this computer, an outage of that server or
+# of the way to it. Each phase's continuation names the owner's repair.
+_TRANSPORT_SUMMARIES: Final[dict[str, str]] = {
+    "remote_unreachable": (
+        "FinishUP could not reach the selected FinishUP server elsewhere, or the connection to "
+        "it ended"
+    ),
+    "remote_auth_failed": (
+        "the selected FinishUP server elsewhere refused this computer's credentials (for an SSH "
+        "server, the keys OpenSSH offered)"
+    ),
+    "remote_identity_changed": (
+        "the selected FinishUP server elsewhere could not be verified (its SSH host key is not "
+        "the one this computer knows), so FinishUP did not connect to it"
+    ),
+    "remote_service_not_running": (
+        "the selected FinishUP server elsewhere is reachable, but its FinishUP service is not "
+        "running"
+    ),
+    "remote_incompatible": (
+        "the selected FinishUP server elsewhere runs another FinishUP release, so nothing was "
+        "recorded there"
+    ),
+}
 
-    return _REFUSAL_SUMMARIES.get(phase)
+
+def refusal_summary(phase: str) -> str | None:
+    """The fixed one-line summary of a remote ``phase``: an authorization refusal, or a server
+    elsewhere that could not be reached; None for any other."""
+
+    return _REFUSAL_SUMMARIES.get(phase) or _TRANSPORT_SUMMARIES.get(phase)
 
 
 def bump_credential_generation(root: Path) -> bool:
