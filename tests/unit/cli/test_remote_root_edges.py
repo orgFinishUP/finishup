@@ -19,6 +19,7 @@ from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.cli import menu
 from finishup.cli.command_scope import ServerHostRequired, server_host_refusal_line
 from finishup.client import targets
+from finishup.client.authorization import refusal_summary
 from finishup.client.targets import ServerTarget
 from finishup.config.paths import reset_selection_memo
 from finishup.ports.control import ControlError
@@ -73,10 +74,10 @@ def test_the_terminal_interface_never_calls_a_server_elsewhere_the_local_service
         ControlError("service_unavailable", retryable=True, phase="remote_auth_failed")
     )
     assert unreachable.reason == "remote_auth_failed"
-    assert unreachable.message == "the selected FinishUP server elsewhere could not be reached"
-    assert unreachable.details and "ssh-add" in unreachable.details[0]
+    assert unreachable.message == refusal_summary("remote_auth_failed")
+    assert unreachable.details and "SSH key" in unreachable.details[0]
     unnamed = _connect_failure(ControlError("service_unavailable", retryable=True))
-    assert "local" not in unnamed.message
+    assert unnamed.message == "the selected FinishUP server elsewhere could not be reached"
 
 
 def test_stop_the_service_asks_nothing_while_the_server_in_use_is_refused(

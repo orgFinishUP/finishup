@@ -43,7 +43,6 @@ from finishup.client.ssh_transport import (
     observed_host_key,
     probe_argv,
     remote_command_line,
-    resolve_ssh,
     run_ssh,
 )
 from finishup.client.target_runtime import TargetRuntimeError
@@ -266,8 +265,10 @@ async def _profile(prober: _Prober, launcher: str, remote_root: str | None) -> b
 
 
 def _ssh(ssh: str | None) -> str:
+    from finishup.client import ssh_transport
+
     try:
-        return ssh if ssh is not None else resolve_ssh()
+        return ssh if ssh is not None else ssh_transport.resolve_ssh()
     except UpstreamUnavailable as error:
         raise _refused(error.reason) from None
 

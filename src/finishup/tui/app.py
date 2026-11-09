@@ -3231,7 +3231,11 @@ class FinishUpTui(App[int]):
             SelectionView(
                 name="server-add",
                 title="Add a server",
-                body=("Servers on another machine, a port or the web arrive in a later release.",),
+                body=(
+                    "Add an SSH server with 'finishup server add NAME ssh://USER@HOST' in a "
+                    "terminal (OpenSSH may ask about its host key there); HTTPS and port servers "
+                    "arrive in a later release.",
+                ),
                 options=(
                     Option(
                         "add:local",

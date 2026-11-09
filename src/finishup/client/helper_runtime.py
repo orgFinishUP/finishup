@@ -146,10 +146,8 @@ class SshTargetRuntime:
             ensure_helper(target_root, record.target_id)
 
     def stop(self, root: Path | None) -> None:
-        import anyio
-
         from finishup.client.helper_status import stop_helper
-        from finishup.client.ssh_transport import UpstreamUnavailable, exit_master, resolve_ssh
+        from finishup.client.ssh_transport import UpstreamUnavailable, exit_master_now, resolve_ssh
 
         record, target_root = _record(root)
         if not stop_helper(target_root, timeout_seconds=_STOP_SECONDS):
@@ -158,7 +156,8 @@ class SshTargetRuntime:
             ssh = resolve_ssh()
         except UpstreamUnavailable:
             return
-        anyio.run(exit_master, ssh, target_root, record)
+        # Synchronous: a stop may be asked from inside an event loop (a setup step's switch).
+        exit_master_now(ssh, target_root, record)
 
     def probe(self, root: Path | None) -> ProbeResult:
         _record(root)

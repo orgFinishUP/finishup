@@ -7,15 +7,13 @@ launcher prints. The real OpenSSH runs in ``tests/capability/test_openssh_helper
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from builders.fake_openssh import IDENTITY, FakeServer, fake_server
 from builders.server_profiles import profile_document
 from builders.server_targets import ambient_home
 from finishup.client import targets
@@ -27,100 +25,11 @@ from finishup.client.ssh_discovery import (
     host_key_question,
 )
 from finishup.client.target_runtime import TargetRuntimeError
-from finishup.protocol.schemas import schema_manifest_digest
-
-_KEY_BLOB = b"the server's host key"
-_FINGERPRINT = base64.b64encode(hashlib.sha256(_KEY_BLOB).digest()).rstrip(b"=").decode()
-_IDENTITY = "sha256:" + hashlib.sha256(_KEY_BLOB).hexdigest()
-
-_FAKE_SSH = r"""
-import json, os, sys
-from pathlib import Path
-
-state = Path(os.environ["FAKE_SSH_STATE"])
-argv = sys.argv[1:]
-with (state / "calls").open("a") as log:
-    log.write(json.dumps(argv) + "\n")
-command = argv[-1]
-known = (state / "known").read_text()
-ask = "StrictHostKeyChecking=ask" in argv
-if known == "changed":
-    sys.stderr.write("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n")
-    sys.stderr.write("Host key verification failed.\n")
-    sys.exit(255)
-if known == "unknown":
-    if not ask:
-        sys.stderr.write("No ED25519 host key is known for [h]:22 and you have requested strict checking.\n")
-        sys.stderr.write("Host key verification failed.\n")
-        sys.exit(255)
-    if (state / "answer").read_text() != "yes":
-        sys.stderr.write("Host key verification failed.\n")
-        sys.exit(255)
-    (state / "known").write_text("known")
-key = (state / "fingerprint").read_text()
-sys.stderr.write("debug1: Server host key: ssh-ed25519 SHA256:" + key + "\n")
-if (state / "auth").read_text() == "refused":
-    sys.stderr.write("owner@h: Permission denied (publickey).\n")
-    sys.exit(255)
-if "for candidate in" in command:
-    launcher = (state / "launcher").read_text()
-    if not launcher:
-        sys.exit(3)
-    print(launcher)
-    sys.exit(0)
-if "service endpoint --json" in command:
-    print(json.dumps({
-        "schema": "yoetz.service-endpoint/1",
-        "endpoint": "/srv/fu/run/control.sock",
-        "launcher": ["/srv/bin/finishup"],
-        "release": "0.3.0",
-        "schema_manifest_digest": (state / "manifest").read_text(),
-        "runtime_dir_session_bound": False,
-        "linger": "unknown",
-    }))
-    sys.exit(0)
-if "service profile --json" in command:
-    sys.stdout.write((state / "profile").read_text() + "\n")
-    sys.exit(0)
-sys.exit(127)
-"""
-
-
-class FakeServer:
-    def __init__(self, directory: Path) -> None:
-        self.directory = directory
-        self.ssh = str(directory / "ssh")
-        (directory / "ssh").write_text(f"#!{sys.executable}\n{_FAKE_SSH}", encoding="utf-8")
-        (directory / "ssh").chmod(0o700)
-        self.set(
-            known="known",
-            answer="no",
-            fingerprint=_FINGERPRINT,
-            auth="ok",
-            launcher="/srv/bin/finishup",
-            manifest=schema_manifest_digest(),
-            profile=json.dumps(profile_document()),
-        )
-        (directory / "calls").write_text("")
-
-    def set(self, **files: str) -> None:
-        for name, text in files.items():
-            (self.directory / name).write_text(text, encoding="utf-8")
-
-    def calls(self) -> list[list[str]]:
-        lines = (self.directory / "calls").read_text().splitlines()
-        return [json.loads(line) for line in lines]
-
-    def asked(self) -> list[bool]:
-        return ["StrictHostKeyChecking=ask" in call for call in self.calls()]
 
 
 @pytest.fixture
 def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeServer]:
-    state = tmp_path / "ssh-state"
-    state.mkdir()
-    monkeypatch.setenv("FAKE_SSH_STATE", str(state))
-    yield FakeServer(state)
+    yield fake_server(tmp_path, monkeypatch)
 
 
 def _discover(server: FakeServer, *, question: HostKeyQuestion | None = None, **options: object):  # noqa: ANN202
@@ -144,7 +53,7 @@ def test_a_known_server_is_discovered_without_a_question(server: FakeServer) -> 
     assert found.launcher == "/srv/bin/finishup"
     assert found.session_bound is False
     assert found.profile.identity_type == "ssh_host_key"
-    assert found.profile.identity == _IDENTITY
+    assert found.profile.identity == IDENTITY
     assert json.loads(found.profile.document) == profile_document()
     assert told == [] and not any(server.asked())
     # Every probe is strict, never multiplexed, and verbose (the host key is read from it).
@@ -192,7 +101,7 @@ def test_an_unknown_host_key_is_asked_once_on_the_console_and_then_recorded(
     # The first strict attempt found the key unknown; the next one let OpenSSH ask; every later
     # probe asks nothing (the key is known now).
     assert server.asked() == [False, True, False, False]
-    assert found.profile.identity == _IDENTITY
+    assert found.profile.identity == IDENTITY
 
 
 def test_a_declined_host_key_adds_nothing_and_is_named(server: FakeServer) -> None:
@@ -240,7 +149,7 @@ def test_no_observed_host_key_fails_closed(server: FakeServer) -> None:
 def test_the_profile_source_fetches_a_recorded_target_and_asks_only_inside_the_console_block(
     server: FakeServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from finishup.client import ssh_discovery
+    from finishup.client import ssh_transport
 
     with ambient_home(monkeypatch):
         with targets.registry_lock():
@@ -253,9 +162,9 @@ def test_the_profile_source_fetches_a_recorded_target_and_asks_only_inside_the_c
                 remote_root="/srv/fu",
                 remote_launcher="/srv/bin/finishup",
             )
-    monkeypatch.setattr(ssh_discovery, "resolve_ssh", lambda: server.ssh)
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: server.ssh)
     profile = SshProfileSource().fetch(record)
-    assert profile.identity == _IDENTITY
+    assert profile.identity == IDENTITY
     assert server.calls()[-1][-1] == (
         "env FINISHUP_ISOLATED_ROOT=/srv/fu /srv/bin/finishup service profile --json"
     )
@@ -264,7 +173,7 @@ def test_the_profile_source_fetches_a_recorded_target_and_asks_only_inside_the_c
         SshProfileSource().fetch(record)
     told: list[str] = []
     with host_key_question(HostKeyQuestion(lambda: told.append("asked"))):
-        assert SshProfileSource().fetch(record).identity == _IDENTITY
+        assert SshProfileSource().fetch(record).identity == IDENTITY
     assert told == ["asked"]
     from dataclasses import replace
 

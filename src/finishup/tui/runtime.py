@@ -3175,16 +3175,8 @@ def _connect_failure(error: BaseException) -> RuntimeError_:
     from finishup.client.targets import active_root_may_be_remote
 
     if active_root_may_be_remote():
-        # A server elsewhere (L1's known edge: never "the local FinishUP service"): its remote
-        # phase and the owner's way on, in the CLI's fixed words.
-        if type(phase) is str and phase.startswith("remote_"):
-            from finishup.cli.server import ServerCommandRefused, refusal_message
-
-            return RuntimeError_(
-                phase,
-                "the selected FinishUP server elsewhere could not be reached",
-                details=(refusal_message(ServerCommandRefused(phase)),),
-            )
+        # A server elsewhere whose failure names no phase (L1's known edge: never "the local
+        # FinishUP service"); one that names a phase was answered above with its own words.
         return RuntimeError_(
             str(getattr(error, "reason", "service_unavailable")),
             "the selected FinishUP server elsewhere could not be reached",

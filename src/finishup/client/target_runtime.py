@@ -199,8 +199,18 @@ class LocalTargetRuntime:
             return anyio.run(probe)
 
 
-# Kind -> loader. The foundation ships ``local``; each approach adds its remote kinds here.
-_RUNTIME_LOADERS: dict[str, Callable[[], TargetRuntime]] = {"local": LocalTargetRuntime}
+def _ssh_runtime() -> TargetRuntime:
+    from finishup.client.helper_runtime import SshTargetRuntime
+
+    return SshTargetRuntime()
+
+
+# Kind -> loader: ``local`` and ``ssh`` (its helper and OpenSSH, ADR-052); HTTPS and
+# ``local_port`` arrive with the REST client (layer 5).
+_RUNTIME_LOADERS: dict[str, Callable[[], TargetRuntime]] = {
+    "local": LocalTargetRuntime,
+    "ssh": _ssh_runtime,
+}
 
 
 def register_target_runtime(kind: TargetKind, loader: Callable[[], TargetRuntime]) -> None:

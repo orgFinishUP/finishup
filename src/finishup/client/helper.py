@@ -83,7 +83,6 @@ from finishup.client.ssh_transport import (
     direct_argv,
     direct_remote_argv,
     exit_master,
-    resolve_ssh,
     run_ssh,
 )
 from finishup.client.targets import ServerTarget, TargetError
@@ -196,7 +195,9 @@ class SshDirectUpstream:
 
     def _executable(self) -> str:
         if self._ssh is None:
-            self._ssh = resolve_ssh()
+            from finishup.client import ssh_transport
+
+            self._ssh = ssh_transport.resolve_ssh()
         return self._ssh
 
     async def ensure(self) -> None:

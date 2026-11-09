@@ -256,6 +256,33 @@ def _isolated_rejected_finishup_calls(  # pyright: ignore[reportUnusedFunction]
     monkeypatch.setattr(rejections_module, "state_dir", lambda: Path(root))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_openssh(  # pyright: ignore[reportUnusedFunction]
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never run the real OpenSSH from a test outside ``tests/capability`` (ADR-052).
+
+    SSH servers are open from layer 4: a test that reaches an SSH target's transport without a
+    stand-in would otherwise run ``ssh`` against a test host name (a DNS lookup, a connection).
+    The product finds ``ssh`` through ``ssh_transport.resolve_ssh``; here it answers that none is
+    installed, so the attempt fails closed as ``remote_unreachable``. A test that stands in for
+    OpenSSH passes its own program, or patches this resolver itself; the capability tests run the
+    real one against a private ``sshd``.
+    """
+
+    if "capability" in Path(str(request.node.fspath)).parts:
+        return
+    try:
+        import finishup.client.ssh_transport as ssh_transport
+    except ImportError:
+        return
+
+    def no_openssh() -> str:
+        raise ssh_transport.UpstreamUnavailable("remote_unreachable")
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", no_openssh)
+
+
 @pytest.fixture(scope="session")
 def fixture_loader() -> FixtureLoader:
     """Expose the lazy read-only loader without touching Wave A resources at collection."""

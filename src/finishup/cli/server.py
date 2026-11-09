@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     from finishup.client.repository_hold import HoldDecision, RepositoryChoice
     from finishup.client.server_folders import FolderRecord, OutsideReadMode
     from finishup.client.server_profile import FetchedProfile
+    from finishup.client.ssh_discovery import HostKeyQuestion, SshDiscovery
     from finishup.client.targets import ServerConsent
     from finishup.protocol.consent_envelope import ConsentEnvelope
 
@@ -126,11 +127,12 @@ _USAGE: Final = 2
 _UNSAFE: Final = 20
 _UNAVAILABLE: Final = 20
 
-# The remote kinds are closed in this release: what every surface says when one is asked for.
+# HTTPS and port servers are closed in this release: what every surface says when one is asked
+# for. SSH servers are open (ADR-052, layer 4).
 REMOTE_KIND_UNAVAILABLE: Final = (
-    "this release connects only to FinishUP servers on this computer: the everyday server and "
-    "named local servers ('finishup server add NAME --local'). SSH, HTTPS and port servers "
-    "arrive in a later release"
+    "this release connects to FinishUP servers on this computer (the everyday server and named "
+    "local servers, 'finishup server add NAME --local') and over SSH ('finishup server add NAME "
+    "ssh://[user@]host[:port]'). HTTPS and port servers arrive in a later release"
 )
 
 # Remedies are fixed text: no name, host, path, or other owner-typed value is ever echoed.
@@ -275,15 +277,20 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "this FinishUP build has no client runtime for that kind of server target",
         _UNAVAILABLE,
     ),
-    # 'finishup server use NAME' cannot confirm the current disclosure while the remote kinds
-    # are closed (it answers 'remote_kind_unavailable'), so the way on is a server on this computer.
+    # An SSH target is confirmed again with 'finishup server use NAME' on the owner's terminal;
+    # an HTTPS or port target only in a later release.
     "target_reauthorization_required": (
         "this server target was authorized under an older disclosure of what leaves this "
-        "computer, so nothing was sent to it, and only a later release can authorize it again; "
-        "use a server on this computer ('finishup server use local')",
+        "computer, so nothing was sent to it; agree to the current one with 'finishup server use "
+        "NAME' on your own terminal (an SSH server), or use a server on this computer ('finishup "
+        "server use local')",
         _USAGE,
     ),
-    "usage": ("give --local: this release adds only named local servers on this computer", _USAGE),
+    "usage": (
+        "give --local for a named local server on this computer, or an ssh://[user@]host[:port] "
+        "address for a server on another machine",
+        _USAGE,
+    ),
     "remote_unreachable": (
         "the server could not be reached; check the address and your network, then retry",
         _UNAVAILABLE,
@@ -462,6 +469,12 @@ def _cli[**P](command: Callable[P, None]) -> Callable[P, None]:
 
 
 def _runtime_failure(error: TargetRuntimeError) -> NoReturn:
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    if error.reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
+        # The phase is the reason; the connection's own ``service_unavailable`` adds nothing the
+        # owner can act on (RE-7), so it is not printed beside it.
+        raise ServerCommandRefused(error.phase)
     if error.phase == "runtime_unavailable":
         raise ServerCommandRefused(
             "runtime_unavailable", detail=f"{error.reason}, phase {error.phase}"
@@ -889,6 +902,7 @@ def _fetch_profile(record: ServerTarget) -> FetchedProfile:
     is empty), so a kind opened in a test without a source refuses ``remote_kind_unavailable``.
     """
 
+    from finishup.cli.trusted_console import TrustedConsoleError
     from finishup.client.server_profile import PROFILE_SOURCES
 
     loader = PROFILE_SOURCES.get(record.kind)
@@ -896,7 +910,11 @@ def _fetch_profile(record: ServerTarget) -> FetchedProfile:
         raise ServerCommandRefused("remote_kind_unavailable")
     try:
         return loader().fetch(record)
+    except TrustedConsoleError:
+        raise ServerCommandRefused("trusted_console_required") from None
     except TargetRuntimeError as error:
+        if error.reason in {"remote_host_key_unconfirmed", "trusted_console_required"}:
+            raise ServerCommandRefused(error.reason) from None
         _runtime_failure(error)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
@@ -935,26 +953,49 @@ def _warn_open_sessions() -> None:
 @_cli
 def server_add(
     name: Annotated[str, typer.Argument(help="Target name: 1-16 lowercase letters, digits, -.")],
-    address: Annotated[str | None, typer.Argument(hidden=True)] = None,
+    address: Annotated[
+        str | None,
+        typer.Argument(
+            help="An SSH server: ssh://USER@HOST:PORT (user and port optional; omit with --local)."
+        ),
+    ] = None,
     local: Annotated[
         bool, typer.Option("--local", help="A named local server on this computer.")
     ] = False,
     port: Annotated[int | None, typer.Option("--port", hidden=True)] = None,
-    remote_root: Annotated[str | None, typer.Option("--remote-root", hidden=True)] = None,
-    remote_launcher: Annotated[str | None, typer.Option("--remote-launcher", hidden=True)] = None,
+    remote_root: Annotated[
+        str | None,
+        typer.Option(
+            "--remote-root",
+            help="SSH: the server's FinishUP root (absolute), when it runs an isolated one.",
+        ),
+    ] = None,
+    remote_launcher: Annotated[
+        str | None,
+        typer.Option(
+            "--remote-launcher",
+            help="SSH: the absolute path of the server's finishup (else the usual install paths).",
+        ),
+    ] = None,
     ca_file: Annotated[Path | None, typer.Option("--ca-file", hidden=True)] = None,
     tls_pin: Annotated[str | None, typer.Option("--tls-pin", hidden=True)] = None,
-    outside_reads: Annotated[str | None, typer.Option("--outside-reads", hidden=True)] = None,
+    outside_reads: Annotated[
+        str | None,
+        typer.Option(
+            "--outside-reads",
+            help="local or listed: what the server may read outside your projects here.",
+        ),
+    ] = None,
 ) -> None:
-    """Add a named local server on this computer, with its own vault, tasks and settings."""
+    """Add a server: a named local one on this computer, or an SSH server on another machine."""
 
     if (port is not None or address is not None) and not local:
         from finishup.client import authorization
 
-        if not authorization.OPEN_REMOTE_KINDS:
-            # The remote kinds are closed in this release (``ssh``, ``https``, ``local_port``):
-            # refused before the selection, the name, any prompt, policy check, probe or write.
-            # The kind is told by the arguments alone, so the address is never parsed.
+        # The kind is told by the arguments alone (the address is never parsed for this): a kind
+        # closed in this release (HTTPS, a port) is refused before the selection, the name, any
+        # prompt, policy check, probe or write.
+        if kind_of_arguments(address, port) not in authorization.OPEN_REMOTE_KINDS:
             raise ServerCommandRefused("remote_kind_unavailable")
         _add_remote(
             name,
@@ -1006,6 +1047,23 @@ def server_add(
             "to set up its vault.",
         )
     )
+
+
+def kind_of_arguments(address: str | None, port: int | None) -> str:
+    """The kind ``server add``'s arguments name, by their prefix alone (nothing is parsed):
+    ``local_port`` for ``--port`` or an ``https://`` loopback address, ``https``, ``ssh``, or
+    ``other`` for anything else (refused as a closed kind before anything is asked)."""
+
+    if port is not None:
+        return "local_port"
+    text = address or ""
+    if text.startswith("ssh://"):
+        return "ssh"
+    if text.startswith(("https://127.0.0.1:", "https://[::1]:")):
+        return "local_port"
+    if text.startswith("https://"):
+        return "https"
+    return "other"
 
 
 def _remote_location(
@@ -1121,7 +1179,23 @@ def _add_remote(
         )
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
-    fetched = _fetch_profile(provisional)
+    session_bound = False
+    if kind == "ssh":
+        # SSH discovery (design v2 section 2.1): the endpoint and the profile, from the server's
+        # own launcher; an unknown host key is asked about only on this trusted console.
+        found = _discover_ssh(
+            user, cast(str, host), cast(int, ssh_port), remote_root, remote_launcher
+        )
+        remote_launcher, session_bound = found.launcher, found.session_bound
+        try:
+            provisional = replace(
+                provisional, remote_endpoint=found.endpoint, remote_launcher=found.launcher
+            )
+        except TargetError as error:
+            raise ServerCommandRefused(error.reason) from None
+        fetched = found.profile
+    else:
+        fetched = _fetch_profile(provisional)
     envelope, lines = _consent_offer(provisional, fetched)
     mode = outside_reads
     official = official_address(kind, base_url, ca_file=ca_text, tls_pin=tls_pin)
@@ -1147,6 +1221,7 @@ def _add_remote(
                 port=ssh_port,
                 remote_root=remote_root,
                 remote_launcher=remote_launcher,
+                remote_endpoint=provisional.remote_endpoint,
             )
             try:
                 # The envelope again for the record as written (its own id): the same terms.
@@ -1164,6 +1239,110 @@ def _add_remote(
         raise ServerCommandRefused(error.reason) from None
     typer.echo(f"Added server target {record.name} ({record.target_id}, {record.kind}).")
     _emit(_added_mode_lines(record, recorded=recorded))
+    if session_bound:
+        typer.echo(
+            "Warning: that server's FinishUP endpoint lives in its login session's runtime folder "
+            "and disappears at its last logout; enable linger for that account, or add it again "
+            "with --remote-root."
+        )
+    _say_repository_hold(record)
+    _emit((f"Use it with 'finishup server use {record.name}'.",))
+
+
+def _discover_ssh(
+    user: str | None,
+    host: str,
+    port: int,
+    remote_root: str | None,
+    remote_launcher: str | None,
+) -> SshDiscovery:
+    """SSH discovery for ``server add`` (``client.ssh_discovery``), refused with closed reasons."""
+
+    from finishup.cli.trusted_console import TrustedConsoleError
+    from finishup.client.ssh_discovery import discover
+
+    typer.echo("Asking the server over SSH where its FinishUP service listens and what it offers.")
+    try:
+        return discover(
+            user=user,
+            host=host,
+            port=port,
+            remote_root=remote_root,
+            remote_launcher=remote_launcher,
+            question=_host_key_question(),
+        )
+    except TrustedConsoleError:
+        raise ServerCommandRefused("trusted_console_required") from None
+    except TargetRuntimeError as error:
+        if error.reason == "remote_host_key_unconfirmed":
+            raise ServerCommandRefused("remote_host_key_unconfirmed") from None
+        _runtime_failure(error)
+
+
+# RE-7: printed only when OpenSSH will ask, never for a known or a changed key.
+_HOST_KEY_QUESTION: Final = (
+    "This computer does not know the server's SSH host key yet, so OpenSSH asks you to confirm "
+    "it here: compare the fingerprint with the server's own before you answer yes."
+)
+
+
+def _host_key_question() -> HostKeyQuestion:
+    """The owner is told, on the trusted console only, that OpenSSH is about to ask (RE-11)."""
+
+    from finishup.client.ssh_discovery import HostKeyQuestion
+
+    def before() -> None:
+        from finishup.cli.trusted_console import TrustedForegroundConsole
+
+        with TrustedForegroundConsole() as console:
+            console.write(_HOST_KEY_QUESTION + "\n")
+
+    return HostKeyQuestion(before)
+
+
+def _say_repository_hold(record: ServerTarget) -> None:
+    """After choosing or adding remote ``record``: whether this folder's repository is held or
+    kept for it, else how many repositories are held for it (ADR-051 decision 8, FR-5). Best
+    effort: it asks this computer's FinishUP about this folder when it can answer, and never
+    fails the command."""
+
+    if not record.is_remote or not _open_kind(record.kind):
+        return
+    try:
+        here: RepositoryHere | None = repository_here()
+    except (ServerCommandRefused, TargetError, PathSafetyError):
+        here = None
+    try:
+        if here is not None:
+            decision = _decision_here(record, here, _live_state(here))
+            if decision.state == "held":
+                typer.echo(
+                    "This repository's privacy policy on this computer allows no network use, so "
+                    f"FinishUP holds its work for {record.name}: nothing from it is sent. To send "
+                    f"it anyway, run 'finishup server repositories add {record.name}' here; to "
+                    "keep it here without being asked again, 'finishup server repositories keep "
+                    f"{record.name}'."
+                )
+                return
+            if decision.state == "kept":
+                typer.echo(
+                    f"This repository's work is kept on this computer for {record.name}, as you "
+                    f"chose; 'finishup server repositories add {record.name}' here sends it anyway."
+                )
+                return
+        held = len(repository_groups(record).held)
+    except Exception:  # noqa: BLE001 - a hint that cannot be computed is left out
+        return
+    if held:
+        noun = (
+            "repository whose privacy policy on this computer allows no network use is"
+            if held == 1
+            else "repositories whose privacy policy on this computer allows no network use are"
+        )
+        typer.echo(
+            f"{held} {noun} held for {record.name}; 'finishup server repositories list "
+            f"{record.name}' shows them."
+        )
 
 
 def _record_added_mode(record: ServerTarget, mode: OutsideReadMode | None) -> bool:
@@ -1473,7 +1652,15 @@ def _use_remote(
     from finishup.client.server_profile import consent_envelope_for, record_consent
 
     check_remote_hop()
-    fetched = _fetch_profile(record)
+    if authorize is None:
+        # On the owner's terminal an unknown host key may be asked about (RE-11); the terminal
+        # interface passes its own confirmation and never lets OpenSSH ask on its screen.
+        from finishup.client.ssh_discovery import host_key_question
+
+        with host_key_question(_host_key_question()):
+            fetched = _fetch_profile(record)
+    else:
+        fetched = _fetch_profile(record)
     envelope, lines = _consent_offer(record, fetched)
     if authorize is None:
         _confirm_on_trusted_console(record.name, record.kind, lines)
@@ -1530,6 +1717,8 @@ def server_use(
         typer.echo(f"Using server target {record.name} ({record.target_id}, {record.kind}).")
     for line in switch.left_lines():
         typer.echo(line, err=switch.left_open)
+    if record is not None:
+        _say_repository_hold(record)
     _warn_open_sessions()
 
 
@@ -1954,9 +2143,9 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
     identity = "" if target["target_id"] is None else f"{target['target_id']}, "
     use = f"chosen by: {document['source']}" if in_use else "not the server in use"
     lines = [f"Server: {name} ({identity}{target['kind']}); {use}"]
-    if target["kind"] != "local":
-        # The remote kinds are closed in this release: a record another build wrote is shown,
-        # never used.
+    if target["kind"] != "local" and not _open_kind(str(target["kind"])):
+        # HTTPS and port servers are closed in this release: a record another build wrote is
+        # shown, never used.
         lines.append(f"Not available: {REMOTE_KIND_UNAVAILABLE}.")
     if target["location"] is not None:
         lines.append(f"Address: {target['location']}")
@@ -2591,8 +2780,7 @@ _STYLE_LINES: Final[dict[str, str]] = {
 }
 
 
-# Hidden while no SSH server can be added (ADR-052): the layer that opens SSH shows it.
-@server_app.command("set", hidden=True)
+@server_app.command("set")
 @_cli
 def server_set(
     name: Annotated[str, typer.Argument(help="An SSH server target.")],
@@ -2645,8 +2833,8 @@ folders_app = typer.Typer(
     help="Choose what a server on another machine may read outside your projects on this computer.",
     no_args_is_help=True,
 )
-# Hidden in this release: every folder it lists is for a server elsewhere (ADR-051 decision 5).
-server_app.add_typer(folders_app, name="folders", hidden=True)
+# Every folder it lists is for a server elsewhere (ADR-051 decision 5): an SSH server here.
+server_app.add_typer(folders_app, name="folders")
 
 _FOLDER_NOTICE: Final = (
     "Let server target {name} ({target_id}) read files beneath this folder on this computer:",
@@ -3020,9 +3208,9 @@ repositories_app = typer.Typer(
     ),
     no_args_is_help=True,
 )
-# Hidden in this release (the owner's answer O4): no server elsewhere can be selected yet, so
-# 'add' refuses before the console; 'keep', 'list' and 'remove' work, so the way back exists.
-server_app.add_typer(repositories_app, name="repositories", hidden=True)
+# Shown since SSH servers open (the owner's answer O4, FR-5): 'add' acts for an SSH target and
+# refuses before the console for a kind still closed; 'keep', 'list' and 'remove' always work.
+server_app.add_typer(repositories_app, name="repositories")
 
 _NAME_ARGUMENT = Annotated[
     str | None,

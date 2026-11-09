@@ -517,13 +517,13 @@ async def test_on_demand_keeps_waiting_when_the_spawned_service_lost_the_singlet
 def _remote_record(disclosure_version: int | None = None) -> object:
     from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 
+    # An HTTPS server: a kind this release does not reach (SSH opens in layer 4; HTTPS in 5).
     return ServerTarget(
         "t_0a1b2c3d",
         "lab",
-        "ssh",
+        "https",
         "2026-11-05T12:00:00.000Z",
-        host="lab.example",
-        port=22,
+        base_url="https://lab.example",
         claim_salt="A" * 43 + "=",
         authorized_at="2026-11-05T12:00:00.000Z",
         disclosure_version=DISCLOSURE_VERSION if disclosure_version is None else disclosure_version,
@@ -591,7 +591,7 @@ async def test_on_demand_names_a_remote_target_root_without_waiting(
 async def test_a_remote_target_root_is_refused_before_anything_is_dialled(
     monkeypatch: pytest.MonkeyPatch, on_demand: bool, refusal: str | None, phase: str
 ) -> None:
-    """This release reaches no server on another machine: a connection from a remote target's
+    """This release reaches no HTTPS or port server: a connection from such a remote target's
     root (one another build selected) is refused at once, before its endpoint is even tried or a
     service started. The shared connection check names a zero-network or stale-disclosure
     refusal by its own token (ADR-051 decision 8); any other remote root, or one whose record

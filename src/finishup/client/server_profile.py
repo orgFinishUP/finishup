@@ -40,8 +40,8 @@ broader consent, so a refresh that stops part way can never let the broader offe
 (``server_profile_changed``) until the owner agrees again; stopping after them leaves the older
 cache, wider than the consent now, which refuses until the next refresh records the profile.
 
-In this release no profile source is registered for any kind (``PROFILE_SOURCES``), so nothing is
-fetched: layer 4 registers SSH (``service profile --json`` on the server), layer 5 HTTPS.
+``PROFILE_SOURCES`` holds SSH (``service profile --json`` on the server, fetched over OpenSSH by
+``server add``, ``server use`` and the target's helper); layer 5 registers HTTPS.
 """
 
 from __future__ import annotations
@@ -136,8 +136,16 @@ class ProfileSource(Protocol):
     def fetch(self, record: ServerTarget) -> FetchedProfile: ...
 
 
-# The profile source of each remote kind. Empty in this release: no transport exists yet.
-PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {}
+def _ssh_source() -> ProfileSource:
+    # Loaded only when a profile is fetched (never on a hook's path, design v2 section 8.9).
+    from finishup.client.ssh_discovery import SshProfileSource
+
+    return SshProfileSource()
+
+
+# The profile source of each remote kind: SSH (``service profile --json`` on the server, over
+# OpenSSH); HTTPS and ``local_port`` arrive in layer 5.
+PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {"ssh": _ssh_source}
 
 
 @dataclass(frozen=True, slots=True)

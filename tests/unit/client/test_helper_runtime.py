@@ -134,11 +134,11 @@ def test_disconnect_stops_the_stamped_helper_and_exits_the_master(
     _record, root = ssh_target
     exited: list[Path] = []
 
-    async def exit_master(_ssh: str, where: Path, _record: object) -> None:
+    def exit_master(_ssh: str, where: Path, _record: object) -> None:
         exited.append(where)
 
     monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
-    monkeypatch.setattr(ssh_transport, "exit_master", exit_master)
+    monkeypatch.setattr(ssh_transport, "exit_master_now", exit_master)
     process = _holder(root, ignore=False)
     try:
         SshTargetRuntime().stop(root)

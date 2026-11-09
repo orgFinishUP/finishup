@@ -1098,12 +1098,16 @@ def new_remote_target(
     port: int | None = None,
     remote_root: str | None = None,
     remote_launcher: str | None = None,
+    remote_endpoint: str | None = None,
     now: str | None = None,
 ) -> tuple[ServerTarget, Path]:
     """Create a remote target root (client state only) with a fresh claim salt.
 
     The caller has already obtained the owner's typed confirmation of the current disclosure on
     the trusted console; ``authorized_at`` records when. Callers hold ``registry_lock()``.
+    ``remote_endpoint`` is the SSH server's control endpoint its own launcher reported (SSH
+    discovery, ADR-052); without one it is ``<remote_root>/run/control.sock`` when a remote root
+    is given.
     """
 
     if kind not in REMOTE_KINDS:
@@ -1112,7 +1116,8 @@ def new_remote_target(
     if any(record.name == name for record in list_targets()):
         raise TargetError("target_name_taken")
     stamp = now or _now()
-    remote_endpoint = None if remote_root is None else f"{remote_root.rstrip('/')}/run/control.sock"
+    if remote_endpoint is None and remote_root is not None:
+        remote_endpoint = f"{remote_root.rstrip('/')}/run/control.sock"
     directory = servers_dir()
     target_id = _new_target_id(directory)
     root = directory / target_id

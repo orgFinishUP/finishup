@@ -31,7 +31,8 @@ pytestmark = pytest.mark.anyio
 _ROWS = (
     ServerRow("local", "local", None, None, True),
     ServerRow("work", "local", "t_1a2b3c4d", None, False),
-    ServerRow("lab", "ssh", "t_9f8e7d6c", "ssh://owner@lab.example:22", False),
+    # An HTTPS server: a kind this release does not reach (SSH opens in layer 4, HTTPS in 5).
+    ServerRow("lab", "https", "t_9f8e7d6c", "https://lab.example", False),
 )
 
 
@@ -93,8 +94,8 @@ async def test_switching_to_a_named_local_server_needs_no_terminal_handoff() -> 
 
 
 async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen() -> None:
-    """The remote kinds are closed in this release: "Use lab" asks for no confirmation and hands
-    nothing over; the refusal is reported with its reason and the selection is unchanged."""
+    """HTTPS and port servers are closed in this release: "Use lab" asks for no confirmation and
+    hands nothing over; the refusal is reported with its reason and the selection is unchanged."""
 
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["use:lab"])
@@ -354,8 +355,9 @@ async def test_the_real_runtime_refuses_a_remote_record_and_leaves_one_quietly(
     monkeypatch.setattr("finishup.cli.trusted_console.TrustedForegroundConsole", no_console)
     with ambient_home(monkeypatch) as home:
         with targets.registry_lock():
+            # An HTTPS server: closed in this release (SSH opens in layer 4).
             record, _root = targets.new_remote_target(
-                "lab", "ssh", user="owner", host="lab.example", port=22
+                "lab", "https", base_url="https://lab.example"
             )
             targets.write_selection(record)
         reset_selection_memo()

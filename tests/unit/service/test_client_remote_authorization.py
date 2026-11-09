@@ -149,7 +149,14 @@ def test_every_remote_root_is_refused_before_anything_is_dialled(
         claimed.append(args)
 
     monkeypatch.setattr("finishup.client.remote_binding.workspace_claim_for_root", claim)
-    assert _refused(path, workspace) == ("service_unavailable", True, "target_root_is_remote")
+    from finishup.client.authorization import OPEN_REMOTE_KINDS
+
+    # SSH is open in this release (layer 4): a target the owner never consented to a server
+    # profile for is refused at the consent step, before anything is dialled, like a closed kind.
+    phase = (
+        "server_profile_changed" if remote.kind in OPEN_REMOTE_KINDS else "target_root_is_remote"
+    )
+    assert _refused(path, workspace) == ("service_unavailable", True, phase)
     assert claimed == []
 
 

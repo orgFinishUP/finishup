@@ -2856,9 +2856,8 @@ async def _service_profile(json_output: bool) -> int:
     return 0
 
 
-# Hidden while no server elsewhere can connect (ADR-052, layer 3): the SSH discovery of the layer
-# that opens a remote kind runs it on the server, and that layer shows it.
-@service_app.command("profile", hidden=True)
+# SSH discovery runs it on the server over OpenSSH (ADR-052, design v2 section 2.1).
+@service_app.command("profile")
 def service_profile(json_output: _JSON = False) -> None:
     """Show what this FinishUP server offers a client on another computer (its server profile).
 

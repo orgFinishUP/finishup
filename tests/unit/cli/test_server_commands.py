@@ -148,10 +148,11 @@ def test_every_server_command_renders_its_help(home: Path, arguments: tuple[str,
     assert "internal_error" not in result.output
 
 
-def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
-    """The remote kinds are closed in this release: ``login``, ``logout`` and ``folders`` are
-    hidden from ``server --help``, and ``add --help`` names no remote address or option. Hidden
-    commands still parse and show their own help."""
+def test_the_help_offers_servers_on_this_computer_and_over_ssh(home: Path) -> None:
+    """SSH servers are open in this release (layer 4), HTTPS and port servers are not: ``login``
+    and ``logout`` (API keys) stay hidden from ``server --help``; ``set``, ``folders`` and
+    ``repositories`` are shown; ``add --help`` names the ``ssh://`` address and its options, and
+    no HTTPS or port option. Hidden commands still parse and show their own help."""
 
     listing = _invoke("--help")
     assert listing.exit_code == 0, listing.output
@@ -165,26 +166,31 @@ def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
         for group in server_cli.server_app.registered_groups
         if group.name is not None and not group.hidden
     }
-    assert shown == {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"}
+    assert shown == {
+        "add",
+        "list",
+        "use",
+        "status",
+        "test",
+        "remove",
+        "connect",
+        "disconnect",
+        "set",
+        "folders",
+        "repositories",
+    }
     words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
-    assert not words & {"login", "logout", "folders"}
+    assert not words & {"login", "logout"}
 
     add = _invoke("add", "--help")
     assert add.exit_code == 0, add.output
     add_help = _plain(add.stdout)
     assert "--local" in add_help
-    for remote in (
-        "ssh://",
-        "https://",
-        "--port",
-        "--remote-root",
-        "--remote-launcher",
-        "--ca-file",
-        "--tls-pin",
-        "--outside-reads",
-    ):
-        assert remote not in add_help
+    for ssh in ("ssh://", "--remote-root", "--remote-launcher", "--outside-reads"):
+        assert ssh in add_help
+    for closed in ("https://", "--port", "--ca-file", "--tls-pin"):
+        assert closed not in add_help
     for hidden in (("login", "--help"), ("logout", "--help"), ("folders", "--help")):
         shown = _invoke(*hidden)
         assert shown.exit_code == 0, (hidden, shown.output)
@@ -333,14 +339,13 @@ def test_status_of_the_everyday_server_and_a_named_one(home: Path, quiet_probe: 
     assert named["source"] == "ambient"  # status NAME never changes the selection
 
 
+# SSH servers are open (layer 4; ``tests/unit/cli/test_server_ssh_add.py``); these stay closed.
 _REMOTE_ADDRESSES: Final = (
-    pytest.param(("ssh://owner@lab.example",), id="ssh"),
-    pytest.param(("ssh://owner@lab.example:2222", "--remote-root", "/srv/fu"), id="ssh-root"),
     pytest.param(("https://fu.example",), id="https"),
     pytest.param(("https://fu.example", "--tls-pin", "sha256:" + "a" * 64), id="https-pin"),
     pytest.param(("https://127.0.0.1:9443",), id="loopback-address"),
     pytest.param(("--port", "9443"), id="port"),
-    pytest.param(("ssh://owner@lab.example", "--outside-reads", "local"), id="outside-reads"),
+    pytest.param(("https://fu.example", "--outside-reads", "local"), id="outside-reads"),
     # Nothing is parsed to tell the kind: an address that is no address is refused the same.
     pytest.param(("http://fu.example",), id="plain-http"),
     pytest.param(("not an address",), id="not-an-address"),
@@ -351,9 +356,9 @@ _REMOTE_ADDRESSES: Final = (
 def test_remote_add_is_refused_for_every_kind_before_anything_is_asked_or_written(
     home: Path, monkeypatch: pytest.MonkeyPatch, arguments: tuple[str, ...]
 ) -> None:
-    """The remote kinds are closed in this release: ``server add`` refuses an SSH, HTTPS or port
-    server with ``remote_kind_unavailable`` before any trusted-console prompt, zero-network check,
-    probe, dial, key prompt or write, says what this release connects to, and adds nothing."""
+    """HTTPS and port servers are closed in this release: ``server add`` refuses one with
+    ``remote_kind_unavailable`` before any trusted-console prompt, zero-network check, probe, dial,
+    key prompt or write, says what this release connects to, and adds nothing."""
 
     from finishup.cli import zero_network_selection
 
@@ -372,10 +377,9 @@ def test_remote_add_is_refused_for_every_kind_before_anything_is_asked_or_writte
     assert result.exit_code == 2, result.output
     assert result.stdout == ""
     assert result.stderr == (
-        "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-        "computer: the everyday server and named local servers ('finishup server add NAME "
-        "--local'). SSH, HTTPS and port servers arrive in a later release; nothing was added\n"
+        f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; nothing was added\n"
     )
+    assert "over SSH" in result.stderr
     for owner_text in ("lab.example", "fu.example", "owner", "9443", "/srv/fu"):
         assert owner_text not in result.output
     assert targets.list_targets() == ()
@@ -906,7 +910,7 @@ def test_an_installation_whose_identity_cannot_be_read_has_an_unreadable_policy(
 
 
 @pytest.mark.parametrize("before", ["everyday", "named_local"])
-@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+@pytest.mark.parametrize("kind", ["https", "local_port"])
 def test_use_refuses_a_remote_record_and_leaves_the_selection(
     home: Path, monkeypatch: pytest.MonkeyPatch, before: str, kind: str
 ) -> None:
@@ -935,9 +939,7 @@ def test_use_refuses_a_remote_record_and_leaves_the_selection(
     assert result.exit_code == 2, result.output
     assert result.stdout == ""
     assert result.stderr == (
-        "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-        "computer: the everyday server and named local servers ('finishup server add NAME "
-        "--local'). SSH, HTTPS and port servers arrive in a later release; the selected server "
+        f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; the selected server "
         "is unchanged\n"
     )
     assert "lab.example" not in result.output
@@ -998,28 +1000,26 @@ def test_use_refuses_a_record_that_turned_remote_before_the_selection_is_written
 def test_list_and_status_show_a_remote_record_as_not_available(
     home: Path, quiet_probe: None
 ) -> None:
-    record, _root = _another_builds_target("lab", "ssh")
+    record, _root = _another_builds_target("lab", "https")
 
     listed = _invoke("list")
     assert listed.exit_code == 0, listed.output
     lines = listed.stdout.splitlines()
     assert lines[0].startswith("* local") and "(not available" not in lines[0]
     (row,) = [line for line in lines if record.target_id in line]
-    assert row.endswith("ssh://owner@lab.example:22 (not available in this release)")
+    assert row.endswith("https://lab.example (not available in this release)")
 
     # What 'server status lab' prints on a terminal (it prints the JSON document otherwise).
     shown = server_cli.status_lines(
         server_cli.build_status_document("lab"), in_use=server_cli.target_in_use("lab")
     )
     assert list(shown[:2]) == [
-        f"Server: lab ({record.target_id}, ssh); not the server in use",
-        "Not available: this release connects only to FinishUP servers on this computer: the "
-        "everyday server and named local servers ('finishup server add NAME --local'). SSH, "
-        "HTTPS and port servers arrive in a later release.",
+        f"Server: lab ({record.target_id}, https); not the server in use",
+        f"Not available: {server_cli.REMOTE_KIND_UNAVAILABLE}.",
     ]
     status = _status_json("lab")
     target = cast(dict[str, JsonValue], status["target"])
-    assert target["location"] == "ssh://owner@lab.example:22"
+    assert target["location"] == "https://lab.example"
     probe = cast(dict[str, JsonValue], status["probe"])
     # No remote runtime is registered: a closed token, never a local fallback, nothing sent.
     assert (probe["outcome"], probe["reason"], probe["phase"]) == (
@@ -1046,8 +1046,9 @@ def test_list_and_status_show_a_remote_record_as_not_available(
         (("add", "lab", "--local", "--remote-root", "/srv"), "usage"),
         (
             ("add", "lab", "ssh://lab.example", "--tls-pin", "sha256:" + "a" * 64),
-            "remote_kind_unavailable",
+            "target_tls_invalid",
         ),
+        (("add", "lab", "ssh://lab.example", "--remote-root", "srv"), "target_path_invalid"),
         (("use", "nowhere"), "target_unknown"),
         (("remove", "nowhere"), "target_unknown"),
         (("login", "nowhere"), "remote_kind_unavailable"),
@@ -1103,9 +1104,7 @@ def test_login_is_refused_before_anything_is_read_and_logout_deletes_a_key_offli
         assert login.exit_code == 2, login.output
         assert login.stdout == ""
         assert login.stderr == (
-            "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-            "computer: the everyday server and named local servers ('finishup server add NAME "
-            "--local'). SSH, HTTPS and port servers arrive in a later release; no key was read "
+            f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; no key was read "
             "or stored\n"
         )
     assert (root / targets.SERVER_TARGET_FILE_NAME).is_file()
@@ -1258,7 +1257,7 @@ def test_leaving_a_remote_record_without_a_runtime_says_nothing_of_a_connection(
     runtime for its kind in this release this client ran nothing for it, so no connection is
     said to have closed."""
 
-    record, _root = _another_builds_target("lab", "ssh", select=True)
+    record, _root = _another_builds_target("lab", "https", select=True)
 
     back = _invoke("use", "local")
 
@@ -1517,7 +1516,7 @@ def test_a_stopped_remote_service_is_named_alike_for_every_kind(
 
 
 def test_a_remote_kind_without_a_runtime_is_a_typed_refusal(home: Path) -> None:
-    _another_builds_target("lab", "ssh")
+    _another_builds_target("lab", "https")
     for command in ("connect", "disconnect", "test"):
         result = _invoke(command, "lab")
         assert result.exit_code == 20
@@ -1707,7 +1706,7 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     """``connect`` sends nothing to a target confirmed under an older disclosure; seeing,
     stopping and removing it stay possible, and ``use`` is refused as for every remote kind."""
 
-    _another_builds_target("lab", "ssh")
+    _another_builds_target("lab", "https")
     # A later release shows a newer disclosure than the one the owner confirmed.
     monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION + 1)
 
@@ -1715,10 +1714,9 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     assert refused.exit_code == 2
     assert refused.stderr.startswith("target_reauthorization_required:")
     assert "lab.example" not in refused.stderr
-    # 'server use NAME' cannot confirm it while the remote kinds are closed (it is refused
-    # below), so the way on is a server on this computer; a later release can authorize it.
-    assert "server use NAME" not in refused.stderr
-    assert "only a later release can authorize it again" in refused.stderr
+    # An SSH server is confirmed again with 'server use NAME' on the owner's terminal; an HTTPS
+    # one (refused below while closed) points to a server on this computer.
+    assert "'finishup server use NAME' on your own terminal (an SSH server)" in refused.stderr
     assert "'finishup server use local'" in refused.stderr
     status = _status_json("lab")
     authorization = cast(
@@ -1837,10 +1835,10 @@ def test_service_start_is_an_on_demand_start_plus_status(
     assert calls == [(ControlClientKind.CLI, None)]
 
 
-def test_service_profile_is_hidden_and_prints_what_this_server_offers(
+def test_service_profile_is_shown_and_prints_what_this_server_offers(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-052: ``finishup service profile`` (hidden until a server elsewhere can connect) starts
+    """ADR-052: ``finishup service profile`` (shown since SSH discovery runs it, layer 4) starts
     this root's service on demand, as ``service start`` does, and prints its verified profile."""
 
     from finishup.cli.app import service_app
@@ -1877,7 +1875,7 @@ def test_service_profile_is_hidden_and_prints_what_this_server_offers(
         for command in service_app.registered_commands
         if command.name in {"profile", "endpoint", "status"}
     }
-    assert hidden == {"profile": True, "endpoint": False, "status": False}
+    assert hidden == {"profile": False, "endpoint": False, "status": False}
 
 
 def test_ambiguous_everyday_folders_are_a_bounded_refusal(home: Path) -> None:

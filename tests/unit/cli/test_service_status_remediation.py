@@ -376,7 +376,10 @@ def test_a_refused_remote_root_names_its_directive_never_a_local_service(
     assert f"Next: {directive.directive}\n" in guidance
     assert "finishup service run" not in guidance
     assert "'finishup server use local'" in directive.directive
-    assert "server use NAME" not in guidance and "with its name" not in guidance
+    if phase != "target_reauthorization_required":
+        # An older disclosure of an SSH server is confirmed again by the owner, by its name, on
+        # their own terminal (layer 4); every other refusal points to this computer's server.
+        assert "server use NAME" not in guidance and "with its name" not in guidance
 
 
 @pytest.mark.parametrize("phase", ["target_root_is_remote", "target_reauthorization_required"])

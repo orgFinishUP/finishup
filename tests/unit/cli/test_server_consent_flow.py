@@ -20,13 +20,14 @@ from typing import Any, Self
 import pytest
 from typer.testing import CliRunner, Result
 
-from builders.server_profiles import consent_to, fetched, profile_document
+from builders.server_profiles import HOST_KEY, consent_to, fetched, profile_document
 from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.cli import trusted_console
 from finishup.client import server_profile, targets
 from finishup.client.server_profile import FetchedProfile
+from finishup.client.ssh_discovery import SshDiscovery
 from finishup.client.targets import ServerTarget
 from finishup.config.paths import reset_selection_memo
 from finishup.protocol.consent_envelope import ReviewEgress
@@ -110,6 +111,26 @@ def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> _Source:
     stand_in = _Source()
     for kind in ("ssh", "https", "local_port"):
         monkeypatch.setitem(server_profile.PROFILE_SOURCES, kind, lambda: stand_in)
+
+    def discover(
+        user: str | None,
+        host: str,
+        port: int,
+        remote_root: str | None,
+        remote_launcher: str | None,
+    ) -> SshDiscovery:
+        # SSH discovery at 'server add' (``client.ssh_discovery``, tested on its own and against
+        # a real OpenSSH): the endpoint and launcher the server reported, and the stand-in profile.
+        del user, host, port
+        stand_in.fetched.append("ssh")
+        return SshDiscovery(
+            f"{(remote_root or '/srv/fu').rstrip('/')}/run/control.sock",
+            remote_launcher or "/usr/local/bin/finishup",
+            False,
+            FetchedProfile(json.dumps(stand_in.document).encode(), "ssh_host_key", HOST_KEY),
+        )
+
+    monkeypatch.setattr(server_cli, "_discover_ssh", discover)
     return stand_in
 
 
@@ -205,11 +226,12 @@ def test_an_open_kind_with_no_transport_is_still_unavailable(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del home
-    open_remote_kinds(monkeypatch, "ssh", consent=False)
+    # HTTPS has no transport in this release (layer 5); opened in process, it is unavailable.
+    open_remote_kinds(monkeypatch, "https", consent=False)
     monkeypatch.setattr(server_cli, "_zero_network_in_force", lambda: False)
     console = _console(monkeypatch, b"listed", b"lab")
 
-    result = _invoke("add", "lab", "ssh://owner@lab.example")
+    result = _invoke("add", "lab", "https://lab.example")
 
     assert result.stderr.startswith("remote_kind_unavailable:")
     assert console.opened == 0 and targets.list_targets() == ()

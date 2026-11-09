@@ -20,7 +20,13 @@ def test_the_local_kind_has_the_built_in_runtime() -> None:
     assert isinstance(runtime_for("local"), LocalTargetRuntime)
 
 
-@pytest.mark.parametrize("kind", ["local_port", "ssh", "https"])
+def test_an_ssh_target_has_its_helper_runtime() -> None:
+    from finishup.client.helper_runtime import SshTargetRuntime
+
+    assert isinstance(runtime_for("ssh"), SshTargetRuntime)
+
+
+@pytest.mark.parametrize("kind", ["local_port", "https"])
 def test_an_unregistered_remote_kind_is_a_closed_refusal(kind: str) -> None:
     with pytest.raises(TargetRuntimeError) as raised:
         runtime_for(kind)  # type: ignore[arg-type]

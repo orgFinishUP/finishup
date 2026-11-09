@@ -10,9 +10,9 @@ the owner makes ends it before more is sent.
 1. the record is readable (an unreadable one may name a remote kind: ``target_root_is_remote``);
 2. ``zero_network_remote_selected``: this computer last reported a zero-network policy;
 3. ``target_reauthorization_required``: the owner authorized it under an older disclosure;
-4. the kind is open in this release (``OPEN_REMOTE_KINDS``); this release opens none, so every
-   remote root stops here as ``target_root_is_remote``, the refusal layer 1 gave every connection
-   and spawn path for a remote root;
+4. the kind is open in this release (``OPEN_REMOTE_KINDS``: ``ssh`` only); any other remote root
+   (``https``, ``local_port``, until layer 5) stops here as ``target_root_is_remote``, the refusal
+   layer 1 gave every connection and spawn path for a remote root;
 5. the consent (``client.server_profile.consent_verdict``, ADR-052): the server's current profile,
    compared with the envelope the owner consented to, is the same or narrower (admitted under its
    revision), requires a level the owner did not agree to (``server_level_unavailable``), or is
@@ -109,10 +109,10 @@ __all__ = [
     "refusal_summary",
 ]
 
-# The remote kinds a connection may be made to in this release. Layer 2 opens none: layer 4
-# opens ``ssh`` once the helper exists, layer 5 ``https`` and ``local_port`` once the REST client
-# does. A test that exercises a claim-bound connection opens one on purpose, in process only.
-OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset()
+# The remote kinds a connection may be made to in this release: ``ssh``, through the target's
+# helper (design v2 section 3) or directly. Layer 5 opens ``https`` and ``local_port`` once the
+# REST client exists; a test that exercises one of them opens it on purpose, in process only.
+OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset({"ssh"})
 CHANGED: Final = "server_authorization_changed"
 # Every phase the gate or a generation check refuses a remote connection with.
 AUTHORIZATION_REFUSALS: Final = frozenset(

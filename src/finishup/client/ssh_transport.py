@@ -61,6 +61,8 @@ __all__ = [
     "destination",
     "direct_argv",
     "direct_remote_argv",
+    "exit_master",
+    "exit_master_now",
     "host_key_changed",
     "host_key_unconfirmed",
     "master_argv",
@@ -497,6 +499,32 @@ async def exit_master(ssh: str, root: Path, record: ServerTarget) -> None:
     if _owned_socket(control) is not None:
         with contextlib.suppress(Exception):
             await run_ssh(control_argv(ssh, root, record, "exit"), seconds=2.0)
+    for path in (control, root / "run" / UPSTREAM_NAME):
+        remove_owned_socket(path)
+
+
+def exit_master_now(ssh: str, root: Path, record: ServerTarget) -> None:
+    """``exit_master`` for a caller with no event loop of its own, or inside one (synchronous).
+
+    ``server use``, ``disconnect``, ``remove`` and ``set --style`` stop what this client runs for
+    an SSH target from wherever they are called (a worker thread, a setup step inside an event
+    loop). Bounded; never raises.
+    """
+
+    import subprocess
+
+    control = root / "run" / MASTER_NAME
+    if _owned_socket(control) is not None:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # noqa: S603 - fixed argv
+                control_argv(ssh, root, record, "exit"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=ssh_environment(),
+                timeout=2.0,
+                check=False,
+            )
     for path in (control, root / "run" / UPSTREAM_NAME):
         remove_owned_socket(path)
 
