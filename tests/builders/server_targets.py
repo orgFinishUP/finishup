@@ -154,6 +154,10 @@ def record_remote_target(name: str = "elsewhere") -> ServerTarget:
     return record
 
 
+def _refuse_spawn(_root: Path, _target_id: str) -> object:
+    raise PermissionError("helper_not_spawned_in_unit_tests")
+
+
 def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: bool = True) -> None:
     """Open ``kinds`` to connections, in this process and for this test only.
 
@@ -166,10 +170,13 @@ def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: boo
     admits it with real records. A test of the consent itself passes ``consent=False``.
     """
 
-    from finishup.client import authorization
+    from finishup.client import authorization, helper_status
 
     assert set(kinds) <= targets.REMOTE_KINDS
     monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset(kinds))
+    # A unit test never starts a real helper process (ADR-052): a client that would start one is
+    # told it could not, unless the test stands in for the helper itself.
+    monkeypatch.setattr(helper_status, "spawn_helper", _refuse_spawn)
     if not consent:
         return
     from builders.server_profiles import consent_to

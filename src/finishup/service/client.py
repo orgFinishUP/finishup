@@ -719,6 +719,22 @@ def _sent_outcome(error: ControlError) -> ControlError:
     return error
 
 
+def _ask_helper_to_refresh(authorization: AuthorizationCheck | None) -> None:
+    """Leave the marker that asks a remote target's helper to fetch the profile again."""
+
+    grant = getattr(authorization, "grant", None)
+    target_id = getattr(grant, "target_id", None)
+    if type(target_id) is not str:
+        return
+    try:
+        from finishup.client.helper_status import request_profile_refresh
+        from finishup.client.targets import target_root
+
+        request_profile_refresh(target_root(target_id))
+    except Exception:  # noqa: BLE001 - a marker that cannot be left asks nothing
+        return
+
+
 def _protocol_error(error: ControlProtocolError) -> ControlError:
     if error.reason == "server_profile_changed":
         # The service did not admit this remote client's hello: the profile revision it consented
@@ -1700,6 +1716,7 @@ class ServiceClient(ControlClientPort):
                 refused = ControlError(
                     "service_unavailable", retryable=True, phase="server_profile_changed"
                 )
+                _ask_helper_to_refresh(self._authorization)
                 self._failure = self._failure or refused
                 await self._fail_connection(refused)
                 return ControlResult(
@@ -2447,6 +2464,8 @@ class _RemoteAdmission:
 
     authorization: AuthorizationCheck
     workspace_binding: ClientWorkspaceBinding | None
+    target_id: str = ""
+    kind: str = ""
 
 
 async def _admit_remote(
@@ -2501,9 +2520,9 @@ async def _admit_remote(
             check = bind_prebuilt_check(authorization, workspace_binding.authorization)
         except TargetError as error:
             raise _remote_target_refusal(error) from None
-        return _RemoteAdmission(check, workspace_binding)
+        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind)
     if workspace_locator is None:
-        return _RemoteAdmission(authorization, None)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
     from finishup.adapters.workspace_binding import canonical_workspace_locator
     from finishup.adapters.workspace_root import RepositoryIdentityError
     from finishup.client.remote_binding import binding_for_active_root
@@ -2518,12 +2537,293 @@ async def _admit_remote(
             workspace_locator, serve_workspace=serve_workspace, authorization=authorization
         )
     except RepositoryIdentityError:
-        return _RemoteAdmission(authorization, None)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
     except TargetError as error:
         raise _remote_target_refusal(error) from None
     if binding is None or binding.authorization is None:
-        return _RemoteAdmission(authorization, binding)
-    return _RemoteAdmission(binding.authorization, binding)
+        return _RemoteAdmission(authorization, binding, record.target_id, record.kind)
+    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind)
+
+
+async def _connect_remote(
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """Reach an admitted server elsewhere through its transport, within ``deadline``.
+
+    An SSH target is reached through its helper (the relay style, the default) or directly
+    (``ssh -W``, the owner's advanced choice), as its connection style record says (ADR-052,
+    design v2 section 1.2). Nothing local is ever spawned or superseded but the target's own
+    helper. A server that refused the consented profile revision (``server_profile_changed``)
+    leaves the marker that asks the helper to fetch the profile again; never a fetch here.
+    """
+
+    if admission.kind != "ssh":
+        # No transport exists for this kind in this release (the gate refuses it first); a test
+        # that opens one in process dials the target root's own endpoint, as layer 3 did.
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+        )
+    from finishup.client.helper_status import read_connection_style, request_profile_refresh
+    from finishup.client.targets import target_root
+
+    root = target_root(admission.target_id)
+    style = read_connection_style(root)
+    try:
+        if style == "direct":
+            return await _connect_direct(
+                root,
+                admission,
+                client_kind,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+                deadline=deadline,
+            )
+        return await _connect_through_helper(
+            root,
+            admission,
+            client_kind,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            deadline=deadline,
+        )
+    except ControlError as error:
+        if error.phase == "server_profile_changed":
+            request_profile_refresh(root)
+        raise
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
+    return remaining
+
+
+async def _connect_direct(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The direct style: this process's own ``ssh -W`` stream (approach B's seam).
+
+    A remote service that is not running is started once through the server's own launcher (this
+    client's demand), then dialled again inside the same deadline.
+    """
+
+    from finishup.client.ssh_transport import (
+        SshControlStream,
+        UpstreamUnavailable,
+        direct_argv,
+        direct_remote_argv,
+        resolve_ssh,
+        run_ssh,
+    )
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        record = None
+    if record is None or record.target_id != admission.target_id:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="server_authorization_changed"
+        )
+    try:
+        ssh = resolve_ssh()
+    except UpstreamUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+
+    async def dial() -> ControlStream:
+        return await SshControlStream.open(direct_argv(ssh, root, record))
+
+    async def attempt() -> ServiceClient:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=_remaining(deadline),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+            dial=dial,
+            transport="ssh",
+        )
+
+    try:
+        return await attempt()
+    except ControlError as error:
+        if error.phase != "remote_service_not_running":
+            raise
+    phase = admission.authorization.refusal()
+    if phase is not None:
+        raise ControlError("service_unavailable", retryable=True, phase=phase)
+    code, _stdout, _stderr = await run_ssh(
+        direct_remote_argv(ssh, root, record, "service", "start", "--json"),
+        seconds=_remaining(deadline),
+    )
+    if code != 0:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="remote_service_not_running"
+        )
+    return await attempt()
+
+
+def _helper_failure(root: Path, before: object) -> ControlError | None:
+    """The phase the helper recorded for this attempt's failure, if it recorded one meanwhile."""
+
+    from finishup.client.helper_status import read_helper_status
+
+    status = read_helper_status(root)
+    if status is None or status == before or status.reason is None:
+        return None
+    if status.phase != "unavailable" and (status.phase, status.reason) != (
+        "stopped",
+        "zero_network_remote_selected",
+    ):
+        return None
+    if status.reason not in REMOTE_CONNECTION_PHASES:
+        return None
+    return ControlError(
+        "service_unavailable",
+        retryable=True,
+        phase=status.reason,
+        correlation_id=status.correlation_id,
+    )
+
+
+async def _connect_through_helper(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The relay style: the target's helper serves ``<root>/run/control.sock``.
+
+    The helper is client-owned and vault-less, so starting one is always safe: when nothing
+    answers, one is started (never a service), and a helper left by an older release of this
+    client is replaced by its stamped pid (never a newer one). A helper ending at its idle exit
+    is followed by a successor; any other stop (a ``server use``, ``disconnect``, ``remove``, a
+    zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
+    ends the wait at once; every ``service_unavailable`` raised here names a remote phase.
+    """
+
+    from finishup.client.helper_status import (
+        helper_holder,
+        read_helper_status,
+        spawn_helper,
+        stop_helper,
+    )
+
+    before = read_helper_status(root)
+
+    def idle_exit_finished() -> bool:
+        if helper_holder(root) is not None:
+            return False
+        status = read_helper_status(root)
+        return status is not None and (status.phase, status.reason) == ("stopped", "idle_timeout")
+
+    async def attempt() -> ServiceClient:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+            transport="connector",
+        )
+
+    def named(error: ControlError) -> ControlError:
+        if error.reason != "service_unavailable" or error.phase is not None:
+            return error
+        recorded = _helper_failure(root, before)
+        if recorded is not None:
+            return recorded
+        return ControlError(
+            "service_unavailable",
+            retryable=True,
+            phase="remote_unreachable",
+            correlation_id=error.correlation_id,
+        )
+
+    try:
+        return await attempt()
+    except _AcceptedServiceUnresponsive as error:
+        raise named(error) from error
+    except ControlError as error:
+        if error.reason != "service_unavailable" or error.phase is not None:
+            raise
+    holder = helper_holder(root)
+    if (
+        holder is not None
+        and (
+            holder.version != __version__
+            or holder.schema_manifest_digest != _manifest_digest_for_client()
+        )
+        and holder_version_order(holder.version) != "newer"
+    ):
+        # A helper left by an older release of this client (an in-place upgrade) is client-owned:
+        # replace it by its stamped pid. One a newer release started is never replaced from here.
+        if not await asyncio.to_thread(stop_helper, root, timeout_seconds=_remaining(deadline)):
+            raise named(ControlError("service_unavailable", retryable=True))
+        holder = None
+    spawned = False
+    if holder is None:
+        try:
+            spawn_helper(root, admission.target_id)
+        except FileNotFoundError:
+            # The target's folder is gone (``server remove``): nothing is made again.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            ) from None
+        except OSError:
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="remote_unreachable"
+            ) from None
+        spawned = True
+    last_error: ControlError | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        if not spawned and idle_exit_finished():
+            # The helper that held the target was ending at its idle exit: start its successor
+            # now instead of waiting on an endpoint nothing will serve again.
+            try:
+                spawn_helper(root, admission.target_id)
+            except OSError:
+                break
+            spawned = True
+        recorded = _helper_failure(root, before)
+        if recorded is not None and recorded.phase not in {None, "remote_unreachable"}:
+            # The helper named this outage: waiting longer cannot repair it.
+            raise recorded
+        try:
+            return await attempt()
+        except _AcceptedServiceUnresponsive as error:
+            last_error = error
+        except ControlError as error:
+            last_error = error
+            if error.reason != "service_unavailable" or error.phase is not None:
+                raise
+    raise named(last_error or ControlError("service_unavailable", retryable=True))
 
 
 async def connect_service(
@@ -2564,14 +2864,12 @@ async def connect_service(
         workspace_locator, workspace_binding, serve_workspace=serve_workspace
     )
     if admission is not None:
-        return await _connect_service_attempt(
+        return await _connect_remote(
+            admission,
             client_kind,
-            workspace_locator=None,
             projection_render_mode=projection_render_mode,
             output_is_controlling_tty=output_is_controlling_tty,
-            timeout_seconds=_CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
-            workspace_binding=admission.workspace_binding,
-            authorization=admission.authorization,
+            deadline=time.monotonic() + _CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
         )
     return await _connect_service_attempt(
         client_kind,
@@ -2598,12 +2896,44 @@ def service_holder_identity() -> SingletonHolder | None:
     stopped, or replaced, and must not infer health from it.
     """
 
-    from finishup.service.lifecycle import probe_singleton_holder_identity
+    from finishup.service.lifecycle import SingletonHolder, probe_singleton_holder_identity
 
+    remote_root = _remote_target_root()
+    if remote_root is not None:
+        # A remote target's endpoint belongs to its helper (ADR-052): the holder is the live
+        # stamped helper, and its status generation moves when a repair changes the connection,
+        # so a latched outage clears (the availability latch). It is never superseded from here.
+        from finishup.client.helper_status import helper_holder, read_helper_status
+
+        holder = helper_holder(remote_root)
+        status = read_helper_status(remote_root)
+        if holder is None or status is None or status.pid != holder.pid:
+            return None
+        return SingletonHolder(
+            holder.pid, f"helper-{status.generation}", _manifest_digest_for_client(), __version__
+        )
     try:
         return probe_singleton_holder_identity(_singleton_lock_path())
     except Exception:
         return None
+
+
+def _remote_target_root() -> Path | None:
+    """The active root when it is a server elsewhere's (its helper holds it), else ``None``."""
+
+    try:
+        root = active_root()
+    except PathSafetyError:
+        return None
+    if root is None:
+        return None
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        return None
+    return root if record is not None and record.is_remote else None
 
 
 def _singleton_holder_lock_is_held() -> bool | None:
@@ -2768,20 +3098,20 @@ async def connect_service_on_demand(
         raise ValueError("service_start_timeout_invalid")
     if type(serve_workspace) is not bool:
         raise TypeError("serve_workspace_invalid")
+    deadline = time.monotonic() + timeout_seconds
     admission = await _admit_remote(
         workspace_locator, workspace_binding, serve_workspace=serve_workspace
     )
     if admission is not None:
-        return await _connect_service_attempt(
+        # One deadline for the whole remote path (design v2 section 8.9): the gate above, the
+        # helper's start, the transport, the handshake; the caller's call and cleanup follow.
+        return await _connect_remote(
+            admission,
             client_kind,
-            workspace_locator=None,
             projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
             output_is_controlling_tty=False,
-            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, timeout_seconds),
-            workspace_binding=admission.workspace_binding,
-            authorization=admission.authorization,
+            deadline=deadline,
         )
-    deadline = time.monotonic() + timeout_seconds
 
     async def connect_with_remaining_budget() -> ServiceClient:
         remaining = deadline - time.monotonic()

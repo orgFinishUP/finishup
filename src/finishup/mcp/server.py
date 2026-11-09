@@ -1108,6 +1108,12 @@ async def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) ->
     lease.registration = registration
     _HELPER_REGISTRATIONS[id(client)] = lease
     lease.task = asyncio.create_task(_renew_helper_lease(client, authorization, lease))
+    # The helper serves the registration in the background; in the direct style no connection
+    # of this bridge passes it, so it is started here when none runs (ADR-052).
+    with contextlib.suppress(Exception):
+        from finishup.client.helper_runtime import ensure_helper_for_direct_style
+
+        await asyncio.to_thread(ensure_helper_for_direct_style, registration.target_id)
 
 
 async def _renew_helper_lease(

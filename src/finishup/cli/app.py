@@ -492,19 +492,38 @@ async def build_service_client(
 
     Ordinary CLI work is repository-bound by default. Passing ``None`` explicitly remains the
     narrow escape hatch for callers whose operation genuinely has no workspace authority.
+
+    For a server elsewhere (an SSH target, ADR-052) the connection answers the server's workspace
+    calls while it is open (its own live calls), and registers the workspace with the target's
+    helper, whose background agent answers the work the server goes on with after this command
+    returns (the registration's 15-minute lease). A local root connects exactly as before.
     """
+
+    from finishup.client.targets import active_root_may_be_remote
 
     locator = (
         resolve_cli_workspace_locator()
         if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
         else resolve_cli_workspace_locator(cast(WorkspaceLocator | None, workspace_locator))
     )
-    return await connect_service(
+    if not active_root_may_be_remote():
+        return await connect_service(
+            client_kind,
+            workspace_locator=locator,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+        )
+    client = await connect_service(
         client_kind,
         workspace_locator=locator,
         projection_render_mode=projection_render_mode,
         output_is_controlling_tty=output_is_controlling_tty,
+        serve_workspace=True,
     )
+    from finishup.client.helper_runtime import register_for_background
+
+    await anyio.to_thread.run_sync(register_for_background, client, "cli")
+    return client
 
 
 def _bounded_input(input_path: str | None, inline: str | None) -> JsonValue:
