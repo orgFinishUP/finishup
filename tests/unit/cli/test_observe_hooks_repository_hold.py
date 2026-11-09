@@ -528,3 +528,24 @@ def test_the_codex_re_ground_refreshes_outside_any_running_event_loop(
     report = repository_report(_key(workspace))
     assert report is not None and report.no_network
     assert dialled == []
+
+
+def test_while_no_kind_is_open_a_session_without_consent_is_told_nothing_of_the_hold(
+    home: Path,
+    tmp_path: Path,
+    workspace: str,
+    dialled: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hold is named only where it is what stops a connection: with every kind closed, an
+    earlier step of the gate does, so a session without consent starts as in layer 1."""
+
+    _select("https")
+    _report_no_network(workspace)
+    opened = {host: _session_start(host, tmp_path / f"open-{host}", workspace) for host in _HOSTS}
+    assert set(opened.values()) == {hook_context(HELD, "unconsented")}
+    open_remote_kinds(monkeypatch)
+    for host in _HOSTS:
+        emitted = _emitted(host, tmp_path / f"closed-{host}", workspace, source="startup")
+        assert "repository_egress_held" not in json.dumps(emitted)
+    assert dialled == []

@@ -470,9 +470,14 @@ def refresh_at_session_start(
 
 
 async def _hold_phase(worktree: str, budget_seconds: float) -> str | None:
+    from finishup.client.authorization import preflight_refusal
     from finishup.client.repository_hold import decide
     from finishup.client.targets import active_target_record, target_root
 
+    if preflight_refusal() is not None:
+        # An earlier step of the gate refuses this root (ADR-052; in this release, every remote
+        # kind is closed): the hold is not what stops a connection, so it is not named.
+        return None
     reports = read_repository_reports()
     if isinstance(reports, str) or not any(report.no_network for report in reports):
         # Nothing this computer reported is held: no Git read is needed to know it.
@@ -498,8 +503,9 @@ def session_start_hold_phase(
     from the selected server elsewhere, or kept on this computer; the phase, or None.
 
     Record-only, like the connection seam's own decision (``repository_hold.decide``): no service
-    is asked. Only while a server elsewhere is selected and this computer reported a repository
-    that allows no network use; then the repository's one Git read, bounded by
+    is asked. Only while a server elsewhere is selected that the gate's earlier steps admit
+    (``authorization.preflight_refusal``: none is in this release) and this computer reported a
+    repository that allows no network use; then the repository's one Git read, bounded by
     ``budget_seconds`` (``HOOK_READ_SECONDS`` at most), in a fresh ``contextvars`` context on its
     own event loop (``run_async``, ``asyncio.run`` by default). Never raises.
     """
