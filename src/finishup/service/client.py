@@ -466,6 +466,9 @@ class ClientWorkspaceBinding:
     claim: WorkspaceClaim
     agent: WorkspaceCallHandler | None = None
     authorization: AuthorizationCheck | None = None
+    # The worktree top level the claim was made for, on this computer only (never sent): what a
+    # registration with the target's helper names (ADR-052, ``client.helper_registrations``).
+    worktree: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
@@ -1216,12 +1219,27 @@ class ServiceClient(ControlClientPort):
         # What a connection to a server elsewhere was admitted under (ADR-052): re-checked before
         # every frame it sends and on its watch. A local connection has none, and no watch (O2).
         self._authorization = authorization
+        # The claim and worktree of a claim-bound connection to a server elsewhere, on this
+        # computer only (ADR-052): what its owner registers with the target's helper.
+        self._remote_workspace: tuple[WorkspaceClaim, str] | None = None
         self._receiver = asyncio.create_task(self._receive_results())
         self._watch = (
             None
             if authorization is None
             else asyncio.create_task(self._watch_authorization(recheck or _recheck_after_interval))
         )
+
+    @property
+    def authorization(self) -> AuthorizationCheck | None:
+        """What a connection to a server elsewhere was admitted under; ``None`` when local."""
+
+        return self._authorization
+
+    @property
+    def remote_workspace(self) -> tuple[WorkspaceClaim, str] | None:
+        """The claim and worktree a claim-bound remote connection serves; ``None`` otherwise."""
+
+        return self._remote_workspace
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
@@ -2249,7 +2267,13 @@ async def _connect_service_attempt(
             handshake.add_done_callback(_consume_background_task)
             raise TimeoutError
         session = handshake.result()
-        return _connected_client(stream, session, client_kind, agent, authorization=authorization)
+        client = _connected_client(stream, session, client_kind, agent, authorization=authorization)
+        if workspace_binding is not None and workspace_binding.worktree is not None:
+            client._remote_workspace = (  # pyright: ignore[reportPrivateUsage]
+                workspace_binding.claim,
+                workspace_binding.worktree,
+            )
+        return client
     except TimeoutError as exc:
         accepted = stream is not None
         if stream is not None:

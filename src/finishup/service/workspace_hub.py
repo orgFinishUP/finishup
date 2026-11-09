@@ -539,9 +539,7 @@ class WorkspaceAgentHub:
             return preferred
         live = [channel for channel in self._channels.get(handle, ()) if not channel.closed]
         declaring = [channel for channel in live if channel.declares(operation)]
-        background = [
-            channel for channel in declaring if channel.declaration.role == "background"
-        ]
+        background = [channel for channel in declaring if channel.declaration.role == "background"]
         if background:
             # The helper's agent (ADR-052): it answers every call no connection's own agent
             # takes, live or background, so a connection's agent is never raced for it.

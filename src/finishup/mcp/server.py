@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 from urllib.parse import unquote_to_bytes, urlsplit
 
 import anyio
@@ -978,10 +978,94 @@ def _cursor_workspace_identity(path: str) -> tuple[int, int] | None:
 
 
 async def _close_client(client: ServiceClient) -> None:
+    _release_for_helper(client)
     try:
         await client.close()
     except Exception:
         pass
+
+
+# This bridge's registrations with the helper of a server elsewhere (ADR-052, design v2 section
+# 8.5): one registrant per bridge process; each claim-bound connection with an agent registers its
+# workspace, renews it while the bridge uses it, and releases it when the connection closes,
+# Cursor's roots-changed retirement included.
+if TYPE_CHECKING:
+    from finishup.client.helper_registrations import Registration
+
+_HELPER_REGISTRATIONS: dict[int, Registration] = {}
+_HELPER_REGISTRANT: list[str] = []
+
+
+def _helper_registrant() -> str:
+    if not _HELPER_REGISTRANT:
+        from finishup.client.helper_registrations import new_registrant
+
+        _HELPER_REGISTRANT.append(new_registrant())
+    return _HELPER_REGISTRANT[0]
+
+
+def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) -> None:
+    """Register ``client``'s claimed workspace with its target's helper; best effort.
+
+    Only a claim-bound connection to a server elsewhere that serves its workspace registers; the
+    connection works the same either way (its own agent answers its live calls).
+    """
+
+    # A stand-in client (a test's) need not carry either.
+    workspace = getattr(client, "remote_workspace", None)
+    authorization = getattr(client, "authorization", None)
+    if workspace is None or authorization is None or not hasattr(authorization, "grant"):
+        return
+    from finishup.client.authorization import ConnectionAuthorization
+    from finishup.client.helper_registrations import RegistrationError, register
+
+    if type(authorization) is not ConnectionAuthorization:
+        return
+    try:
+        registration = register(
+            authorization,
+            workspace[0],
+            workspace[1],
+            registrant=_helper_registrant(),
+            source="mcp_roots" if runtime.host_profile == "cursor" else "mcp_bridge",
+        )
+    except (RegistrationError, OSError, ValueError):
+        return
+    _HELPER_REGISTRATIONS[id(client)] = registration
+
+
+def _renew_for_helper(client: ServiceClient) -> None:
+    """Renew ``client``'s registration once half its lease has passed; best effort."""
+
+    registration = _HELPER_REGISTRATIONS.get(id(client))
+    authorization = getattr(client, "authorization", None)
+    if registration is None or authorization is None:
+        return
+    from datetime import UTC, datetime, timedelta
+
+    from finishup.client.authorization import ConnectionAuthorization
+    from finishup.client.helper_registrations import LEASE_SECONDS, Registration, renew
+    from finishup.config.installation import parse_rfc3339_ms
+
+    if type(authorization) is not ConnectionAuthorization:
+        return
+    due = parse_rfc3339_ms(registration.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
+    if datetime.now(UTC) < due:
+        return
+    renewed = renew(registration, authorization)
+    if isinstance(renewed, Registration):
+        _HELPER_REGISTRATIONS[id(client)] = renewed
+    else:
+        _HELPER_REGISTRATIONS.pop(id(client), None)
+
+
+def _release_for_helper(client: ServiceClient) -> None:
+    registration = _HELPER_REGISTRATIONS.pop(id(client), None)
+    if registration is None:
+        return
+    from finishup.client.helper_registrations import release
+
+    release(registration.target_id, registration.claim, registration.registrant)
 
 
 async def _discard_client(runtime: BridgeRuntime, client: ServiceClient) -> None:
@@ -1125,6 +1209,7 @@ async def _ensure_service_client(
                 async with slot.lock:
                     if _slot_retired_since(runtime, generation, workspace_locator):
                         raise _retired_binding_error(runtime)
+                _renew_for_helper(existing)
                 return existing
             if waiter is not None:
                 await waiter.wait()
@@ -1150,6 +1235,7 @@ async def _ensure_service_client(
                     )
                 )
                 await connected_attempt.connect()
+                _register_for_helper(runtime, connected_attempt)
             except BaseException as exc:
                 if connected_attempt is not None:
                     await _close_client(connected_attempt)
@@ -1859,6 +1945,9 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
     if runtime.host_profile != "cursor":
         return
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    # The helper stops serving the old roots: every registration this bridge made goes with them
+    # (ADR-052; the closing client releases its own as well).
+    _release_bridge_registrations()
     async with slot.workspace_binding_lock:
         slot.workspace_locator = None
         slot.workspace_root_identity = None
@@ -1867,6 +1956,19 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
         slot.workspace_binding_state = "failed"
         slot.workspace_binding_correlation_id = None
     await close_bridge_runtime(runtime)
+
+
+def _release_bridge_registrations() -> None:
+    """Release every registration this bridge process made, for every target."""
+
+    if not _HELPER_REGISTRANT:
+        return
+    from finishup.client.helper_registrations import release_registrant
+
+    targets_seen = {registration.target_id for registration in _HELPER_REGISTRATIONS.values()}
+    _HELPER_REGISTRATIONS.clear()
+    for target_id in targets_seen:
+        release_registrant(target_id, _HELPER_REGISTRANT[0])
 
 
 def _workspace_locator_for_runtime(runtime: BridgeRuntime) -> WorkspaceLocator | None:
