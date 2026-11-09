@@ -1620,18 +1620,19 @@ def test_a_background_agent_declares_its_role_and_a_connection_agent_sends_none(
     background, hello = asyncio.run(exercise("background"))
     assert background.workspace_agent is not None
     assert background.workspace_agent.role == "background"
-    assert decode_control_frame(hello)["workspace_agent"]["role"] == "background"
+    agent_wire = cast(dict[str, JsonValue], decode_control_frame(hello)["workspace_agent"])
+    assert agent_wire["role"] == "background"
     connection, hello = asyncio.run(exercise("connection"))
     assert (
         connection.workspace_agent is not None and connection.workspace_agent.role == "connection"
     )
-    assert "role" not in decode_control_frame(hello)["workspace_agent"]
+    assert "role" not in cast(dict[str, JsonValue], decode_control_frame(hello)["workspace_agent"])
     with pytest.raises(ValueError, match="workspace_agent_role_invalid"):
         WorkspaceAgentDeclaration(("capture",), 1_024, role=cast(Any, "both"))
 
 
 def test_the_server_profile_method_and_its_refusal_are_on_the_wire() -> None:
-    request = {
+    request: dict[str, JsonValue] = {
         "kind": "call",
         "protocol_version": "1.0",
         "rpc_id": _rpc_id(7),
