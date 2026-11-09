@@ -1847,6 +1847,15 @@ async def _drain_observation_async(
                     startup_line = spawned_startup_failure_line(error)
                     if startup_line is not None:
                         typer.echo(startup_line, err=True)
+                    # A connection the authorization gate refused (ADR-052), a repository held
+                    # from the selected server elsewhere or kept on this computer included, is
+                    # named as every CLI command names it; the summary, its JSON and exit 20 are
+                    # unchanged.
+                    from finishup.cli.render import render_authorization_refusal
+
+                    refusal = render_authorization_refusal(error)
+                    if refusal is not None:
+                        typer.echo(refusal, err=True)
                     tally.note_reason(
                         ObservationGapCode.SERVICE_UNAVAILABLE.value, len(deliverable)
                     )

@@ -115,9 +115,10 @@ class StatusOutcome:
     # Set only for an ``active`` read made for a post-compaction start (ADR-044): the facts the
     # same status result carried, plus the declared deliverables when the second read answered.
     recap: RecapFacts | None = None
-    # Set only for an ``unavailable`` read this computer refused before anything was sent
-    # (ADR-051 decision 8, ``targets.REMOTE_ROOT_REFUSALS``): ``zero_network_remote_selected``,
-    # ``target_reauthorization_required``, or ``target_root_is_remote`` for any other remote root.
+    # Set only for an ``unavailable`` read the shared authorization gate refused or ended
+    # (``client.authorization.AUTHORIZATION_REFUSALS``, ADR-052): ``zero_network_remote_selected``,
+    # ``target_reauthorization_required``, ``target_root_is_remote`` for any other remote root
+    # (ADR-051 decision 8), a held or kept repository, or ``server_authorization_changed``.
     phase: str | None = None
 
 
@@ -201,9 +202,16 @@ def unavailable_context(phase: str | None) -> str:
 
     ``phase`` is set only when this computer refused the selected server before anything was sent
     (``targets.REMOTE_ROOT_REFUSALS``, ADR-051 decision 8); every other unavailable read keeps
-    the plain text.
+    the plain text. A repository held from the selected server elsewhere, or kept on this
+    computer, is checked first and named with its own text (round 5's hold).
     """
 
+    if phase in {"repository_egress_held", "repository_egress_kept"}:
+        # A repository held from the selected server elsewhere, or kept on this computer (ADR-051
+        # decision 8): named with the same text on every host, in its mapped-session form.
+        from finishup.client.repository_hold import hook_context
+
+        return hook_context(phase, "mapped")
     from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
     if phase in REMOTE_ROOT_REFUSALS:
@@ -1640,11 +1648,11 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS
+        from finishup.client.authorization import AUTHORIZATION_REFUSALS
 
         return StatusOutcome(
             _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
-            phase=error.phase if error.phase in REMOTE_ROOT_REFUSALS else None,
+            phase=error.phase if error.phase in AUTHORIZATION_REFUSALS else None,
         )
     except Exception:
         return StatusOutcome("unavailable")
@@ -1663,6 +1671,30 @@ async def _read_status(
 # #209-#213 hook-latency loop. The MCP bridge (`finishup mcp serve`) starts for the same Codex
 # session, knows its own serving route from its argv, and emits the `registration_drift`
 # diagnostic for free; that is the single emitter. See docs/runbooks/codex-integration.md.
+
+
+def _refresh_repository_report(
+    locator: str | None, payload: Mapping[str, JsonValue], *, deadline: float
+) -> None:
+    """The observe pass's own session-start report refresh, for a resume or compact re-ground.
+
+    Canonicalized as the observe pass names the worktree; bounded by what is left of ``deadline``
+    (half a second at most). Never raises.
+    """
+
+    if locator is None:
+        return
+    with contextlib.suppress(Exception):
+        from finishup.adapters.workspace_binding import canonical_workspace_locator
+        from finishup.cli import observe_hooks
+
+        observe_hooks._refresh_repository_report(  # pyright: ignore[reportPrivateUsage]
+            "SessionStart",
+            payload,
+            canonical_workspace_locator(locator),
+            skip_service=False,
+            deadline=deadline,
+        )
 
 
 def handle_session_start(
@@ -1826,6 +1858,10 @@ def handle_session_start(
                 return 0
 
             selection = resolve_session_workspace(workspace, payload)
+            # ADR-051 decision 8: before the status read connects, this computer's FinishUP is
+            # asked about the session's repository when its report is missing or stale, so a
+            # repository just found to allow no network use is held in this very pass.
+            _refresh_repository_report(selection.locator, payload, deadline=entered + 2.1)
 
             async def _run() -> StatusOutcome:
                 return await _read_status(

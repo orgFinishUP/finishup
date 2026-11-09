@@ -1516,6 +1516,28 @@ def render_remote_refusal(phase: str, *, head: str) -> str:
     return "\n".join(lines)
 
 
+def render_authorization_refusal(error: BaseException) -> str | None:
+    """A connection the shared authorization gate refused or ended (ADR-052), or None.
+
+    ``<phase>: <summary>`` and the directive of the phase's way back, for a retryable
+    ``service_unavailable`` whose phase is one of ``client.authorization.AUTHORIZATION_REFUSALS``
+    (the remote-root refusals, the repository hold, a changed authorization); any other error is
+    None, so the caller keeps its own rendering.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    if getattr(error, "reason", None) != "service_unavailable":
+        return None
+    phase = getattr(error, "phase", None)
+    if type(phase) is not str:
+        return None
+    summary = refusal_summary(phase)
+    if summary is None:
+        return None
+    return render_remote_refusal(phase, head=summary)
+
+
 def render_local_recovery_lines(reason: object) -> list[str]:
     """Return the directive lines for a CLI lifecycle, instance, or ceremony reason, or [].
 

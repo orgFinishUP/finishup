@@ -23,7 +23,7 @@ import pytest
 
 import finishup.cli.observe_hooks as observe_hooks
 import finishup.client.everyday_repository as everyday_repository
-from builders.server_targets import ambient_home, record_remote_target
+from builders.server_targets import ambient_home, open_remote_kinds, record_remote_target
 from finishup.adapters.integrations.observation_local import LocalObservationStore
 from finishup.client import targets
 from finishup.client.everyday_policy import record_repository_report, repository_report
@@ -149,6 +149,7 @@ def test_a_later_session_start_asks_nothing_and_a_server_elsewhere_is_held_from_
     workspace: str,
     live: list[tuple[str, float]],
     connections: list[bool],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from finishup.client.remote_binding import binding_for_active_root
     from finishup.client.targets import TargetError
@@ -165,6 +166,8 @@ def test_a_later_session_start_asks_nothing_and_a_server_elsewhere_is_held_from_
     _session_start(tmp_path, workspace, source="resume")
 
     assert len(live) == 1
+    # The hold is the gate's last step; the kind is opened in process to reach it (ADR-052).
+    open_remote_kinds(monkeypatch, "ssh")
     with pytest.raises(TargetError) as held:
         asyncio.run(binding_for_active_root(WorkspaceLocator(workspace), serve_workspace=False))
     assert held.value.reason == "repository_egress_held"

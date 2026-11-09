@@ -90,6 +90,7 @@ __all__ = [
     "gate",
     "preflight_refusal",
     "read_generation",
+    "refusal_summary",
 ]
 
 # The remote kinds a connection may be made to in this release. Layer 2 opens none: layer 4
@@ -376,6 +377,40 @@ def preflight_refusal() -> str | None:
     except Exception:  # noqa: BLE001 - a refusal that cannot be decided names a remote root
         return "target_root_is_remote"
     return None
+
+
+# What stopped, in fixed words, for every authorization refusal: the line every CLI surface shows
+# before the phase's directive (``<phase>: <summary>``). No path, name or host.
+_REFUSAL_SUMMARIES: Final[dict[str, str]] = {
+    "zero_network_remote_selected": (
+        "FinishUP refused the selected server's connection before anything was sent"
+    ),
+    "target_reauthorization_required": (
+        "FinishUP refused the selected server's connection before anything was sent"
+    ),
+    "target_root_is_remote": (
+        "FinishUP refused the selected server's connection before anything was sent"
+    ),
+    "repository_egress_held": (
+        "this repository's privacy policy on this computer allows no network use, so nothing "
+        "from it was sent to the selected FinishUP server"
+    ),
+    "repository_egress_kept": (
+        "this repository's work is kept on this computer, as its owner chose, so nothing from it "
+        "was sent to the selected FinishUP server"
+    ),
+    CHANGED: (
+        "the server selection, record or key this connection was made under changed, so FinishUP "
+        "ended it before sending more"
+    ),
+}
+assert set(_REFUSAL_SUMMARIES) == AUTHORIZATION_REFUSALS
+
+
+def refusal_summary(phase: str) -> str | None:
+    """The fixed one-line summary of an authorization refusal ``phase``; None for any other."""
+
+    return _REFUSAL_SUMMARIES.get(phase)
 
 
 def bump_credential_generation(root: Path) -> bool:
