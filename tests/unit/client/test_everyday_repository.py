@@ -441,3 +441,126 @@ def test_a_registry_that_cannot_be_read_switches_the_reads_on(home: Path) -> Non
     (folder / "target.json").chmod(0o600)
     # A damaged record may name a server elsewhere: the hold fails toward reading.
     assert targets.remote_target_recorded() is True
+
+
+# --- nothing on the session-start path waits on a special file (Codex review B3) ---------------
+
+
+def _installation_marker() -> Path:
+    from finishup.config.load import load_config
+    from finishup.config.paths import bundle_root
+
+    root = bundle_root(_data_dir=load_config({}, os.environ, None).storage.data_dir)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root / "installation-state.json"
+
+
+def _finishes(work: object, seconds: float = 10.0) -> list[object]:
+    """Run ``work`` in a daemon thread; what it returned, or [] if it is still running."""
+
+    import threading
+    from collections.abc import Callable
+    from typing import cast
+
+    done: list[object] = []
+
+    def run() -> None:
+        done.append(cast(Callable[[], object], work)())
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    # A bounded wait on the work itself: it ends at once, long before this deadline.
+    thread.join(timeout=seconds)
+    return done
+
+
+def _unblock(fifo: Path) -> None:
+    """Give a reader that is waiting on ``fifo`` its end of file (only for a run that blocked)."""
+
+    try:
+        descriptor = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    os.close(descriptor)
+
+
+def test_a_special_file_as_the_installation_marker_never_blocks_the_live_read(
+    home: Path, elsewhere: None, repository: str
+) -> None:
+    from finishup.cli.provider_status import MachineScopeError, machine_scope_request
+
+    marker = _installation_marker()
+    os.mkfifo(marker, 0o600)
+    calls: list[str] = []
+    try:
+
+        def request() -> object:
+            try:
+                return machine_scope_request()
+            except MachineScopeError as error:
+                return error.reason
+
+        assert _finishes(request) == ["installation_marker_invalid"]
+
+        def session_start_read() -> object:
+            return asyncio.run(
+                read_everyday_repository(
+                    repository,
+                    budget_seconds=0.5,
+                    connect=_connector(True, _setup("granted", False), calls),
+                    installation_exists=lambda: True,
+                )
+            )
+
+        assert _finishes(session_start_read) == [EverydayReads("unreadable", "unreadable")]
+        assert calls == []
+    finally:
+        _unblock(marker)
+    # The other markers it refuses, each before reading what it holds.
+    marker.unlink()
+    with marker.open("wb") as handle:
+        handle.truncate(64 * 1_024 * 1_024)  # sparse: nothing is written, and nothing read
+    marker.chmod(0o600)
+    with pytest.raises(MachineScopeError) as oversized:
+        machine_scope_request()
+    assert oversized.value.reason == "installation_marker_invalid"
+    marker.unlink()
+    target = marker.with_name("elsewhere.json")
+    target.write_bytes(b"{}\n")
+    marker.symlink_to(target)
+    with pytest.raises(MachineScopeError) as linked:
+        machine_scope_request()
+    assert linked.value.reason == "installation_marker_invalid"
+    marker.unlink()
+    with pytest.raises(MachineScopeError) as missing:
+        machine_scope_request()
+    assert missing.value.reason == "installation_marker_missing"
+
+
+def test_a_special_file_swapped_in_after_the_check_never_blocks_a_report_read(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the ``lstat`` check and the open, a FIFO takes the record's place: the open does
+    not wait for a writer, and the record reads as unreadable."""
+
+    record_repository_report("sha256:" + "a" * 64, "/srv/app", no_network=True, now=_AT)
+    record_reported_policy(zero_network=False, now=_AT)
+    paths = {reports_path(): reports_path().lstat()}
+    from finishup.client.everyday_policy import marker_path
+
+    paths[marker_path()] = marker_path().lstat()
+    for path in paths:
+        path.unlink()
+        os.mkfifo(path, 0o600)
+    real = Path.lstat
+
+    def as_checked(self: Path) -> os.stat_result:
+        return paths.get(self) or real(self)
+
+    monkeypatch.setattr(Path, "lstat", as_checked)
+    try:
+        assert _finishes(read_repository_reports) == ["unreadable"]
+        assert _finishes(read_marker) == ["unreadable"]
+    finally:
+        for path in paths:
+            _unblock(path)

@@ -234,8 +234,11 @@ def read_marker() -> MarkerReading:
     ):
         return "unreadable"
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # Never blocks: a special file put in its place is refused, not waited on (a hook reads it).
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return "unreadable"
             encoded = os.read(descriptor, _MAX_BYTES + 1)
         finally:
             os.close(descriptor)
@@ -435,8 +438,11 @@ def _read_reports_file() -> ReportsReading:
     ):
         return "unreadable"
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # Never blocks: a special file put in its place is refused, not waited on (a hook reads it).
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return "unreadable"
             chunks: list[bytes] = []
             remaining = _MAX_REPORTS_BYTES + 1
             while remaining > 0:
