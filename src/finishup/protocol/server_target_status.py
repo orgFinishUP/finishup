@@ -26,8 +26,10 @@ __all__ = [
     "SERVER_TARGET_STATUS_SCHEMA_VERSION",
     "ServerTargetAllowedRepository",
     "ServerTargetAuthorization",
+    "ServerTargetConnection",
     "ServerTargetConsent",
     "ServerTargetDescription",
+    "ServerTargetHelper",
     "ServerTargetHeldRepository",
     "ServerTargetKeptRepository",
     "ServerTargetOutsideReads",
@@ -226,6 +228,33 @@ class ServerTargetRepositories(BaseModel):
     here: ServerTargetRepositoryHere | None
 
 
+class ServerTargetHelper(BaseModel):
+    """What the target's helper last recorded (ADR-052): closed tokens and its generation.
+
+    ``running`` says whether a helper holds the target's lock now; ``phase`` and ``reason`` are
+    its last record (``ready``, ``unavailable`` with the remote phase, ``stopped`` with why).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    running: bool
+    phase: Literal["starting", "ready", "unavailable", "stopped"]
+    reason: Token | None
+    generation: Annotated[int, Field(ge=1)]
+
+
+class ServerTargetConnection(BaseModel):
+    """How this computer reaches an SSH target (ADR-052, design v2 section 1.2): the owner's
+    connection ``style``, the styles the server's last profile offers, and its helper, if one
+    ever recorded anything."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    style: Literal["relay", "direct"]
+    styles_offered: list[Literal["relay", "direct"]] = Field(max_length=2)
+    helper: ServerTargetHelper | None
+
+
 class ServerTargetDescription(BaseModel):
     """The target the deciding source resolves to (``target_id`` null: not a named target)."""
 
@@ -239,6 +268,8 @@ class ServerTargetDescription(BaseModel):
     authorization: ServerTargetAuthorization | None
     # Null for a target that is not remote, or one never consented to a server profile (ADR-052).
     consent: ServerTargetConsent | None
+    # Null for a target that is not an SSH server (ADR-052): how this computer reaches it.
+    connection: ServerTargetConnection | None
     # Null for a target that is not remote: a local server reads under its own privacy policy.
     outside_reads: ServerTargetOutsideReads | None
     # Null for a target that is not remote: a server on this computer applies this computer's

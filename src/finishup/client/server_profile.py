@@ -105,6 +105,7 @@ __all__ = [
     "read_consented_envelope",
     "record_consent",
     "refresh_profile",
+    "styles_offered",
 ]
 
 CACHE_NAME: Final = "server-profile.json"
@@ -151,6 +152,32 @@ class ConsentVerdict:
     revision: ServerProfileRevision | None = None
     narrowed: bool = False
     coverage_reduced: frozenset[str] = frozenset()
+
+
+# The connection styles each server edge offers (design v2 section 1.2): a server reached through
+# its owner-only control socket over SSH offers the relay and the direct style.
+_STYLES_BY_EDGE: Final[dict[str, tuple[str, ...]]] = {"ssh-control": ("relay", "direct")}
+
+
+def styles_offered(record: ServerTarget) -> tuple[str, ...]:
+    """The connection styles the last profile fetched for ``record`` offers; ``()`` for none.
+
+    The owner may choose only among these (``finishup server set NAME --style``). A target with
+    no readable profile offers none. File reads only.
+    """
+
+    try:
+        cached = read_cached_profile(target_root(record.target_id))
+    except Exception:  # noqa: BLE001 - a profile that cannot be read offers nothing
+        return ()
+    if cached is None or record.kind != "ssh":
+        return ()
+    offered: list[str] = []
+    for edge in cached.profile.edges:
+        for style in _STYLES_BY_EDGE.get(edge, ()):
+            if style not in offered:
+                offered.append(style)
+    return tuple(offered)
 
 
 def endpoint_origin(record: ServerTarget) -> str:

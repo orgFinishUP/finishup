@@ -85,6 +85,7 @@ from finishup.protocol.canonical import JsonValue, canonical_encode
 if TYPE_CHECKING:
     from finishup.cli.trusted_console import TrustedForegroundConsole
     from finishup.cli.zero_network_selection import ZeroNetworkSelection
+    from finishup.client.helper_status import ConnectionStyle
     from finishup.client.repository_hold import HoldDecision, RepositoryChoice
     from finishup.client.server_folders import FolderRecord, OutsideReadMode
     from finishup.client.server_profile import FetchedProfile
@@ -324,6 +325,21 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "that server requires more of this computer than this release can agree to (it keeps a "
         "copy of the code, level L2, which arrives in a later release), so nothing was changed",
         _USAGE,
+    ),
+    "style_invalid": ("give --style relay or --style direct", _USAGE),
+    "style_not_applicable": (
+        "only an SSH server has a connection style; a server on this computer is reached directly",
+        _USAGE,
+    ),
+    "style_unavailable": (
+        "that server's profile does not offer that connection style, so nothing was changed",
+        _USAGE,
+    ),
+    "remote_launcher_not_found": (
+        "no FinishUP launcher was found on that server at the usual install paths "
+        "(~/.local/bin, /opt/homebrew/bin, /usr/local/bin, /usr/bin), so nothing was added; give "
+        "its absolute path with --remote-launcher",
+        _UNAVAILABLE,
     ),
     "target_still_connected": (
         "the connection this client runs for that target did not stop in time, so nothing was "
@@ -1670,6 +1686,7 @@ def build_status_document(
         "credential": credential,
         "authorization": authorization,
         "consent": consent,
+        "connection": _connection_document(record, root),
         "outside_reads": outside_reads,
         "repositories": repositories,
     }
@@ -1689,6 +1706,60 @@ def build_status_document(
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _connection_document(record: ServerTarget | None, root: Path | None) -> JsonValue:
+    """How this computer reaches an SSH target (ADR-052): file reads only, never a connection."""
+
+    if record is None or root is None or record.kind != "ssh":
+        return None
+    from finishup.client.helper_status import (
+        helper_holder,
+        read_connection_style,
+        read_helper_status,
+    )
+    from finishup.client.server_profile import styles_offered
+
+    status = read_helper_status(root)
+    helper: JsonValue = None
+    if status is not None:
+        helper = {
+            "running": helper_holder(root) is not None,
+            "phase": status.phase,
+            "reason": status.reason,
+            "generation": status.generation,
+        }
+    return {
+        "style": read_connection_style(root),
+        "styles_offered": list(styles_offered(record)),
+        "helper": helper,
+    }
+
+
+def connection_lines(target: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Owner-display lines of how this computer reaches an SSH target."""
+
+    connection = target.get("connection")
+    if not isinstance(connection, Mapping):
+        return ()
+    found = cast(Mapping[str, JsonValue], connection)
+    style = found["style"]
+    lines = [
+        f"Connection: {style} ("
+        + (
+            "this computer's FinishUP helper keeps one SSH connection for every program here"
+            if style == "relay"
+            else "each program here opens its own SSH channel through a shared OpenSSH master"
+        )
+        + ")."
+    ]
+    helper = found["helper"]
+    if isinstance(helper, Mapping):
+        state = cast(Mapping[str, JsonValue], helper)
+        running = "running" if state["running"] else "not running"
+        reason = "" if state["reason"] is None else f", {state['reason']}"
+        lines.append(f"Helper: {running}; last {state['phase']}{reason}.")
+    return tuple(lines)
 
 
 def _consent_document(record: ServerTarget) -> JsonValue:
@@ -1917,6 +1988,7 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
             f"Round trip p95: {probe['round_trip_p95_ms']} ms over {probe['samples']} status calls"
         )
     lines.extend(consent_lines(target))
+    lines.extend(connection_lines(target))
     lines.extend(outside_read_lines(target))
     lines.extend(repository_lines(target))
     if document["selection_overridden"]:
@@ -2504,6 +2576,67 @@ def server_disconnect(
 
     label = _runtime_call(name, "stop")
     typer.echo(f"Disconnected: {label}.")
+
+
+_STYLE_LINES: Final[dict[str, str]] = {
+    "relay": (
+        "this computer's FinishUP helper keeps one SSH connection to it for every program here "
+        "(the default)"
+    ),
+    "direct": (
+        "each program here (hooks, the MCP server, commands) opens its own SSH channel to it, "
+        "through one OpenSSH connection shared for 15 minutes; FinishUP's helper still answers "
+        "that server's background work"
+    ),
+}
+
+
+# Hidden while no SSH server can be added (ADR-052): the layer that opens SSH shows it.
+@server_app.command("set", hidden=True)
+@_cli
+def server_set(
+    name: Annotated[str, typer.Argument(help="An SSH server target.")],
+    style: Annotated[
+        str,
+        typer.Option(
+            "--style",
+            help="How this computer reaches it: relay (the default) or direct (advanced).",
+        ),
+    ],
+) -> None:
+    """Change how this computer reaches an SSH server (an advanced option)."""
+
+    from finishup.client.helper_status import CONNECTION_STYLES, write_connection_style
+    from finishup.client.server_profile import styles_offered
+
+    if style not in CONNECTION_STYLES:
+        raise ServerCommandRefused("style_invalid")
+    record = _target_or_fail(name)
+    if record.kind != "ssh":
+        raise ServerCommandRefused("style_not_applicable")
+    if not _open_kind(record.kind):
+        raise ServerCommandRefused("remote_kind_unavailable")
+    if style not in styles_offered(record):
+        # Only a style the server's own profile offers (design v2 section 1.2).
+        raise ServerCommandRefused("style_unavailable")
+    root = target_root(record.target_id)
+    try:
+        with registry_lock():
+            stored = _stored_record(record)
+            if stored.kind != "ssh":
+                raise ServerCommandRefused("style_not_applicable")
+            # What this client runs for the target ends first, so nothing keeps the old style.
+            _stop_for_remove(stored, root)
+            write_connection_style(root, cast("ConnectionStyle", style))
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    except OSError:
+        raise ServerCommandRefused("target_root_unsafe") from None
+    typer.echo(
+        f"Server target {record.name} ({record.target_id}) is now reached in the {style} style: "
+        f"{_STYLE_LINES[style]}."
+    )
+    _warn_open_sessions()
 
 
 # --- what a server may read outside your projects (ADR-051 decision 5) ------------------------
