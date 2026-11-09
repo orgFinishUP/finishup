@@ -94,7 +94,9 @@ accepted generation. `refusal()`:
 A connection admitted to a server elsewhere keeps its `AuthorizationCheck` (`service.client`). A
 connection given a prebuilt workspace binding keeps the binding's own check (its repository's
 hold) beside the admission (`bind_prebuilt_check`), and one made for another target is refused
-`server_authorization_changed` before the dial. The check runs before every frame, by `connect()` (the MCP bridge's reuse check), before a workspace
+`server_authorization_changed` before the dial. The check runs right before the dial, again right
+before the hello (which carries the claim and the agent declaration) is written, before every
+later frame, by `connect()` (the MCP bridge's reuse check), before a workspace
 reply leaves (a reply computed while it lapsed is not sent), and by a watch every
 `GENERATION_RECHECK_SECONDS` (1 s; an injectable tick for tests). A lapse fails pending calls with
 the phase and later calls with the same stored failure. The workspace agent of that connection

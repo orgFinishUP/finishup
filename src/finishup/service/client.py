@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Buffer, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -2025,6 +2025,47 @@ def _connected_client(
     )
 
 
+class _HelloRefused(Exception):
+    """The connection's authorization lapsed before its hello was written."""
+
+
+class _CheckedHelloStream:
+    """The dialled stream while its hello is written: each write is checked first (ADR-052).
+
+    The hello carries the workspace claim and the agent declaration, so it is guarded by the same
+    authorization check as every later frame: a selection, record, key or hold change made while
+    the dial was under way refuses the connection before anything is written (``refused`` names
+    the phase), never after.
+    """
+
+    __slots__ = ("_authorization", "_stream", "refused")
+
+    def __init__(self, stream: AuthenticatedUnixStream, authorization: AuthorizationCheck) -> None:
+        self._stream = stream
+        self._authorization = authorization
+        self.refused: str | None = None
+
+    @property
+    def peer_identity(self) -> object:
+        return self._stream.peer_identity
+
+    async def receive(self, max_bytes: int) -> bytes:
+        return await self._stream.receive(max_bytes)
+
+    async def send_all(self, data: Buffer) -> None:
+        try:
+            phase = self._authorization.refusal()
+        except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
+            phase = None
+        if phase is not None:
+            self.refused = phase
+            raise _HelloRefused
+        await self._stream.send_all(data)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
 class _AcceptedServiceUnresponsive(ControlError):
     """A fixed endpoint accepted locally but did not complete its bounded handshake."""
 
@@ -2112,7 +2153,7 @@ async def _connect_service_attempt(
 
     A ``workspace_binding`` sends its claim (and declares its agent) in place of a locator. An
     ``authorization`` (a connection to a server elsewhere, ADR-052) is checked once more right
-    before the dial, and the connection keeps it.
+    before the dial and again right before the hello is written, and the connection keeps it.
     """
 
     agent = None if workspace_binding is None else workspace_binding.agent
@@ -2121,6 +2162,7 @@ async def _connect_service_attempt(
         if phase is not None:
             raise ControlError("service_unavailable", retryable=True, phase=phase)
     stream: AuthenticatedUnixStream | None = None
+    guarded: _CheckedHelloStream | None = None
     deadline = time.monotonic() + timeout_seconds
     try:
         async with asyncio.timeout(timeout_seconds):
@@ -2128,9 +2170,10 @@ async def _connect_service_attempt(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
+        guarded = None if authorization is None else _CheckedHelloStream(stream, authorization)
         handshake = asyncio.create_task(
             client_handshake(
-                stream,
+                stream if guarded is None else guarded,
                 client_kind,
                 __version__,
                 workspace_locator=workspace_locator,
@@ -2169,6 +2212,11 @@ async def _connect_service_attempt(
     except ControlProtocolError as exc:
         if stream is not None:
             await _best_effort_close_stream(stream)
+        if guarded is not None and guarded.refused is not None:
+            # Nothing was written: the hello was refused before it left.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase=guarded.refused
+            ) from None
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
         raise _protocol_error(exc) from exc

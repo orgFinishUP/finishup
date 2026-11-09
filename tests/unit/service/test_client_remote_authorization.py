@@ -266,6 +266,48 @@ async def test_a_change_to_what_a_connection_was_admitted_under_ends_it(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("change", ["selection", "hold"])
+async def test_a_change_while_the_dial_is_under_way_refuses_the_hello(
+    remote: targets.ServerTarget,
+    workspace: WorkspaceLocator,
+    nothing_started: None,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The hello carries the claim and the agent declaration: it is checked like every frame, so
+    a change made after the pre-dial check and before the hello sends nothing at all."""
+
+    open_remote_kinds(monkeypatch, remote.kind)
+    daemon = scripted_service(monkeypatch)
+    key = repository_key(await canonical_workspace_root(workspace))
+    serve = service_client.connect_control
+
+    async def dial_while_the_owner_changes_it() -> object:
+        stream = await serve()
+        if change == "selection":
+            targets.clear_selection()
+        else:
+            record_repository_report(key, workspace.path, no_network=True)
+        return stream
+
+    monkeypatch.setattr(service_client, "connect_control", dial_while_the_owner_changes_it)
+    with pytest.raises(ControlError) as refused:
+        await connect_service(
+            ControlClientKind.CLI, workspace_locator=workspace, serve_workspace=True
+        )
+    await asyncio.gather(*daemon.serving, return_exceptions=True)
+    expected = "server_authorization_changed" if change == "selection" else "repository_egress_held"
+    assert (refused.value.reason, refused.value.retryable, refused.value.phase) == (
+        "service_unavailable",
+        True,
+        expected,
+    )
+    # Dialled, and nothing written: not the hello, not the claim.
+    assert daemon.connections == 1
+    assert daemon.received(0) == []
+
+
+@pytest.mark.anyio
 async def test_a_prebuilt_binding_keeps_its_repository_check(
     remote: targets.ServerTarget,
     workspace: WorkspaceLocator,
