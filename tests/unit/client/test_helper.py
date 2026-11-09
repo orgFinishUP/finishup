@@ -688,3 +688,76 @@ def test_a_refresh_that_ends_the_admission_ends_its_relays(
         return ended
 
     assert asyncio.run(run()) == b""
+
+
+class _SilentUpstream(FakeUpstream):
+    """Its server accepts every channel and never answers anything (a wedged remote end)."""
+
+    def __init__(self) -> None:
+        super().__init__(ScriptedDaemon())
+        self.streams: list[object] = []
+        self.ends: list[object] = []
+
+    async def open_stream(self):  # noqa: ANN201
+        self.opened += 1
+        client_end, server_end = memory_pair()
+        self.streams.append(client_end)
+        self.ends.append(server_end)  # held open, never read from or answered
+        return client_end
+
+
+def test_an_upstream_that_never_answers_the_hello_ends_the_relay_within_its_bound(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A5: the setup is bounded; the stream is closed and the client no longer counts."""
+
+    record, root = ssh_target
+
+    async def run() -> tuple[bool, list[bool], int, bytes]:
+        upstream = _SilentUpstream()
+        helper = _helper(record, root, upstream, setup_seconds=0.2)
+        client, local = _pair()
+        helper._spawn_relay(local, own=False)  # pyright: ignore[reportPrivateUsage]
+        [relay] = helper._relays  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(hello_frame(server_profile=TEST_REVISION))
+        done, _ = await asyncio.wait((relay,), timeout=10)
+        async with asyncio.timeout(10):
+            answered = await client.receive(65_536)
+        await client.aclose()
+        closed = [stream.closed for stream in upstream.streams]  # type: ignore[attr-defined]
+        return relay in done, closed, helper._active, answered  # pyright: ignore[reportPrivateUsage]
+
+    ended, closed, active, answered = asyncio.run(run())
+    assert ended and answered == b""
+    assert closed == [True] and active == 0
+    status = read_helper_status(root)
+    assert status is not None
+    assert (status.phase, status.reason) == ("unavailable", "remote_unreachable")
+
+
+def test_a_relay_cancelled_while_it_waits_for_the_server_closes_its_stream(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A5: a stop or a lapse during the setup leaves no upstream stream open."""
+
+    record, root = ssh_target
+
+    async def run() -> tuple[list[bool], int]:
+        upstream = _SilentUpstream()
+        helper = _helper(record, root, upstream)
+        client, local = _pair()
+        helper._spawn_relay(local, own=False)  # pyright: ignore[reportPrivateUsage]
+        [relay] = helper._relays  # pyright: ignore[reportPrivateUsage]
+        await client.send_all(hello_frame(server_profile=TEST_REVISION))
+        async with asyncio.timeout(10):
+            while not upstream.streams:
+                await asyncio.sleep(0)
+        helper._end_relays()  # pyright: ignore[reportPrivateUsage]
+        done, _ = await asyncio.wait((relay,), timeout=10)
+        assert done == {relay}
+        await client.aclose()
+        closed = [stream.closed for stream in upstream.streams]  # type: ignore[attr-defined]
+        return closed, helper._active  # pyright: ignore[reportPrivateUsage]
+
+    closed, active = asyncio.run(run())
+    assert closed == [True] and active == 0

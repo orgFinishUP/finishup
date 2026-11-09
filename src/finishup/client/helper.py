@@ -118,6 +118,9 @@ _REFRESH_MIN_SECONDS: Final = 30.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
 _HELLO_SECONDS: Final = 10.0
+# One upstream attempt, from the master's start to the server's first answer to the hello: a
+# server that accepts the channel and never answers ends the relay here, its stream closed.
+_UPSTREAM_SETUP_SECONDS: Final = 30.0
 _TICK_SECONDS: Final = 1.0
 _PUMP_CHUNK: Final = 65_536
 _FRAME_PREFIX: Final = 4
@@ -230,6 +233,13 @@ class _RelayEnded(Exception):
 
 async def _wait(seconds: float) -> None:
     await asyncio.sleep(seconds)
+
+
+async def _discard(stream: ControlStream) -> None:
+    """Close ``stream``, whatever it raises; a cancellation still closes it first."""
+
+    with contextlib.suppress(Exception):
+        await asyncio.shield(stream.aclose())
 
 
 class HelperAgent:
@@ -481,9 +491,11 @@ class Helper:
         tick: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         ssh: str | None = None,
+        setup_seconds: float = _UPSTREAM_SETUP_SECONDS,
     ) -> None:
         if record.kind != "ssh":
             raise ValueError("target_not_ssh")
+        self._setup_seconds = setup_seconds
         self._root = root
         self._record = record
         self._style: ConnectionStyle = style
@@ -695,22 +707,10 @@ class Helper:
         """
 
         for attempt in range(2):
-            await self._upstream.ensure()
-            upstream = await self._upstream.open_stream()
-            if not self._may_forward(admission):
-                with contextlib.suppress(Exception):
-                    await upstream.aclose()
-                self._lapse(admission)
-                raise _RelayEnded
-            try:
-                await upstream.send_all(hello)
-                first = await upstream.receive(_PUMP_CHUNK)
-            except (LocalControlTransportError, OSError):
-                first = b""
+            upstream, first = await self._attempt(hello, admission)
             if first:
                 return upstream, first
-            with contextlib.suppress(Exception):
-                await upstream.aclose()
+            await _discard(upstream)
             # sshd could not reach the server's endpoint: its service is not running.
             now = self._clock()
             if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
@@ -722,6 +722,39 @@ class Helper:
                     continue
             break
         raise UpstreamUnavailable("remote_service_not_running")
+
+    async def _attempt(
+        self, hello: bytes, admission: ConnectionAuthorization
+    ) -> tuple[ControlStream, bytes]:
+        """One bounded upstream attempt: the stream and the server's first answer (``b""``: none).
+
+        The master's start, the channel's open, the hello and the first answer share one bound
+        (``remote_unreachable`` past it); the stream it opened is closed on every failure and on
+        a cancellation (the relay ending, a lapse, the helper stopping), never left behind.
+        """
+
+        upstream: ControlStream | None = None
+        try:
+            async with asyncio.timeout(self._setup_seconds):
+                await self._upstream.ensure()
+                upstream = await self._upstream.open_stream()
+                if not self._may_forward(admission):
+                    self._lapse(admission)
+                    raise _RelayEnded
+                try:
+                    await upstream.send_all(hello)
+                    first = await upstream.receive(_PUMP_CHUNK)
+                except (LocalControlTransportError, OSError):
+                    first = b""
+        except TimeoutError:
+            if upstream is not None:
+                await _discard(upstream)
+            raise UpstreamUnavailable("remote_unreachable") from None
+        except BaseException:
+            if upstream is not None:
+                await _discard(upstream)
+            raise
+        return upstream, first
 
     async def _serve_local(self, local: AuthenticatedUnixStream, *, own: bool = False) -> None:
         if not own:
