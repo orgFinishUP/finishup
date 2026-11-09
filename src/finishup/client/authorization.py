@@ -69,6 +69,7 @@ from finishup.config.paths import (
     SERVER_TARGET_FILE_NAME,
     PathSafetyError,
     ensure_owner_only_dir,
+    selection_override_active,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
@@ -313,6 +314,15 @@ class ConnectionAuthorization:
         return None
 
 
+def _selected_now() -> str | None:
+    """The target id the selection file names now; ``None`` when none can be read."""
+
+    try:
+        return read_selected_target_id()
+    except TargetError:
+        return None
+
+
 def _active_record() -> ServerTarget | None:
     """The active root's record; an unreadable one (which may name a remote kind) refuses."""
 
@@ -331,14 +341,19 @@ def authorize_active_root() -> ConnectionAuthorization | None:
     ``None`` for a local root: nothing is checked and nothing watched (O2). For a remote root,
     the generation is read, then the record again and the gate (steps 1 to 4), so the record
     admitted is never newer than the generation and a change made while the gate runs is seen at
-    the first check; a refusal raises ``TargetError`` with its closed phase. A root that cannot
-    be resolved at all raises its own ``TargetError`` (``target_root_unsafe``).
+    the first check; a refusal raises ``TargetError`` with its closed phase. A root the selection
+    named is admitted only while the selection file, read after the generation, still names it:
+    a process that remembers a root another process has since unselected is refused
+    ``server_authorization_changed`` (the MCP bridge then follows the selection, O1). A root that
+    cannot be resolved at all raises its own ``TargetError`` (``target_root_unsafe``).
     """
 
     record = _active_record()
     if record is None or not record.is_remote:
         return None
-    selection_bound = selection_source() == "selection"
+    # A ``selection_override`` block names its root on purpose; only a root the selection file
+    # named is bound to that file.
+    selection_bound = selection_source() == "selection" and not selection_override_active()
     try:
         generation = read_generation(target_root(record.target_id), selection_bound=selection_bound)
     except (OSError, PathSafetyError):
@@ -347,6 +362,13 @@ def authorize_active_root() -> ConnectionAuthorization | None:
     if admitted is None or not admitted.is_remote or admitted.target_id != record.target_id:
         # The root changed while it was being admitted: refuse rather than guess.
         raise TargetError("target_root_is_remote")
+    if selection_bound and _selected_now() != admitted.target_id:
+        # This process remembers the root it started with (``config.paths``' selection memo),
+        # so another process may have selected another server before the generation was read:
+        # its stamp is then the new selection's, and no later check would see the change. The
+        # selection on disk, read after the generation, must name the admitted target; a change
+        # after this read changes the stamp and is seen at the first check.
+        raise TargetError(CHANGED)
     gate(admitted)
     grant = Grant(
         target_id=admitted.target_id,

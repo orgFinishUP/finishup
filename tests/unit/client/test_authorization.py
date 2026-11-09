@@ -335,6 +335,67 @@ def test_the_admission_reads_the_generation_before_the_gate(
     assert admitted.refusal() == CHANGED
 
 
+def _select_elsewhere(record: ServerTarget, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``finishup server use`` in another process: the selection file changes and this
+    process's memory of its root does not (``write_selection`` resets it only here)."""
+
+    with monkeypatch.context() as patch:
+        patch.setattr(targets, "reset_selection_memo", lambda: None)
+        targets.write_selection(record)
+
+
+def test_an_admission_binds_the_selection_on_disk_not_this_process_memory(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process remembers server A; another process selected B before the admission read the
+    generation. Admitting A under B's stamp would never be undone by a later check."""
+
+    second = _remote("second", select=False)
+    first = _remote("first")
+    open_remote_kinds(monkeypatch, "https")
+    assert targets.active_target_record() == first  # this process now remembers it
+    _select_elsewhere(second, monkeypatch)
+    assert targets.active_target_record() == first  # still remembered
+    with pytest.raises(TargetError) as refused:
+        authorize_active_root()
+    assert refused.value.reason == CHANGED
+    assert preflight_refusal() == CHANGED
+    # Cleared from another process: the remembered server is refused the same way.
+    _select_elsewhere(first, monkeypatch)
+    assert authorize_active_root() is not None
+    targets.selection_path().unlink()
+    with pytest.raises(TargetError) as cleared:
+        authorize_active_root()
+    assert cleared.value.reason == CHANGED
+    # Once this process follows the selection (O1), it admits what the file names now.
+    _select_elsewhere(second, monkeypatch)
+    reset_selection_memo()
+    admitted = authorize_active_root()
+    assert admitted is not None and admitted.grant.target_id == second.target_id
+    assert admitted.grant.selection_bound and admitted.refusal() is None
+
+
+def test_a_selection_override_is_bound_to_its_own_root(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``selection_override`` names one target on purpose (a probe of a named server): its
+    admission does not follow the selection file, which names another."""
+
+    from finishup.config.paths import selection_override
+
+    _remote("first")
+    second = _remote("second", select=False)
+    open_remote_kinds(monkeypatch, "https")
+    with selection_override(targets.target_root(second.target_id)):
+        admitted = authorize_active_root()
+    assert admitted is not None and admitted.grant.target_id == second.target_id
+    assert not admitted.grant.selection_bound
+    assert admitted.refusal() is None
+    # Its own record changing still ends it.
+    assert bump_credential_generation(targets.target_root(second.target_id))
+    assert admitted.refusal() == CHANGED
+
+
 def test_refusals_from_the_gate_carry_a_closed_phase(home: Path) -> None:
     _remote()
     with pytest.raises(TargetError) as refused:

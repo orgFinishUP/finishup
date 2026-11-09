@@ -55,6 +55,7 @@ __all__ = [
     "reset_selection_memo",
     "runtime_dir",
     "selection_override",
+    "selection_override_active",
     "runtime_pin_path",
     "service_generation_path",
     "setup_marker_path",
@@ -668,6 +669,20 @@ def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -
         yield
     finally:
         _SELECTION_OVERRIDE.reset(token)
+
+
+def selection_override_active(*, _probe: _PathProbe | None = None) -> bool:
+    """Whether a ``selection_override`` block decides this context's selection now.
+
+    Such a block names its root on purpose (one named target, probed or stopped from a process
+    whose own selection names another): the selection file does not, so an authorization made
+    under it is bound to that root, not to the selection (ADR-052).
+    """
+
+    probe = _probe_or_default(_probe)
+    key = str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)
+    override = _SELECTION_OVERRIDE.get()
+    return override is not None and override[0] == key
 
 
 def active_root(*, _probe: _PathProbe | None = None) -> Path | None:

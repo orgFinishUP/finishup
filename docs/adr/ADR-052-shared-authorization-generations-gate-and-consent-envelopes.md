@@ -69,7 +69,13 @@ edit. `folders.json` is deliberately not a component: the workspace agent re-rea
 settings on every call (ADR-051 decision 5), so a change applies without ending a connection.
 
 `authorize_active_root()` reads the generation, then the record again, then runs gate steps 1 to
-4, so a change made while the gate runs is seen at the first check. `ConnectionAuthorization`
+4, so a change made while the gate runs is seen at the first check. A root the selection named is
+admitted only while the selection file, read after the generation, still names it: a process
+remembers the root it started with (the MCP bridge's selection memo), and a selection another
+process changed before the generation was read would otherwise be stamped into the accepted
+generation and never seen; such an admission is refused `server_authorization_changed`, and the
+bridge follows the selection (O1). A `selection_override` block (one named target, probed or
+stopped) is bound to its own root, not to the selection file. `ConnectionAuthorization`
 holds the grant (target id, kind, an identity digest over id, kind, location and claim salt, a
 consent digest, the repository key once known, and whether the selection named the root) and the
 accepted generation. `refusal()`:
