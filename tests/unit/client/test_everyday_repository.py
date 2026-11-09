@@ -594,7 +594,7 @@ def test_a_special_file_as_the_installation_marker_never_blocks_the_live_read(
                 read_everyday_repository(
                     repository,
                     budget_seconds=0.5,
-                    connect=_connector(True, _setup("granted", False), calls),
+                    connect=_connector(True, _setup("granted", False), calls),  # type: ignore[arg-type]
                     installation_exists=lambda: True,
                 )
             )
