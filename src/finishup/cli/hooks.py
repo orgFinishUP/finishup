@@ -414,6 +414,9 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "request_timeout": "retry",
         "service_draining": "retry",
         "service_generation_changed": "retry",
+        # A request on a connection bound to an older server-profile revision (ADR-052): the client
+        # ends the connection with phase ``server_profile_changed``; the hook reports it unavailable.
+        "server_profile_changed": "unavailable",
         "read_projection_failed": "retry",
         "response_projection_failed": "retry",
         "privacy_projection_unavailable": "retry",
