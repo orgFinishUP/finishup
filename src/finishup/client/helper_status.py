@@ -1,0 +1,605 @@
+"""The helper's owner-only records in an SSH target root, and how clients start or stop it.
+
+A server elsewhere is reached through one background helper per target (design v2 section 3, the
+unified helper; ADR-051, ADR-052): ``finishup helper run --target <id>``. This module is what every
+client needs to know about it, and nothing more, so it stays light (the standard library, the
+target and path helpers, the protocol's closed phase sets): a hook may import it.
+
+Records beneath ``<target root>``, every one owner-only and holding closed tokens, generated ids,
+integers and timestamps only (no host, name, path or remote text):
+
+* ``state/helper.lock``: the singleton flock, stamped with the holder's pid, package version and
+  schema-manifest digest. A client stops or supersedes a helper only by this stamped pid, never by
+  matching a process name or path.
+* ``state/helper-status.json`` (``yoetz.helper-status/1``): ``generation``, ``phase``, ``reason``,
+  ``correlation_id``, ``pid``, ``started_at`` and the connection ``style``. The generation moves on
+  every change of phase or reason and with every new helper process, so a client that latched an
+  outage (the MCP bridge) sees the repair (the availability latch).
+* ``config/connection-style.json`` (``yoetz.connection-style/1``): ``relay`` (the default, also
+  when the record is absent) or ``direct``, the owner's choice (``finishup server set NAME
+  --style``).
+* ``state/profile-refresh-requested``: an empty marker a client leaves when the server refused it
+  with ``server_profile_changed``; the helper refreshes the profile and removes it.
+
+Ownership and reaping never depend on the process that started a helper: the lock and its stamp
+in the target root are the ownership, a stop signals only the stamped pid, and the spawner reaps
+its own child (exactly that pid) on a daemon thread while it lives; a spawner that exits first
+leaves the helper to the system, which reaps it.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import os
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final, Literal, cast
+
+from finishup.config.installation import format_rfc3339_ms, parse_rfc3339_ms
+from finishup.config.paths import PathSafetyError, existing_owner_only_dir
+from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+__all__ = [
+    "CONNECTION_STYLES",
+    "CONNECTION_STYLE_NAME",
+    "CONNECTION_STYLE_SCHEMA",
+    "HELPER_IDLE_SECONDS",
+    "HELPER_LOCK_NAME",
+    "HELPER_PHASES",
+    "HELPER_REASONS",
+    "HELPER_STATUS_NAME",
+    "HELPER_STATUS_SCHEMA",
+    "PROFILE_REFRESH_MARKER",
+    "ConnectionStyle",
+    "HelperLock",
+    "HelperLockBusy",
+    "HelperPhase",
+    "HelperStamp",
+    "HelperStatus",
+    "helper_environment",
+    "helper_holder",
+    "new_status",
+    "now_stamp",
+    "read_connection_style",
+    "read_helper_status",
+    "request_profile_refresh",
+    "spawn_helper",
+    "stop_helper",
+    "take_profile_refresh_request",
+    "write_connection_style",
+    "write_helper_status",
+]
+
+HELPER_STATUS_SCHEMA: Final = "yoetz.helper-status/1"
+HELPER_STATUS_NAME: Final = "helper-status.json"
+HELPER_LOCK_NAME: Final = "helper.lock"
+CONNECTION_STYLE_SCHEMA: Final = "yoetz.connection-style/1"
+CONNECTION_STYLE_NAME: Final = "connection-style.json"
+PROFILE_REFRESH_MARKER: Final = "profile-refresh-requested"
+# A helper with no client for this long exits; the next client starts a new one (design v2 §3).
+HELPER_IDLE_SECONDS: Final = 900.0
+HELPER_PHASES: Final = frozenset({"starting", "ready", "unavailable", "stopped"})
+CONNECTION_STYLES: Final = ("relay", "direct")
+
+type HelperPhase = Literal["starting", "ready", "unavailable", "stopped"]
+type ConnectionStyle = Literal["relay", "direct"]
+
+# ``unavailable`` names one remote connection phase (``protocol.errors``): an outage of the server
+# or its transport, or the shared gate's refusal of the helper's own admission (ADR-052).
+_UNAVAILABLE_REASONS: Final = REMOTE_CONNECTION_PHASES
+# ``stopped`` names why the process ended; ``zero_network_remote_selected`` is both: the helper
+# relays nothing while this computer last reported a zero-network policy, then stops for it.
+_STOPPED_REASONS: Final = frozenset(
+    {
+        "idle_timeout",
+        "stop_requested",
+        "helper_failed",
+        "target_removed",
+        "zero_network_remote_selected",
+    }
+)
+HELPER_REASONS: Final = _UNAVAILABLE_REASONS | _STOPPED_REASONS
+
+_MAX_RECORD_BYTES: Final = 2_048
+_CORRELATION: Final = "err_"
+_STOP_POLL_SECONDS: Final = 0.05
+# The helper's scrubbed environment: what OpenSSH and the interpreter need, nothing secret and no
+# FinishUP variable. ``SSH_AUTH_SOCK`` lets OpenSSH use the owner's agent (the key stays in
+# OpenSSH). The XDG base directories decide where this machine's server registry lives, so the
+# helper resolves the same target root its client did.
+_ENVIRONMENT_NAMES: Final = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SSH_AUTH_SOCK",
+    "TMPDIR",
+    "USER",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HelperStatus:
+    """One validated ``yoetz.helper-status/1`` record."""
+
+    generation: int
+    phase: HelperPhase
+    reason: str | None
+    correlation_id: str | None
+    pid: int
+    started_at: str
+    style: ConnectionStyle = "relay"
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation < 1:
+            raise ValueError("helper_status_invalid")
+        if self.phase not in HELPER_PHASES:
+            raise ValueError("helper_status_invalid")
+        allowed = {
+            "starting": frozenset[str](),
+            "ready": frozenset[str](),
+            "unavailable": _UNAVAILABLE_REASONS,
+            "stopped": _STOPPED_REASONS,
+        }[self.phase]
+        if (self.reason is None) is bool(allowed) or (
+            self.reason is not None and self.reason not in allowed
+        ):
+            raise ValueError("helper_status_invalid")
+        if self.correlation_id is not None and (
+            type(self.correlation_id) is not str
+            or not self.correlation_id.startswith(_CORRELATION)
+            or not 4 < len(self.correlation_id) <= 64
+            or not self.correlation_id.isascii()
+        ):
+            raise ValueError("helper_status_invalid")
+        if type(self.pid) is not int or not 1 <= self.pid < 2**31:
+            raise ValueError("helper_status_invalid")
+        if self.style not in CONNECTION_STYLES:
+            raise ValueError("helper_status_invalid")
+        parse_rfc3339_ms(self.started_at)
+
+    def body(self) -> dict[str, JsonValue]:
+        return {
+            "schema": HELPER_STATUS_SCHEMA,
+            "generation": self.generation,
+            "phase": self.phase,
+            "reason": self.reason,
+            "correlation_id": self.correlation_id,
+            "pid": self.pid,
+            "started_at": self.started_at,
+            "style": self.style,
+        }
+
+    def encode(self) -> bytes:
+        return canonical_encode(cast(JsonValue, self.body())) + b"\n"
+
+
+def _status_path(root: Path) -> Path:
+    return root / "state" / HELPER_STATUS_NAME
+
+
+def _lock_path(root: Path) -> Path:
+    return root / "state" / HELPER_LOCK_NAME
+
+
+def _style_path(root: Path) -> Path:
+    return root / "config" / CONNECTION_STYLE_NAME
+
+
+def _read_owner_only(path: Path) -> bytes | None:
+    """A regular, owner-owned, owner-only file's bytes; ``None`` when absent or unsafe.
+
+    Opened without following a link and without waiting on a special file (``O_NONBLOCK``), and
+    read bounded: a hook may call it.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+            or facts.st_size > _MAX_RECORD_BYTES
+        ):
+            return None
+        data = os.read(descriptor, _MAX_RECORD_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return data if len(data) <= _MAX_RECORD_BYTES else None
+
+
+def _write_owner_only(path: Path, encoded: bytes) -> None:
+    """Atomically replace ``path`` beneath an existing owner-only folder (temp, fsync, rename).
+
+    The folder is never created here: a target folder that ``server remove`` deleted is never
+    made again by a helper still ending (A-REMOVE-RACE). Raises ``OSError`` when it is gone.
+    """
+
+    try:
+        if not existing_owner_only_dir(path.parent):
+            raise FileNotFoundError(errno.ENOENT, "folder_missing")
+    except PathSafetyError:
+        raise PermissionError(errno.EPERM, "folder_unsafe") from None
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+    )
+    try:
+        try:
+            view = memoryview(encoded)
+            while view:
+                view = view[os.write(descriptor, view) :]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+_STATUS_FIELDS: Final = frozenset(
+    {"schema", "generation", "phase", "reason", "correlation_id", "pid", "started_at", "style"}
+)
+
+
+def read_helper_status(root: Path) -> HelperStatus | None:
+    """The status in ``root``; ``None`` when absent, unsafe or malformed (never a guess)."""
+
+    data = _read_owner_only(_status_path(root))
+    if data is None or not data.endswith(b"\n"):
+        return None
+    try:
+        parsed = strict_json_parse(data[:-1])
+        if type(parsed) is not dict:
+            return None
+        source = cast(dict[str, JsonValue], parsed)
+        if set(source) != _STATUS_FIELDS or source["schema"] != HELPER_STATUS_SCHEMA:
+            return None
+        status = HelperStatus(
+            cast(int, source["generation"]),
+            cast(HelperPhase, source["phase"]),
+            cast(str | None, source["reason"]),
+            cast(str | None, source["correlation_id"]),
+            cast(int, source["pid"]),
+            cast(str, source["started_at"]),
+            cast(ConnectionStyle, source["style"]),
+        )
+    except (TypeError, ValueError):
+        return None
+    return status if status.encode() == data else None
+
+
+def write_helper_status(root: Path, status: HelperStatus) -> None:
+    """Atomically replace the status; raises ``OSError`` when the target folder is gone."""
+
+    _write_owner_only(_status_path(root), status.encode())
+
+
+def read_connection_style(root: Path) -> ConnectionStyle:
+    """The owner's connection style for the SSH target at ``root``: ``relay`` unless ``direct``.
+
+    An absent record is ``relay`` (the default, design v2 U21). A record that cannot be read
+    safely is ``relay`` too: the style the helper serves, which asks nothing more of this
+    computer than the other.
+    """
+
+    data = _read_owner_only(_style_path(root))
+    if data is None or not data.endswith(b"\n"):
+        return "relay"
+    try:
+        parsed = strict_json_parse(data[:-1])
+    except ValueError:
+        return "relay"
+    if (
+        type(parsed) is not dict
+        or set(cast(dict[str, JsonValue], parsed)) != {"schema", "style"}
+        or cast(dict[str, JsonValue], parsed)["schema"] != CONNECTION_STYLE_SCHEMA
+    ):
+        return "relay"
+    style = cast(dict[str, JsonValue], parsed)["style"]
+    return "direct" if style == "direct" else "relay"
+
+
+def write_connection_style(root: Path, style: ConnectionStyle) -> None:
+    """Record the owner's connection style for the target at ``root`` (``config/`` must exist)."""
+
+    if style not in CONNECTION_STYLES:
+        raise ValueError("connection_style_invalid")
+    body: dict[str, JsonValue] = {"schema": CONNECTION_STYLE_SCHEMA, "style": style}
+    _write_owner_only(_style_path(root), canonical_encode(body) + b"\n")
+
+
+def request_profile_refresh(root: Path) -> None:
+    """Leave the marker that asks the target's helper to fetch the server's profile again.
+
+    Written by a client the server refused with ``server_profile_changed``; never a fetch itself
+    (design v2 section 8.9: no profile refresh on a hook's path). Never raises.
+    """
+
+    path = root / "state" / PROFILE_REFRESH_MARKER
+    try:
+        if not existing_owner_only_dir(path.parent):
+            return
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600
+        )
+        os.close(descriptor)
+    except (OSError, PathSafetyError):
+        return
+
+
+def take_profile_refresh_request(root: Path) -> bool:
+    """Remove the refresh marker; whether one was there. Never raises."""
+
+    try:
+        os.unlink(root / "state" / PROFILE_REFRESH_MARKER)
+    except OSError:
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class HelperStamp:
+    """The advisory identity a live helper stamped into its lock file."""
+
+    pid: int
+    version: str
+    schema_manifest_digest: str
+
+
+class HelperLockBusy(Exception):
+    """Another live helper holds this target root's singleton lock."""
+
+
+class HelperLock:
+    """The helper singleton: an exclusive flock on ``state/helper.lock``, stamped."""
+
+    __slots__ = ("_descriptor", "_path")
+
+    def __init__(self, root: Path) -> None:
+        self._path = _lock_path(root)
+        self._descriptor: int | None = None
+
+    def acquire(self, *, version: str, schema_manifest_digest: str) -> None:
+        descriptor = os.open(
+            self._path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+        )
+        try:
+            facts = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(facts.st_mode)
+                or facts.st_uid != os.geteuid()
+                or stat.S_IMODE(facts.st_mode) & 0o077
+            ):
+                raise HelperLockBusy
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                    raise HelperLockBusy from None
+                raise
+            stamp: dict[str, JsonValue] = {
+                "pid": os.getpid(),
+                "version": version,
+                "schema_manifest_digest": schema_manifest_digest,
+            }
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, canonical_encode(stamp) + b"\n")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+
+    def assert_held(self) -> None:
+        """For ``unix_socket.remove_stale_endpoint``: only the holder clears a stale endpoint."""
+
+        if self._descriptor is None:
+            raise RuntimeError("helper_lock_not_held")
+
+    def release(self) -> None:
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is None:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                os.ftruncate(descriptor, 0)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _lock_held(path: Path) -> bool | None:
+    """Whether some process holds the exclusive flock (``None``: cannot be inspected)."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            return True if exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN} else None
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def helper_holder(root: Path) -> HelperStamp | None:
+    """The stamp of the live helper holding ``root``'s lock, or ``None``.
+
+    The stamp alone is advisory: it is returned only while the flock is held and the stamped pid
+    is alive.
+    """
+
+    path = _lock_path(root)
+    data = _read_owner_only(path)
+    if data is None or _lock_held(path) is not True:
+        return None
+    try:
+        parsed = strict_json_parse(data.rstrip(b"\n"))
+    except ValueError:
+        return None
+    if type(parsed) is not dict:
+        return None
+    stamp = cast(dict[str, JsonValue], parsed)
+    pid = stamp.get("pid")
+    version = stamp.get("version")
+    digest = stamp.get("schema_manifest_digest")
+    if (
+        type(pid) is not int
+        or not 1 <= pid < 2**31
+        or type(version) is not str
+        or not 0 < len(version) <= 128
+        or type(digest) is not str
+        or len(digest) != 71
+    ):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return HelperStamp(pid, version, digest)
+
+
+def helper_environment() -> dict[str, str]:
+    """The scrubbed environment a helper runs with: no product variable, no secret.
+
+    The target travels as ``--target``; no isolation variable is set, so neither the helper nor
+    its OpenSSH children inherit anything that could point a FinishUP process at another root.
+    """
+
+    return {name: os.environ[name] for name in _ENVIRONMENT_NAMES if name in os.environ}
+
+
+def _helper_command(target_id: str) -> tuple[str, ...]:
+    return (sys.executable, "-m", "finishup", "helper", "run", "--target", target_id)
+
+
+def _reap(process: subprocess.Popen[bytes]) -> None:
+    """Wait for this process's own helper child, so it never lingers as a zombie (RE-3).
+
+    ``Popen.wait`` waits on that one pid (``waitpid``), never on any other child, and tolerates a
+    child something else already reaped. Errors are dropped: the reaper has nothing to report.
+    """
+
+    with contextlib.suppress(BaseException):
+        process.wait()
+
+
+def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
+    """Start one detached helper for the target at ``root``; its stderr goes to ``log/helper.stderr``.
+
+    The helper outlives the call (its own session) and stops on another process's word (``server
+    use``, ``disconnect``, ``remove``, a zero-network policy) or at its idle exit, while this
+    process may keep running (an MCP bridge, the terminal interface): a daemon thread waits on
+    exactly the spawned pid, so a stopped helper is reaped at once instead of staying
+    ``<defunct>``; nothing here waits on, or signals, a process by pattern. The log folder is made
+    only beneath an existing target folder (a removed target is never made again).
+    """
+
+    log = root / "log"
+    try:
+        if not existing_owner_only_dir(root):
+            raise FileNotFoundError(errno.ENOENT, "target_missing")
+    except PathSafetyError:
+        raise PermissionError(errno.EPERM, "target_unsafe") from None
+    with contextlib.suppress(FileExistsError):
+        log.mkdir(mode=0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(log / "helper.stderr", flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter, module and arguments
+            _helper_command(target_id),
+            close_fds=True,
+            env=helper_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=descriptor,
+            start_new_session=True,
+        )
+    finally:
+        os.close(descriptor)
+    threading.Thread(
+        target=_reap, args=(process,), name="finishup-helper-reaper", daemon=True
+    ).start()
+    return process
+
+
+def stop_helper(root: Path, *, timeout_seconds: float = 5.0) -> bool:
+    """Ask ``root``'s stamped helper to stop and wait for its lock; ``True`` once free.
+
+    Only the pid stamped in the held lock is signalled (AGENTS.md: never by pattern). Returns
+    ``True`` when no helper runs or it released the lock in time, ``False`` otherwise.
+    """
+
+    holder = helper_holder(root)
+    if holder is None:
+        return True
+    try:
+        os.kill(holder.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _lock_held(_lock_path(root)) is False:
+            return True
+        time.sleep(_STOP_POLL_SECONDS)
+    return _lock_held(_lock_path(root)) is False
+
+
+def new_status(
+    previous: HelperStatus | None,
+    phase: HelperPhase,
+    reason: str | None,
+    *,
+    correlation_id: str | None = None,
+    started_at: str,
+    style: ConnectionStyle = "relay",
+) -> HelperStatus:
+    """The next status: the generation moves only when the phase or the reason changes, and with
+    every new helper process (so a latch keyed on it moves)."""
+
+    generation = 1 if previous is None else previous.generation
+    if previous is not None and (previous.phase, previous.reason) != (phase, reason):
+        generation += 1
+    if previous is not None and previous.pid != os.getpid():
+        generation = previous.generation + 1
+    return HelperStatus(generation, phase, reason, correlation_id, os.getpid(), started_at, style)
+
+
+def now_stamp() -> str:
+    return format_rfc3339_ms(datetime.now(UTC))
