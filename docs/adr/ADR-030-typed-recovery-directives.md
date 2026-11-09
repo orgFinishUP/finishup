@@ -308,3 +308,15 @@ a first plan, else the last accepted write's `result_frontier`, retrying under t
 `frontier_digest_mismatch` keep `frontier_refresh_required`, which reads `status`. In tb4n5 the
 shared directive sent six first-plan agents to a status read they had just made (ADR-047
 amendment of 2026-10-13).
+
+## Amendment (2026-11-09, ADR-052): three continuations of the shared authorization gate
+
+Layer 2 of the unified client/server model registers three directives for the phases of a
+connection to a server elsewhere that the shared gate refuses or ends:
+`repository_send_decision_required` (`repository_egress_held`: ask the user once; only they run
+`finishup server repositories add`; on a decline run `keep` and do not ask again),
+`repository_kept_on_this_computer` (`repository_egress_kept`: continue without FinishUP for that
+repository and do not ask again) and `server_connection_renew` (`server_authorization_changed`:
+the selection, record or key the connection was made under changed; repeat the same request with
+the same identity). Each is a protocol reason code with its continuation, rendered on every
+surface like the other remote phases; none names a path, server name or host.

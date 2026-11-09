@@ -1961,3 +1961,18 @@ kept up to date in layer 1; the rest is the contract the layers that open a remo
 - **Local sinks (decision 3).** `agent_context` and `local_human_view` remain non-egress sinks on
   the client machine; with a remote target, the content they receive has first crossed the
   owner-authorized hop from the server.
+
+## Amendment proposed by ADR-052 (2026-11-09): a repository whose grant forbids network egress holds the server hop
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) (layer 2 of the
+unified client/server model) and ADR-051 decision 8's subsection *A repository whose policy on
+this computer allows no network use* add one rule to the FinishUP server hop above: while a server
+elsewhere is selected, a repository whose own grant on this computer composes to no network egress
+is held from that server by default — nothing FinishUP reads or claims for it is sent there — until
+the owner allows it for that target (`finishup server repositories add`, trusted console, typed
+name) or keeps it on this computer (`keep`). Unknown is not held; the hold is the last step of one
+authorization gate checked before any claim, dial or sync and watched while a connection is open.
+The hold covers FinishUP's own reads and claims for the repository, not what an agent in another
+folder reads and its hooks capture (the maintainer's addendum of 2026-11-07). No remote kind is
+open in layer 2, so the hold is built but reached only in process; its reads and records stay
+dormant until a server elsewhere is recorded.

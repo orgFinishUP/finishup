@@ -577,3 +577,15 @@ unchanged on whichever host runs the service.
   variable or a pin is in force `server use` is refused (`selection_overridden`). The typed
   confirmation of a remote target's disclosure on the trusted console (ADR-051 decision 8) arrives
   with the remote kinds; in layer 1 no selection needs one.
+
+## Amendment proposed by ADR-052 (2026-11-09): the credential generation
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) adds an
+owner-only client record beside a remote target's credential: `<target root>/config/
+credential-generation` (`yoetz.credential-generation/1`, a random 128-bit generation and the
+schema, canonical JSON, renamed into place). It holds no secret and grants nothing; it changes only
+when the owner's own command acts on the target's key (`server logout`, `server remove`, and
+`server login` once a key can be stored), never on an automatic token refresh. Every connection
+admitted under the previous generation ends with `server_authorization_changed` and must
+authenticate again under the key now current. A key changed in the platform credential store
+outside FinishUP is not seen. The vault, its states and the local ceremonies are unchanged.

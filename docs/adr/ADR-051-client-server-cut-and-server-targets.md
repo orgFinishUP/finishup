@@ -6,7 +6,10 @@ Rewritten on 2026-11-08 for the **unified client/server model** the maintainer a
 (see *Unified model* and *Maintainer decisions of 2026-11-08* below): the three competing pull
 requests become options of one product, delivered as stacked layers. **Layer 1**, the first of
 them, carries the shared decisions recorded here; every remote kind stays closed
-(`remote_kind_unavailable`) until its own layer opens it. Design gates: protocol (control
+(`remote_kind_unavailable`) until its own layer opens it. **Layer 2** adds shared authorization —
+one gate, authorization generations, consent-envelope types and the repository egress hold —
+recorded in [ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) and
+in decision 8 below; it keeps every remote kind closed. Design gates: protocol (control
 envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
 layout (target roots and the selection file), release/packaging (client and server-edge
 processes, version lockstep) and the `OPEN_QUESTIONS` flip. Maintainer acknowledgement: on
@@ -29,7 +32,7 @@ crossing ledger and the AST boundary test), `src/finishup/cli/command_scope.py`,
 `src/finishup/service/control_protocol.py` and `src/finishup/service/daemon.py`, the
 control-envelope 2.10.0 schemas and fixtures, and the closed tokens in
 `src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Later layers add the
-modules their own amendments of this ADR name.
+modules their own amendments of this ADR name; layer 2's are listed in ADR-052.
 **Amends:** ADR-001, ADR-008, ADR-009, ADR-018, ADR-026, ADR-028 and ADR-031; each carries a dated
 amendment note pointing here, limited to what layer 1 does. **Relates to:** ADR-002 (idempotency
 scope), ADR-010 (Cursor roots), ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz`
@@ -170,9 +173,33 @@ them, `server use` refuses a remote record, and `server login` refuses, each wit
 
 **Not yet built:** every remote kind and its runtime; the background helper and both remote
 connection styles (layer 4); the server profile, handshake and per-request consent binding
-(layer 3); authorization generations and the repository egress hold (layer 2); REST, both HTTP
-server edges, API key scopes, discovery, the official origin preset and the compatibility window
-(layer 5); the server copy and level L2 (layer 6).
+(layer 3); authorization generations and the repository egress hold (layer 2, below); REST, both
+HTTP server edges, API key scopes, discovery, the official origin preset and the compatibility
+window (layer 5); the server copy and level L2 (layer 6).
+
+### Built in layer 2, and not yet built
+
+**Built, in the connection path of every remote root:** one authorization gate in one order
+(zero-network, the disclosure, an open kind, then the repository hold), run before any claim,
+dial, spawn or sync, and its record-only form for hooks (ADR-052 decision 1). In this release it
+opens no kind, so every remote root is still refused as `target_root_is_remote` exactly as in
+layer 1.
+
+**Built, exercised in process, dormant on the network:** authorization generations and the
+watch every claim-bound connection keeps (`server_authorization_changed`), the credential
+generation, consent-envelope types and their partial order (ADR-052), and the repository egress
+hold of decision 8 with its fence (decision 5), its phases (decision 6) and its waiting rows
+(decision 12). Their tests open a remote kind in process; an architecture test keeps the
+release's own set of open kinds empty.
+
+**Dormant until a server elsewhere is recorded** (the owner's answer O3): the session-start read
+of a repository's policy and the owner-only record of repositories it keeps. With no remote
+target on this computer, every surface behaves as in layer 1.
+
+**Hidden:** `finishup server repositories` (its `add` refuses `remote_kind_unavailable` before the
+console; `keep`, `list` and `remove` work).
+
+**Not yet built:** the follow-ups ADR-052 lists for layers 3 to 7.
 
 ## Decisions
 
@@ -776,6 +803,13 @@ remote kinds only, so they are dormant in layer 1, where the `server folders` gr
   never touches a client root. Decision 12 says whose consent and keys govern such an ingest.
 - **Local stays local.** Local targets never declare an agent, so the default path is unchanged.
 
+**Held repositories are fenced** (layer 2, decision 8's repository hold). The agent of a
+connection to a server elsewhere also fences, on every call, the recorded worktrees of every other
+repository held from that same target or kept on this computer, exactly like FinishUP's own
+directories; a held worktree that is or contains the claimed workspace is not fenced, and one
+nested inside it is governed by the claimed repository's grant. An agent whose own connection's
+authorization lapsed answers every call `workspace_unavailable` (ADR-052).
+
 ### 6. Honest outcomes
 
 - **Provenance.** Every piece of workspace evidence obtained through the hub is labelled
@@ -922,6 +956,14 @@ remote kinds only, so they are dormant in layer 1, where the `server folders` gr
   logs, hook output, MCP text or receipts. Remedy text lives once in `protocol/recovery.py`, and
   local remedy text keeps its exact bytes.
 
+- **The authorization phases** (layer 2, ADR-052). A connection to a server elsewhere refused by
+  the shared gate or ended by its authorization's watch is a retryable `service_unavailable` with
+  one of six phases — `zero_network_remote_selected`, `target_reauthorization_required`,
+  `target_root_is_remote`, `repository_egress_held`, `repository_egress_kept`,
+  `server_authorization_changed` — each with its own continuation, rendered alike by the CLI, MCP,
+  hooks, the terminal interface and the menu. A task whose agent's authorization lapsed records
+  the existing `workspace_agent_unavailable` gap; no receipt field is added.
+
 ### 7. Credentials are pluggable and never on an agent-facing surface
 
 - `finishup.client.credentials.CredentialSource` is the interface, so OAuth can replace an API key
@@ -982,7 +1024,9 @@ remote kinds only, so they are dormant in layer 1, where the `server folders` gr
 
 Layer 1 status: every rule of this decision guards a remote target, and none can be added or
 selected (decision 3), so the consent confirmation is never reached and the zero-network refusals
-are dormant. Two parts act already: the owner-only record of what this computer's everyday service
+are dormant. Layer 2 runs these refusals inside one shared gate (ADR-052) and adds the repository
+egress hold (the subsection at the end of this decision); both stay dormant while no remote kind
+is open. Two parts act already: the owner-only record of what this computer's everyday service
 last reported (*Remember*, below) is kept up to date, and the last line of defence still refuses
 a remote record that something other than `server use` selected. The unified model binds consent
 to the server's offer: a consent envelope compared by an explicit partial order (layer 2) and a
@@ -1136,13 +1180,16 @@ for the kinds that need them; the trusted-console rule stays.
   nothing for such a target and the switch has nothing to stop or report. Every surface that
   switches says so by generated id and kind. When a stop does not finish within its wait the
   selection is still cleared, and the command says so on stderr with `finishup server disconnect`
-  as the way to finish it. Until open agent sessions restart, a running MCP bridge keeps the
-  target it started with. A selection that cannot be read names no target, so switching away
+  as the way to finish it. Until open agent sessions restart, a running MCP bridge keeps a server
+  on this computer it started with; a bridge connected to a server elsewhere ends that connection
+  once the selection changes and follows the new selection on its next request (the owner's
+  answer O1, ADR-052). A selection that cannot be read names no target, so switching away
   from it stops nothing (`finishup server disconnect NAME` stops a target's connection).
 
-  **Honest limits:** a connection already open when the policy changes is
-  not cut (its next connection is refused); after switching, open agent sessions keep the
-  target they started with until they restart, and their connections are refused; after an
+  **Honest limits:** a connection already open when the policy changes ends at its next check
+  (within about a second, layer 2's watch; a request already under way may finish); after
+  switching, an open agent session on a server elsewhere follows the new selection (O1), while
+  one that started on a server on this computer keeps it until it restarts; after an
   upgrade from a release without the marker, nothing is remembered until this computer's policy
   is next reported. Agents cannot change the policy or the selection, so no MCP tool surfaces or
   answers the choice.
@@ -1195,6 +1242,98 @@ for the kinds that need them; the trusted-console rule stays.
   server).
 - **Honest limit.** This is a trusted-console decision, not a vault-reauthenticated ceremony,
   because a client machine may have no vault.
+
+#### A repository whose policy on this computer allows no network use
+
+Maintainer decision of 2026-11-07 (round 4), specified in the round-5 design on issue #1308 with
+the maintainer's addendum of the same day and the critic review the addendum made binding; built
+in layer 2 on the shared gate (ADR-052). While a server on another machine, a port or the web is
+selected, a repository whose own privacy grant on this computer composes to no network egress is
+**held** from it: nothing FinishUP reads or claims for that repository is sent there until the
+owner decides. Interpretation:
+
+1. *Held* means this computer's everyday FinishUP reported, live or last, that the repository's
+   grant is `granted` and its composed policy does not permit network egress, while the machine
+   row permits it (machine-wide zero-network is refused earlier, as above), for a remote target
+   with no current choice for that repository. A repository with no grant inherits the machine row
+   and is never held; named local servers are out of scope.
+2. *Unknown is not held:* no report, an unreadable one, a failed read, an isolation variable or
+   pin, or a computer never set up.
+3. *Held is retryable*, never a refusal of the task: `repository_egress_held` (continuation
+   `repository_send_decision_required`: the agent asks the user once; only the user runs `finishup
+   server repositories add` on the trusted console and types the server's name; on a decline it
+   runs `finishup server repositories keep` and does not ask again). A kept repository is
+   `repository_egress_kept` (`repository_kept_on_this_computer`: continue without FinishUP for it,
+   never ask again).
+4. *One decision for every remote kind.*
+
+**Detection and order.** The hold is the gate's last step (ADR-052 decision 1): after the record,
+zero-network, the disclosure and an open kind, and before any claim, dial, start or sync. The
+repository's root is resolved once (its one Git read); its key is `sha256` over the shared
+repository identity, so every linked worktree shares it.
+
+**Records.** `<ambient state dir>/servers/everyday-repositories.json`
+(`yoetz.everyday-repository-policy/1`, owner-only, atomic): per repository key, whether it allows
+network use, when the current no-network stretch began (`no_network_since`), when it was reported
+and up to eight worktrees; at most 256 entries, permitted entries evicted first. It is written by a
+live read at session start (at most 0.5 s, once per repository per day or when older than the last
+machine report, in a fresh context on its own event loop, before any attach, status or drain), by
+every privacy ceremony and `provider status` from what the service already answered, and after a
+change here (a decision whose repository is not known re-reads every permitted entry within 3 s and
+forgets the ones it cannot). While the machine row forbids network use a repository's own grant
+cannot be told apart, so its entry is forgotten. **Dormant until a server elsewhere is recorded**
+(O3): with no remote target record on this computer none of this reads or writes anything, and
+there is no report from before the first one; removing the last one deletes the record.
+`<target root>/config/repositories.json` (`yoetz.server-repositories/1`) keeps the owner's choices
+for that target — `send` (allowed anyway, under disclosure version 1) or `keep` — each bound to the
+`no_network_since` it was made in, so a grant that leaves no-network and returns asks again
+(`grant_changed`); machine-row changes and target edits do not lapse a choice.
+
+**Fence and own hold.** The workspace agent of any other repository's connection to the same target
+fences the held repositories' recorded worktrees from outside reads, listed folders, outside read
+roots and `lstat_candidates`, read per call (decision 5). A held worktree that is, or contains, the
+claimed workspace is not fenced (that would empty its own reads), and a repository nested inside the
+claimed one is governed by the claimed repository's own grant (critic gap 7). An agent whose own
+connection's authorization lapsed — its repository held or kept among the causes — answers every
+call `workspace_unavailable`.
+
+**Texts.** Every host (Codex, Claude Code, Cursor) receives one byte-identical session-start text
+per state (`repository_hold.hook_context`): the attach form substitutes for the "call start"
+advice instead of being prepended (critic gap 8), an unconsented form names no observations, and a
+mapped form serves resume and compact. CLI, MCP, the terminal interface and the menu render the
+phases as every authorization refusal (ADR-052). `server repositories add|keep|list|remove`,
+`server status` (`target.repositories`) and the terminal interface's `/server` item show and change
+the choices; the group is hidden and `add` refuses `remote_kind_unavailable` while no kind is open
+(O4).
+
+**Honest limits.**
+
+1. In this release no server elsewhere can be used, so nothing is held yet.
+2. Unknown is not held: a grant never reported since this release (or since the first server
+   elsewhere was recorded) is not held until it is reported.
+3. Past 256 entries the oldest are evicted; an evicted held entry becomes unknown.
+4. A request already under way may finish; open connections end within about a second. "Nothing
+   more", never "never sent"; what the server received stays there.
+5. Fencing covers recorded worktrees only (at most eight per repository), and a fenced read is not
+   counted on receipts (O7; the count lands with level-L2 provenance).
+6. Connections that name no repository are not held.
+7. A same-user process can edit either record; the trusted console stops agents from using
+   FinishUP's own commands, not same-user file writes. A hand edit does end open connections
+   (ADR-052's generation).
+8. After an allow, the observations recorded while held are sent, without the content captured
+   while held.
+9. A choice survives machine-row changes and lapses only when the repository's no-network stretch
+   is broken or the report is lost; a no → yes → no change the client never saw keeps the choice
+   (critic gap 12). Binding the choice to the service's authority digest was rejected because it
+   lapses on unrelated machine changes.
+10. Per-prompt cues are unchanged; each refused call is cheap and carries the directive.
+11. Under required startup a held repository keeps tools blocked until the owner decides, switches
+    to this computer's server, or returns startup to optional.
+12. **Hook content from other folders is still sent** (the addendum's answer 2): the hold covers
+    what FinishUP itself reads and claims for the repository, not what an agent in another folder
+    reads and its hooks capture.
+13. A repository nested inside another is governed by the outer repository's grant.
+14. Processes older than this release keep its rules until they restart.
 
 ### 9. Scopes, not self-declared client kinds, bound a key
 
@@ -1344,6 +1483,11 @@ before.
   follow-up; both need a control method of their own. Follow-up owner: issue #903, the remote
   service request this ADR scopes, until a dedicated issue is filed.
 
+- **Held rows wait** (layer 2, decision 8's repository hold). Observations of a held or kept
+  repository wait in this computer's outbox; both drain sites record the phase and leave the rows
+  pending. After an allow they are delivered, without the content captured while the repository
+  was held, as the `server repositories add` disclosure says.
+
 ## Topology
 
 Layer 1 has one topology, the unix style. Every hook, MCP bridge, CLI and terminal process dials
@@ -1394,6 +1538,8 @@ kind opens.
 | `server folders add NAME FOLDER` (trusted console) | `server folders remove NAME FOLDER` or `--all` (also clears a damaged record, to an empty one in `listed` mode; applies from the workspace agent's next read, in either mode, and a read already in progress may still return files, and a review the server already prepared may still send what it read) | `server folders list NAME`, `server status [--json]`, `/server` status |
 | `server connect [NAME]` | `server disconnect [NAME]` (stops only what that root's runtime stamped; never by name or pattern) | `server status`, `server test` |
 | This computer's everyday service reports its machine-scope policy (the zero-network check, `privacy show`, a privacy change here): the owner-only marker of what it last reported (decision 8) | the next report replaces it; deleting FinishUP's folders removes it; the zero-network check removes it once the everyday installation no longer exists | `server status [--json]` (`policy_read`, `last_reported_at`), `server list`, `setup status --next`, the menu home, `/server` and the header |
+| Layer 2, once a server elsewhere is recorded: this computer's FinishUP reports a repository's policy (a session start, a privacy ceremony or change here, `provider status`): the owner-only repository report (decision 8) | the next report replaces it; a report whose folders are all gone is forgotten by `server repositories list`; removing the last server elsewhere deletes the record; deleting FinishUP's folders removes it | `server repositories list`, `server status [NAME] [--json]` (`target.repositories`) |
+| Layer 2: `server repositories add` (trusted console; refused `remote_kind_unavailable` while no remote kind is open) or `keep` | `server repositories remove [NAME] [--repository FOLDER]` or `--all` (also repairs a damaged record) | `server repositories list`, `server status [NAME] [--json]`, `/server` and the header |
 
 Deleting a target's root removes every client-side artifact of that target except an API key
 kept in the platform credential store (service `yoetz.server-credential.v1`, account = target id),
