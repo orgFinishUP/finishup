@@ -52,6 +52,12 @@ _FORBIDDEN: Final = (
     "finishup.client.transports",
     "finishup.client.credentials",
     "finishup.client.target_runtime",
+    # ADR-052 (design v2 section 8.9): the SSH helper, its discovery and profile refresh, and its
+    # runtime never load on a hook's path; a hook dials through ``client.helper_status`` and
+    # ``client.ssh_transport`` only, lazily, for a server elsewhere.
+    "finishup.client.helper",
+    "finishup.client.helper_runtime",
+    "finishup.client.ssh_discovery",
 )
 # Drift ceiling: the measured set after the diet is well under this, so a
 # future eager import shows up here even if it is not on the named list.
@@ -121,6 +127,8 @@ def test_client_targets_module_is_hook_safe() -> None:
         "finishup.client.repository_hold",
         "finishup.client.everyday_repository",
         "finishup.client.authorization",
+        "finishup.client.helper_status",
+        "finishup.client.ssh_transport",
     ],
 )
 def test_the_repository_hold_modules_are_hook_safe(module: str) -> None:
@@ -302,3 +310,22 @@ def test_required_startup_hooks_keep_the_import_diet(
         json.loads(completed.stdout.decode("utf-8"))
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_service_client_path_to_an_ssh_server_stays_off_the_helper() -> None:
+    """ADR-052, design v2 section 8.9: what a hook loads when it connects (the service client)
+    reaches an SSH server's helper or ``ssh -W`` stream through the light modules only; the
+    helper process, discovery and the profile refresh are never imported on that path."""
+
+    loaded = set(
+        _modules(
+            "import finishup.service.client as client\n"
+            "import finishup.client.helper_status, finishup.client.ssh_transport"
+        )
+    )
+    for module in (
+        "finishup.client.helper",
+        "finishup.client.helper_runtime",
+        "finishup.client.ssh_discovery",
+    ):
+        assert module not in loaded, module
