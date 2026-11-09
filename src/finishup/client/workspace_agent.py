@@ -77,7 +77,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from finishup.adapters.approved_checks import ApprovedCheckCommand, ApprovedCheckRunner
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
@@ -400,6 +400,7 @@ class WorkspaceAgentHandler:
         outside_reads: Callable[[], OutsideReads] | None = None,
         held_roots: Callable[[], tuple[str, ...]] | None = None,
         own_authorization: _OwnAuthorization | None = None,
+        role: Literal["connection", "background"] = "connection",
     ) -> None:
         """``workspace`` is the locator the connection's claim was computed from; never the
         filesystem root, which no claim names (``workspace_locator_path_invalid``).
@@ -436,6 +437,9 @@ class WorkspaceAgentHandler:
         repository's hold included): once it refuses, every call is answered
         ``workspace_unavailable``, so background work between the connection's own checks reads
         nothing more (ADR-052).
+
+        ``role`` is declared in the hello (ADR-052, design v2 section 8.5): ``connection`` for the
+        agent of the connection in front of the workspace, ``background`` for the helper's.
         """
 
         if type(workspace) is not WorkspaceLocator:
@@ -451,7 +455,7 @@ class WorkspaceAgentHandler:
                 key=str.encode,
             )
         )
-        self._declaration = WorkspaceAgentDeclaration(offered, max_reply_bytes)
+        self._declaration = WorkspaceAgentDeclaration(offered, max_reply_bytes, role=role)
         self._operations = frozenset(offered)
         self._root = workspace.path
         self._protected = directories

@@ -1,0 +1,1109 @@
+"""``finishup helper run --target <id>``: the one background helper of an SSH server (design v2 §3).
+
+One process per SSH target (``state/helper.lock``), started on demand by a client that needs it,
+never by ``service run``; it exits 15 minutes after its last client (a relayed connection or a
+served registration) and is stopped by ``server disconnect``, ``remove``, ``use <other>`` and
+``set --style`` through its stamped pid. Its roles:
+
+1. **Relay** (the default style, U21): it serves ``<target root>/run/control.sock`` with the
+   service's owner-only fences and peer-UID check, and carries each local connection over one
+   channel of its OpenSSH master's ``-L`` forward into the server's owner-only control socket. It
+   reads the hello (a hello naming a ``workspace_locator`` is never forwarded: a path on this
+   computer never leaves it), and every later client frame is checked against the helper's own
+   admission before it is forwarded (ADR-052, FR-2); frames from the server pass unparsed.
+2. **Background workspace agent** per registration (``client.helper_registrations``, FR-1): a
+   claim-bound connection whose agent declares ``role: background``, built through
+   ``remote_workspace_binding`` under the helper's admission, so the repository hold is decided
+   before the claim and the agent fences held repositories and answers nothing once its check
+   lapses. It never counts as client activity and never starts the server's service.
+3. **Observation drain**: what this computer's hooks captured for each served workspace is
+   delivered over its agent every 30 seconds, as its own task (never holding the tick or a stop),
+   and once more, bounded, as the helper stops, never while this computer is zero-network.
+4. **Profile cache and re-check** (design v2 sections 2.3 and 8.9): the server's profile is
+   fetched (``client.ssh_discovery``) and recorded (``client.server_profile.refresh_profile``) at
+   start, every 10 minutes while an upstream was used, when one of its own connections is refused
+   ``server_profile_changed`` and when a client left the refresh marker; at most every 30 seconds.
+
+**Admission (FR-3).** Everything above runs only under the helper's own admission through the
+shared gate (``authorization.authorize_target``: pinned to its root, steps 2 to 5 and the
+generation). A lapse (the owner's ``logout``/``remove`` credential bump, a consent or record
+change, ADR-052 O8) ends every relayed connection and every agent; the next local connection is
+admitted again. While this computer last reported a zero-network policy the helper relays nothing,
+records ``zero_network_remote_selected``, asks its OpenSSH master to exit and stops at once.
+
+Its status record (``client.helper_status``) names every outage with a closed phase, so a client
+whose connection closed can say why. Nothing here logs or raises a path, host or name.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import contextlib
+import os
+import signal
+import socket
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Protocol, cast
+
+from finishup import __version__
+from finishup.adapters.control.unix_socket import (
+    AuthenticatedUnixStream,
+    EndpointKind,
+    LocalControlTransportError,
+    UnixEndpointListener,
+    authenticate_peer,
+    bind_control_listener,
+    connect_owner_only_endpoint,
+    remove_stale_endpoint,
+)
+from finishup.client.attribution import ConnectionTransport
+from finishup.client.helper_status import (
+    HELPER_IDLE_SECONDS,
+    ConnectionStyle,
+    HelperLock,
+    HelperLockBusy,
+    HelperPhase,
+    HelperStatus,
+    new_status,
+    now_stamp,
+    read_connection_style,
+    read_helper_status,
+    take_profile_refresh_request,
+    write_helper_status,
+)
+from finishup.client.ssh_transport import (
+    SshControlStream,
+    SshMaster,
+    UpstreamUnavailable,
+    direct_argv,
+    direct_remote_argv,
+    exit_master,
+    resolve_ssh,
+    run_ssh,
+)
+from finishup.client.targets import ServerTarget, TargetError
+from finishup.service.control_protocol import (
+    MAX_CONTROL_FRAME_BYTES,
+    ControlProtocolError,
+    ControlStream,
+    encode_control_frame,
+    read_control_frame,
+)
+
+if TYPE_CHECKING:
+    from finishup.client.authorization import ConnectionAuthorization
+    from finishup.client.helper_registrations import Registration, ServedWorkspace
+    from finishup.client.server_profile import FetchedProfile
+    from finishup.service.client import ClientWorkspaceBinding, ServiceClient
+
+__all__ = [
+    "DRAIN_INTERVAL_SECONDS",
+    "REFRESH_INTERVAL_SECONDS",
+    "Helper",
+    "HelperAgent",
+    "Upstream",
+    "run_helper",
+]
+
+# How often the helper delivers what this computer's hooks captured, per served workspace.
+DRAIN_INTERVAL_SECONDS: Final = 30.0
+# How often the helper fetches the server's profile again while an upstream is in use.
+REFRESH_INTERVAL_SECONDS: Final = 600.0
+# The fewest seconds between two profile fetches, whatever asked for them.
+_REFRESH_MIN_SECONDS: Final = 30.0
+# How often the registrations are read again even when their folder did not change.
+_AGENT_SYNC_SECONDS: Final = 30.0
+_HELLO_SECONDS: Final = 10.0
+_TICK_SECONDS: Final = 1.0
+_PUMP_CHUNK: Final = 65_536
+_FRAME_PREFIX: Final = 4
+# One extra remote ``service start`` per this window at most, for a client's connection only.
+_RESTART_WINDOW_SECONDS: Final = 30.0
+# The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
+_SHUTDOWN_DRAIN_SECONDS: Final = 2.0
+_RECONNECT_MIN_SECONDS: Final = 0.5
+_RECONNECT_MAX_SECONDS: Final = 30.0
+_ZERO_NETWORK: Final = "zero_network_remote_selected"
+_PROFILE_CHANGED: Final = "server_profile_changed"
+
+
+type Dial = Callable[[], Awaitable[ControlStream]]
+
+
+class Upstream(Protocol):
+    """How the helper reaches the server's control endpoint (one fresh raw stream a call)."""
+
+    async def ensure(self) -> None: ...
+
+    async def open_stream(self) -> ControlStream: ...
+
+    async def start_remote_service(self) -> bool: ...
+
+    async def close(self) -> None: ...
+
+    async def zero_network(self) -> None: ...
+
+
+class SshRelayUpstream:
+    """The relay style: one warm master; each stream is one channel of its ``-L`` forward."""
+
+    def __init__(self, root: Path, record: ServerTarget, *, ssh: str | None = None) -> None:
+        self._master = SshMaster(root, record, ssh=ssh)
+        self._root = root
+        self._record = record
+
+    async def ensure(self) -> None:
+        await self._master.ensure()
+
+    async def open_stream(self) -> ControlStream:
+        for attempt in range(2):
+            await self._master.ensure()
+            try:
+                return await connect_owner_only_endpoint(self._master.upstream_path)
+            except LocalControlTransportError:
+                # The master's forward is gone (a dropped connection): restart it once.
+                await self._master.close()
+                if attempt == 0:
+                    continue
+        raise UpstreamUnavailable("remote_unreachable")
+
+    async def start_remote_service(self) -> bool:
+        return await self._master.run_remote("service", "start") == 0
+
+    async def close(self) -> None:
+        await self._master.close()
+
+    async def zero_network(self) -> None:
+        await self._master.close()
+
+
+class SshDirectUpstream:
+    """The direct style: each stream is its own ``ssh -W`` through a ``ControlMaster=auto``.
+
+    The master is OpenSSH's own (``ControlPersist``); the helper asks it to exit only when this
+    computer turns zero-network (``server disconnect`` and the other stops ask it themselves).
+    """
+
+    def __init__(self, root: Path, record: ServerTarget, *, ssh: str | None = None) -> None:
+        self._root = root
+        self._record = record
+        self._ssh = ssh
+
+    def _executable(self) -> str:
+        if self._ssh is None:
+            self._ssh = resolve_ssh()
+        return self._ssh
+
+    async def ensure(self) -> None:
+        return None
+
+    async def open_stream(self) -> ControlStream:
+        return await SshControlStream.open(
+            direct_argv(self._executable(), self._root, self._record)
+        )
+
+    async def start_remote_service(self) -> bool:
+        code, _stdout, _stderr = await run_ssh(
+            direct_remote_argv(
+                self._executable(), self._root, self._record, "service", "start", "--json"
+            ),
+            seconds=30.0,
+        )
+        return code == 0
+
+    async def close(self) -> None:
+        return None
+
+    async def zero_network(self) -> None:
+        await exit_master(self._executable(), self._root, self._record)
+
+
+class _RelayEnded(Exception):
+    """A relayed connection ended because its admission refused a frame."""
+
+
+async def _wait(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+class HelperAgent:
+    """One served registration's background agent connection, kept and reconnected until closed.
+
+    The connection carries the real ``WorkspaceAgentHandler`` (``role: background``) and is
+    checked against the binding's own authorization (the helper's admission bound to the
+    repository's hold) before every frame and on its watch. Before each attempt ``may_connect``
+    (the binding's check and the target's record) is asked: once it refuses, the agent stops for
+    good; the helper opens a new one if the registration is served again. It never starts the
+    server's service.
+    """
+
+    __slots__ = (
+        "_binding",
+        "_client",
+        "_closing",
+        "_dial",
+        "_drain",
+        "_drain_lock",
+        "_on_profile_changed",
+        "_reconnect_wait",
+        "_supervisor",
+        "_transport",
+        "registration",
+    )
+
+    def __init__(
+        self,
+        registration: Registration,
+        binding: ClientWorkspaceBinding,
+        drain: object,
+        dial: Dial,
+        *,
+        transport: ConnectionTransport,
+        on_profile_changed: Callable[[], None],
+        reconnect_wait: Callable[[float], Awaitable[None]] = _wait,
+    ) -> None:
+        self.registration = registration
+        self._binding = binding
+        self._drain = drain
+        self._dial = dial
+        self._transport = transport
+        self._on_profile_changed = on_profile_changed
+        self._reconnect_wait = reconnect_wait
+        self._client: ServiceClient | None = None
+        self._closing = False
+        self._drain_lock = asyncio.Lock()
+        self._supervisor: asyncio.Task[None] | None = None
+
+    def __repr__(self) -> str:
+        return "HelperAgent(<redacted>)"
+
+    @property
+    def alive(self) -> bool:
+        return not self._closing and self._supervisor is not None and not self._supervisor.done()
+
+    @property
+    def client(self) -> ServiceClient | None:
+        client = self._client
+        return None if client is None or client.closed else client
+
+    def start(self) -> None:
+        if self._supervisor is None:
+            self._supervisor = asyncio.create_task(self._supervise())
+
+    def _may_connect(self) -> bool:
+        check = self._binding.authorization
+        try:
+            return check is None or check.refusal() is None
+        except Exception:  # noqa: BLE001 - a check that cannot be made connects nothing
+            return False
+
+    async def _supervise(self) -> None:
+        from finishup.ports.control import ControlClientKind, ControlError
+        from finishup.service.client import connect_service_via
+
+        delay = _RECONNECT_MIN_SECONDS
+        while not self._closing:
+            if not self._may_connect():
+                # Never connect again: the target was removed, its authorization changed or its
+                # repository is held now (A-REMOVE-RACE; ADR-052).
+                return
+            try:
+                client = await connect_service_via(
+                    self._dial,
+                    ControlClientKind.CLI,
+                    workspace_binding=self._binding,
+                    authorization=self._binding.authorization,
+                    transport=self._transport,
+                )
+            except ControlError as error:
+                if error.phase == _PROFILE_CHANGED:
+                    self._on_profile_changed()
+                await self._reconnect_wait(delay)
+                delay = min(delay * 2, _RECONNECT_MAX_SECONDS)
+                continue
+            except Exception:  # noqa: BLE001 - unreachable or mid-restart: try again, bounded
+                await self._reconnect_wait(delay)
+                delay = min(delay * 2, _RECONNECT_MAX_SECONDS)
+                continue
+            delay = _RECONNECT_MIN_SECONDS
+            self._client = client
+            try:
+                await client.wait_closed()
+            finally:
+                self._client = None
+                with contextlib.suppress(Exception):
+                    await client.close()
+            if not self._closing:
+                await self._reconnect_wait(_RECONNECT_MIN_SECONDS)
+
+    async def drain(self, *, may_send: Callable[[], bool]) -> None:
+        """Deliver this workspace's captured observations over the live connection, if any.
+
+        Never raises; nothing is sent while ``may_send`` refuses (zero-network, a lapsed check).
+        """
+
+        client = self.client
+        if client is None or not may_send() or not self._may_connect():
+            return
+        async with self._drain_lock:
+            with contextlib.suppress(Exception):
+                await cast("_Drain", self._drain).drain(client)
+
+    async def aclose(self) -> None:
+        self._closing = True
+        supervisor, self._supervisor = self._supervisor, None
+        if supervisor is not None:
+            supervisor.cancel()
+            await asyncio.gather(supervisor, return_exceptions=True)
+        client, self._client = self._client, None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
+        with contextlib.suppress(Exception):
+            cast("_Drain", self._drain).close()
+
+
+class _Drain(Protocol):
+    async def drain(self, client: ServiceClient) -> object: ...
+
+    def close(self) -> None: ...
+
+
+type AgentOpener = Callable[
+    [Path, ServerTarget, "Registration", "ConnectionAuthorization", Dial],
+    Awaitable["HelperAgent | None"],
+]
+
+
+async def open_helper_agent(
+    root: Path,
+    record: ServerTarget,
+    registration: Registration,
+    admission: ConnectionAuthorization,
+    dial: Dial,
+    *,
+    transport: ConnectionTransport,
+    on_profile_changed: Callable[[], None],
+) -> HelperAgent | None:
+    """The background agent for ``registration``; ``None`` when it may not be served now.
+
+    The binding is built again from the registration's worktree under the target's own salt and
+    the helper's admission (the repository's hold decided before the claim); a binding whose claim
+    is not the registration's (a moved folder, an edited record) is never served.
+    """
+
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.client.observation_outbox import ClientObservationDrain
+    from finishup.client.remote_binding import remote_workspace_binding
+    from finishup.ports.control import WorkspaceLocator
+
+    try:
+        salt = base64.b64decode(cast(str, record.claim_salt), validate=True)
+    except (TypeError, ValueError, binascii.Error):
+        return None
+    locator = WorkspaceLocator(registration.worktree)
+    try:
+        binding = await remote_workspace_binding(
+            locator,
+            salt,
+            serve_workspace=True,
+            target=record,
+            authorization=admission,
+            role="background",
+        )
+    except (RepositoryIdentityError, TargetError, ValueError, OSError):
+        return None
+    if binding.claim != registration.claim or binding.agent is None:
+        return None
+    # The root's own state, named: the drain's store reads run on executor threads.
+    drain = ClientObservationDrain(locator, state=root / "state")
+    agent = HelperAgent(
+        registration,
+        binding,
+        drain,
+        dial,
+        transport=transport,
+        on_profile_changed=on_profile_changed,
+    )
+    agent.start()
+    return agent
+
+
+@dataclass(slots=True)
+class _Refresh:
+    """When the profile was last fetched, and why the next fetch is due."""
+
+    last: float | None = None
+    requested: bool = True
+    task: asyncio.Task[None] | None = None
+
+
+type Refresher = Callable[[ServerTarget], Awaitable[None]]
+
+
+async def _refresh_over_ssh(record: ServerTarget) -> None:
+    """Fetch the server's profile over OpenSSH and record it under the registry lock."""
+
+    from finishup.client.server_profile import refresh_profile
+    from finishup.client.ssh_discovery import fetch_profile_async
+    from finishup.client.targets import registry_lock
+
+    fetched: FetchedProfile = await fetch_profile_async(record)
+
+    def record_it() -> None:
+        with registry_lock():
+            refresh_profile(record, fetched)
+
+    await asyncio.to_thread(record_it)
+
+
+class Helper:
+    """One SSH target's helper: relay, background agents, drain, profile refresh, idle exit."""
+
+    def __init__(
+        self,
+        root: Path,
+        record: ServerTarget,
+        *,
+        style: ConnectionStyle = "relay",
+        upstream: Upstream | None = None,
+        idle_seconds: float = HELPER_IDLE_SECONDS,
+        drain_interval: float = DRAIN_INTERVAL_SECONDS,
+        refresh_interval: float = REFRESH_INTERVAL_SECONDS,
+        agent_opener: AgentOpener | None = None,
+        refresher: Refresher | None = None,
+        tick: Callable[[], Awaitable[None]] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        ssh: str | None = None,
+    ) -> None:
+        if record.kind != "ssh":
+            raise ValueError("target_not_ssh")
+        self._root = root
+        self._record = record
+        self._style: ConnectionStyle = style
+        if upstream is None:
+            upstream = (
+                SshRelayUpstream(root, record, ssh=ssh)
+                if style == "relay"
+                else SshDirectUpstream(root, record, ssh=ssh)
+            )
+        self._upstream = upstream
+        self._idle_seconds = idle_seconds
+        self._drain_interval = drain_interval
+        self._refresh_interval = refresh_interval
+        self._agent_opener = agent_opener
+        self._refresher: Refresher = refresher or _refresh_over_ssh
+        self._tick = tick or (lambda: asyncio.sleep(min(_TICK_SECONDS, drain_interval)))
+        self._clock = clock
+        self._status: HelperStatus | None = read_helper_status(root)
+        self._started_at = now_stamp()
+        self._admission: ConnectionAuthorization | None = None
+        self._active = 0
+        self._last_activity = clock()
+        self._last_upstream_use: float | None = None
+        self._last_drain = clock()
+        self._last_sync: float | None = None
+        self._registrations_stamp: object = None
+        self._agents: dict[tuple[object, ...], HelperAgent] = {}
+        self._served_count = 0
+        self._delivery: asyncio.Task[None] | None = None
+        self._refresh = _Refresh()
+        self._relays: set[asyncio.Task[None]] = set()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._stop = asyncio.Event()
+        self._stop_reason = "stop_requested"
+        self._last_restart = -_RESTART_WINDOW_SECONDS
+
+    # -- status ------------------------------------------------------------------------------
+
+    @property
+    def stop_reason(self) -> str:
+        return self._stop_reason
+
+    def _write_status(self, phase: HelperPhase, reason: str | None) -> None:
+        previous = self._status
+        if (
+            previous is not None
+            and previous.started_at == self._started_at
+            and previous.pid == os.getpid()
+            and (previous.phase, previous.reason) == (phase, reason)
+        ):
+            return
+        correlation_id = None
+        if phase == "unavailable" and reason is not None:
+            from finishup.observability.logging import record_public_error_without_raising
+
+            correlation_id = record_public_error_without_raising(
+                component="client.helper", operation="helper_upstream", reason=reason
+            )
+        status = new_status(
+            previous,
+            phase,
+            reason,
+            correlation_id=correlation_id,
+            started_at=self._started_at,
+            style=self._style,
+        )
+        try:
+            write_helper_status(self._root, status)
+        except OSError:
+            # The target folder is gone (``server remove``): nothing is made again.
+            self.request_stop("target_removed")
+            return
+        self._status = status
+
+    # -- admission (FR-3) -----------------------------------------------------------------------
+
+    def _admitted(self) -> ConnectionAuthorization | None:
+        """The helper's admission now, admitting again after a lapse; ``None`` while refused.
+
+        A refusal is recorded as the status's phase; zero-network stops the helper.
+        """
+
+        from finishup.client.authorization import authorize_target
+
+        admission = self._admission
+        if admission is not None and admission.refusal() is None:
+            return admission
+        if admission is not None:
+            # Lapsed: every connection made under it ends (O8: the relay too).
+            self._admission = None
+            self._end_relays()
+        try:
+            from finishup.client.targets import read_target
+
+            current = read_target(self._root)
+            if current is None or current.target_id != self._record.target_id:
+                self.request_stop("target_removed")
+                return None
+            admission = authorize_target(current)
+        except TargetError as error:
+            phase = error.reason
+            if phase == _ZERO_NETWORK:
+                self._refuse_zero_network()
+                return None
+            from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+            self._write_status(
+                "unavailable",
+                phase if phase in REMOTE_CONNECTION_PHASES else "server_authorization_changed",
+            )
+            return None
+        self._admission = admission
+        return admission
+
+    def _zero_network(self) -> bool:
+        from finishup.client.everyday_policy import last_reported_zero_network
+
+        try:
+            return last_reported_zero_network() is not None
+        except Exception:  # noqa: BLE001 - a record that cannot be read refuses nothing new
+            return False
+
+    def _refuse_zero_network(self) -> bool:
+        """Stop when this computer last reported a zero-network policy; whether it did."""
+
+        if not self._zero_network():
+            return False
+        if not (self._stop.is_set() and self._stop_reason == _ZERO_NETWORK):
+            self._write_status("unavailable", _ZERO_NETWORK)
+            self.request_stop(_ZERO_NETWORK)
+        return True
+
+    def _may_send(self) -> bool:
+        if self._stop.is_set() and self._stop_reason == _ZERO_NETWORK:
+            return False
+        if self._zero_network():
+            return False
+        admission = self._admission
+        return admission is not None and admission.refusal() is None
+
+    # -- the relay -------------------------------------------------------------------------------
+
+    def _end_relays(self) -> None:
+        for task in tuple(self._relays):
+            task.cancel()
+
+    async def _dial_own(self) -> ControlStream:
+        """A connection to this helper's relay that bypasses its endpoint (background agents).
+
+        It is relayed exactly like a client's, but it is not client activity and never starts
+        the server's service.
+        """
+
+        ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            relayed = AuthenticatedUnixStream(theirs, authenticate_peer(theirs))
+            dialled = AuthenticatedUnixStream(ours, authenticate_peer(ours))
+        except BaseException:
+            ours.close()
+            theirs.close()
+            raise
+        self._spawn_relay(relayed, own=True)
+        return dialled
+
+    def _spawn_relay(self, local: AuthenticatedUnixStream, *, own: bool) -> None:
+        task = asyncio.create_task(self._serve_local(local, own=own))
+        self._relays.add(task)
+        task.add_done_callback(self._relays.discard)
+
+    async def _open_channel(self, hello: bytes, *, restart: bool) -> tuple[ControlStream, bytes]:
+        """One upstream stream with the hello sent, and the first answered bytes.
+
+        With ``restart`` (a client's connection) a remote service that is not running is started
+        once with the server's own launcher; a background agent's connection never starts it.
+        """
+
+        for attempt in range(2):
+            await self._upstream.ensure()
+            upstream = await self._upstream.open_stream()
+            try:
+                await upstream.send_all(hello)
+                first = await upstream.receive(_PUMP_CHUNK)
+            except (LocalControlTransportError, OSError):
+                first = b""
+            if first:
+                return upstream, first
+            with contextlib.suppress(Exception):
+                await upstream.aclose()
+            # sshd could not reach the server's endpoint: its service is not running.
+            now = self._clock()
+            if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
+                self._last_restart = now
+                if await self._upstream.start_remote_service():
+                    continue
+            break
+        raise UpstreamUnavailable("remote_service_not_running")
+
+    async def _serve_local(self, local: AuthenticatedUnixStream, *, own: bool = False) -> None:
+        if not own:
+            self._active += 1
+            self._last_activity = self._clock()
+        upstream: ControlStream | None = None
+        try:
+            if self._refuse_zero_network():
+                return
+            try:
+                async with asyncio.timeout(_HELLO_SECONDS):
+                    hello = await read_control_frame(local)
+            except (TimeoutError, ControlProtocolError, LocalControlTransportError):
+                return
+            if (
+                "connection_nonce" not in hello
+                or hello.get("workspace_locator") is not None
+                or hello.get("server_profile") is None
+            ):
+                # Not a hello, a hello naming a path on this computer, or one bound to no
+                # consented profile revision: never forwarded.
+                return
+            admission = self._admitted()
+            if admission is None:
+                return
+            try:
+                upstream, first = await self._open_channel(
+                    encode_control_frame(hello), restart=not own
+                )
+            except UpstreamUnavailable as error:
+                self._write_status("unavailable", error.reason)
+                return
+            self._last_upstream_use = self._clock()
+            self._write_status("ready", None)
+            await local.send_all(first)
+            await self._pump_both(local, upstream, admission)
+        except (asyncio.CancelledError, _RelayEnded):
+            pass
+        except Exception:  # noqa: BLE001 - a relay fault ends this connection only
+            pass
+        finally:
+            if upstream is not None:
+                with contextlib.suppress(Exception):
+                    await upstream.aclose()
+            with contextlib.suppress(Exception):
+                await local.aclose()
+            if not own:
+                self._active -= 1
+                self._last_activity = self._clock()
+
+    async def _pump_checked(
+        self, source: ControlStream, sink: ControlStream, admission: ConnectionAuthorization
+    ) -> None:
+        """Client to server, frame by frame: each frame is checked before it is forwarded."""
+
+        buffer = bytearray()
+        while chunk := await source.receive(_PUMP_CHUNK):
+            buffer.extend(chunk)
+            while len(buffer) >= _FRAME_PREFIX:
+                size = int.from_bytes(buffer[:_FRAME_PREFIX], "big")
+                if size == 0 or size > MAX_CONTROL_FRAME_BYTES:
+                    raise _RelayEnded
+                end = _FRAME_PREFIX + size
+                if len(buffer) < end:
+                    break
+                if admission.refusal() is not None or not self._may_send():
+                    # What this connection was admitted under changed: nothing more is sent.
+                    self._admission = None
+                    raise _RelayEnded
+                frame = bytes(buffer[:end])
+                del buffer[:end]
+                await sink.send_all(frame)
+                self._last_upstream_use = self._clock()
+        shutdown = getattr(sink, "shutdown_write", None)
+        if shutdown is not None:
+            with contextlib.suppress(Exception):
+                await shutdown()
+
+    async def _pump(self, source: ControlStream, sink: ControlStream) -> None:
+        while chunk := await source.receive(_PUMP_CHUNK):
+            await sink.send_all(chunk)
+        shutdown = getattr(sink, "shutdown_write", None)
+        if shutdown is not None:
+            with contextlib.suppress(Exception):
+                await shutdown()
+
+    async def _pump_both(
+        self, local: ControlStream, upstream: ControlStream, admission: ConnectionAuthorization
+    ) -> None:
+        tasks = (
+            asyncio.create_task(self._pump_checked(local, upstream, admission)),
+            asyncio.create_task(self._pump(upstream, local)),
+        )
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _accept(self, listener: UnixEndpointListener) -> None:
+        while not self._stop.is_set():
+            try:
+                stream = await listener.accept()
+            except LocalControlTransportError as error:
+                if error.reason == "listener_closed":
+                    return
+                continue
+            self._spawn_relay(stream, own=False)
+
+    # -- background agents ------------------------------------------------------------------------
+
+    def _agent_dial(self) -> Dial:
+        if self._style == "relay":
+            return self._dial_own
+        return self._upstream.open_stream
+
+    def _registrations_changed(self) -> bool:
+        from finishup.client.helper_registrations import registrations_dir
+
+        try:
+            facts = os.lstat(registrations_dir(self._record.target_id))
+            stamp: object = (facts.st_ino, facts.st_mtime_ns, facts.st_ctime_ns)
+        except (OSError, TargetError):
+            stamp = None
+        changed = stamp != self._registrations_stamp
+        self._registrations_stamp = stamp
+        return changed
+
+    def _profile_changed(self) -> None:
+        self._refresh.requested = True
+
+    async def _sync_agents(self) -> None:
+        """Open an agent for each registration served now; close every other one."""
+
+        from finishup.client.helper_registrations import served_workspaces
+
+        self._last_sync = self._clock()
+        admission = self._admitted()
+        served: tuple[ServedWorkspace, ...] = ()
+        if admission is not None:
+            try:
+                served = await served_workspaces(self._record)
+            except Exception:  # noqa: BLE001 - a read that fails serves nothing this round
+                served = ()
+        self._served_count = len(served)
+        wanted = {
+            (
+                item.registration.claim,
+                item.registration.worktree,
+                item.registration.registrant,
+            ): item.registration
+            for item in served
+        }
+        for key in tuple(self._agents):
+            agent = self._agents[key]
+            if key not in wanted or not agent.alive:
+                del self._agents[key]
+                await agent.aclose()
+        if admission is None:
+            return
+        opener = self._agent_opener
+        for key, registration in wanted.items():
+            if key in self._agents:
+                continue
+            if opener is not None:
+                agent = await opener(
+                    self._root, self._record, registration, admission, self._agent_dial()
+                )
+            else:
+                agent = await open_helper_agent(
+                    self._root,
+                    self._record,
+                    registration,
+                    admission,
+                    self._agent_dial(),
+                    transport="connector" if self._style == "relay" else "ssh",
+                    on_profile_changed=self._profile_changed,
+                )
+            if agent is not None:
+                self._agents[key] = agent
+                if self._last_upstream_use is None:
+                    self._last_upstream_use = self._clock()
+
+    async def _close_agents(self) -> None:
+        agents = tuple(self._agents.values())
+        self._agents.clear()
+        for agent in agents:
+            with contextlib.suppress(Exception):
+                await agent.aclose()
+
+    # -- drain and refresh --------------------------------------------------------------------------
+
+    async def _drain(self) -> None:
+        """Deliver what this computer captured, over each served workspace's agent."""
+
+        self._last_drain = self._clock()
+        if self._refuse_zero_network():
+            return
+        for agent in tuple(self._agents.values()):
+            await agent.drain(may_send=self._may_send)
+
+    def _refresh_due(self) -> bool:
+        state = self._refresh
+        now = self._clock()
+        if state.task is not None and not state.task.done():
+            return False
+        if state.last is not None and now - state.last < _REFRESH_MIN_SECONDS:
+            return False
+        if take_profile_refresh_request(self._root):
+            state.requested = True
+        if state.requested:
+            return True
+        used = self._last_upstream_use
+        return (
+            state.last is not None
+            and now - state.last >= self._refresh_interval
+            and used is not None
+            and now - used < self._refresh_interval
+        )
+
+    def _may_refresh(self) -> bool:
+        """Gate steps 2 to 4 only: the refresh is how the consent catches up with the server."""
+
+        from finishup.client import authorization
+        from finishup.client.targets import read_target, require_current_authorization
+
+        try:
+            current = read_target(self._root)
+            require_current_authorization(current)
+        except TargetError:
+            return False
+        return current is not None and current.kind in authorization.OPEN_REMOTE_KINDS
+
+    async def _run_refresh(self) -> None:
+        state = self._refresh
+        state.last = self._clock()
+        state.requested = False
+        if not self._may_refresh():
+            return
+        from finishup.client.targets import read_target
+
+        try:
+            current = read_target(self._root)
+            if current is None:
+                return
+            await self._refresher(current)
+        except Exception:  # noqa: BLE001 - the cached profile stays; the next due fetch retries
+            return
+        # A refreshed consent or revision: connections admitted before it are admitted again.
+        if self._admission is not None and self._admission.refusal() is not None:
+            self._admission = None
+
+    def _start_refresh(self) -> None:
+        self._refresh.task = asyncio.create_task(self._run_refresh())
+        self._tasks.add(self._refresh.task)
+        self._refresh.task.add_done_callback(self._tasks.discard)
+
+    # -- lifetime -------------------------------------------------------------------------------------
+
+    def request_stop(self, reason: str = "stop_requested") -> None:
+        if not self._stop.is_set():
+            self._stop_reason = reason
+        self._stop.set()
+
+    def _idle(self) -> bool:
+        idle = self._clock() - self._last_activity
+        return (
+            self._active == 0
+            and self._served_count == 0
+            and not self._agents
+            and idle >= self._idle_seconds
+        )
+
+    async def step(self) -> bool:
+        """One tick of the helper's watch; whether it is stopping.
+
+        Zero-network first (a stop, at once); then the admission (a lapse ends every relay and
+        every agent); the registrations when their folder changed or every 30 seconds; the drain
+        and the profile refresh when due, each as its own task; the idle exit.
+        """
+
+        if self._stop.is_set() or self._refuse_zero_network():
+            return True
+        admission = self._admitted()
+        if self._stop.is_set():
+            return True
+        if admission is None:
+            await self._close_agents()
+        now = self._clock()
+        if self._registrations_changed() or (
+            self._last_sync is None or now - self._last_sync >= _AGENT_SYNC_SECONDS
+        ):
+            await self._sync_agents()
+        if self._agents or self._served_count:
+            # A served registration is a client: the helper stays while one is live.
+            self._last_activity = now
+        delivering = self._delivery is not None and not self._delivery.done()
+        if not delivering and now - self._last_drain >= self._drain_interval:
+            # Its own task: the tick keeps checking zero-network and idleness every second, and
+            # a stop cancels the pass instead of waiting for it (A-ZN-DRAIN).
+            self._delivery = asyncio.create_task(self._drain())
+        if admission is not None and self._refresh_due():
+            self._start_refresh()
+        if self._idle():
+            self.request_stop("idle_timeout")
+        return self._stop.is_set()
+
+    async def _watch(self) -> None:
+        while not self._stop.is_set():
+            await self._tick()
+            if await self.step():
+                return
+
+    async def serve(self, listener: UnixEndpointListener | None) -> str:
+        """Serve until stopped or idle; return the closed reason the process stopped for."""
+
+        self._write_status("starting", None)
+        running: list[asyncio.Task[None]] = []
+        if listener is not None:
+            running.append(asyncio.create_task(self._accept(listener)))
+        running.append(asyncio.create_task(self._watch()))
+        if self._admitted() is not None:
+            if self._style == "direct":
+                self._write_status("ready", None)
+            self._start_refresh()
+        try:
+            await self._stop.wait()
+        finally:
+            if self._delivery is not None:
+                running.append(self._delivery)
+            for task in (*running, *self._tasks):
+                task.cancel()
+            await asyncio.gather(*running, *self._tasks, return_exceptions=True)
+            zero_network = self._stop_reason == _ZERO_NETWORK
+            if not zero_network and self._stop_reason != "target_removed":
+                with contextlib.suppress(TimeoutError):
+                    async with asyncio.timeout(_SHUTDOWN_DRAIN_SECONDS):
+                        await self._drain()
+            if listener is not None:
+                with contextlib.suppress(Exception):
+                    await listener.aclose()
+            # Background agents first, so none dials again while the relays are torn down.
+            await self._close_agents()
+            self._end_relays()
+            await asyncio.gather(*tuple(self._relays), return_exceptions=True)
+            with contextlib.suppress(Exception):
+                if zero_network:
+                    await self._upstream.zero_network()
+                else:
+                    await self._upstream.close()
+            if self._stop_reason != "target_removed":
+                self._write_status("stopped", self._stop_reason)
+        return self._stop_reason
+
+
+async def _bind(lock: HelperLock) -> UnixEndpointListener:
+    try:
+        return await bind_control_listener()
+    except LocalControlTransportError as error:
+        if error.reason != "endpoint_exists":
+            raise
+    # A previous helper left the endpoint behind; only the lock holder clears it.
+    await remove_stale_endpoint(EndpointKind.CONTROL, lock)
+    return await bind_control_listener()
+
+
+async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: float) -> int:
+    """The helper process body: lock, bind (relay), serve, release. Exit 0 also when one runs."""
+
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    lock = HelperLock(root)
+    try:
+        lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+    except HelperLockBusy:
+        return 0
+    except OSError:
+        return 20
+    try:
+        style = read_connection_style(root)
+        listener = await _bind(lock) if style == "relay" else None
+        helper = Helper(root, record, style=style, idle_seconds=idle_seconds)
+        loop = asyncio.get_running_loop()
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.add_signal_handler(number, helper.request_stop)
+        await helper.serve(listener)
+        return 0
+    except LocalControlTransportError:
+        with contextlib.suppress(OSError):
+            write_helper_status(
+                root,
+                new_status(
+                    read_helper_status(root), "stopped", "helper_failed", started_at=now_stamp()
+                ),
+            )
+        return 20
+    finally:
+        lock.release()
+
+
+def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> int:
+    """``finishup helper run --target ID``: serve one SSH target in the foreground.
+
+    ``ID`` must name an SSH target in this computer's server registry. An isolation variable or
+    runtime pin naming another root refuses (exit 2): the helper never serves a root its process
+    would not resolve. Exit 0 when it stopped (or another helper already serves the target), 20
+    when its endpoint could not be bound.
+    """
+
+    from finishup.client.targets import read_target, target_root
+    from finishup.config.paths import PathSafetyError, isolated_root, selection_override
+
+    try:
+        root = target_root(target_id)
+        record = read_target(root)
+        if record is None or record.kind != "ssh" or record.target_id != target_id:
+            return 2
+        explicit = isolated_root()
+    except (TargetError, PathSafetyError, ValueError):
+        return 2
+    if explicit is not None and explicit != root:
+        return 2
+    # Every path this process resolves is the target's own: its endpoint, its records, and the
+    # outside reads its agents answer (bound to this target's claim salt).
+    with selection_override(root):
+        return asyncio.run(run_helper_process(root, record, idle_seconds=idle_seconds))

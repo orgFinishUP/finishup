@@ -52,6 +52,7 @@ from finishup.service.control_protocol import (
 )
 
 __all__ = [
+    "hello_frame",
     "AGENT_METHODS",
     "call_request",
     "split_frames",
@@ -133,6 +134,13 @@ class MemoryStream:
         payload = bytes(data)
         if payload:
             self.other._chunks.put_nowait(payload)
+
+    async def shutdown_write(self) -> None:
+        """End the peer's reads (a half-close); this end still reads what the peer sends."""
+
+        if self.closed or self.other is None:
+            return
+        self.other._chunks.put_nowait(b"")
 
     async def aclose(self) -> None:
         if self.closed:
@@ -331,7 +339,9 @@ def _answer(request: ControlCallRequest) -> ControlResult:
     return _result(request, ControlError("vault_locked"))
 
 
-def _hello(*, agent: bool) -> dict[str, JsonValue]:
+def _hello(
+    *, agent: bool, server_profile: ServerProfileRevision | None = None
+) -> dict[str, JsonValue]:
     hello: dict[str, JsonValue] = {
         "protocol_version": "1.0",
         "client_kind": "cli",
@@ -355,6 +365,10 @@ def _hello(*, agent: bool) -> dict[str, JsonValue]:
             "operations": ["read_task_base"],
             "max_reply_bytes": 1_048_576,
         }
+    if server_profile is not None:
+        from finishup.protocol.server_profile import revision_to_json
+
+        hello["server_profile"] = revision_to_json(server_profile)
     return hello
 
 
@@ -476,15 +490,21 @@ async def _read_payload(stream: ControlStream) -> bytes:
     return _payload(await read_control_frame(stream, eof_reason="handshake_rejected"))
 
 
-async def run_scripted_session(stream: ControlStream, *, agent: bool = True) -> list[bytes]:
+async def run_scripted_session(
+    stream: ControlStream,
+    *,
+    agent: bool = True,
+    server_profile: ServerProfileRevision | None = None,
+) -> list[bytes]:
     """Drive the fixed session over ``stream``; return every payload the client received.
 
     Bodies are empty objects: the scripted daemon answers by method alone, so no workflow body
-    shape is involved and only framing, routing and correlation are under test.
+    shape is involved and only framing, routing and correlation are under test. A hello for a
+    server elsewhere names the consented ``server_profile`` revision (ADR-052).
     """
 
     received: list[bytes] = []
-    await stream.send_all(encode_control_frame(_hello(agent=agent)))
+    await stream.send_all(encode_control_frame(_hello(agent=agent, server_profile=server_profile)))
     received.append(await _read_payload(stream))
     for index, method in enumerate(AGENT_METHODS):
         await stream.send_all(encode_control_frame(call_request(0x5100 + index, method)))
@@ -556,3 +576,11 @@ def scripted_service(monkeypatch: pytest.MonkeyPatch) -> ScriptedDaemon:
 
     monkeypatch.setattr(client_module, "connect_control", dial)
     return daemon
+
+
+def hello_frame(
+    *, agent: bool = False, server_profile: ServerProfileRevision | None = None
+) -> bytes:
+    """One encoded scripted hello (a claim and an agent with ``agent``)."""
+
+    return encode_control_frame(_hello(agent=agent, server_profile=server_profile))

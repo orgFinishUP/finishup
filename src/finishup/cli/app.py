@@ -43,6 +43,7 @@ from finishup.cli.exits import (
     lifecycle_public_code,
     remediation_message,
 )
+from finishup.cli.helper import helper_app
 from finishup.cli.project import project_app
 from finishup.cli.render import (
     bounded_failure_line,
@@ -267,6 +268,7 @@ app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
 app.add_typer(project_app, name="project")
 app.add_typer(server_app, name="server")
+app.add_typer(helper_app, name="helper")
 
 
 def _recommend_operation(name: str) -> Callable[..., None]:

@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, TypedDict,
 
 from finishup import __version__
 from finishup.adapters.control.unix_socket import (
-    AuthenticatedUnixStream,
     LocalControlTransportError,
     connect_control,
 )
@@ -93,6 +92,7 @@ from finishup.ports.workspace_agent import outcome_for_reason
 from finishup.protocol.canonical import canonical_encode, parse_canonical_integer_string
 from finishup.protocol.errors import (
     AUTHORIZATION_REFUSAL_PHASES,
+    REMOTE_CONNECTION_PHASES,
     SERVICE_HANDSHAKE_PHASES,
     SERVICE_START_TIMEOUT_PHASE,
 )
@@ -122,6 +122,7 @@ from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     ControlProtocolError,
     ControlSession,
+    ControlStream,
     client_handshake,
     encode_control_frame,
     is_workspace_call_frame,
@@ -154,6 +155,7 @@ __all__ = [
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "connect_service_via",
     "holder_version_order",
     "path_refusal_reason",
     "prepare_project_request",
@@ -342,8 +344,6 @@ def _remote_target_refusal(error: Exception) -> ControlError:
     ``zero_network_remote_selected`` and ``target_reauthorization_required`` keep their names; any
     other reason is ``target_root_is_remote``. The reason is a closed token and names no path.
     """
-
-    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
     reason = getattr(error, "reason", None)
     phase = reason if reason in REMOTE_CONNECTION_PHASES else "target_root_is_remote"
@@ -1198,7 +1198,7 @@ class ServiceClient(ControlClientPort):
 
     def __init__(
         self,
-        stream: AuthenticatedUnixStream,
+        stream: ControlStream,
         session: ControlSession,
         client_kind: ControlClientKind,
         *,
@@ -1266,6 +1266,12 @@ class ServiceClient(ControlClientPort):
         """Whether this connection has ended (closed, failed, or its authorization lapsed)."""
 
         return self._closed
+
+    async def wait_closed(self) -> None:
+        """Wait until this connection has ended: its peer closed it, it failed, its authorization
+        lapsed, or it was closed. A long-lived holder (a helper's background agent) waits here."""
+
+        await asyncio.gather(asyncio.shield(self._receiver), return_exceptions=True)
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
@@ -2109,7 +2115,7 @@ async def _recheck_after_interval() -> None:
 
 
 def _connected_client(
-    stream: AuthenticatedUnixStream,
+    stream: ControlStream,
     session: ControlSession,
     client_kind: ControlClientKind,
     workspace_agent: WorkspaceCallHandler | None = None,
@@ -2145,7 +2151,7 @@ class _CheckedHelloStream:
 
     __slots__ = ("_authorization", "_stream", "refused")
 
-    def __init__(self, stream: AuthenticatedUnixStream, authorization: AuthorizationCheck) -> None:
+    def __init__(self, stream: ControlStream, authorization: AuthorizationCheck) -> None:
         self._stream = stream
         self._authorization = authorization
         self.refused: str | None = None
@@ -2227,7 +2233,7 @@ def _consume_background_task[ResultT](task: asyncio.Task[ResultT]) -> None:
         pass
 
 
-async def _best_effort_close_stream(stream: AuthenticatedUnixStream) -> None:
+async def _best_effort_close_stream(stream: ControlStream) -> None:
     """Bound cleanup even when a faulty peer stream never completes ``aclose``."""
 
     task = asyncio.create_task(stream.aclose())
@@ -2253,12 +2259,17 @@ async def _connect_service_attempt(
     timeout_seconds: float,
     workspace_binding: ClientWorkspaceBinding | None = None,
     authorization: AuthorizationCheck | None = None,
+    dial: Callable[[], Awaitable[ControlStream]] | None = None,
+    transport: ConnectionTransport = "unix",
 ) -> ServiceClient:
     """Connect and handshake within one attempt budget, preserving accepted-socket identity.
 
     A ``workspace_binding`` sends its claim (and declares its agent) in place of a locator. An
     ``authorization`` (a connection to a server elsewhere, ADR-052) is checked once more right
     before the dial and again right before the hello is written, and the connection keeps it.
+    ``dial`` replaces the fixed endpoint for a connection to a server elsewhere (an SSH target's
+    helper or its direct ``ssh -W`` stream); a transport that names why it failed (a closed
+    remote phase) is reported with that phase.
     """
 
     agent = None if workspace_binding is None else workspace_binding.agent
@@ -2266,12 +2277,12 @@ async def _connect_service_attempt(
         phase = authorization.refusal()
         if phase is not None:
             raise ControlError("service_unavailable", retryable=True, phase=phase)
-    stream: AuthenticatedUnixStream | None = None
+    stream: ControlStream | None = None
     guarded: _CheckedHelloStream | None = None
     deadline = time.monotonic() + timeout_seconds
     try:
         async with asyncio.timeout(timeout_seconds):
-            stream = await connect_control()
+            stream = await (connect_control() if dial is None else _remote_dial(dial))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
@@ -2300,7 +2311,9 @@ async def _connect_service_attempt(
             handshake.add_done_callback(_consume_background_task)
             raise TimeoutError
         session = handshake.result()
-        client = _connected_client(stream, session, client_kind, agent, authorization=authorization)
+        client = _connected_client(
+            stream, session, client_kind, agent, transport=transport, authorization=authorization
+        )
         if workspace_binding is not None and workspace_binding.worktree is not None:
             client._remote_workspace = (  # pyright: ignore[reportPrivateUsage]
                 workspace_binding.claim,
@@ -2318,10 +2331,14 @@ async def _connect_service_attempt(
             error = ControlError("service_unavailable", retryable=True)
         raise error from exc
     except LocalControlTransportError as exc:
+        named = await _remote_end_phase(stream)
         if stream is not None:
             await _best_effort_close_stream(stream)
+        if named is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=named) from exc
         raise _transport_error(exc) from exc
     except ControlProtocolError as exc:
+        named = await _remote_end_phase(stream)
         if stream is not None:
             await _best_effort_close_stream(stream)
         if guarded is not None and guarded.refused is not None:
@@ -2329,6 +2346,10 @@ async def _connect_service_attempt(
             raise ControlError(
                 "service_unavailable", retryable=True, phase=guarded.refused
             ) from None
+        if named is not None:
+            # The transport itself ended the stream (OpenSSH named why): the server never read
+            # the hello, so the remote phase is the answer, not a protocol fault.
+            raise ControlError("service_unavailable", retryable=True, phase=named) from exc
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
         raise _protocol_error(exc) from exc
@@ -2336,6 +2357,76 @@ async def _connect_service_attempt(
         if stream is not None:
             await _best_effort_close_stream(stream)
         raise
+
+
+async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlStream:
+    """Run a remote transport's dial; a failure it names (a closed remote phase) keeps its name."""
+
+    try:
+        return await dial()
+    except (LocalControlTransportError, ControlError):
+        raise
+    except Exception as exc:
+        reason = getattr(exc, "reason", None)
+        if type(reason) is str and reason in REMOTE_CONNECTION_PHASES:
+            raise ControlError("service_unavailable", retryable=True, phase=reason) from None
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="remote_unreachable"
+        ) from None
+
+
+async def _remote_end_phase(stream: ControlStream | None) -> str | None:
+    """The closed remote phase a direct stream names for its own end, if it can name one."""
+
+    failure_phase = cast(
+        Callable[[], Awaitable[str | None]] | None, getattr(stream, "failure_phase", None)
+    )
+    if failure_phase is None:
+        return None
+    try:
+        phase = await failure_phase()
+    except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
+        return None
+    return phase if phase in REMOTE_CONNECTION_PHASES else None
+
+
+async def connect_service_via(
+    dial: Callable[[], Awaitable[ControlStream]],
+    client_kind: ControlClientKind,
+    *,
+    workspace_binding: ClientWorkspaceBinding | None,
+    authorization: AuthorizationCheck | None,
+    transport: ConnectionTransport,
+    timeout_seconds: float = _CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+) -> ServiceClient:
+    """Handshake over a stream ``dial`` opens, with no admission of the active root.
+
+    For a client that admitted its connection itself: an SSH target's helper holds its
+    background workspace agents this way (``client.helper``), over its own relay (never through
+    its endpoint, so they never count as client activity) or a direct ``ssh -W`` stream. The
+    ``authorization`` is checked before the dial, before the hello and before every frame, and
+    watched, exactly as for ``connect_service``. Failures are ``service_unavailable`` with a
+    closed phase where the transport names one, or the protocol's own closed reason; never a
+    path.
+    """
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    if workspace_binding is not None and type(workspace_binding) is not ClientWorkspaceBinding:
+        raise TypeError("workspace_binding_invalid")
+    if transport not in CONNECTION_TRANSPORTS:
+        raise ValueError("connection_transport_invalid")
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=None,
+        projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+        output_is_controlling_tty=False,
+        timeout_seconds=timeout_seconds,
+        workspace_binding=workspace_binding,
+        authorization=authorization,
+        dial=dial,
+        transport=transport,
+    )
 
 
 def _check_workspace_binding(

@@ -117,6 +117,8 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "service unlock": "server_host",
         "setup vault": "server_host",
         # This machine's host registrations and server targets.
+        # The background helper of an SSH server target: this client's own process (ADR-052).
+        "helper": "client_only",
         "integrate admission": "client_only",
         "integrate mcp": "client_only",
         "integrate plugin": "client_only",

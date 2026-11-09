@@ -97,6 +97,7 @@ __all__ = [
     "ConnectionAuthorization",
     "Grant",
     "authorize_active_root",
+    "authorize_target",
     "bind_prebuilt_check",
     "bump_credential_generation",
     "consent_digest",
@@ -434,6 +435,45 @@ def authorize_active_root() -> ConnectionAuthorization | None:
         consent_digest=_consent_digest(admitted),
         repository_key=None,
         selection_bound=selection_bound,
+        profile_revision=revision,
+    )
+    return ConnectionAuthorization(grant, generation)
+
+
+def authorize_target(record: ServerTarget) -> ConnectionAuthorization:
+    """Admit a connection to remote ``record`` from a process that serves that target itself.
+
+    The target's helper (design v2 section 3) admits its relay, its background agents and its
+    profile refresh this way: pinned to the target's own root, never bound to the selection file
+    (the owner's ``server use`` of another server stops the helper instead). The generation is
+    read first, then the record again and the gate (steps 2 to 5), exactly as
+    ``authorize_active_root`` does; a record removed, replaced or changed meanwhile is
+    ``server_authorization_changed``, and any other refusal raises its closed phase.
+    """
+
+    if not record.is_remote:
+        raise TargetError("target_root_is_remote")
+    root = target_root(record.target_id)
+    try:
+        generation = read_generation(root, selection_bound=False)
+        current = read_target(root)
+    except (OSError, PathSafetyError):
+        raise TargetError("target_root_is_remote") from None
+    if (
+        current is None
+        or not current.is_remote
+        or current.target_id != record.target_id
+        or _identity_digest(current) != _identity_digest(record)
+    ):
+        raise TargetError(CHANGED)
+    revision = gate(current)
+    grant = Grant(
+        target_id=current.target_id,
+        kind=current.kind,
+        identity_digest=_identity_digest(current),
+        consent_digest=_consent_digest(current),
+        repository_key=None,
+        selection_bound=False,
         profile_revision=revision,
     )
     return ConnectionAuthorization(grant, generation)

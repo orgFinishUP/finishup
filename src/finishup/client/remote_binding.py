@@ -25,7 +25,7 @@ import hmac
 import posixpath
 from collections.abc import Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
 from finishup.client.authorization import ConnectionAuthorization, authorize_active_root
@@ -56,6 +56,7 @@ async def remote_workspace_binding(
     protected: Sequence[str] | None = None,
     target: ServerTarget | None = None,
     authorization: ConnectionAuthorization | None = None,
+    role: Literal["connection", "background"] = "connection",
 ) -> ClientWorkspaceBinding:
     """The claim on ``workspace`` under ``claim_salt``, with its agent when ``serve_workspace``.
 
@@ -78,6 +79,8 @@ async def remote_workspace_binding(
     computer (``repository_hold.held_worktrees``, read per call), and answers nothing once that
     check lapses (``own_authorization``: its own repository held or kept, or, with an admission,
     any change that ends the connection).
+
+    ``role`` is the agent's declared role: ``background`` for the helper's agent (ADR-052).
     """
 
     if type(workspace) is not WorkspaceLocator:
@@ -123,6 +126,7 @@ async def remote_workspace_binding(
             outside_reads=outside,
             held_roots=held,
             own_authorization=check,
+            role=role,
         ),
         authorization=check,
         worktree=worktree,

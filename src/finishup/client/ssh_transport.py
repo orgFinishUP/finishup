@@ -719,6 +719,14 @@ class SshControlStream:
         except (OSError, RuntimeError):
             raise LocalControlTransportError("connection_failed") from None
 
+    async def shutdown_write(self) -> None:
+        """End what this stream sends (OpenSSH passes the end of input on to the server)."""
+
+        writer = self._process.stdin
+        if writer is not None and not self._closed:
+            with contextlib.suppress(Exception):
+                writer.close()
+
     async def _wait_exit(self, seconds: float) -> int | None:
         try:
             async with asyncio.timeout(seconds):
