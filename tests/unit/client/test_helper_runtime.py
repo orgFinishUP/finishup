@@ -102,17 +102,23 @@ def test_connect_checks_again_whatever_the_helper_last_recorded(
     assert connections == [1]
 
 
+# A stand-in helper: it holds the lock and, like the real helper's tick, ends when the target's
+# stop epoch moves (``ignore``: it never looks, a helper that does not stop). Nothing signals it.
 _HOLDER = """
 import signal, sys, time
 from pathlib import Path
 sys.path.insert(0, {src!r})
-from finishup.client.helper_status import HelperLock
-lock = HelperLock(Path({root!r}))
+from finishup.client.helper_status import HelperLock, read_helper_epoch
+root = Path({root!r})
+lock = HelperLock(root)
 lock.acquire(version="0.0.1", schema_manifest_digest="sha256:" + "0" * 64)
-if {ignore!r}:
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+epoch = read_helper_epoch(root)
 print("held", flush=True)
-signal.pause()
+if {ignore!r}:
+    signal.pause()
+while read_helper_epoch(root) == epoch:
+    time.sleep(0.01)
+lock.release()
 """
 
 
@@ -142,7 +148,8 @@ def test_disconnect_stops_the_stamped_helper_and_exits_the_master(
     process = _holder(root, ignore=False)
     try:
         SshTargetRuntime().stop(root)
-        assert process.wait(timeout=10) == -signal.SIGTERM
+        # It ended on its own once the epoch moved: no signal reached it (A3).
+        assert process.wait(timeout=10) == 0
     finally:
         if process.poll() is None:
             process.kill()

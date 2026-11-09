@@ -2735,9 +2735,9 @@ async def _connect_through_helper(
 
     The helper is client-owned and vault-less, so starting one is always safe: when nothing
     answers, one is started (never a service), and a helper left by an older release of this
-    client is replaced by its stamped pid (never a newer one). A helper ending at its idle exit
-    is followed by a successor; any other stop (a ``server use``, ``disconnect``, ``remove``, a
-    zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
+    client is replaced through the target's stop epoch (never a newer one). A helper ending at its
+    idle exit is followed by a successor; any other stop (a ``server use``, ``disconnect``,
+    ``remove``, a zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
     ends the wait at once; every ``service_unavailable`` raised here names a remote phase.
     """
 
@@ -2802,7 +2802,8 @@ async def _connect_through_helper(
         and holder_version_order(holder.version) != "newer"
     ):
         # A helper left by an older release of this client (an in-place upgrade) is client-owned:
-        # replace it by its stamped pid. One a newer release started is never replaced from here.
+        # stop it (its stop epoch moves; no pid is signalled), then start this release's. One a
+        # newer release started is never replaced from here.
         if not await asyncio.to_thread(stop_helper, root, timeout_seconds=_remaining(deadline)):
             raise named(ControlError("service_unavailable", retryable=True))
         holder = None

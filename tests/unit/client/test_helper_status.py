@@ -201,7 +201,7 @@ def test_a_spawned_helper_that_another_process_stops_is_reaped_at_once(
     stamped one). The child must be reaped while this process lives, not when it exits.
     """
 
-    def paused(_target_id: str) -> tuple[str, ...]:
+    def paused(_target_id: str, _epoch: str) -> tuple[str, ...]:
         return (sys.executable, "-c", "import signal; signal.pause()")
 
     monkeypatch.setattr(helper_status, "_helper_command", paused)
@@ -217,3 +217,91 @@ def test_a_spawned_helper_that_another_process_stops_is_reaped_at_once(
         time.sleep(0.01)
         state = _process_state(pid)
     assert state is None, f"helper child left in state {state}"
+
+
+def _hold_lock_stamped(root: Path, stamp: bytes) -> int:
+    """Hold ``root``'s helper lock from this process with ``stamp`` as its content."""
+
+    import fcntl
+
+    descriptor = os.open(root / "state" / "helper.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, stamp)
+    return descriptor
+
+
+def test_a_stop_never_signals_the_pid_a_stamp_names(root: Path) -> None:
+    """A3: the stamped pid may belong to another process once the helper exited (pid reuse)."""
+
+    import fcntl
+    import json
+    import subprocess
+
+    from finishup.client.helper_status import read_helper_epoch
+
+    # Another process of this user, which now has the pid an exited helper stamped.
+    bystander = subprocess.Popen(  # noqa: S603 - this interpreter, fixed source
+        (sys.executable, "-c", "import signal; signal.pause()")
+    )
+    stamp = {"pid": bystander.pid, "version": "0.1.0", "schema_manifest_digest": _DIGEST}
+    descriptor = _hold_lock_stamped(root, json.dumps(stamp).encode() + b"\n")
+    try:
+        assert helper_holder(root) is not None
+        before = read_helper_epoch(root)
+        assert stop_helper(root, timeout_seconds=0.2) is False
+        # The lock is still held, so the stop is not reported done; the stop was asked for
+        # through the epoch, and the bystander was never signalled.
+        assert read_helper_epoch(root) != before
+        assert bystander.poll() is None
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+        # Stopped by the one pid this test started.
+        bystander.terminate()
+        bystander.wait(timeout=10)
+    assert stop_helper(root, timeout_seconds=0.2) is True
+
+
+def test_a_lock_held_under_an_unreadable_stamp_is_never_reported_stopped(root: Path) -> None:
+    """A2: success means the lock was seen free, whatever its stamp says."""
+
+    import fcntl
+
+    descriptor = _hold_lock_stamped(root, b"not a stamp\n")
+    try:
+        assert helper_holder(root) is None
+        assert stop_helper(root, timeout_seconds=0.2) is False
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert stop_helper(root, timeout_seconds=0.2) is True
+
+
+def test_a_spawned_helper_carries_the_epoch_its_spawner_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2: the epoch read at spawn travels as ``--epoch``; every stop moves it."""
+
+    from finishup.client.helper_status import read_helper_epoch, start_fenced
+
+    seen: list[tuple[str, str]] = []
+    original = helper_status._helper_command  # pyright: ignore[reportPrivateUsage]
+
+    def command(target_id: str, epoch: str) -> tuple[str, ...]:
+        seen.append((target_id, epoch))
+        return (sys.executable, "-c", "pass")
+
+    monkeypatch.setattr(helper_status, "_helper_command", command)
+    assert read_helper_epoch(root) == "none"
+    spawn_helper(root, "t_0000000a").wait(timeout=10)
+    assert stop_helper(root, timeout_seconds=1.0) is True
+    moved = read_helper_epoch(root)
+    assert moved != "none" and len(moved) == 32
+    spawn_helper(root, "t_0000000a").wait(timeout=10)
+    assert seen == [("t_0000000a", "none"), ("t_0000000a", moved)]
+    # The first spawn's helper, starting only now, is fenced; the second's is not; one started
+    # by hand (no epoch) never is.
+    assert start_fenced(root, "none") and not start_fenced(root, moved)
+    assert not start_fenced(root, None)
+    assert original("t_0000000a", moved)[-4:] == ("--target", "t_0000000a", "--epoch", moved)

@@ -32,12 +32,13 @@ _REFUSALS: Final = {
 def helper_run(
     target: Annotated[str, typer.Option("--target", help="The SSH target's id (t_<8 hex>).")],
     idle_seconds: Annotated[float, typer.Option("--idle-seconds", hidden=True, min=1.0)] = 900.0,
+    epoch: Annotated[str | None, typer.Option("--epoch", hidden=True)] = None,
 ) -> None:
     """Serve the SSH target until stopped or idle for 15 minutes."""
 
     from finishup.client.helper import run_helper
 
-    code = run_helper(target, idle_seconds=idle_seconds)
+    code = run_helper(target, idle_seconds=idle_seconds, epoch=epoch)
     if code in _REFUSALS:
         typer.echo(_REFUSALS[code], err=True)
     raise typer.Exit(code)

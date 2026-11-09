@@ -7,9 +7,10 @@ every runtime: the CLI calls it outside its event loop, the terminal interface f
   it refuses), then connects as any client would (the relay style starts the target's helper; the
   direct style dials ``ssh -W`` and starts the helper for its background agents). It checks again
   every time, whatever the helper last recorded (A-CONNECT-STALE).
-* ``stop`` stops the target's helper by its stamped pid and asks the target's OpenSSH master to
-  exit through its control socket (never by pattern); a helper that does not release its lock in
-  time is ``target_still_connected`` (``server remove`` then removes nothing).
+* ``stop`` stops the target's helper through its stop epoch (a pending start included, the lock
+  proven free; no pid is signalled) and asks the target's OpenSSH master to exit through its
+  control socket (never by pattern); a helper that does not release its lock in time is
+  ``target_still_connected`` (``server remove`` then removes nothing).
 * ``probe`` times status round trips over the real transport.
 """
 

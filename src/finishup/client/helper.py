@@ -3,7 +3,8 @@
 One process per SSH target (``state/helper.lock``), started on demand by a client that needs it,
 never by ``service run``; it exits 15 minutes after its last client (a relayed connection or a
 served registration) and is stopped by ``server disconnect``, ``remove``, ``use <other>`` and
-``set --style`` through its stamped pid. Its roles:
+``set --style`` through its target's stop epoch (``helper_status``: never a signal to a pid);
+one spawned before such a stop never serves. Its roles:
 
 1. **Relay** (the default style, U21): it serves ``<target root>/run/control.sock`` with the
    service's owner-only fences and peer-UID check, and carries each local connection over one
@@ -72,6 +73,7 @@ from finishup.client.helper_status import (
     new_status,
     now_stamp,
     read_connection_style,
+    read_helper_epoch,
     read_helper_status,
     take_profile_refresh_request,
     write_helper_status,
@@ -512,10 +514,13 @@ class Helper:
         clock: Callable[[], float] = time.monotonic,
         ssh: str | None = None,
         setup_seconds: float = _UPSTREAM_SETUP_SECONDS,
+        epoch: str | None = None,
     ) -> None:
         if record.kind != "ssh":
             raise ValueError("target_not_ssh")
         self._setup_seconds = setup_seconds
+        # The stop epoch this helper serves under (``helper_status``); a stop moves it.
+        self._epoch = read_helper_epoch(root) if epoch is None else epoch
         self._root = root
         self._record = record
         self._style: ConnectionStyle = style
@@ -1057,13 +1062,19 @@ class Helper:
     async def step(self) -> bool:
         """One tick of the helper's watch; whether it is stopping.
 
-        Zero-network first (a stop, at once); then the admission (a lapse ends every relay and
+        Zero-network first (a stop, at once); a moved stop epoch (a stop); then the admission (a
+        lapse ends every relay and
         every agent); the registrations when their folder changed or every 30 seconds; the drain
         and the profile refresh when due, each as its own task (the refresh under gate steps 2 to
         4 only, so it also runs while the consent refuses the cached profile); the idle exit.
         """
 
         if self._stop.is_set() or self._refuse_zero_network():
+            return True
+        if read_helper_epoch(self._root) != self._epoch:
+            # A stop (``server disconnect``, ``remove``, ``use <other>``, ``set --style``, a
+            # replacement) moved the epoch: no signal is ever sent to a helper.
+            self.request_stop("stop_requested")
             return True
         admission = self._admitted()
         if self._stop.is_set():
@@ -1155,8 +1166,11 @@ async def _bind(lock: HelperLock) -> UnixEndpointListener:
     return await bind_control_listener()
 
 
-async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: float) -> int:
-    """The helper process body: lock, bind (relay), serve, release. Exit 0 also when one runs."""
+async def run_helper_process(
+    root: Path, record: ServerTarget, *, idle_seconds: float, epoch: str | None = None
+) -> int:
+    """The helper process body: lock, fence, bind (relay), serve, release. Exit 0 also when one
+    runs, and when a stop came after its spawner read ``epoch`` (it serves nothing then)."""
 
     from finishup.protocol.schemas import schema_manifest_digest
 
@@ -1168,9 +1182,25 @@ async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: 
     except OSError:
         return 20
     try:
+        # Read once, right after the lock: a stop before this read fences this start, one after
+        # it is seen on the first tick.
+        current = read_helper_epoch(root)
+        if epoch is not None and current != epoch:
+            with contextlib.suppress(OSError):
+                write_helper_status(
+                    root,
+                    new_status(
+                        read_helper_status(root),
+                        "stopped",
+                        "stop_requested",
+                        started_at=now_stamp(),
+                        style=read_connection_style(root),
+                    ),
+                )
+            return 0
         style = read_connection_style(root)
         listener = await _bind(lock) if style == "relay" else None
-        helper = Helper(root, record, style=style, idle_seconds=idle_seconds)
+        helper = Helper(root, record, style=style, idle_seconds=idle_seconds, epoch=current)
         loop = asyncio.get_running_loop()
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             with contextlib.suppress(NotImplementedError, RuntimeError):
@@ -1190,13 +1220,16 @@ async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: 
         lock.release()
 
 
-def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> int:
+def run_helper(
+    target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS, epoch: str | None = None
+) -> int:
     """``finishup helper run --target ID``: serve one SSH target in the foreground.
 
     ``ID`` must name an SSH target in this computer's server registry. An isolation variable or
     runtime pin naming another root refuses (exit 2): the helper never serves a root its process
     would not resolve. Exit 0 when it stopped (or another helper already serves the target), 20
-    when its endpoint could not be bound.
+    when its endpoint could not be bound. ``epoch`` is the stop epoch its spawner read
+    (``helper_status.spawn_helper``): a stop since then ends it before it serves anything.
     """
 
     from finishup.client.targets import read_target, target_root
@@ -1215,4 +1248,4 @@ def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> 
     # Every path this process resolves is the target's own: its endpoint, its records, and the
     # outside reads its agents answer (bound to this target's claim salt).
     with selection_override(root):
-        return asyncio.run(run_helper_process(root, record, idle_seconds=idle_seconds))
+        return asyncio.run(run_helper_process(root, record, idle_seconds=idle_seconds, epoch=epoch))

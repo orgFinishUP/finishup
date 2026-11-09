@@ -888,3 +888,61 @@ def test_a_live_direct_agent_keeps_the_periodic_refresh_due(
     # At start, then every 10 minutes while the agent's connection is live; with no live
     # connection, the one use recorded at its opening is soon older than 10 minutes.
     assert asyncio.run(run()) == ([1_000.0, 1_601.0, 2_202.0] if live else [1_000.0])
+
+
+def test_a_helper_spawned_before_a_stop_serves_nothing_once_it_starts(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A2: ``disconnect`` came between the spawn and the lock: the late helper never serves."""
+
+    from finishup.client.helper import run_helper_process
+    from finishup.client.helper_status import read_helper_epoch, stop_helper
+    from finishup.config.paths import selection_override
+
+    record, root = ssh_target
+    spawned_with = read_helper_epoch(root)
+    # Nothing holds the lock yet (the spawned process is still starting): the stop is done.
+    assert stop_helper(root, timeout_seconds=1.0) is True
+
+    async def run() -> int:
+        return await asyncio.wait_for(
+            run_helper_process(root, record, idle_seconds=900.0, epoch=spawned_with), 10
+        )
+
+    with selection_override(root):
+        assert asyncio.run(run()) == 0
+    # It bound no endpoint and left the lock free; its status says it was stopped.
+    assert not (root / "run" / "control.sock").exists()
+    status = read_helper_status(root)
+    assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
+    assert stop_helper(root, timeout_seconds=0.2) is True
+
+
+def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_free(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """A2/A3: the stop is the epoch, read on the helper's tick; no signal is sent to it."""
+
+    from finishup.client.helper import run_helper_process
+    from finishup.client.helper_status import helper_holder, read_helper_epoch, stop_helper
+    from finishup.config.paths import selection_override
+
+    record, root = ssh_target
+
+    async def run() -> tuple[int, bool]:
+        serving = asyncio.create_task(
+            run_helper_process(root, record, idle_seconds=900.0, epoch=read_helper_epoch(root))
+        )
+        async with asyncio.timeout(10):
+            while helper_holder(root) is None or not (root / "run" / "control.sock").exists():
+                await asyncio.sleep(0)
+        stopped = await asyncio.to_thread(stop_helper, root, timeout_seconds=10.0)
+        async with asyncio.timeout(10):
+            code = await serving
+        return code, stopped
+
+    with selection_override(root):
+        code, stopped = asyncio.run(run())
+    assert (code, stopped) == (0, True)
+    status = read_helper_status(root)
+    assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
