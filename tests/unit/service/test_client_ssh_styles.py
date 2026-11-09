@@ -212,16 +212,25 @@ def test_the_direct_style_dials_its_own_stream_and_checks_every_frame(
     _record, root = ssh_selected
     write_connection_style(root, "direct")
     daemon = ScriptedDaemon()
-    opened: list[tuple[str, ...]] = []
+    opened: list[tuple[str, str | None, bool]] = []
 
-    async def open_stream(argv: tuple[str, ...]):  # noqa: ANN202
-        opened.append(tuple(argv))
+    async def open_stream(  # noqa: ANN202
+        ssh: str,
+        _root: Path,
+        record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        # The verified direct transport (``ssh_transport.open_direct_stream``), stood in: it is
+        # asked for the key the owner's consent names, within the connection's deadline.
+        opened.append((ssh, expected, deadline is not None))
         client_end, server_end = memory_pair()
         daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
         return client_end
 
     monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
-    monkeypatch.setattr(ssh_transport.SshControlStream, "open", staticmethod(open_stream))
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
 
     def no_helper(*_args: object) -> object:
         raise AssertionError("the direct style never dials the helper's endpoint")
@@ -243,7 +252,9 @@ def test_the_direct_style_dials_its_own_stream_and_checks_every_frame(
     transport, refused = asyncio.run(run())
     assert transport == "ssh"
     assert refused.phase == "server_authorization_changed"
-    assert len(opened) == 1 and "-W" in opened[0] and "ControlMaster=auto" in opened[0]
+    from builders.server_profiles import HOST_KEY
+
+    assert opened == [("/usr/bin/ssh", HOST_KEY, True)]
     # One status call reached the server; the one after the owner's change never left.
     assert len(daemon.received(0)) == 2
 

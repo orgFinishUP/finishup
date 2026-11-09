@@ -31,6 +31,7 @@ from finishup.client.ssh_transport import (
     classify_ssh_failure,
     control_argv,
     direct_argv,
+    direct_master_argv,
     direct_remote_argv,
     host_key_changed,
     host_key_unconfirmed,
@@ -43,6 +44,8 @@ from finishup.client.ssh_transport import (
     ssh_environment,
 )
 from finishup.client.targets import ServerTarget
+
+_KEY = "sha256:" + hashlib.sha256(b"the consented host key").hexdigest()
 
 
 @pytest.fixture
@@ -87,6 +90,8 @@ def test_the_relay_master_argv_is_fixed_and_secret_free(
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        "-o",
+        "LogLevel=DEBUG1",
         "-p",
         "2222",
         "-L",
@@ -107,18 +112,17 @@ def test_the_relay_master_argv_is_fixed_and_secret_free(
         control_argv("/usr/bin/ssh", root, record, "stop")
 
 
-def test_the_direct_argv_rides_one_persistent_master(
+def test_the_direct_argv_rides_one_verified_persistent_master(
     ssh_target: tuple[ServerTarget, Path],
 ) -> None:
     record, root = ssh_target
+    # A stream never becomes a master; it prints how it reached the server (B1).
     assert direct_argv("/usr/bin/ssh", root, record) == (
         "/usr/bin/ssh",
         "-S",
         f"{root}/run/m",
         "-o",
-        "ControlMaster=auto",
-        "-o",
-        "ControlPersist=15m",
+        "ControlMaster=no",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -127,13 +131,40 @@ def test_the_direct_argv_rides_one_persistent_master(
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        "-o",
+        "LogLevel=DEBUG1",
         "-p",
         "2222",
         "-W",
         "/srv/fu/run/control.sock",
         "owner@lab.example",
     )
-    assert direct_remote_argv("/usr/bin/ssh", root, record, "service", "start", "--json")[-2:] == (
+    assert direct_master_argv("/usr/bin/ssh", root, record) == (
+        "/usr/bin/ssh",
+        "-M",
+        "-S",
+        f"{root}/run/m",
+        "-o",
+        "ControlPersist=15m",
+        "-N",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "LogLevel=DEBUG1",
+        "-p",
+        "2222",
+        "owner@lab.example",
+    )
+    remote = direct_remote_argv("/usr/bin/ssh", root, record, "service", "start", "--json")
+    assert remote[3:5] == ("-o", "ControlMaster=no") and "LogLevel=DEBUG1" in remote
+    assert remote[-2:] == (
         "--",
         "env FINISHUP_ISOLATED_ROOT=/srv/fu /opt/finishup/bin/finishup service start --json",
     )
@@ -294,7 +325,8 @@ def test_a_master_that_cannot_start_names_why(
             master = SshMaster(root, record, ssh=program)
             try:
                 await master.ensure(
-                    deadline=None if deadline is None else time.monotonic() + deadline
+                    expected=_KEY,
+                    deadline=None if deadline is None else time.monotonic() + deadline,
                 )
             except UpstreamUnavailable as error:
                 reasons.append(error.reason)
@@ -373,3 +405,273 @@ def test_an_upstream_socket_is_reached_only_with_the_fixed_endpoint_fences(
         "endpoint_unsafe",
     ]
     assert stat.S_ISDIR(run_dir.stat().st_mode)
+
+
+def _key_line(blob: bytes) -> tuple[bytes, str]:
+    printed, digest = _fingerprint(blob)
+    return b"debug1: Server host key: ssh-ed25519 SHA256:" + printed + b"\n", digest
+
+
+def test_only_the_consented_host_key_lets_a_connection_be_used() -> None:
+    """B1: a connection OpenSSH made itself is used only when it verified the consented key."""
+
+    from finishup.client.ssh_transport import host_keys, require_host_key
+
+    line, consented = _key_line(b"consented")
+    other_line, other = _key_line(b"rotated")
+    assert host_keys(b"noise\n" + line + line) == {consented}
+    require_host_key(line, consented)
+    # None printed: it rode a master, which its caller verified.
+    require_host_key(b"debug1: mux_client_request_session: master session id: 2\n", consented)
+    for stderr, expected in (
+        (other_line, consented),
+        (line + other_line, consented),
+        (line, None),
+    ):
+        with pytest.raises(UpstreamUnavailable, match="remote_identity_changed"):
+            require_host_key(stderr, expected)
+    assert host_keys(other_line) == {other}
+
+
+_FAKE_MASTER = r"""
+import os, signal, socket, sys
+argv = sys.argv[1:]
+state = os.environ["FAKE_MASTER_STATE"]
+with open(os.path.join(state, "calls"), "a") as log:
+    log.write(" ".join(argv) + "\n")
+if "-O" in argv:
+    sys.exit(0)
+with open(os.path.join(state, "key"), "rb") as handle:
+    key = handle.read()
+if key:
+    sys.stderr.buffer.write(b"debug1: Server host key: ssh-ed25519 SHA256:" + key + b"\n")
+    sys.stderr.flush()
+local = argv[argv.index("-L") + 1].split(":", 1)[0]
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(local)
+os.chmod(local, 0o600)
+listener.listen(1)
+signal.pause()
+"""
+
+
+@pytest.fixture
+def fake_master(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, Path]]:
+    """A stand-in relay master: prints the host key in ``key`` (if any), then listens on its
+    ``-L`` socket until it is stopped (by the pid ``SshMaster`` spawned)."""
+
+    import sys
+
+    state = tmp_path / "master-state"
+    state.mkdir()
+    (state / "calls").write_text("")
+    program = tmp_path / "ssh"
+    program.write_text(f"#!{sys.executable}\n{_FAKE_MASTER}", encoding="utf-8")
+    program.chmod(0o700)
+    monkeypatch.setenv("FAKE_MASTER_STATE", str(state))
+    yield str(program), state
+
+
+def _masters_started(state: Path) -> int:
+    return sum("-L" in line.split() for line in (state / "calls").read_text().splitlines())
+
+
+@pytest.mark.parametrize("printed", ["consented", "rotated", "none"])
+def test_the_relay_master_is_ready_only_once_it_verified_the_consented_key(
+    ssh_target: tuple[ServerTarget, Path], fake_master: tuple[str, Path], printed: str
+) -> None:
+    """B1: a master that verified another key (the server's key rotated and ``known_hosts``
+    updated, the consent unchanged), or named none, is stopped before anything uses it."""
+
+    record, root = ssh_target
+    program, state = fake_master
+    _line, consented = _key_line(b"consented")
+    printed_keys = {
+        "consented": _fingerprint(b"consented")[0],
+        "rotated": _fingerprint(b"rotated")[0],
+        "none": b"",
+    }
+    (state / "key").write_bytes(printed_keys[printed])
+
+    async def run() -> tuple[str | None, bool]:
+        master = SshMaster(root, record, ssh=program)
+        try:
+            await master.ensure(expected=consented, deadline=time.monotonic() + 2.0)
+        except UpstreamUnavailable as error:
+            return error.reason, master.alive
+        else:
+            return None, master.alive
+        finally:
+            if printed == "consented":
+                await master.close()
+
+    reason, alive = asyncio.run(run())
+    if printed == "consented":
+        assert (reason, alive) == (None, True)
+    else:
+        assert (reason, alive) == ("remote_identity_changed", False)
+
+
+def test_a_running_relay_master_is_reused_only_for_the_key_it_verified(
+    ssh_target: tuple[ServerTarget, Path], fake_master: tuple[str, Path]
+) -> None:
+    """B1: after the owner agrees to another key, the running master is replaced and checked."""
+
+    record, root = ssh_target
+    program, state = fake_master
+    (state / "key").write_bytes(_fingerprint(b"consented")[0])
+    _line, consented = _key_line(b"consented")
+    _line, rotated = _key_line(b"rotated")
+
+    async def run() -> tuple[int, int, str | None]:
+        master = SshMaster(root, record, ssh=program)
+        try:
+            await master.ensure(expected=consented)
+            await master.ensure(expected=consented)
+            reused = _masters_started(state)
+            try:
+                await master.ensure(expected=rotated, deadline=time.monotonic() + 2.0)
+            except UpstreamUnavailable as error:
+                return reused, _masters_started(state), error.reason
+            return reused, _masters_started(state), None
+        finally:
+            await master.close()
+
+    assert asyncio.run(run()) == (1, 2, "remote_identity_changed")
+
+
+class _DirectOpenSsh:
+    """A stand-in ``run_ssh`` for the direct style's master: ``-O check``/``exit`` and the master
+    start, which binds a real socket at ``run/m`` (as OpenSSH's backgrounded master does) and
+    prints the host key ``printed`` names."""
+
+    def __init__(self, root: Path) -> None:
+        import socket
+
+        self.root = root
+        self.socket = socket
+        self.calls: list[str] = []
+        self.printed = b""
+        self.listener: object | None = None
+
+    def _unbind(self) -> None:
+        listener = self.listener
+        if listener is not None:
+            listener.close()  # type: ignore[attr-defined]
+            self.listener = None
+        (self.root / "run" / "m").unlink(missing_ok=True)
+
+    async def __call__(self, argv: tuple[str, ...], *, seconds: float):  # noqa: ANN204
+        if "-O" in argv:
+            operation = argv[argv.index("-O") + 1]
+            self.calls.append(operation)
+            if operation == "exit":
+                self._unbind()
+            return (0 if self.listener is not None else 255), b"", b""
+        self.calls.append("master")
+        self._unbind()
+        listener = self.socket.socket(self.socket.AF_UNIX)
+        listener.bind(str(self.root / "run" / "m"))
+        (self.root / "run" / "m").chmod(0o600)
+        self.listener = listener
+        return 0, b"", self.printed
+
+
+def test_the_direct_master_is_recorded_only_once_it_verified_the_consented_key(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: the direct style's master is verified when started, reused only as recorded, and
+    replaced when the consent names another key; a rotated key is refused, nothing recorded."""
+
+    from finishup.client import ssh_transport
+    from finishup.client.ssh_transport import ensure_direct_master
+
+    record, root = ssh_target
+    openssh = _DirectOpenSsh(root)
+    monkeypatch.setattr(ssh_transport, "run_ssh", openssh)
+    consented_line, consented = _key_line(b"consented")
+    rotated_line, rotated = _key_line(b"rotated")
+    record_path = root / "state" / "ssh-master.json"
+
+    async def ensure(expected: str | None) -> str | None:
+        try:
+            await ensure_direct_master("ssh", root, record, expected=expected)
+        except UpstreamUnavailable as error:
+            return error.reason
+        return None
+
+    async def run() -> None:
+        try:
+            openssh.printed = consented_line
+            assert await ensure(consented) is None
+            assert openssh.calls == ["master"]
+            assert record_path.stat().st_mode & 0o777 == 0o600
+            # Reused as recorded, once it answers.
+            assert await ensure(consented) is None
+            assert openssh.calls == ["master", "check"]
+            # The owner agreed to another key: the running master is replaced and checked
+            # again; the server still shows the old one, so it is refused and asked to exit.
+            assert await ensure(rotated) == "remote_identity_changed"
+            assert openssh.calls[2:] == ["exit", "master", "exit"]
+            assert not record_path.exists() and openssh.listener is None
+            # The server's key rotated (known_hosts updated), the consent unchanged.
+            openssh.calls.clear()
+            openssh.printed = rotated_line
+            assert await ensure(consented) == "remote_identity_changed"
+            assert openssh.calls == ["master", "exit"] and not record_path.exists()
+            # A master nobody recorded (another process's, a relay's) is never ridden.
+            openssh.calls.clear()
+            openssh.printed = consented_line
+            assert await ensure(consented) is None
+            record_path.unlink()
+            assert await ensure(consented) is None
+            assert openssh.calls == ["master", "exit", "master"]
+            # Nothing to verify against: refused before anything runs.
+            openssh.calls.clear()
+            assert await ensure(None) == "remote_identity_changed"
+            assert openssh.calls == []
+        finally:
+            openssh._unbind()  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("printed", "reason"),
+    [
+        ("mux", None),
+        ("consented", None),
+        ("rotated", "remote_identity_changed"),
+        ("refused", "remote_auth_failed"),
+    ],
+)
+def test_a_direct_stream_is_used_only_once_openssh_said_how_it_reached_the_server(
+    tmp_path: Path, printed: str, reason: str | None
+) -> None:
+    """B1: a ``-W`` stream rode the verified master (its multiplexing line), or verified the
+    consented key over a connection of its own; anything else is never written to."""
+
+    consented_printed, consented = _fingerprint(b"consented")
+    rotated_printed, _rotated = _fingerprint(b"rotated")
+    lines = {
+        "mux": "debug1: mux_client_request_stdio_fwd: master session id: 2",
+        "consented": f"debug1: Server host key: ssh-ed25519 SHA256:{consented_printed.decode()}",
+        "rotated": f"debug1: Server host key: ssh-ed25519 SHA256:{rotated_printed.decode()}",
+    }
+    if printed == "refused":
+        body = 'echo "owner@h: Permission denied (publickey)." >&2; exit 255'
+    else:
+        body = f'echo "{lines[printed]}" >&2; exec cat'
+    program = _script(tmp_path, "w", body)
+
+    async def run() -> str | None:
+        stream = await SshControlStream.open((program,))
+        try:
+            await stream.verify(consented, deadline=time.monotonic() + 10.0)
+        except UpstreamUnavailable as error:
+            return error.reason
+        finally:
+            await stream.aclose()
+        return None
+
+    assert asyncio.run(run()) == reason

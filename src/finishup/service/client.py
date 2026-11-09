@@ -2629,11 +2629,13 @@ async def _connect_direct(
     client's demand), then dialled again inside the same deadline.
     """
 
+    from finishup.client.server_profile import consented_host_key
     from finishup.client.ssh_transport import (
-        SshControlStream,
         UpstreamUnavailable,
-        direct_argv,
         direct_remote_argv,
+        ensure_direct_master,
+        open_direct_stream,
+        require_host_key,
         resolve_ssh,
         run_ssh,
     )
@@ -2653,7 +2655,11 @@ async def _connect_direct(
         raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
 
     async def dial() -> ControlStream:
-        return await SshControlStream.open(direct_argv(ssh, root, record))
+        # Verified before it is handed back: it rode the master that verified the consented
+        # host key, or verified that key over a connection of its own (ADR-052).
+        return await open_direct_stream(
+            ssh, root, record, expected=consented_host_key(root), deadline=deadline
+        )
 
     async def attempt() -> ServiceClient:
         return await _connect_service_attempt(
@@ -2676,10 +2682,16 @@ async def _connect_direct(
     phase = admission.authorization.refusal()
     if phase is not None:
         raise ControlError("service_unavailable", retryable=True, phase=phase)
-    code, _stdout, _stderr = await run_ssh(
-        direct_remote_argv(ssh, root, record, "service", "start", "--json"),
-        seconds=_remaining(deadline),
-    )
+    expected = consented_host_key(root)
+    try:
+        await ensure_direct_master(ssh, root, record, expected=expected, deadline=deadline)
+        code, _stdout, stderr = await run_ssh(
+            direct_remote_argv(ssh, root, record, "service", "start", "--json"),
+            seconds=_remaining(deadline),
+        )
+        require_host_key(stderr, expected)
+    except UpstreamUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
     if code != 0:
         raise ControlError(
             "service_unavailable", retryable=True, phase="remote_service_not_running"

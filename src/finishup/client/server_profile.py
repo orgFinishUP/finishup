@@ -100,6 +100,7 @@ __all__ = [
     "FetchedProfile",
     "ProfileSource",
     "consent_verdict",
+    "consented_host_key",
     "endpoint_origin",
     "read_cached_profile",
     "read_consented_envelope",
@@ -391,6 +392,28 @@ def _verdict_of(comparison: EnvelopeComparison, revision: ServerProfileRevision)
     if comparison.verdict == "level_unavailable":
         return ConsentVerdict(_LEVEL_UNAVAILABLE)
     return ConsentVerdict(_PROFILE_CHANGED)
+
+
+def consented_host_key(root: Path) -> str | None:
+    """The SSH host key the owner's consent for the target at ``root`` is bound to, or ``None``.
+
+    The ``sha256:`` digest the consented envelope's endpoint names (``ssh_host_key``): every new
+    OpenSSH connection to that target must have verified exactly this key before anything is
+    sent over it (``client.ssh_transport``). ``None`` when the record, its consent or the
+    envelope cannot be read, or names no SSH host key: a transport then refuses (fail closed).
+    Never raises; file reads only.
+    """
+
+    try:
+        record = read_target(root)
+        if record is None or record.kind != "ssh" or record.consent is None:
+            return None
+        envelope = read_consented_envelope(root, record.consent)
+    except Exception:  # noqa: BLE001 - a consent that cannot be read verifies nothing
+        return None
+    if envelope is None or envelope.endpoint.identity_type != "ssh_host_key":
+        return None
+    return envelope.endpoint.identity
 
 
 def consent_verdict(record: ServerTarget) -> ConsentVerdict:

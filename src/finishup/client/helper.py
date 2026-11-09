@@ -77,12 +77,13 @@ from finishup.client.helper_status import (
     write_helper_status,
 )
 from finishup.client.ssh_transport import (
-    SshControlStream,
     SshMaster,
     UpstreamUnavailable,
-    direct_argv,
     direct_remote_argv,
+    ensure_direct_master,
     exit_master,
+    open_direct_stream,
+    require_host_key,
     run_ssh,
 )
 from finishup.client.targets import ServerTarget, TargetError
@@ -151,8 +152,18 @@ class Upstream(Protocol):
     async def zero_network(self) -> None: ...
 
 
+def _consented_host_key(root: Path) -> str | None:
+    from finishup.client.server_profile import consented_host_key
+
+    return consented_host_key(root)
+
+
 class SshRelayUpstream:
-    """The relay style: one warm master; each stream is one channel of its ``-L`` forward."""
+    """The relay style: one warm master; each stream is one channel of its ``-L`` forward.
+
+    The master is used only while it verified the host key the owner's consent names now
+    (``SshMaster.ensure``), read again for every stream.
+    """
 
     def __init__(self, root: Path, record: ServerTarget, *, ssh: str | None = None) -> None:
         self._master = SshMaster(root, record, ssh=ssh)
@@ -160,11 +171,11 @@ class SshRelayUpstream:
         self._record = record
 
     async def ensure(self) -> None:
-        await self._master.ensure()
+        await self._master.ensure(expected=_consented_host_key(self._root))
 
     async def open_stream(self) -> ControlStream:
         for attempt in range(2):
-            await self._master.ensure()
+            await self._master.ensure(expected=_consented_host_key(self._root))
             try:
                 return await connect_owner_only_endpoint(self._master.upstream_path)
             except LocalControlTransportError:
@@ -175,7 +186,10 @@ class SshRelayUpstream:
         raise UpstreamUnavailable("remote_unreachable")
 
     async def start_remote_service(self) -> bool:
-        return await self._master.run_remote("service", "start") == 0
+        code = await self._master.run_remote(
+            "service", "start", expected=_consented_host_key(self._root)
+        )
+        return code == 0
 
     async def close(self) -> None:
         await self._master.close()
@@ -207,17 +221,23 @@ class SshDirectUpstream:
         return None
 
     async def open_stream(self) -> ControlStream:
-        return await SshControlStream.open(
-            direct_argv(self._executable(), self._root, self._record)
+        return await open_direct_stream(
+            self._executable(),
+            self._root,
+            self._record,
+            expected=_consented_host_key(self._root),
         )
 
     async def start_remote_service(self) -> bool:
-        code, _stdout, _stderr = await run_ssh(
+        expected = _consented_host_key(self._root)
+        await ensure_direct_master(self._executable(), self._root, self._record, expected=expected)
+        code, _stdout, stderr = await run_ssh(
             direct_remote_argv(
                 self._executable(), self._root, self._record, "service", "start", "--json"
             ),
             seconds=30.0,
         )
+        require_host_key(stderr, expected)
         return code == 0
 
     async def close(self) -> None:

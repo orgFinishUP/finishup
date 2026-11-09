@@ -185,13 +185,14 @@ def test_a_cli_connection_registers_its_workspace_once_and_starts_a_helper_only_
 
         daemon = ScriptedDaemon()
 
-        async def open_stream(_argv: tuple[str, ...]):  # noqa: ANN202
+        async def open_stream(*_args: object, **_kwargs: object):  # noqa: ANN202
+            # The verified direct transport (``ssh_transport.open_direct_stream``), stood in.
             client_end, server_end = memory_pair()
             daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
             return client_end
 
         monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
-        monkeypatch.setattr(ssh_transport.SshControlStream, "open", staticmethod(open_stream))
+        monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
     with targets.registry_lock():
         targets.write_selection(record)
     reset_selection_memo()
