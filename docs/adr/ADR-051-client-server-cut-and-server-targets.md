@@ -951,7 +951,11 @@ authorization lapsed answers every call `workspace_unavailable` (ADR-052).
   reconnect, operation-status probe and `request_id` replay. There is no local write queue: a
   queued write would let a receipt describe work the server never recorded.
 - **No replay across targets.** Idempotency is scoped by installation (ADR-002 decision 4). A
-  `request_id` sent to one target is never replayed against another.
+  `request_id` sent to one target is never replayed against another. Since a running MCP bridge
+  follows a changed selection (ADR-052, O1), a request already sent over a connection that ended
+  with `server_authorization_changed` is never resent by the bridge, and its outcome is reported
+  unknown; a reconnect replays only on the target the bridge's admission binds to the selection
+  on disk.
 - **No user-controlled text.** Target names, hosts, addresses and paths never appear in errors,
   logs, hook output, MCP text or receipts. Remedy text lives once in `protocol/recovery.py`, and
   local remedy text keeps its exact bytes.

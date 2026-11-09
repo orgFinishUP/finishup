@@ -674,7 +674,7 @@ default service.
   byte for byte as before (O3).
 - **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
   connection it made to a server elsewhere ends with `server_authorization_changed` once the
-  selection, record or key changes, and its next request follows the new selection (ADR-052, O1);
+  selection, record or key changes, and its next request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown);
   hooks follow a new selection at once. Restart open Cursor windows and Agent CLI sessions after `finishup server
   use`. Required-mode `failClosed` gate hooks deny for an unreachable target exactly as for an
   unreachable local service; nothing falls back to the local service.

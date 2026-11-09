@@ -47,8 +47,9 @@ here allows no network use; ask the user once, never run `finishup server reposi
 them, and repeat the same request after they allow it; if they decline, run `finishup server
 repositories keep` and do not ask again. `repository_kept_on_this_computer`: continue without
 FinishUP for this repository. `server_connection_renew`: FinishUP stopped sending over a
-connection whose authorization changed, and what that server received stays there; repeat the
-request. Never switch servers or change a privacy policy for the user.
+connection whose authorization changed, and what that server received stays there; a request
+already sent may be recorded there and FinishUP never resends it, so tell the user a write's
+outcome is unknown; later requests use the current selection. Never switch servers or change a privacy policy for the user.
 
 Typed continuation pointers resolve to these small topics: startup and identity to
 [`startup.md`](startup.md), publication field ownership to [`publication.md`](publication.md),

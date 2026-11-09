@@ -83,8 +83,10 @@ accepted generation. `refusal()`:
 - the same generation passes;
 - a selection that no longer names the target, a replaced or removed target, or a new credential
   generation is **`server_authorization_changed`** (continuation `server_connection_renew`:
-  repeat the same request with the same identity; it runs under the current selection or names
-  the refusal now in force);
+  FinishUP stopped sending over the connection and what the server received stays there; a request
+  already sent may be recorded there and is never resent, since the server selected now may be
+  another (ADR-051: no replay across targets), so its outcome is unknown; later requests run under
+  the current selection or name the refusal now in force);
 - anything else re-runs gate steps 2 to 6 on the re-read record and accepts the new generation
   when they pass, so a rewrite with the same content never ends a connection;
 - a refusal is final for that connection; a check that cannot be made keeps the last decision;
@@ -162,9 +164,16 @@ digest and revision in `target.json`, and mapping the verdicts to `server_profil
 
 - **O1 — follow the new selection.** A claim-bound connection to a server elsewhere ends with
   `server_authorization_changed`; the MCP bridge then forgets the root it started with and follows
-  the current selection on its next connection, for the same request
-  (`mcp.server._follow_selection_after`). A switch between servers on this computer is unchanged:
-  the bridge keeps the server it started with. The open-sessions line says both.
+  the current selection on its next connection (`mcp.server._follow_selection_after`). A request
+  found lapsed by the reuse check, before it was sent, goes on that next connection; a request
+  already sent over the connection that ended is never sent again (`_invoke_with_reconnect`), since
+  the server selected now may be another one and it could then run on both (ADR-051: no replay
+  across targets): the agent is told its outcome is unknown, and only later requests follow the
+  selection. `server_authorization_changed` is not latched as the bridge's availability outage, so
+  the next request makes a fresh connection under the current selection, starting a service on
+  this computer when one is selected. An admission whose remembered root the selection no longer
+  names is refused the same way (decision 2). A switch between servers on this computer is
+  unchanged: the bridge keeps the server it started with. The open-sessions line says both.
 - **O2 — local connections are never checked.** No authorization object, generation read or watch
   for the everyday server, a named local server or an isolated root that is not a target.
 - **O3 — dormant until a server elsewhere exists.** The session-start live read and the owner-only

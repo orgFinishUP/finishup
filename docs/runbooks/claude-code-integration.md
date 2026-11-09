@@ -495,7 +495,7 @@ process to the default service.
 - **Switching mid-session.** The MCP bridge reads the selection once per process and keeps a
   server on this computer for the life of the session; a connection it made to a server elsewhere
   ends with `server_authorization_changed` once the selection, record or key changes, and its next
-  request follows the new selection (ADR-052, O1); hooks follow a new selection at once. Restart open Claude
+  request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown); hooks follow a new selection at once. Restart open Claude
   Code sessions after `finishup server use`. In required startup mode a target that cannot be
   reached denies tracked tools exactly as an unreachable local service does; it never falls back to
   the local service.

@@ -205,6 +205,10 @@ class ScriptedDaemon:
         self.replied = asyncio.Event()
         # The connections ``scripted_service`` serves, one task each.
         self.serving: list[asyncio.Task[None]] = []
+        # While set, a workflow call is left unanswered (it stays under way) and ``held`` is set
+        # once one arrives, so a test acts while a request is in flight without waiting on time.
+        self.hold_calls = False
+        self.held = asyncio.Event()
 
     def received(self, connection: int = -1) -> list[bytes]:
         """Every frame payload one connection sent the daemon, its hello first."""
@@ -262,6 +266,9 @@ class ScriptedDaemon:
 
                     task = asyncio.create_task(answer_after_cancel())
                     tasks.add(task)
+                    continue
+                if self.hold_calls and request.method is not ControlMethod.SERVICE_STATUS:
+                    self.held.set()
                     continue
                 async with write_lock:
                     await self._send(stream, _answer(request))

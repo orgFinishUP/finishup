@@ -133,6 +133,7 @@ from finishup.ports.integrations import FINISHUP_MCP_TOOL_NAMES
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from finishup.protocol.errors import (
+    AUTHORIZATION_REFUSAL_PHASES,
     SERVICE_STARTUP_PHASES,
     PublicErrorCode,
     PublicOperationError,
@@ -338,6 +339,23 @@ _AVAILABILITY_LATCH_REASONS: Final = frozenset(
     }
 )
 _AVAILABILITY_TERMINAL: Final = "terminal_unavailable"
+
+
+def _latches_availability(error: BaseException) -> bool:
+    """Whether ``error`` describes this host binding's availability, which later calls inherit.
+
+    Not ``server_authorization_changed``: it ends one connection to a server elsewhere, and the
+    next request follows the current selection with a fresh connection (ADR-052, O1), which an
+    inherited outage would stop (a quiet probe never starts the service now selected).
+    """
+
+    return (
+        isinstance(error, ControlError)
+        and error.reason in _AVAILABILITY_LATCH_REASONS
+        and error.phase != "server_authorization_changed"
+    )
+
+
 _INHERITED_AVAILABILITY_SUFFIX: Final = (
     " This bridge already reported this outage under the same correlation_id for an earlier "
     "request; no new diagnostic was recorded for this call. FinishUP remains unavailable for this "
@@ -1037,9 +1055,12 @@ def _follow_selection_after(error: BaseException) -> None:
     """After a connection to a server elsewhere ended because its authorization changed, follow
     the current selection (ADR-052, the owner's answer O1).
 
-    ``server_authorization_changed``: the selection, the server's record or its key changed. The
-    bridge forgets the root it started with, so its next connection, made at once for the same
-    request or on the next one, reads the selection as it is now and passes the gate under it.
+    ``server_authorization_changed``: what the connection was authorized under changed (the
+    selection, the server's record or key, this computer's policy or a repository's hold). The
+    bridge forgets the root it started with, so its next connection reads the selection as it is
+    now and passes the gate under it. A request found lapsed before it was sent (the reuse check)
+    is sent on that next connection; one already sent over the connection that ended is never
+    sent again (``_invoke_with_reconnect``): its outcome is unknown, and the next request follows.
     Any other failure, and every change between servers on this computer, keeps the root the
     bridge started with, as before (a local connection is never ended by a selection change).
     """
@@ -1143,11 +1164,7 @@ async def _ensure_service_client(
                     # The start ran out of this call's budget, not of its own: a typed
                     # timeout the caller recovers from, never a latched outage.
                     raise _call_timeout() from None
-                keep_gate = (
-                    retain_availability_failure_for_latch
-                    and isinstance(exc, ControlError)
-                    and exc.reason in _AVAILABILITY_LATCH_REASONS
-                )
+                keep_gate = retain_availability_failure_for_latch and _latches_availability(exc)
                 raise
             # Publish only if no retirement landed while discovery ran outside the lock: a
             # client for a binding retired meanwhile is closed and no RPC is sent on it.
@@ -2996,6 +3013,12 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
         if error.reason in _DISCARD_CLIENT_REASONS:
             await _discard_client(runtime, client)
         _follow_selection_after(error)
+        if error.phase in AUTHORIZATION_REFUSAL_PHASES:
+            # The connection to a server elsewhere ended because what it was authorized under
+            # changed. The request may already be recorded there, and the server selected now may
+            # be another one: it is never sent again (ADR-051: no replay across targets). Its
+            # outcome is reported unknown; only later requests follow the selection (O1).
+            raise
         if not error.retryable or error.reason not in _RECONNECT_REASONS:
             raise
         replacement = await ensure_service_client(
@@ -3148,7 +3171,7 @@ async def _dispatch_within_budget[RequestT: BaseModel, ResultT: BaseModel](
                 check_mode=check_mode,
             )
     except ControlError as exc:
-        if exc.reason in _AVAILABILITY_LATCH_REASONS:
+        if _latches_availability(exc):
             inherited_failure = await _inherit_terminal_availability(runtime, request_id)
             if inherited_failure is not None:
                 return inherited_failure
@@ -3972,7 +3995,7 @@ async def _dispatch_closure_prepare_within_budget(
                 operation="closure_prepare",
             )
     except ControlError as exc:
-        if exc.reason in _AVAILABILITY_LATCH_REASONS:
+        if _latches_availability(exc):
             inherited_failure = await _inherit_terminal_availability(runtime, request_id)
             if inherited_failure is not None:
                 return inherited_failure

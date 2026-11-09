@@ -857,17 +857,22 @@ _DIRECTIVES: Final = (
     # A connection to a server elsewhere ended because what it was authorized under changed
     # (ADR-052): the selection, the server's record or key, this computer's policy or a
     # repository's hold. It had sent something, so it says FinishUP stopped sending and that what
-    # the server received stays there (design v2 section 8.10). Repeating the request makes a new
-    # connection under the current authorization, or names the refusal that now applies.
+    # the server received stays there (design v2 section 8.10). A request it had sent has an
+    # unknown outcome there and is never resent, since the server selected now may be another
+    # (ADR-051: no replay across targets); later requests run under the current selection or
+    # name the refusal that now applies.
     RecoveryDirective(
         token="server_connection_renew",
         directive=(
             "What this connection to a server elsewhere was authorized under changed, so FinishUP "
-            "stopped sending over it; what that server received stays there. Repeat the request: "
-            "it runs under the current selection or names the refusal now."
+            "stopped sending over it; what that server received stays there. A request already "
+            "sent may be recorded there; FinishUP never resends it."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
-        nudge="Never change the server selection or a key for the owner.",
+        nudge=(
+            "Later requests use the current selection; tell the user a sent write's outcome is "
+            "unknown. Never change servers or keys."
+        ),
     ),
     RecoveryDirective(
         token="server_on_this_computer_required",

@@ -3,8 +3,10 @@
 The owner's answer O1: a claim-bound connection to a server elsewhere ends with
 ``server_authorization_changed`` once the selection, the server's record or its key changes; the
 bridge then forgets the root it started with and follows the current selection on its next
-connection, for the same request. A switch between servers on this computer is unchanged: the
-bridge keeps the connection it has (a local connection is never checked, O2).
+request. A request already sent over the connection that ended is never sent again: the server
+selected now may be another one (ADR-051: no replay across targets), so its outcome stays unknown
+and the agent is told so. A switch between servers on this computer is unchanged: the bridge
+keeps the connection it has (a local connection is never checked, O2).
 
 The real connection seam runs throughout; only the server is a scripted stand-in reached over an
 in-memory stream. Remote kinds are opened in process (none is open in this release).
@@ -12,6 +14,7 @@ in-memory stream. Remote kinds are opened in process (none is open in this relea
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -167,6 +170,90 @@ async def test_a_bridge_on_a_server_elsewhere_follows_the_new_selection(
     # Every connection after the change follows the current selection.
     assert dialled[before:] and set(dialled[before:]) == {expected_root}
     assert expected_hello in _last_hello(daemon)
+    await _cleanup(runtime)
+
+
+def _calls(daemon: ScriptedDaemon, method: str) -> int:
+    """How many calls of ``method`` the scripted service received, on every connection."""
+
+    count = 0
+    for connection in range(daemon.connections):
+        for payload in daemon.received(connection)[1:]:
+            frame = as_json(payload)
+            count += frame.get("kind") == "call" and frame.get("method") == method
+    return count
+
+
+def _error(result: object) -> dict[str, object]:
+    structured = cast(dict[str, object], getattr(result, "structuredContent"))
+    return cast(dict[str, object], structured["error"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["selection", "credential"])
+async def test_a_request_under_way_when_the_authorization_changes_is_never_sent_again(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    dialled: list[Path | None],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The request was sent to server A; while it was under way the owner selected another
+    server (or logged out). Resending it on the new connection could run it twice, once on each
+    server: it is not resent, its outcome is reported unknown, and the next request follows."""
+
+    open_remote_kinds(monkeypatch, "https")
+    record = _remote()
+    remote_root = targets.target_root(record.target_id)
+    targets.write_selection(record)
+    reset_selection_memo()
+    tick = asyncio.Event()
+
+    async def recheck() -> None:
+        # The watch's interval, released by the test once the request is under way.
+        await tick.wait()
+        tick.clear()
+
+    monkeypatch.setattr(service_client, "_recheck_after_interval", recheck)
+    runtime = bridge.build_bridge_runtime(
+        host_profile="claude", workspace_locator=WorkspaceLocator(workspace)
+    )
+    daemon.hold_calls = True
+    under_way = asyncio.create_task(
+        bridge.dispatch_status(_status(new_id(IdKind.REQUEST)), runtime)
+    )
+    async with asyncio.timeout(10):
+        await daemon.held.wait()
+    if change == "selection":
+        _switch_to_everyday_elsewhere()
+        expected_root, expected_hello = None, "workspace_locator"
+    else:
+        assert bump_credential_generation(remote_root)
+        expected_root, expected_hello = remote_root, "workspace_claim"
+    tick.set()
+    async with asyncio.timeout(10):
+        result = await under_way
+
+    error = _error(result)
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["safe_details"] == {
+        "continuation": "server_connection_renew",
+        "phase": "server_authorization_changed",
+        "reason_code": "service_unavailable",
+    }
+    # Sent once, over the connection it was sent on; no other connection was made for it.
+    assert dialled == [remote_root]
+    assert _calls(daemon, "status") == 1
+
+    # The next request follows the current selection (O1).
+    daemon.hold_calls = False
+    assert _code(await bridge.dispatch_status(_status(new_id(IdKind.REQUEST)), runtime)) == (
+        "VAULT_LOCKED"
+    )
+    assert dialled[1:] and set(dialled[1:]) == {expected_root}
+    assert expected_hello in _last_hello(daemon)
+    assert _calls(daemon, "status") == 2
     await _cleanup(runtime)
 
 

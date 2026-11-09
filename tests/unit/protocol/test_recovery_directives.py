@@ -717,17 +717,23 @@ class TestWorkspaceBindingAndServerTargetReasons:
         for entry in (held, kept):
             assert entry.guidance_uri is not None
 
-    def test_a_changed_authorization_says_sending_stopped_and_to_repeat_the_request(self) -> None:
+    def test_a_changed_authorization_says_sending_stopped_and_the_outcome_is_unknown(self) -> None:
         # ADR-052: an open connection to a server elsewhere ends when what it was authorized
         # under changes; it already sent something, so the words say FinishUP stopped sending and
         # that what the server received stays there, never that nothing was sent (design v2 8.10).
+        # A request already sent is never resent (ADR-051: no replay across targets), so its
+        # outcome is unknown, and only later requests follow the selection (O1).
         entry = directive_for("server_connection_renew")
         assert entry is not None and entry.nudge is not None
         assert "authorized under changed" in entry.directive
         assert "stopped sending over it" in entry.directive
         assert "what that server received stays there" in entry.directive
+        assert "may be recorded there; FinishUP never resends it" in entry.directive
         assert "nothing" not in entry.directive
-        assert entry.nudge == "Never change the server selection or a key for the owner."
+        assert "same identity" not in entry.directive
+        assert entry.nudge.startswith("Later requests use the current selection")
+        assert "outcome is unknown" in entry.nudge
+        assert "Never change servers or keys." in entry.nudge
         assert entry.guidance_uri is not None
 
     def test_the_new_tokens_are_protocol_tokens_not_local_ones(self) -> None:

@@ -1507,7 +1507,7 @@ later process to the default service.
   byte for byte as before (O3).
 - **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
   connection it made to a server elsewhere ends with `server_authorization_changed` once the
-  selection, record or key changes, and its next request follows the new selection (ADR-052, O1);
+  selection, record or key changes, and its next request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown);
   hooks and shell calls follow a new selection at once. Restart open Codex sessions after `finishup server use`.
 - **Launcher.** The bare-`PATH` hook rule of issue #604 applies whichever server is selected: put
   the intended launcher first on `PATH`.
