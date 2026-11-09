@@ -24,12 +24,19 @@ from pathlib import Path
 
 import pytest
 
-from finishup.client import target_runtime
+from finishup.client import target_runtime, targets
 from finishup.client.target_runtime import ProbeResult, TargetRuntime
+from finishup.client.targets import ServerTarget
 from finishup.config.installation import instance_root_fits
 from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, reset_selection_memo
 
-__all__ = ["StandInRuntime", "ambient_home", "remote_runtime", "short_home_base"]
+__all__ = [
+    "StandInRuntime",
+    "ambient_home",
+    "record_remote_target",
+    "remote_runtime",
+    "short_home_base",
+]
 
 _PREFIX = ".yz-target-test-"
 # The deepest root a test makes, ``<home>/<prefix><8 random>/state/finishup/servers/t_<8 hex>``:
@@ -130,3 +137,17 @@ def remote_runtime(monkeypatch: pytest.MonkeyPatch) -> StandInRuntime:
         loaders[kind] = load
     monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
     return runtime
+
+
+def record_remote_target(name: str = "elsewhere") -> ServerTarget:
+    """Record one server elsewhere (an ``https`` target) without selecting it.
+
+    Its record alone switches the repository hold's reads and records on (ADR-052, the owner's
+    answer O3); call it inside ``ambient_home``.
+    """
+
+    with targets.registry_lock():
+        record, _root = targets.new_remote_target(
+            name, "https", base_url="https://finishup.example"
+        )
+    return record

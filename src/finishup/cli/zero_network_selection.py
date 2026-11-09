@@ -930,7 +930,13 @@ def _say_if_held(worktree: str | None, state: RepositoryState | None) -> None:
 def _after_change(
     state: NetworkState, workspace_locator: Path | None, *, sweep: bool
 ) -> tuple[str | None, RepositoryState | None]:
-    worktree = None if state in {"zero_network", "no_policy"} else _worktree_of(workspace_locator)
+    from finishup.client.targets import remote_target_recorded
+
+    # The repository reads stay dormant until a server elsewhere is recorded (ADR-052, O3): until
+    # then a policy change reads this computer's policy alone, as before the hold existed.
+    if state in {"zero_network", "no_policy"} or not remote_target_recorded():
+        return None, None
+    worktree = _worktree_of(workspace_locator)
     repository = None if worktree is None else live_repository_state(worktree)
     if sweep and state == "network_permitted":
         _sweep_permitted_reports(skip=worktree)

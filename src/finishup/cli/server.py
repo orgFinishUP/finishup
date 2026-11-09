@@ -1317,7 +1317,7 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
-    key_left = cleared = finished = False
+    key_left = cleared = finished = reports_removed = False
     try:
         with registry_lock():
             # The selection goes first, so a new hook or command can no longer dial the target
@@ -1327,6 +1327,7 @@ def server_remove(
                 cleared = True
             if record.is_remote:
                 key_left = _remove_remote(record, root)
+                reports_removed = _forget_reports_after_last_remote()
             else:
                 from finishup.cli.instance import dispose_instance
                 from finishup.config.installation import InstanceIdentityError
@@ -1350,6 +1351,11 @@ def server_remove(
             # A remove that did not finish keeps the switch it already made (SRV-2): say so.
             _say_using_everyday()
     typer.echo(f"Removed server target {record.name} ({record.target_id}).")
+    if reports_removed:
+        typer.echo(
+            "No server elsewhere is left, so this computer no longer keeps what its FinishUP said "
+            "of each repository's privacy policy; it is recorded again from when one is added."
+        )
     if key_left:
         from finishup.client.credentials import SERVER_CREDENTIAL_SERVICE
 
@@ -1417,6 +1423,22 @@ def _remove_remote(record: ServerTarget, root: Path) -> bool:
             "target_partly_removed", message=_PARTLY_REMOVED_KEY_DELETED if key_deleted else None
         ) from None
     return key_left
+
+
+def _forget_reports_after_last_remote() -> bool:
+    """Once no server elsewhere is recorded, delete the repository reports (ADR-052, O3).
+
+    The reports exist only for the hold, which applies only to a server elsewhere; they are made
+    from when the first one is recorded, so removing the last one is their way out. Whether a
+    record was deleted; never raises.
+    """
+
+    from finishup.client.everyday_policy import remove_repository_reports
+    from finishup.client.targets import remote_target_recorded
+
+    if remote_target_recorded():
+        return False
+    return remove_repository_reports()
 
 
 def _record_no_key(root: Path, key_deleted: bool) -> None:

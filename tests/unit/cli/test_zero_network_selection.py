@@ -39,7 +39,7 @@ from typer.testing import CliRunner, Result
 import finishup.cli.zero_network_selection as zero_network
 import finishup.client.everyday_policy as everyday_policy
 from builders.privacy_policies import local_only_policy, minimal_external_policy
-from builders.server_targets import ambient_home, remote_runtime
+from builders.server_targets import ambient_home, record_remote_target, remote_runtime
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.client import targets
@@ -2581,6 +2581,8 @@ def test_a_decision_of_an_unknown_repository_reads_every_permitting_one_again(
     from finishup.client.everyday_policy import record_repository_report, repository_report
 
     monkeypatch.setattr(zero_network, "_after_change_state", lambda: "network_permitted")
+    # The reads are switched on by a server elsewhere being recorded (ADR-052, O3).
+    record_remote_target()
     here = _git_repository(tmp_path / "here")
     tightened = _git_repository(tmp_path / "tightened")
     gone = "sha256:" + "e" * 64
@@ -2604,6 +2606,33 @@ def test_a_decision_of_an_unknown_repository_reads_every_permitting_one_again(
     tightened_report = repository_report(_repository_key(tightened))
     assert tightened_report is not None and tightened_report.no_network
     assert repository_report(gone) is None
+
+
+def test_with_no_server_elsewhere_a_policy_change_reads_no_repository(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dormant until a server elsewhere is recorded (ADR-052, O3): a change here reads this
+    computer's policy alone, as before the hold existed; the first remote target switches the
+    repository read on."""
+
+    monkeypatch.setattr(zero_network, "_after_change_state", lambda: "network_permitted")
+    here = _git_repository(tmp_path / "here")
+    read: list[str] = []
+
+    def reader(worktree: str) -> str:
+        read.append(worktree)
+        return "network_permitted"
+
+    monkeypatch.setattr(zero_network, "_repository_reader", reader)
+    monkeypatch.chdir(here)
+
+    zero_network.after_policy_change(sweep=True)
+    asyncio.run(zero_network.after_policy_change_async(sweep=True))
+    assert read == []
+
+    record_remote_target()
+    zero_network.after_policy_change()
+    assert read == [here]
 
 
 def test_privacy_changes_read_the_repository_whose_change_it_was(
@@ -2648,6 +2677,8 @@ def test_the_ceremonys_setup_read_remembers_this_repositorys_policy(
 
     worktree = _git_repository(tmp_path / "repository")
     record_reported_policy(zero_network=False, now=_AT)
+    # The reads are switched on by a server elsewhere being recorded (ADR-052, O3).
+    record_remote_target()
     setup = JsonObject(
         {
             "schema_version": "2.0.0",

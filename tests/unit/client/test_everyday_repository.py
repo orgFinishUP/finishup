@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import finishup.client.everyday_repository as everyday_repository
-from builders.server_targets import ambient_home
+from builders.server_targets import ambient_home, record_remote_target
 from finishup.client import targets
 from finishup.client.everyday_policy import (
     ReportedPolicy,
@@ -29,6 +29,7 @@ from finishup.client.everyday_policy import (
     read_repository_reports,
     record_reported_policy,
     record_repository_report,
+    reports_path,
     repository_report,
 )
 from finishup.client.everyday_repository import (
@@ -62,6 +63,13 @@ def _git(*arguments: str) -> None:
         stderr=subprocess.DEVNULL,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
+
+
+@pytest.fixture
+def elsewhere(home: Path) -> None:
+    """A server elsewhere is recorded (not selected): the hold's reads are switched on (O3)."""
+
+    record_remote_target()
 
 
 @pytest.fixture
@@ -254,7 +262,9 @@ def test_the_read_runs_against_the_everyday_installation_whatever_is_selected(
 # --- remembering a setup view a client command already received -------------------------------
 
 
-def test_remembering_a_setup_view_on_the_everyday_root(home: Path, repository: str) -> None:
+def test_remembering_a_setup_view_on_the_everyday_root(
+    home: Path, elsewhere: None, repository: str
+) -> None:
     key = _key(repository)
     # No machine report yet: a forbidding grant cannot be told apart from the machine row.
     assert asyncio.run(remember_repository_setup(repository, _setup("granted", False))) is False
@@ -323,7 +333,7 @@ def live(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
 
 
 def test_a_session_start_on_the_everyday_root_records_a_missing_report_once(
-    home: Path, repository: str, live: list[tuple[str, float]]
+    home: Path, elsewhere: None, repository: str, live: list[tuple[str, float]]
 ) -> None:
     assert refresh_at_session_start(repository, budget_seconds=5.0) is True
     # Bounded to half a second whatever the hook has left.
@@ -354,7 +364,7 @@ def test_a_session_start_with_a_server_elsewhere_asks_too_but_a_local_one_does_n
 
 
 def test_a_linked_worktree_of_a_reported_repository_is_recorded_without_asking(
-    home: Path, repository: str, tmp_path: Path, live: list[tuple[str, float]]
+    home: Path, elsewhere: None, repository: str, tmp_path: Path, live: list[tuple[str, float]]
 ) -> None:
     (Path(repository) / "f.txt").write_text("x\n", encoding="utf-8")
     _git("-C", repository, "add", "f.txt")
@@ -388,3 +398,46 @@ def test_the_whole_session_start_pass_is_bounded_its_git_read_included(
     thread.join(timeout=10)
     assert finished == [False]
     assert live == []
+
+
+# --- dormant until a server elsewhere is recorded (ADR-052, the owner's answer O3) -------------
+
+
+def test_with_no_server_elsewhere_nothing_is_asked_or_recorded(
+    home: Path, repository: str, live: list[tuple[str, float]]
+) -> None:
+    record_reported_policy(zero_network=False, now=_AT)
+    assert targets.remote_target_recorded() is False
+    assert refresh_at_session_start(repository, budget_seconds=5.0) is False
+    assert asyncio.run(remember_repository_setup(repository, _setup("granted", False))) is False
+    assert live == []
+    assert not reports_path().exists()
+    # A named local server is not a server elsewhere: still nothing.
+    with targets.registry_lock():
+        targets.new_local_target("work")
+    assert targets.remote_target_recorded() is False
+    assert refresh_at_session_start(repository, budget_seconds=5.0) is False
+    assert live == []
+    assert not reports_path().exists()
+
+
+def test_the_first_server_elsewhere_switches_the_reads_on(
+    home: Path, repository: str, live: list[tuple[str, float]]
+) -> None:
+    record_reported_policy(zero_network=False, now=_AT)
+    assert refresh_at_session_start(repository, budget_seconds=5.0) is False
+    record_remote_target()
+    assert targets.remote_target_recorded() is True
+    assert refresh_at_session_start(repository, budget_seconds=5.0) is True
+    assert live == [(repository, 0.5)]
+    report = repository_report(_key(repository))
+    assert report is not None and report.no_network
+
+
+def test_a_registry_that_cannot_be_read_switches_the_reads_on(home: Path) -> None:
+    folder = targets.servers_dir() / "t_0badf00d"
+    folder.mkdir(mode=0o700, parents=True)
+    (folder / "target.json").write_bytes(b"not a record")
+    (folder / "target.json").chmod(0o600)
+    # A damaged record may name a server elsewhere: the hold fails toward reading.
+    assert targets.remote_target_recorded() is True

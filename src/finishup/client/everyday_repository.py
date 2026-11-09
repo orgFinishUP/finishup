@@ -21,8 +21,10 @@ reports:
 * ``report_needs_refresh`` says when a session start should ask: no entry for the repository,
   one older than ``REPORT_REFRESH_SECONDS``, or one older than the last machine report.
 
-Unknown is never held: an isolation variable or pin, a read that fails, a setup view that cannot
-be classified, or a timeout records nothing. The everyday installation is read under
+Every read and record here is dormant until this computer records a server elsewhere (a remote
+target, selected or not; ADR-052, the owner's answer O3): before then nothing is asked or written,
+and there is no report from before then. Unknown is never held: an isolation variable or pin, a
+read that fails, a setup view that cannot be classified, or a timeout records nothing. The everyday installation is read under
 ``selection_override(None)``, context-local, so a process whose own selection names a server
 elsewhere still asks this computer's own FinishUP, and nothing outside the read sees it.
 
@@ -286,7 +288,8 @@ async def remember_repository_setup(
     """Record a setup view this computer's everyday FinishUP just gave for ``locator``'s repository.
 
     Only for a process on the everyday root (no isolation variable or pin, no server selected
-    for it): a server elsewhere, or a named local one, answers for its own policy. A repository
+    for it), and only once a server elsewhere is recorded (``_hold_active``): a server elsewhere,
+    or a named local one, answers for its own policy. A repository
     with no grant, or one whose grant permits network use, is recorded as such. One whose grant
     composes to no network egress is recorded only while the last machine report says this
     computer permits network use; while it says zero-network the entry is forgotten; with no
@@ -297,7 +300,7 @@ async def remember_repository_setup(
     from finishup.config.paths import PathSafetyError, active_root
 
     try:
-        if not everyday_scope() or active_root() is not None:
+        if not everyday_scope() or active_root() is not None or not _hold_active():
             return False
         worktree = canonical_workspace_locator(os.fspath(locator))
     except (PathSafetyError, OSError, ValueError):
@@ -323,6 +326,21 @@ async def remember_repository_setup(
         now=now,
         lock_wait_seconds=lock_wait_seconds,
     )
+
+
+def _hold_active() -> bool:
+    """Whether the hold's reads and records are switched on: once a server elsewhere is recorded.
+
+    ADR-052 (the owner's answer O3): with no remote target on this computer, nothing here asks a
+    service or writes a report, so a session start, a privacy ceremony and ``provider status``
+    behave byte for byte as before the hold existed. The first remote target switches them on;
+    there is no report from before then. File reads only; a registry that cannot be read switches
+    them on (``targets.remote_target_recorded``).
+    """
+
+    from finishup.client.targets import remote_target_recorded
+
+    return remote_target_recorded()
 
 
 def _parsed(stamp: str) -> datetime | None:
@@ -419,9 +437,9 @@ def refresh_at_session_start(
 ) -> bool:
     """At a session start, ask this computer's FinishUP about the session's repository if needed.
 
-    Runs on this computer's everyday root (while its service is usually running, so a report
-    exists before the owner switches to a server elsewhere) and while a server elsewhere is
-    selected (before any attach, status or drain connection, so a repository just found to allow
+    Dormant until a server elsewhere is recorded (``_hold_active``); then it runs on this
+    computer's everyday root (while its service is usually running, so a report exists before the
+    owner switches to the server elsewhere) and while a server elsewhere is selected (before any attach, status or drain connection, so a repository just found to allow
     no network use is held in the same pass). Only when the report has no entry for the
     repository, or a stale one (``report_needs_refresh``); otherwise it at most records the
     session's worktree for an entry that allows no network use. Bounded by ``budget_seconds``
@@ -435,7 +453,9 @@ def refresh_at_session_start(
     def run(make: Callable[[], Awaitable[object]]) -> object:
         return asyncio.run(cast("Coroutine[object, object, object]", make()))
 
-    if worktree is None or budget_seconds <= 0 or _root_kind() == "other":
+    if worktree is None or budget_seconds <= 0 or not _hold_active():
+        return False
+    if _root_kind() == "other":
         return False
     budget = min(HOOK_READ_SECONDS, budget_seconds)
     try:

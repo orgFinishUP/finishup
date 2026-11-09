@@ -23,7 +23,7 @@ import pytest
 
 import finishup.cli.observe_hooks as observe_hooks
 import finishup.client.everyday_repository as everyday_repository
-from builders.server_targets import ambient_home
+from builders.server_targets import ambient_home, record_remote_target
 from finishup.adapters.integrations.observation_local import LocalObservationStore
 from finishup.client import targets
 from finishup.client.everyday_policy import record_repository_report, repository_report
@@ -37,6 +37,13 @@ from finishup.ports.control import ControlError, WorkspaceLocator
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
         yield root
+
+
+@pytest.fixture
+def elsewhere(home: Path) -> None:
+    """A server elsewhere is recorded (not selected): the hold's reads are switched on (O3)."""
+
+    record_remote_target()
 
 
 @pytest.fixture
@@ -118,6 +125,7 @@ def connections(monkeypatch: pytest.MonkeyPatch, workspace: str) -> list[bool]:
 @pytest.mark.parametrize("consent", [True, False], ids=["consented", "unconsented"])
 def test_a_session_start_on_the_everyday_root_records_the_report_before_any_connection(
     home: Path,
+    elsewhere: None,
     tmp_path: Path,
     workspace: str,
     live: list[tuple[str, float]],
@@ -136,6 +144,7 @@ def test_a_session_start_on_the_everyday_root_records_the_report_before_any_conn
 
 def test_a_later_session_start_asks_nothing_and_a_server_elsewhere_is_held_from_the_record(
     home: Path,
+    elsewhere: None,
     tmp_path: Path,
     workspace: str,
     live: list[tuple[str, float]],
@@ -188,6 +197,7 @@ def test_with_a_server_elsewhere_a_missing_report_is_asked_for_before_any_connec
 )
 def test_a_clear_or_local_only_session_start_asks_nothing(
     home: Path,
+    elsewhere: None,
     tmp_path: Path,
     workspace: str,
     live: list[tuple[str, float]],
@@ -225,3 +235,65 @@ def test_a_named_local_server_asks_nothing(
     reset_selection_memo()
     _session_start(tmp_path, workspace)
     assert live == [(workspace, 0.5)]
+
+
+# --- dormant until a server elsewhere is recorded (ADR-052, the owner's answer O3) -------------
+
+
+def _files(root: Path) -> list[str]:
+    return sorted(os.fspath(path.relative_to(root)) for path in root.rglob("*"))
+
+
+@pytest.mark.parametrize("consent", [True, False], ids=["consented", "unconsented"])
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CLAUDE_HOOK, ObservationSource.CODEX_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_with_no_server_elsewhere_a_session_start_is_as_before_the_hold(
+    home: Path,
+    tmp_path: Path,
+    workspace: str,
+    live: list[tuple[str, float]],
+    monkeypatch: pytest.MonkeyPatch,
+    consent: bool,
+    source: ObservationSource,
+) -> None:
+    """With no remote target, a session start asks nothing, records nothing, and its output,
+    its connections and the files it leaves are those of a pass without the hold's read."""
+
+    def run(state: Path) -> tuple[bytes, list[str], list[str]]:
+        opened: list[str] = []
+
+        async def connect(_kind: object, **kwargs: object) -> object:
+            opened.append(",".join(sorted(kwargs)))
+            raise ControlError("service_unavailable", retryable=True)
+
+        monkeypatch.setattr(observe_hooks, "connect_service", connect, raising=False)
+        store = LocalObservationStore(_state=state)
+        if consent:
+            store.grant_consent(store.workspace_commitment(workspace))
+        out = io.BytesIO()
+        code = observe_hooks.handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=json.dumps(
+                {"session_id": "s-1", "hook_event_name": "SessionStart", "source": "startup"}
+            ).encode(),
+            stdout=out,
+            workspace=workspace,
+            _state=state,
+            source=source,
+        )
+        assert code == 0
+        return out.getvalue(), opened, _files(home)
+
+    with_hold = run(tmp_path / "with")
+
+    def no_read(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(observe_hooks, "_refresh_repository_report", no_read)
+    without = run(tmp_path / "without")
+
+    assert live == []
+    assert with_hold == without
+    assert not any("everyday-repositories" in name for name in with_hold[2])

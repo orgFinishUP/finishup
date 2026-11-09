@@ -96,6 +96,7 @@ __all__ = [
     "reauthorized",
     "registry_lock",
     "remote_root_continuation",
+    "remote_target_recorded",
     "remove_leftover_root",
     "remove_target_root",
     "require_current_authorization",
@@ -732,6 +733,41 @@ def list_targets() -> tuple[ServerTarget, ...]:
 
     records = [record for _root, record in _registry_roots() if record is not None]
     return tuple(sorted(records, key=lambda record: record.name))
+
+
+def remote_target_recorded() -> bool:
+    """Whether this computer records any server elsewhere (a ``local_port``, ``ssh`` or ``https``
+    target), selected or not.
+
+    The repository hold's own reads and records stay dormant until it is true (ADR-052, the
+    owner's answer O3): with no remote target, a session start, a privacy ceremony and a policy
+    change behave exactly as before the hold existed. A registry that cannot be read fails toward
+    the hold (true), since a damaged record may name a remote kind. File reads only; never raises.
+    """
+
+    try:
+        return any(record.is_remote for record in _remote_scan())
+    except Exception:
+        return True
+
+
+def _remote_scan() -> Generator[ServerTarget]:
+    """Each registry record, lazily, so a scan stops at the first remote one. A folder that holds
+    no record (an interrupted add or remove) is skipped: nothing can select it."""
+
+    directory = servers_dir()
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        if not _TARGET_ID.match(entry.name):
+            continue
+        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            raise TargetError("target_root_unsafe")
+        record = read_target(Path(entry.path))
+        if record is not None:
+            yield record
 
 
 def leftover_target_ids() -> tuple[str, ...]:

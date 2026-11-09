@@ -1197,6 +1197,32 @@ def test_remove_deletes_a_key_from_the_platform_store(
     assert keyring.entries == {}
 
 
+def test_removing_the_last_server_elsewhere_deletes_the_repository_reports(
+    home: Path, no_platform_store: None
+) -> None:
+    """ADR-052 (O3): the reports exist only while a server elsewhere is recorded, so removing the
+    last one is their way out; removing one of two, or a named local server, keeps them."""
+
+    from finishup.client.everyday_policy import record_repository_report, reports_path
+
+    _another_builds_target("one")
+    _another_builds_target("two", "ssh")
+    with targets.registry_lock():
+        targets.new_local_target("work")
+    assert record_repository_report("sha256:" + "a" * 64, "/srv/app", no_network=True)
+    assert reports_path().exists()
+
+    first = _invoke("remove", "one")
+    assert first.exit_code == 0, first.output
+    assert reports_path().exists()
+    assert "no longer keeps" not in first.output
+
+    last = _invoke("remove", "two")
+    assert last.exit_code == 0, last.output
+    assert not reports_path().exists()
+    assert "No server elsewhere is left" in last.output
+
+
 class _LockedKeyring:
     """A platform store that is present but cannot be used now (a keychain locked over SSH)."""
 
