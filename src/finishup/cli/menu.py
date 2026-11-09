@@ -124,15 +124,16 @@ def _server_host_refused(*commands: str) -> bool:
 
 
 def _remote_refusal_phase(error: ControlError) -> str | None:
-    """The phase of a remote root refused before anything was sent (ADR-051), or None.
+    """The phase of a connection the authorization gate refused or ended (ADR-051, ADR-052).
 
-    One of ``targets.REMOTE_ROOT_REFUSALS`` on a ``service_unavailable``: no service of this
-    computer is absent or still starting, so the menu never tells the owner to run one.
+    One of ``client.authorization.AUTHORIZATION_REFUSALS`` on a ``service_unavailable``: no
+    service of this computer is absent or still starting, so the menu never tells the owner to
+    run one.
     """
 
-    from finishup.client.targets import REMOTE_ROOT_REFUSALS
+    from finishup.client.authorization import AUTHORIZATION_REFUSALS
 
-    if error.reason == "service_unavailable" and error.phase in REMOTE_ROOT_REFUSALS:
+    if error.reason == "service_unavailable" and error.phase in AUTHORIZATION_REFUSALS:
         return error.phase
     return None
 

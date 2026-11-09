@@ -1027,6 +1027,12 @@ async def ensure_service_client(
         raise _call_timeout() from None
 
 
+def _sentence(text: str) -> str:
+    """A fixed summary as the start of a sentence."""
+
+    return text[:1].upper() + text[1:]
+
+
 def _follow_selection_after(error: BaseException) -> None:
     """After a connection to a server elsewhere ended because its authorization changed, follow
     the current selection (ADR-052, the owner's answer O1).
@@ -2174,12 +2180,14 @@ def _control_error_result(
             safe_details={"reason_code": "service_draining"},
         )
     if error.reason == "service_unavailable":
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS, remote_root_continuation
+        from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
+        from finishup.client.targets import remote_root_continuation
 
-        if error.phase in REMOTE_ROOT_REFUSALS:
-            # The root in use names a server elsewhere (ADR-051): refused before anything was
-            # sent or started. Name the phase and the continuation of its way back, which follows
-            # what named this bridge's root, never a local service to run.
+        if error.phase in AUTHORIZATION_REFUSALS:
+            # The shared authorization gate refused or ended a connection to a server elsewhere
+            # (ADR-051, ADR-052): nothing more was sent and nothing started. Name the phase and
+            # the continuation of its way back (for a remote root, it follows what named this
+            # bridge's root), never a local service to run.
             remote_details: dict[str, object] = {
                 "reason_code": "service_unavailable",
                 "phase": error.phase,
@@ -2193,8 +2201,8 @@ def _control_error_result(
                 operation,
                 code=PublicErrorCode.SERVICE_UNAVAILABLE,
                 message=(
-                    "FinishUP refused the selected server's connection before anything was sent "
-                    f"({error.phase}). Follow the continuation; do not start a local service."
+                    f"{_sentence(refusal_summary(error.phase) or '')} ({error.phase}). Follow the "
+                    "continuation; do not start a local service."
                 ),
                 retryable=True,
                 host_profile=host_profile,

@@ -434,25 +434,18 @@ def control_failure(
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
     if error.reason == "service_unavailable" and error.phase is not None:
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS, remote_root_continuation
+        from finishup.client.authorization import AUTHORIZATION_REFUSALS
+        from finishup.client.targets import remote_root_continuation
 
-        if error.phase in REMOTE_ROOT_REFUSALS:
-            # The root in use names a server elsewhere (ADR-051): this computer refused before
-            # anything was sent or started, so the line names the phase and the directive of its
-            # way back (which follows what named the root), never a local service to start.
-            from finishup.cli.render import recovery_directive_json, render_remote_refusal
+        if error.phase in AUTHORIZATION_REFUSALS:
+            # The shared authorization gate refused or ended a connection to a server elsewhere
+            # (ADR-051, ADR-052): nothing more was sent and nothing started, so the line names the
+            # phase and its fixed summary, then the directive of its way back (for a remote root,
+            # it follows what named the root), never a local service to start.
+            from finishup.cli.render import recovery_directive_json, render_authorization_refusal
             from finishup.protocol.recovery import directive_for
 
-            stderr_writer(
-                _with_correlation(
-                    render_remote_refusal(
-                        error.phase,
-                        head="FinishUP refused the selected server's connection before anything "
-                        "was sent",
-                    ),
-                    error,
-                )
-            )
+            stderr_writer(_with_correlation(cast(str, render_authorization_refusal(error)), error))
             if json_output:
                 payload: dict[str, JsonValue] = {
                     "ok": False,

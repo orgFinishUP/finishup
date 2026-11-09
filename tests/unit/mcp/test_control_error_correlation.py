@@ -596,10 +596,13 @@ def test_a_bridge_whose_root_an_isolation_variable_names_points_to_that_override
     assert "Ask the owner to run 'finishup server use local'" not in text
 
 
-def test_only_the_remote_root_phases_are_admitted_among_the_remote_phases() -> None:
-    """A remote connection phase outside the three refusals stays out of the details."""
+def test_only_the_authorization_refusals_are_admitted_among_the_remote_phases() -> None:
+    """A remote connection phase outside the gate's refusals stays out of the details: the
+    three remote-root refusals, the repository hold and the owner's kept choice, and a changed
+    authorization (ADR-052)."""
 
     from finishup.protocol.errors import (
+        AUTHORIZATION_REFUSAL_PHASES,
         REMOTE_CONNECTION_PHASES,
         REMOTE_ROOT_REFUSAL_PHASES,
         normalize_safe_details,
@@ -608,6 +611,13 @@ def test_only_the_remote_root_phases_are_admitted_among_the_remote_phases() -> N
     assert REMOTE_ROOT_REFUSAL_PHASES == frozenset(
         {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
     )
+    assert AUTHORIZATION_REFUSAL_PHASES == REMOTE_ROOT_REFUSAL_PHASES | {
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+    }
     for phase in REMOTE_CONNECTION_PHASES:
         kept = normalize_safe_details({"phase": phase}).get("phase")
-        assert kept == (phase if phase in REMOTE_ROOT_REFUSAL_PHASES else None)
+        assert kept == (phase if phase in AUTHORIZATION_REFUSAL_PHASES else None)
+    # The five remote_* connection failures of a later layer's transports stay out.
+    assert normalize_safe_details({"phase": "remote_unreachable"}).get("phase") is None

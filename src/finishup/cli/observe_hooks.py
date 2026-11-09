@@ -635,11 +635,11 @@ def _attachment_recovery_context(reason: str) -> str:
         return hook_context(reason, "attach")
     from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
-    if reason in REMOTE_ROOT_REFUSALS:
+    if reason in REMOTE_ROOT_REFUSALS or reason == "server_authorization_changed":
         # ADR-051 decision 8: this computer refused the selected server before anything was sent
         # (zero-network, an older disclosure, or any other remote root, which this release does
-        # not connect to). Name the reason and the owner's fix, as MCP ``start`` and the CLI do;
-        # the server was never asked, so no budget was spent and no service is left to start.
+        # not connect to), or ended a connection whose authorization changed (ADR-052). Name the
+        # reason and the way back, as MCP ``start`` and the CLI do; no service is left to start.
         from finishup.cli.hooks import remote_refusal_context
 
         return remote_refusal_context(reason)

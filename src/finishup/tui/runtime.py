@@ -3140,6 +3140,22 @@ def _connect_failure(error: BaseException) -> RuntimeError_:
             "FinishUP's local folders cannot be used safely",
             details=() if remedy is None else (remedy,),
         )
+    phase = getattr(error, "phase", None)
+    if getattr(error, "reason", None) == "service_unavailable" and type(phase) is str:
+        from finishup.client.authorization import refusal_summary
+
+        summary = refusal_summary(phase)
+        if summary is not None:
+            # The shared authorization gate refused or ended a connection to a server elsewhere
+            # (ADR-051, ADR-052): the phase, what stopped, and its way back; never a local
+            # service that is not reachable.
+            from finishup.client.targets import remote_root_continuation
+            from finishup.protocol.recovery import directive_for
+
+            directive = directive_for(remote_root_continuation(phase))
+            return RuntimeError_(
+                phase, summary, details=() if directive is None else (directive.directive,)
+            )
     return RuntimeError_(
         str(getattr(error, "reason", "service_unavailable")),
         "the local FinishUP service is not reachable",

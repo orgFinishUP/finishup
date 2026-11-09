@@ -192,9 +192,18 @@ def remote_refusal_context(phase: str) -> str:
     assert token is not None and directive is not None
     nudge = "" if directive.nudge is None else f" {directive.nudge}"
     return (
-        f"FinishUP refused the selected server's connection before anything was sent ({phase}). "
+        f"{_REFUSAL_HEADS.get(phase, _REFUSAL_HEAD)} ({phase}). "
         f"{directive.directive}{nudge} Continuation: {token}. "
     )
+
+
+_REFUSAL_HEAD: Final = "FinishUP refused the selected server's connection before anything was sent"
+# A connection whose authorization changed (ADR-052) had sent things before it ended.
+_REFUSAL_HEADS: Final[dict[str, str]] = {
+    "server_authorization_changed": (
+        "FinishUP ended the selected server's connection before sending more"
+    ),
+}
 
 
 def unavailable_context(phase: str | None) -> str:
@@ -214,7 +223,7 @@ def unavailable_context(phase: str | None) -> str:
         return hook_context(phase, "mapped")
     from finishup.client.targets import REMOTE_ROOT_REFUSALS
 
-    if phase in REMOTE_ROOT_REFUSALS:
+    if phase in REMOTE_ROOT_REFUSALS or phase == "server_authorization_changed":
         return remote_refusal_context(phase).rstrip()
     return _UNAVAILABLE_CONTEXT
 

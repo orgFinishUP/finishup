@@ -1,0 +1,168 @@
+"""Every surface renders every authorization refusal the same way (ADR-051, ADR-052).
+
+One matrix over the shared gate's six phases (``client.authorization.AUTHORIZATION_REFUSALS``):
+the zero-network refusal, a stale disclosure, a remote root this release does not connect to, a
+held or kept repository, and a changed authorization. For each, every surface names the closed
+phase, its fixed summary or text, and the continuation of its way back, as a retryable
+``service_unavailable``; none tells the owner to start a local service, and none carries a path,
+a server name or a host (the public-boundary canary).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+import finishup.mcp.server as bridge
+from builders.server_targets import ambient_home
+from finishup.cli import bootstrap, hooks, menu, observe_hooks
+from finishup.client import targets
+from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
+from finishup.config.paths import reset_selection_memo
+from finishup.ports.control import ControlError
+from finishup.protocol.canonical import JsonValue
+from finishup.protocol.recovery import directive_for
+from finishup.tui.runtime import _connect_failure  # pyright: ignore[reportPrivateUsage]
+
+_PHASES = sorted(AUTHORIZATION_REFUSALS)
+_REQUEST = "req_00000000-0000-4000-8000-000000000001"
+
+
+@pytest.fixture
+def selected(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Path, targets.ServerTarget]]:
+    """A server elsewhere, selected, with a name and a host no surface may print."""
+
+    with ambient_home(monkeypatch) as home:
+        with targets.registry_lock():
+            record, _root = targets.new_remote_target(
+                "privbox", "ssh", user="owner", host="secret-host.example", port=22
+            )
+        targets.write_selection(record)
+        reset_selection_memo()
+        yield home, record
+
+
+def _continuation(phase: str) -> str:
+    token = targets.remote_root_continuation(phase)
+    assert token is not None
+    return token
+
+
+def _clean(text: str, home: Path, record: targets.ServerTarget) -> None:
+    for forbidden in (str(home), record.name, cast(str, record.host), "owner@", "service run"):
+        assert forbidden not in text
+
+
+def _error(phase: str) -> ControlError:
+    return ControlError("service_unavailable", retryable=True, phase=phase)
+
+
+def test_the_matrix_covers_every_phase_and_each_has_a_summary_and_a_directive() -> None:
+    assert set(_PHASES) == {
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+        "target_reauthorization_required",
+        "target_root_is_remote",
+        "zero_network_remote_selected",
+    }
+    for phase in _PHASES:
+        assert refusal_summary(phase)
+    assert refusal_summary("remote_unreachable") is None
+
+
+@pytest.mark.parametrize("phase", _PHASES)
+def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
+    selected: tuple[Path, targets.ServerTarget], phase: str
+) -> None:
+    home, record = selected
+    continuation = _continuation(phase)
+    directive = directive_for(continuation)
+    assert directive is not None
+    for json_output in (False, True):
+        err: list[str] = []
+        out: list[JsonValue] = []
+        code = bootstrap.control_failure(
+            _error(phase),
+            json_output=json_output,
+            stderr_writer=err.append,
+            stdout_writer=out.append,
+        )
+        assert code == 20
+        text = "\n".join(err)
+        assert text.splitlines()[0] == f"{phase}: {refusal_summary(phase)}"
+        assert directive.directive in text
+        _clean(text, home, record)
+        if json_output:
+            (payload,) = out
+            body = cast(dict[str, JsonValue], payload)
+            assert (body["ok"], body["reason"], body["phase"], body["retryable"]) == (
+                False,
+                "service_unavailable",
+                phase,
+                True,
+            )
+            assert cast(dict[str, JsonValue], body["recovery"])["continuation"] == continuation
+            _clean(json.dumps(body), home, record)
+        else:
+            assert out == []
+
+
+@pytest.mark.parametrize("phase", _PHASES)
+def test_mcp_names_the_phase_and_its_continuation(
+    selected: tuple[Path, targets.ServerTarget], phase: str
+) -> None:
+    home, record = selected
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        _error(phase), _REQUEST, "start"
+    )
+    structured = cast(dict[str, object], result.structuredContent)
+    error = cast(dict[str, object], structured["error"])
+    assert (error["code"], error["retryable"]) == ("SERVICE_UNAVAILABLE", True)
+    assert error["safe_details"] == {
+        "continuation": _continuation(phase),
+        "phase": phase,
+        "reason_code": "service_unavailable",
+    }
+    text = cast(str, getattr(result.content[0], "text"))
+    assert f"(phase: {phase})" in text
+    _clean(json.dumps(structured) + text, home, record)
+
+
+@pytest.mark.parametrize("phase", _PHASES)
+def test_hooks_name_the_phase_and_continuation_in_attach_and_mapped_texts(
+    selected: tuple[Path, targets.ServerTarget], phase: str
+) -> None:
+    home, record = selected
+    continuation = _continuation(phase)
+    attach = observe_hooks._attachment_recovery_context(phase)  # pyright: ignore[reportPrivateUsage]
+    mapped = hooks.unavailable_context(phase)
+    for text in (attach, mapped):
+        assert f"({phase})" in text
+        assert f"Continuation: {continuation}." in text
+        assert "call start again" not in text.lower() or phase.startswith("repository_")
+        _clean(text, home, record)
+    if phase == "server_authorization_changed":
+        # It had sent things before it ended: never "before anything was sent".
+        assert "before anything was sent" not in attach + mapped
+
+
+@pytest.mark.parametrize("phase", _PHASES)
+def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_service(
+    selected: tuple[Path, targets.ServerTarget], phase: str
+) -> None:
+    home, record = selected
+    directive = directive_for(_continuation(phase))
+    assert directive is not None
+    failure = _connect_failure(_error(phase))
+    assert (failure.reason, failure.message) == (phase, refusal_summary(phase))
+    assert failure.details == (directive.directive,)
+    assert "not reachable" not in failure.message
+    guidance = menu._control_guidance(_error(phase))  # pyright: ignore[reportPrivateUsage]
+    assert phase in guidance and directive.directive in guidance
+    assert "finishup service run" not in guidance
+    _clean(" ".join((failure.message, *failure.details, guidance)), home, record)

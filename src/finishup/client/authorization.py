@@ -71,6 +71,7 @@ from finishup.config.paths import (
     ensure_owner_only_dir,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
+from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
 
 if TYPE_CHECKING:
     from finishup.client.targets import ServerTarget
@@ -109,6 +110,7 @@ AUTHORIZATION_REFUSALS: Final = frozenset(
         CHANGED,
     }
 )
+assert AUTHORIZATION_REFUSALS == AUTHORIZATION_REFUSAL_PHASES
 CREDENTIAL_GENERATION_SCHEMA: Final = "yoetz.credential-generation/1"
 CREDENTIAL_GENERATION_NAME: Final = "credential-generation"
 _IDENTITY_DOMAIN: Final = b"yoetz/target-identity/v1\x00"

@@ -15,6 +15,7 @@ __all__ = [
     "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
     "REASON_CODE_CONTINUATIONS",
+    "AUTHORIZATION_REFUSAL_PHASES",
     "REMOTE_CONNECTION_PHASES",
     "REMOTE_ROOT_REFUSAL_PHASES",
     "SAFE_DETAIL_KEYS",
@@ -504,6 +505,14 @@ REMOTE_ROOT_REFUSAL_PHASES: frozenset[str] = frozenset(
     {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
 )
 assert REMOTE_ROOT_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
+# Every phase the client's shared authorization gate refuses or ends a connection to a server
+# elsewhere with (``client.authorization.AUTHORIZATION_REFUSALS``, ADR-052): the three above, the
+# repository hold and the owner's kept choice, and a changed authorization. A ``phase`` safe detail
+# admits each, so a structured error and its text name which refusal it was.
+AUTHORIZATION_REFUSAL_PHASES: frozenset[str] = REMOTE_ROOT_REFUSAL_PHASES | frozenset(
+    {"repository_egress_held", "repository_egress_kept", "server_authorization_changed"}
+)
+assert AUTHORIZATION_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
 # #1244: the four delivery_* continuation refusals; #1190: review_mode_parent_is_check; ADR-051:
 # the twelve workspace-binding, server-target and remote-connection reasons, plus the stale
 # disclosure refusal (``target_reauthorization_required``), the zero-network refusal
@@ -1059,12 +1068,13 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         # stages (``finishup.service.startup_failure``) name where a spawned service failed (#1040).
         if value in {"replay", "model", "digest", "projection", "handler", "unknown"}:
             return value
-        # A remote root refused before anything was sent (ADR-051) names which refusal it was.
+        # A connection the authorization gate refused or ended (ADR-051, ADR-052) names which
+        # refusal it was.
         if (
             value in SERVICE_STARTUP_PHASES
             or value in SERVICE_HANDSHAKE_PHASES
             or value == SERVICE_START_TIMEOUT_PHASE
-            or value in REMOTE_ROOT_REFUSAL_PHASES
+            or value in AUTHORIZATION_REFUSAL_PHASES
         ):
             return value
         return None
