@@ -324,7 +324,7 @@ class _ConcurrentOwnerAction:
     when the registration holds the lock it waits (``waited``), and the test runs it after the
     registration has let go, exactly where it would run. No timing is involved."""
 
-    def __init__(self, inner: ConnectionAuthorization, action: Callable[[], None]) -> None:
+    def __init__(self, inner: ConnectionAuthorization, action: Callable[[], object]) -> None:
         self.inner = inner
         self.action = action
         self.waited = False
@@ -350,7 +350,7 @@ class _ConcurrentOwnerAction:
         return phase
 
 
-def _register_during(admitted: _Admitted, action: Callable[[], None]) -> _ConcurrentOwnerAction:
+def _register_during(admitted: _Admitted, action: Callable[[], object]) -> _ConcurrentOwnerAction:
     concurrent = _ConcurrentOwnerAction(admitted.authorization, action)
     try:
         register(
