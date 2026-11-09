@@ -123,6 +123,11 @@ def test_add_discovers_the_server_and_records_what_its_launcher_reported(
     assert server_cli._HOST_KEY_QUESTION not in console.text  # pyright: ignore[reportPrivateUsage]
     assert not any(server.asked())
     assert "Use it with 'finishup server use lab'." in result.stdout
+    # An SSH server is listed as one this release reaches (an HTTPS one would not be).
+    listed = _invoke("list")
+    (row,) = [line for line in listed.stdout.splitlines() if record.target_id in line]
+    assert row.endswith("ssh://owner@lab.example:2222/srv/fu") or "not available" not in row
+    assert "not available" not in row
     # The address, the name and the paths travel to OpenSSH and the owner's display only.
     assert all("lab.example" not in line for line in result.stderr.splitlines())
 

@@ -289,3 +289,31 @@ def test_the_holder_of_a_remote_root_is_its_helper_and_moves_with_its_status(
         assert moved is not None and moved.instance_id != holder.instance_id
     finally:
         lock.release()
+
+
+def test_a_hello_the_helper_closes_unanswered_is_named_by_what_it_recorded(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The helper reads a hello and closes it when its own admission or the server refuses (its
+    status names why): the client names that phase, never a failed local handshake."""
+
+    _record, root = ssh_selected
+
+    async def closes() -> object:
+        client_end, server_end = memory_pair()
+        write_helper_status(
+            root,
+            new_status(None, "unavailable", "remote_service_not_running", started_at=now_stamp()),
+        )
+        await server_end.aclose()
+        return client_end
+
+    monkeypatch.setattr(service_client, "connect_control", closes)
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            await connect_service(ControlClientKind.CLI)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert (error.reason, error.phase) == ("service_unavailable", "remote_service_not_running")

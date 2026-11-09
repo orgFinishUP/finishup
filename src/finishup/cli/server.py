@@ -12,13 +12,15 @@ trusted console; refusals name a target by its id or not at all, with a closed r
 * ``connect``/``disconnect`` make the target usable or stop what this client runs for it.
 * ``list``, ``status [--json]`` and ``test`` show the deciding source, the target, and a probe.
 
-The remote kinds stay closed in this release: ``add NAME ssh://…``, ``add NAME https://…`` and
-``add NAME --port PORT`` refuse with ``remote_kind_unavailable`` before any prompt, policy
-check, probe or write; ``use`` refuses a remote record (one another build wrote, or written by
-hand) the same way and leaves the selection unchanged; ``login`` refuses it too, while
-``logout`` stays the offline way to delete a key such a record still has. ``list`` and
-``status`` show a remote record as not available in this release. ``login``, ``logout`` and the
-``folders`` group are hidden from the help.
+SSH servers are open (ADR-052, layer 4): ``add NAME ssh://[user@]host[:port]`` runs SSH discovery
+(the server's own launcher reports its endpoint and profile; an unknown host key is asked about
+only on the trusted console), then the owner's consent; ``set NAME --style relay|direct`` chooses
+how this computer reaches it. HTTPS and port servers stay closed: ``add NAME https://…`` and
+``add NAME --port PORT`` refuse with ``remote_kind_unavailable`` before any prompt, policy check,
+probe or write; ``use`` refuses such a record (one another build wrote, or written by hand) the
+same way and leaves the selection unchanged; ``login`` refuses too, while ``logout`` stays the
+offline way to delete a key such a record still has. ``list`` and ``status`` show such a record
+as not available in this release. ``login`` and ``logout`` are hidden from the help.
 
 An isolation root or a runtime pin outranks the selection; while one is in force every command
 that would change or use the selection is refused with ``selection_overridden``.
@@ -1445,8 +1447,8 @@ def target_rows() -> tuple[tuple[TargetRow, ...], str]:
 
 
 def render_target_rows(rows: tuple[TargetRow, ...], source: str) -> tuple[str, ...]:
-    """The ``finishup server list`` lines; a remote record is shown as not available in this
-    release (the remote kinds are closed: one another build wrote can be listed and removed)."""
+    """The ``finishup server list`` lines; a record of a kind closed in this release (HTTPS or a
+    port) is shown as not available (one another build wrote can be listed and removed)."""
 
     table = [
         (
@@ -1455,7 +1457,11 @@ def render_target_rows(rows: tuple[TargetRow, ...], source: str) -> tuple[str, .
             row.kind,
             row.target_id or "-",
             (row.location or "this computer")
-            + ("" if row.kind == "local" else " (not available in this release)"),
+            + (
+                ""
+                if row.kind == "local" or _open_kind(row.kind)
+                else " (not available in this release)"
+            ),
         )
         for row in rows
     ]

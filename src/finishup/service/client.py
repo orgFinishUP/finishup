@@ -2367,6 +2367,10 @@ async def _connect_service_attempt(
             # The transport itself ended the stream (OpenSSH named why): the server never read
             # the hello, so the remote phase is the answer, not a protocol fault.
             raise ControlError("service_unavailable", retryable=True, phase=named) from exc
+        if exc.reason == "handshake_rejected" and transport != "unix":
+            # A server elsewhere's helper (or transport) closed the hello unanswered: no service
+            # of this computer is involved; the caller names the outage the helper recorded.
+            raise ControlError("service_unavailable", retryable=True) from exc
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
         raise _protocol_error(exc) from exc
@@ -2772,6 +2776,10 @@ async def _connect_through_helper(
     except ControlError as error:
         if error.reason != "service_unavailable" or error.phase is not None:
             raise
+        recorded = _helper_failure(root, before)
+        if recorded is not None and recorded.phase != "remote_unreachable":
+            # The running helper read this hello and named why it could not carry it.
+            raise recorded from error
     holder = helper_holder(root)
     if (
         holder is not None
@@ -2864,12 +2872,15 @@ async def connect_service(
         workspace_locator, workspace_binding, serve_workspace=serve_workspace
     )
     if admission is not None:
+        # A server elsewhere is reached through its transport, which may have to start (its
+        # helper, an OpenSSH master, the server's own idle-stopped service): the start budget,
+        # never a local service. A hook passes its own, shorter budget to the on-demand path.
         return await _connect_remote(
             admission,
             client_kind,
             projection_render_mode=projection_render_mode,
             output_is_controlling_tty=output_is_controlling_tty,
-            deadline=time.monotonic() + _CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + _SERVICE_START_TIMEOUT_SECONDS,
         )
     return await _connect_service_attempt(
         client_kind,
