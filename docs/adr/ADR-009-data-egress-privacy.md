@@ -1911,6 +1911,9 @@ accepted, this record changes as follows. **In layer 1 the hop is defined but ne
 refused before any dial, and no channel or endpoint is added to what this record permits. Of the
 rules below only the owner-only record of what this computer's everyday service last reported is
 kept up to date in layer 1; the rest is the contract the layers that open a remote kind implement.
+**Layer 4 takes the hop for SSH servers** (ADR-052): over OpenSSH only, through the target's helper
+(relay) or a direct `ssh -W` stream, after the shared gate, the consent to the server's profile and
+the repository hold; no other channel or endpoint is added, and HTTPS and port servers stay closed.
 
 - **A distinct hop, outside the five channels.** Traffic between a FinishUP client and the
   owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one

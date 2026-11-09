@@ -425,10 +425,10 @@ failure details are in the [Cursor runbook](cursor-integration.md#linux-and-wsl)
 Operator facts for running a FinishUP service, the everyday server or a named local server
 (`finishup server add NAME --local`), on a headless Linux or WSL 2 host, for example one you log in
 to over SSH (the [servers guide](../usage/servers.md) is the user-facing page; the decisions are in
-[ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md)). In this release a client
-connects only to FinishUP servers on its own computer: remote server kinds (SSH, HTTPS and port)
-arrive in a later release. Evidence state: none of the platform notes below has a recorded
-acceptance run yet, and a cell is claimed only from that evidence.
+[ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md)). Such a host can also serve
+clients on other machines over SSH (next section); HTTPS and port servers arrive in a later
+release. Evidence state: none of the platform notes below has a recorded acceptance run yet, and a
+cell is claimed only from that evidence.
 
 - **Unattended restarts.** Setup's generated passphrase in owner-only file custody (no platform
   store is usable on most headless hosts; ADR-008, 2026-10-19) lets a restarted service come back
@@ -450,6 +450,57 @@ acceptance run yet, and a cell is claimed only from that evidence.
 - **WSL 2.** The distribution stops when idle or on `wsl --shutdown`, taking the service with it;
   with systemd enabled in `/etc/wsl.conf` lingering works as on Linux. State must stay on the
   distribution's own disk (see [Where state may live](#where-state-may-live)).
+
+## SSH servers (ADR-051, ADR-052 layer 4)
+
+Operator facts for using a FinishUP server on another machine over SSH; the user-facing steps are
+in the [servers guide](../usage/servers.md#add-a-server-on-another-machine-ssh), the decisions in
+[ADR-052](../adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)
+decisions 13 to 19. Evidence state: the OpenSSH paths below ran for real on Linux x86-64 (the
+capability tests against a private, unprivileged `sshd`, and an end-to-end run of the CLI, both on
+one machine over loopback). **WSL 2 and macOS are untested** at either end (gap, owner: layer 7);
+no host session (Codex, Claude Code, Cursor) has run against an SSH server yet (layer 7).
+
+- **On the client.** The OpenSSH client (`ssh` on `PATH`; none is `remote_unreachable`) and a key
+  login to the server account that runs FinishUP. FinishUP runs OpenSSH with `BatchMode=yes`, so a
+  passphrase-protected key must be in the agent (`ssh-add`) or the connection is
+  `remote_auth_failed`; nothing is ever prompted except OpenSSH's host-key question at `server add`
+  or `server use` on the owner's own terminal. FinishUP never writes `known_hosts`. The user's own
+  `~/.ssh/config` applies to every `ssh` FinishUP starts.
+- **On the server.** The same FinishUP release, installed at `~/.local/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin` or `/usr/bin` (or given with `--remote-launcher ABS`), set up there, its vault
+  unlocked there when it needs it. `sshd` must allow stream-local forwarding to the client:
+  `AllowStreamLocalForwarding` `yes` (the OpenSSH default) or `local`, and `DisableForwarding`
+  off. The SSH login must be the account that runs the server's FinishUP: the service's peer-UID
+  check admits that user only.
+- **An endpoint that outlives the login.** The server's default endpoint is in
+  `$XDG_RUNTIME_DIR`, removed at the account's last logout without linger; `server add` warns when
+  the server reports that (`service endpoint --json`: `runtime_dir_session_bound` true and linger
+  not enabled). Enable linger for that account (`loginctl enable-linger <user>`) or run the
+  server's FinishUP from its own isolated root and add it with `--remote-root ABS`. A stopped
+  server service is started on a client's demand over SSH (`service start` through the recorded
+  launcher): by the helper at most once per 30 seconds in the relay style, once per connection
+  attempt in the direct style, never for a background agent.
+- **Check a connection.** `finishup server status NAME` shows the style and the helper's last
+  phase ("Connection: relay (…)", "Helper: running; last ready."; JSON
+  `target.connection.helper`); `finishup server test NAME` probes over the real transport. A
+  failure names its closed phase and continuation (`remote_unreachable` → `server test`,
+  `remote_auth_failed` → load the key, `remote_identity_changed` → verify the host key another
+  way, `remote_service_not_running` → start it on the server, `remote_incompatible` → the same
+  release on both). The helper's own records are beneath the target's client root
+  (`state/helper-status.json`, `log/helper.stderr`).
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper by its stamped pid
+  and ends the OpenSSH master (`ssh -O exit`); the server's FinishUP keeps running. Never stop a
+  helper or an `ssh` process by pattern: `ps`-matching `finishup` or `ssh` also hits the owner's
+  other sessions. `server remove NAME` stops both and removes only this computer's record.
+- **Suspend and network changes.** The master's keep-alive (`ServerAliveInterval=15`,
+  `ServerAliveCountMax=3`) notices a dead connection within about 45 seconds, or the next channel
+  failure does, and the helper restarts it; a hook spends only its own deadline and fails open
+  naming `remote_unreachable`.
+- **WSL 2: untested** (gap, owner: layer 7). No run of the helper or of SSH is recorded inside a
+  distribution at either end; do not claim a WSL 2 cell until layer 7 records one. A distribution
+  that stops (idle or `wsl --shutdown`) stops every process in it, a helper or a server service
+  included.
 
 ## Setup and vault acceptance still owned by #737
 

@@ -9,7 +9,12 @@ them, carries the shared decisions recorded here; every remote kind stays closed
 (`remote_kind_unavailable`) until its own layer opens it. **Layer 2** adds shared authorization —
 one gate, authorization generations, consent-envelope types and the repository egress hold —
 recorded in [ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) and
-in decision 8 below; it keeps every remote kind closed. Design gates: protocol (control
+in decision 8 below; it keeps every remote kind closed. **Layer 3** adds the server profile, the
+consent binding and the helper's registration API (ADR-052 decisions 9 to 12), still with every
+kind closed. **Layer 4** opens the `ssh` kind: the unified background helper, the relay and direct
+connection styles, SSH discovery and the host key OpenSSH verified as the endpoint identity
+(*Built in layer 4* below; ADR-052 decisions 13 to 19); `https` and `local_port` stay closed until
+layer 5. Design gates: protocol (control
 envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
 layout (target roots and the selection file), release/packaging (client and server-edge
 processes, version lockstep) and the `OPEN_QUESTIONS` flip. Maintainer acknowledgement: on
@@ -32,7 +37,7 @@ crossing ledger and the AST boundary test), `src/finishup/cli/command_scope.py`,
 `src/finishup/service/control_protocol.py` and `src/finishup/service/daemon.py`, the
 control-envelope 2.10.0 schemas and fixtures, and the closed tokens in
 `src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Later layers add the
-modules their own amendments of this ADR name; layer 2's are listed in ADR-052.
+modules their own amendments of this ADR name; those of layers 2 to 4 are listed in ADR-052.
 **Amends:** ADR-001, ADR-008, ADR-009, ADR-018, ADR-026, ADR-028 and ADR-031; each carries a dated
 amendment note pointing here, limited to what layer 1 does. **Relates to:** ADR-002 (idempotency
 scope), ADR-010 (Cursor roots), ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz`
@@ -181,9 +186,9 @@ window (layer 5); the server copy and level L2 (layer 6).
 
 **Built, in the connection path of every remote root:** one authorization gate in one order
 (zero-network, the disclosure, an open kind, then the repository hold), run before any claim,
-dial, spawn or sync, and its record-only form for hooks (ADR-052 decision 1). In this release it
-opens no kind, so every remote root is still refused as `target_root_is_remote` exactly as in
-layer 1.
+dial, spawn or sync, and its record-only form for hooks (ADR-052 decision 1). In layers 2 and 3
+it opens no kind, so every remote root is still refused as `target_root_is_remote` exactly as in
+layer 1 (layer 4 opens `ssh`).
 
 **Built, exercised in process, dormant on the network:** authorization generations and the
 watch every claim-bound connection keeps (`server_authorization_changed`), the credential
@@ -219,6 +224,65 @@ background agent roles (ADR-052 decisions 10 to 12). No profile source is regist
 and no kind is open, so no consent can be given.
 
 **Not yet built:** the follow-ups ADR-052 decision 8 lists for layers 4 to 7.
+
+### Built in layer 4, and not yet built
+
+**Open:** the `ssh` kind (`client.authorization.OPEN_REMOTE_KINDS == {"ssh"}`; an architecture
+test pins exactly that set). The kind flipped in the last code commit of the layer, after every
+protection below existed. With no SSH target recorded, every surface behaves as in layer 3: no
+helper runs, and a hook imports nothing new (the hook import-diet test covers the helper and SSH
+discovery).
+
+**Built, live for an SSH server:**
+
+- `finishup server add NAME ssh://[user@]host[:port] [--remote-root ABS] [--remote-launcher ABS]
+  [--outside-reads local|listed]` (decision 3 below), with SSH discovery before the consent: the
+  server's own launcher reports its endpoint and its profile over OpenSSH, and the host key
+  OpenSSH verified in that very connection is the endpoint identity the consent is bound to
+  (decision 7, *SSH add*; ADR-052 decision 17). `server use NAME` fetches the profile again the
+  same way and asks for the consent every time.
+- The unified background helper, `finishup helper run --target <id>` (hidden, `client_only`), one
+  per SSH target, started on demand by the clients that need it and never by `service run`
+  (*Topology* below; ADR-052 decisions 13 to 16).
+- Two connection styles: **relay** (the default; the helper serves `<target root>/run/control.sock`
+  and carries each local connection over one channel of its OpenSSH master's stream-local
+  forward) and **direct** (an advanced option; each process opens its own `ssh -W` stream through
+  a shared `ControlMaster=auto` master), chosen with `finishup server set NAME --style
+  relay|direct` among the styles the server's last profile offers (ADR-052 decision 15).
+- The background workspace agent per served registration, the observation drain and the profile
+  re-check, all inside the helper and all under its own admission through the shared gate
+  (ADR-052 decisions 14, 16 and 17). CLI workflow commands to an SSH server answer their own
+  live workspace calls and register the workspace once (a 15-minute lease); the MCP bridge
+  registers and renews as in layer 3; hooks never register.
+- `server status` (text and `server-target-status` 1.0.0 `target.connection`, amended in place)
+  shows the style, the styles offered and the helper's last phase; `server list` and `status` mark
+  only HTTPS and port records as not available in this release.
+- The five transport outages (`remote_unreachable`, `remote_auth_failed`,
+  `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) are named on
+  every surface like the authorization refusals, each with its own continuation, never a local
+  service to start (ADR-052 decision 18).
+- Shown in help: `server add`'s `ssh://` address, `--remote-root`, `--remote-launcher` and
+  `--outside-reads`; `server set`; `server folders`; `server repositories` (its `add` acts for an
+  SSH target); `service profile`.
+
+**Closed:** `https` and `local_port` (decision 3's refusals hold for them unchanged: `server add
+https://…` and `--port N` refuse `remote_kind_unavailable` before any prompt, probe or write, the
+kind told by the argument's prefix alone; `server use` and `server login` refuse such a record),
+and `server login` for every kind. `server logout` refuses an SSH target
+(`credential_not_applicable`: OpenSSH authenticates, no key is stored).
+
+**Not yet built:** HTTPS and port servers, `server login`, the REST client, both HTTP server
+edges, discovery with the official origin preset and API-key direct disclosure (layer 5); the
+server copy, code sync in the helper and level L2 (layer 6); the WAN timing gate, an upgrade over
+running helpers and bridges, and the host × surface × operating system acceptance rows,
+including every macOS and WSL 2 run (layer 7). The terminal interface's `/server` still adds only
+a server on this computer (an SSH server is added with `finishup server add NAME ssh://…` in a
+terminal, because OpenSSH's host-key question needs the raw terminal), its `use` of an SSH target
+never lets OpenSSH ask, and it does not register its workspace with the helper (its own
+connection answers its live calls); those are follow-ups. A host certificate
+(`@cert-authority`) is not supported as the endpoint identity and fails closed. Real OpenSSH runs
+on Linux only (the capability tests and an end-to-end run against a private `sshd`); PR CI does not
+run the capability tests.
 
 ## Decisions
 
@@ -383,6 +447,28 @@ kind without a record migration.
   server); a remote record shown or chosen there gets the same refusal. `server list` and `server
   status` show an existing remote record as not available in this release, and no setup or menu
   next step suggests adding a remote server.
+
+**Layer 4 opens `ssh`** (`OPEN_REMOTE_KINDS == {"ssh"}`); everything above still holds for `https`
+and `local_port`. `server add` tells the kind from the argument's prefix alone, before any prompt:
+`ssh://` is `ssh`; `--port N`, `https://127.0.0.1:` and `https://[::1]:` are `local_port`; any
+other `https://` is `https`; anything else is refused as a closed kind. For `ssh`, in order and
+before anything is written: the selection in force, the name, the address and its options (remote
+paths absolute, SRV-11; `--ca-file` and `--tls-pin` refused as `target_tls_invalid`), the name not
+taken, this computer's zero-network state (SRV-3), SSH discovery (decision 7, *SSH add*), then the
+consent of decision 8 (disclosure 3, level L1, review egress, the outside-read question and the
+typed name). The record keeps the endpoint and the absolute launcher the server reported; an
+endpoint in the server's login-session runtime folder on an account without linger prints a
+warning naming linger or `--remote-root`. The text of `remote_kind_unavailable` now names both
+open families: "this release connects to FinishUP servers on this computer (the everyday server
+and named local servers, 'finishup server add NAME --local') and over SSH ('finishup server add
+NAME ssh://[user@]host[:port]'). HTTPS and port servers arrive in a later release". `server use`
+of an SSH target fetches the profile again and asks for the consent on the trusted console; after
+`add` and after `use` the line naming a held or kept repository returns (FR-5). `server set NAME
+--style relay|direct` and the SSH runtime (`client.helper_runtime.SshTargetRuntime`, registered
+for `ssh`) arrive with it: `connect` admits the target through the shared gate and connects as any
+client would (the relay starts the helper; the direct style dials and starts the helper for its
+background agents), `disconnect` stops the helper by its stamped pid and asks the OpenSSH master to
+exit (`ssh -O exit`), and `test` probes over the real transport.
 
 `finishup server add|list|use|status [--json]|test|remove|login|logout|connect|disconnect` manages
 targets; each mutating command has its reverse (see *Reverse states*). `connect`, `disconnect` and
@@ -1039,12 +1125,37 @@ authorization lapsed answers every call `workspace_unavailable` (ADR-052).
   refused (`remote_host_key_unconfirmed`), nothing is added, and the message names the question
   to answer. Without that console the add never gets this far: the typed confirmation before it
   is refused as `trusted_console_required`, before any `ssh` runs.
+  **As built in layer 4** (design v2 section 2.1; ADR-052 decision 17), discovery comes *before*
+  the consent, because the consent shows what the server's profile offers, and every probe runs
+  strict first. `client.ssh_discovery` finds the launcher (`--remote-launcher`, or the first
+  executable of `$HOME/.local/bin/finishup`, `/opt/homebrew/bin/finishup`,
+  `/usr/local/bin/finishup`, `/usr/bin/finishup`, never a bare name resolved through the remote
+  `PATH`; none is `remote_launcher_not_found`), then runs `[env FINISHUP_ISOLATED_ROOT=<remote
+  root>] <launcher> service endpoint --json` (another schema manifest is `remote_incompatible`) and
+  `… service profile --json` (which starts the server's service on demand). Each probe is `ssh -v
+  -o ControlPath=none -o ControlMaster=no -o BatchMode=yes -o StrictHostKeyChecking=yes -T`. Only
+  when OpenSSH says it does not know the host key, and the trusted console is present, does
+  FinishUP print "This computer does not know the server's SSH host key yet, so OpenSSH asks you to
+  confirm it here: compare the fingerprint with the server's own before you answer yes." and run
+  that probe once more with `StrictHostKeyChecking=ask` (password and keyboard-interactive off).
+  Declined or unanswered is `remote_host_key_unconfirmed` (nothing added); a changed key is
+  `remote_identity_changed` at once and never asked about (RE-7); an unknown key with no trusted
+  console is `trusted_console_required`. A known key without a console runs discovery and is then
+  refused `trusted_console_required` at the consent, before anything is recorded. FinishUP never
+  writes `known_hosts` itself: the owner's answer to OpenSSH is the pin. `server use` fetches the
+  profile the same way on the owner's terminal; the terminal interface never lets OpenSSH ask.
 - Which client process reads the credential follows the connection style: in the relay style
   only the background helper reads it; in the direct style the helper and each dialing process do,
   an ADR-008 amendment made with the layer that ships that style, and logging out bumps a
   credential generation every direct process checks before its next request. Any process
   running as the same user can read the credential store or the file, as it can read today's
   auto-unlock custody; the claim is that no surface an agent reaches reveals or switches it.
+  For SSH (layer 4) there is no FinishUP credential at all: OpenSSH reads the owner's keys and
+  agent, in the helper's master (relay) or in each dialing process's `ssh -W` child (direct), and
+  in the probes of `add`, `use` and the helper's profile refresh (ADR-008 amendment, layer 4). A
+  key that needs a passphrase must be loaded in the agent: `BatchMode=yes` asks nothing, so an
+  unloaded key is `remote_auth_failed`. Changing the style is therefore not an authorization
+  change and bumps no generation.
 
 ### 8. Consent per remote target, on the trusted console
 
@@ -1059,7 +1170,9 @@ to the server's offer: a consent envelope compared by an explicit partial order 
 profile revision carried on every request (layer 3, ADR-052 decision 10, built and dormant while
 no kind is open) add to the disclosure-version check below (now version 3, naming the level and
 the server's review egress); the trusted-console rule stays, and `server use` of a remote target
-asks every time.
+asks every time. Layer 4 opens `ssh`, so for an SSH server every rule of this decision acts: the
+consent is given, the zero-network refusals and the repository hold refuse before any claim, dial
+or helper start, and the helper is the client-owned process the zero-network rule below names.
 
 - `server add` and `server use` for a remote kind need the trusted foreground console, a versioned
   disclosure and the owner typing the target name. At `server add` the same confirmation first
@@ -1342,11 +1455,13 @@ the choices; the group is hidden and `add` refuses `remote_kind_unavailable` whi
 (O4). No surface recommends `add` then: `server status`, `server repositories list` and `keep`
 show what works (`keep`, `remove`) and say that sending a held repository anyway arrives in a later
 release, and the line after a privacy change names no hold while an earlier gate step refuses the
-server.
+server. From layer 4 the group is shown and `add` acts for an SSH target on the trusted console;
+it still refuses before the console for a kind that is closed.
 
 **Honest limits.**
 
-1. In this release no server elsewhere can be used, so nothing is held yet.
+1. Before layer 4 no server elsewhere could be used, so nothing was held; from layer 4 the hold
+   acts for an SSH server.
 2. Unknown is not held: a grant never reported since this release (or since the first server
    elsewhere was recorded) is not held until it is reported.
 3. Past 256 entries the oldest are evicted; an evicted held entry becomes unknown. Past 256 KiB
@@ -1539,7 +1654,8 @@ decision 6).
 
 The remote topology arrives with layers 4 and 5, in the shape the maintainer accepted on
 2026-11-08 (*Unified model*). Each of those layers amends this section with its exact contract;
-what follows is the direction, not a built surface.
+the list below is the direction, and *Layer 4, as built* after it is the contract of the SSH
+part.
 
 - **Background helper** (layer 4). One hidden, `client_only` process per remote target, started
   on demand (never by `service run`), exiting 15 minutes after its last client, stopped by `server
@@ -1561,13 +1677,57 @@ what follows is the direction, not a built surface.
   on the network, recorded as an ADR-008 amendment with that layer). The server's owner picks the
   edge; a client sees only REST.
 
+**Layer 4, as built (SSH).** One helper per SSH target root (`state/helper.lock`, stamped with
+pid, release and schema-manifest digest), started on demand: in the relay style by any client
+that finds nothing answering on `<troot>/run/control.sock` (a hook within its own deadline), in
+the direct style by the MCP bridge and CLI commands after they register a workspace, and by
+`server connect`. It exits 15 minutes after its last relayed client connection when it serves no
+registration, and is stopped by `server disconnect`, `remove`, a `server use` that leaves the
+target and `server set --style` (SIGTERM to the stamped pid, then a wait for the lock; never by
+pattern; one that does not stop is `target_still_connected`). `server logout` does not apply to
+SSH. The spawner reaps its own child on a daemon thread; a spawner that exits first leaves it to
+the system, so reaping never depends on the short-lived starter. A helper stamped by an older
+release of this client is replaced by its stamped pid, a newer one never. A client dialling while
+the helper ends its idle exit starts its successor; any other stop has no successor in that
+client's wait.
+
+- **Relay** (default). The helper binds `<troot>/run/control.sock` with the service's owner-only
+  fences and peer-UID check and keeps one OpenSSH master: `ssh -M -S <troot>/run/m -N -T -o
+  BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o
+  StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o
+  ServerAliveCountMax=3 -p PORT -L <troot>/run/upstream.sock:<remote control.sock>
+  [user@]host`. Each local connection is one channel of that forward. A hello naming a
+  `workspace_locator` or no `server_profile` revision is never forwarded; every later client frame
+  is checked against the helper's admission before it is forwarded; frames from the server pass
+  unparsed. When the server's service is not running, the helper runs the server's own
+  `<launcher> service start` over the master, at most once per 30 seconds and only for a client's
+  connection, never for a background agent.
+- **Direct** (advanced). Each dialing process opens `ssh -S <troot>/run/m -o ControlMaster=auto -o
+  ControlPersist=15m -o BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o
+  ServerAliveCountMax=3 -p PORT -W <remote control.sock> [user@]host` and is an ordinary
+  `ServiceClient` (gate before the dial, the authorization before every frame and on its watch).
+  A stopped server service is started once through the launcher, on that client's demand. The
+  helper still runs, for the background agents, the drain and the refresh. `server disconnect`
+  ends the master with `ssh -O exit`.
+- **Both.** FinishUP's own environment variables are removed from every `ssh` child; the helper
+  runs with a fixed, scrubbed environment (`SSH_AUTH_SOCK` kept for the owner's agent). Its
+  records are owner-only and hold closed tokens, generated ids, integers and times only:
+  `state/helper-status.json`, `config/connection-style.json`,
+  `state/profile-refresh-requested` and `log/helper.stderr` (INTERFACES, *SSH servers and the
+  helper*). There is no code sync in the helper yet (layer 6).
+- **SSH edge.** `sshd` on the server must allow stream-local forwarding; it connects to the
+  server's owner-only control socket as the login user, so the service's peer-UID check passes
+  unchanged and the SSH login is the service owner (ADR-008 amendment, layer 4).
+
 
 ## Reverse states
 
 In layer 1 only `local` targets can be added, so the rows for keys and outside reads apply to a
 remote record another build wrote; their ways out stay usable for it (`server logout`, `server
 folders remove`, `server remove`), and their ways in are refused or reach nothing until a remote
-kind opens.
+kind opens. From layer 4 every row but the `server login` row acts for an SSH target; that row
+stays HTTPS-only (an SSH target holds no key, and `server logout` refuses it as
+`credential_not_applicable`).
 
 | Way in | Way out | Way to see it |
 |---|---|---|
@@ -1580,7 +1740,10 @@ kind opens.
 | `server connect [NAME]` | `server disconnect [NAME]` (stops only what that root's runtime stamped; never by name or pattern) | `server status`, `server test` |
 | This computer's everyday service reports its machine-scope policy (the zero-network check, `privacy show`, a privacy change here): the owner-only marker of what it last reported (decision 8) | the next report replaces it; deleting FinishUP's folders removes it; the zero-network check removes it once the everyday installation no longer exists | `server status [--json]` (`policy_read`, `last_reported_at`), `server list`, `setup status --next`, the menu home, `/server` and the header |
 | Layer 2, once a server elsewhere is recorded: this computer's FinishUP reports a repository's policy (a session start, a privacy ceremony or change here, `provider status`): the owner-only repository report (decision 8) | the next report replaces it; a report whose folders are all gone is forgotten by `server repositories list`; removing the last server elsewhere deletes the record; deleting FinishUP's folders removes it | `server repositories list`, `server status [NAME] [--json]` (`target.repositories`) |
-| Layer 2: `server repositories add` (trusted console; refused `remote_kind_unavailable` while no remote kind is open) or `keep` | `server repositories remove [NAME] [--repository FOLDER]` or `--all` (also repairs a damaged record) | `server repositories list`, `server status [NAME] [--json]`, `/server` and the header |
+| Layer 2: `server repositories add` (trusted console; acts for an SSH target from layer 4, refused `remote_kind_unavailable` for a kind still closed) or `keep` | `server repositories remove [NAME] [--repository FOLDER]` or `--all` (also repairs a damaged record) | `server repositories list`, `server status [NAME] [--json]`, `/server` and the header |
+| Layer 4: a client starts an SSH target's helper on demand (relay: any connecting client; direct: a registrant, `server connect`) | `server disconnect`, `server remove`, a `server use` that leaves the target, `server set --style` (stamped pid, never by pattern); its idle exit 15 minutes after its last client | `server status [--json]` (`target.connection.helper`: running, last phase and reason) |
+| Layer 4: `server set NAME --style direct` (a style the server's last profile offers) | `server set NAME --style relay` (both stop the helper and the master first) | `server status [--json]` (`target.connection.style`, `styles_offered`) |
+| Layer 4: the owner confirms an unknown SSH host key when OpenSSH asks at `server add` or `server use` (OpenSSH writes the owner's `known_hosts`; FinishUP never does) | OpenSSH's own tools remove the pin (for example `ssh-keygen -R`); `server remove` removes FinishUP's record of the identity with the root | `server status` (consent), and `remote_identity_changed` on a key that no longer matches |
 
 Deleting a target's root removes every client-side artifact of that target except an API key
 kept in the platform credential store (service `yoetz.server-credential.v1`, account = target id),
@@ -1595,7 +1758,8 @@ it, or it exits once idle. The ambient installation is never touched by a target
   servers, and the control-schema version and digest, which every envelope bump already moves.
 - Layer 1 sends nothing over a network that `main` did not send: the remote kinds are refused
   before any prompt or probe, and a remote root is refused before any dial.
-- The consequences below hold once a remote kind opens (layers 4 and 5).
+- The consequences below hold for an SSH server from layer 4, and for HTTPS and port servers once
+  layer 5 opens them.
 - Remote evidence is `client_attested`: the ADR-031 fences run on the client, inside the workspace
   agent, and the server cannot check them independently. Receipts say so in one fixed line.
 - Remote round trips cost hook budget. No budget is relaxed; `server test` measures the round trip

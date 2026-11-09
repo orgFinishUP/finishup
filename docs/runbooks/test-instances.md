@@ -160,13 +160,54 @@ for everyday work cannot redirect a test run, and `finishup server use` run thro
 launcher or under an exported root refuses with `selection_overridden`. `finishup server status`
 names the source that decided the root.
 
-Remote server kinds (SSH, HTTPS and port) arrive in a later release; until then `finishup server
-add` refuses them with `remote_kind_unavailable`, so testing server targets covers only the
-everyday and named local servers. A named local server is itself an isolated root, so a process
-tree can also be pointed at it explicitly with `FINISHUP_ISOLATED_ROOT`, which always wins over
-the selection. Never point an instance at the everyday install's directories, and stop only the
-processes you started (`finishup server disconnect`, `finishup instance dispose`), never by
-pattern.
+HTTPS and port servers arrive in a later release; until then `finishup server add` refuses them
+with `remote_kind_unavailable`. SSH servers are open (layer 4; see the next section). A named local
+server is itself an isolated root, so a process tree can also be pointed at it explicitly with
+`FINISHUP_ISOLATED_ROOT`, which always wins over the selection. Never point an instance at the
+everyday install's directories, and stop only the processes you started (`finishup server
+disconnect`, `finishup instance dispose`), never by pattern.
+
+### Testing an SSH server against a private `sshd` (ADR-052, layer 4)
+
+An SSH test needs three isolated parts, none of which may touch the account's own `~/.ssh`, the
+everyday install, or a system `sshd`. `tests/capability/test_openssh_helper.py` (and the
+layer-4 end-to-end run) does exactly this on Linux; follow the same shape by hand. It is not run by
+PR CI, and skips where `ssh`, `sshd` or `ssh-keygen` is missing or `sshd` cannot start.
+
+1. **A private, unprivileged `sshd`.** In a fresh owner-only (0700) folder beneath the real home,
+   not `/tmp` (for example `~/.yz-ssh-<tag>`), generate a throwaway host key and client key with
+   `ssh-keygen -t ed25519 -N ""`, write the client's public key to an `authorized_keys` there, and
+   a config with a free loopback port: `Port <port>`, `ListenAddress 127.0.0.1`, `HostKey`,
+   `AuthorizedKeysFile` and `PidFile` in that folder, `PubkeyAuthentication yes`,
+   `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`, `StrictModes no`,
+   `AllowStreamLocalForwarding yes`, `StreamLocalBindUnlink yes`. Run it in the foreground (`sshd
+   -D -e -f <config>`) and stop it by the PID you started, never by pattern.
+2. **An `ssh` that stays off `~/.ssh`.** OpenSSH reads `~/.ssh` from the password database, not
+   from `$HOME`, so a changed `HOME` does not isolate it. Write a private `ssh_config`
+   (`IdentityFile` the client key, `IdentitiesOnly yes`, `UserKnownHostsFile` in the private
+   folder, `GlobalKnownHostsFile /dev/null`) and a two-line wrapper named `ssh` that runs the real
+   `ssh` with `-F <that config>`; put its folder first on `PATH` for the client processes only.
+   FinishUP runs the first `ssh` on `PATH`, and never writes `known_hosts` itself: the
+   host-key question is answered on a terminal (the capability test drives OpenSSH's own question
+   through a pseudo-terminal), or the test writes the private `known_hosts` beforehand.
+3. **A server root and a client home.** The server is a FinishUP root of its own: a provisioned
+   test instance, or `FINISHUP_ISOLATED_ROOT` naming a fresh root, with its service started and
+   stopped through that root's own commands. Add it with `--remote-root <that root>` and
+   `--remote-launcher <that instance's absolute launcher>`, so discovery never falls back to the
+   usual install paths, which on a developer machine could find the everyday install. The client
+   must be an *ambient* installation, since `server add` and `server use` refuse while an isolation
+   variable or pin decides the root (`selection_overridden`): on Linux, point
+   `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR` at
+   private 0700 folders, unset both isolation variables, and run an unpinned launcher (the
+   checkout's `uv run finishup`), never a provisioned instance's pinned one. The helper inherits
+   the XDG variables, so it resolves the same client registry. macOS ignores the XDG variables for
+   these folders and is untested here (gap, owner: layer 7).
+
+Never register a host (Codex, Claude Code, Cursor) against such a client with a bare `finishup`
+resolved through `PATH`: register it with the absolute launcher you tested (issue #604). Stop what
+you started with `finishup server disconnect NAME` (the helper by its stamped pid, the master
+with `ssh -O exit`) and `finishup server remove NAME`, then the `sshd` by its PID; remove the
+private folders last.
 
 ## Concurrency
 

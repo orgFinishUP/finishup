@@ -602,3 +602,41 @@ admits a remote client's hello only to a peer-authenticated session, as before; 
 answered while the vault is locked and needs no vault handle. The vault, its states and the local
 ceremonies are unchanged. The narrow unauthenticated discovery exception of design v2 section 8.8
 belongs to layer 5 and is not made here.
+
+## Amendment proposed by ADR-052 (layer 4): the SSH edge and who reads an SSH key
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) decisions 13 to
+19 open FinishUP servers on another machine over SSH, the first network edge
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) delivers. This amends invariant 6 with
+that edge, as the ADR-051 amendment above foresaw; the vault, its states, the confidential
+channels and the local ceremonies are unchanged on the server host.
+
+- **Invariant 6 with the SSH edge.** The service still opens no TCP or network listener. On the
+  server, the owner's `sshd` carries a stream-local channel into the service's owner-only control
+  socket (`-L` for the relay's OpenSSH master, `-W` in the direct style) and connects to it as the
+  login user, so the socket's peer-UID check passes unchanged. **SSH is owner-equivalent:** the SSH
+  login is the service owner, and anyone who can log in as that user over SSH could already reach
+  that socket on the server host. Only the control endpoint the server's own launcher reported
+  (`service endpoint --json`) is forwarded; the human-control (YZH1) and secret-ingress (YZS1)
+  endpoints never are, and unlock, consent and the owner receipt view run only on the server host.
+- **Who reads the key.** FinishUP never reads, stores or asks for an SSH key or password. OpenSSH
+  reads the owner's keys, agent (`SSH_AUTH_SOCK`) and `known_hosts`: in the target's helper (its
+  master, relay style), in each dialing process's `ssh -W` child (direct style, through the
+  owner-only master socket `<target root>/run/m`), and in the probes of `server add`, `server use`
+  and the helper's profile refresh. Every `ssh` runs with `BatchMode=yes` and
+  `StrictHostKeyChecking=yes`, except the one probe of `server add` or `server use` on the trusted
+  console that lets OpenSSH ask about an unknown host key (password and keyboard-interactive login
+  off). FinishUP never writes `known_hosts`; the owner's answer to OpenSSH is the pin, and the
+  fingerprint OpenSSH verified is recorded only as the consent's endpoint identity. Choosing the
+  relay or the direct style therefore changes who runs OpenSSH, not who reads a FinishUP
+  credential, and moves no generation.
+- **The helper holds no vault.** `finishup helper run` is a `client_only` process of the client:
+  no vault, key, credential, provider or policy authority. It runs with a fixed, scrubbed
+  environment (no FinishUP variable), binds its relay endpoint `<target root>/run/control.sock`
+  with the service's owner-only fences and peer-UID check, so only the owner's processes on the
+  client reach it, and keeps only owner-only records of closed tokens, generated ids, integers and
+  times. FinishUP's own variables are removed from every `ssh` child, so no root rides a `SendEnv`
+  line to the server.
+- **Not changed.** HTTPS and port servers stay closed; the gateway and native edges, and which
+  processes read an API key in the direct style, remain layer 5's amendment (the native edge with
+  the maintainer's security review).

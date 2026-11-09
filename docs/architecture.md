@@ -10,8 +10,9 @@ signatures — live in [`docs/INTERFACES.md`](INTERFACES.md).
 A persistent local service owns the keys, the decrypted state, the writers, the privacy authority,
 and all outbound access; the CLI, the MCP bridge, and any future UI are clients that ask it to do
 things. That service runs on your own machine: the everyday one by default, or a named local
-server the owner added, each with its own vault and ledger. FinishUP servers on another machine
-are designed but not yet open (see [Client and server](#client-and-server)).
+server the owner added, each with its own vault and ledger. A client can also use the owner's own
+FinishUP server on another machine over SSH; HTTPS and port servers are designed but not yet open
+(see [Client and server](#client-and-server)).
 
 ## Trust topology
 
@@ -49,10 +50,12 @@ privacy authority.
 Secret material never travels over an ordinary CLI argument, environment variable, config file,
 log, trace, transcript, or LLM context. Credentials are provisioned through a confidential terminal
 ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
-[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). When FinishUP servers on another
-machine open, their API key will be entered at a masked prompt (or read once from an owner-only
-key file) and kept in the OS credential store or, where none is usable, an owner-only credential
-file ([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md)); this release stores none.
+[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). An SSH server needs no FinishUP
+credential: OpenSSH authenticates with the owner's own keys and agent, and FinishUP never reads or
+stores an SSH key. When HTTPS servers open, their API key will be entered at a masked prompt (or
+read once from an owner-only key file) and kept in the OS credential store or, where none is
+usable, an owner-only credential file
+([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md)); this release stores none.
 
 The terminal interface sits on the human-CLI leg and is bound by the same rule. It has no
 credential path of its own: when a secret is needed it suspends itself and hands the controlling
@@ -129,9 +132,10 @@ with `finishup server add NAME --local` and picks one with `finishup server use`
 owner-only selection file. That file is the lowest-precedence root source: the isolation variable
 and a runtime pin always win, a selection that names a missing root fails closed instead of
 falling back, and no host registration records it. The target record also knows the remote kinds
-(`local_port`, `ssh`, `https`: a FinishUP service the same owner runs elsewhere), but layer 1
-keeps them closed: `server add` and `server use` refuse them with `remote_kind_unavailable`, and a
-connection to a remote root is refused before any dial (`target_root_is_remote`).
+(`local_port`, `ssh`, `https`: a FinishUP service the same owner runs elsewhere). Layer 1 kept
+them closed; layer 4 opens `ssh` (`finishup server add NAME ssh://[user@]host[:port]`), while
+`server add` and `server use` still refuse `https` and `local_port` with `remote_kind_unavailable`
+and a connection to such a root is refused before any dial (`target_root_is_remote`).
 
 **The workspace agent.** The service reads the agent's working tree for the task base, the
 check-time change, requested-output facts, task inputs, declared tests, reviewer file reads,
@@ -146,13 +150,14 @@ goes to the local adapter unchanged, a `client:` handle goes to the hub, and no 
 ever handed a handle. Evidence obtained that way is labelled `client_attested`, and every
 non-local receipt rendering says so in one fixed line. When no agent can be reached the receipt
 carries a typed gap; nothing passes silently. Layer 1 ships all of this and tests it in process;
-no network reaches it until a remote kind opens.
+from layer 4 an SSH server reaches it over the network.
 
 **Shared authorization (layer 2,
 [ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)).**
 `client/authorization.py` (hook-safe) is the one gate every connection from a remote root passes
 before any claim, dial or spawn — zero-network, the disclosure, an open kind
-(`OPEN_REMOTE_KINDS`, empty in layer 2), then the repository hold — and the authorization
+(`OPEN_REMOTE_KINDS`, empty in layers 2 and 3, `{ssh}` from layer 4), the consent (layer 3), then
+the repository hold — and the authorization
 generation an admitted connection watches. `service/client.py` runs the gate in both connect paths
 (`_admit_remote`) and keeps the admission in `ServiceClient`, checked before every frame, on reuse
 and by a one-second watch; a local connection carries none. `client/repository_hold.py` decides
@@ -174,8 +179,37 @@ step (after the kind step); `cli/server.py` asks for the consent on the trusted 
 kind opens, and `server status` shows it. `client/helper_registrations.py` is the API through
 which client processes register the workspaces a target's helper serves (layer 4 runs the
 helper); the MCP bridge registers its claimed workspace, and `service/workspace_hub.py` routes a
-live call to its own connection's agent and background work to a `background` agent first. No
-profile source is registered for any kind and no kind is open in this layer.
+live call to its own connection's agent and background work to a `background` agent first. In
+layer 3 no profile source is registered and no kind is open.
+
+**SSH servers and the helper (layer 4, ADR-052 decisions 13 to 19).** Layer 4 opens `ssh`. Every
+part of it is CLIENT and never runs or loads on a hook's path unless an SSH target is in use.
+
+- `client/ssh_discovery.py` runs at `server add` and `server use` (and in the helper's refresh):
+  over OpenSSH it finds the server's own `finishup` launcher at fixed install paths, asks it for
+  its control endpoint (`service endpoint --json`) and its profile (`service profile --json`), and
+  takes the host key OpenSSH verified in that connection as the endpoint identity the consent is
+  bound to. An unknown host key is asked about only by OpenSSH on the owner's terminal; a changed
+  one is refused (`remote_identity_changed`).
+- `client/ssh_transport.py` holds the fixed OpenSSH argv: the relay's master with its stream-local
+  forward, the direct style's `ssh -W` stream through a shared `ControlMaster=auto` master, and the
+  closed classification of OpenSSH failures.
+- `client/helper.py` (`finishup helper run --target <id>`, hidden, `client_only`) is the one
+  background helper per SSH target, started on demand by a client and never by `service run`,
+  stopped by `server disconnect|remove|use <other>|set --style` through its stamped pid, idle
+  15 minutes after its last client. In the relay style (the default) it serves
+  `<target root>/run/control.sock`, so hooks, the MCP bridge, the CLI and the terminal interface
+  keep dialling a Unix endpoint, and checks every client frame against its own admission before
+  forwarding it. In every style it runs one background workspace agent per registered workspace
+  (`role: background`), drains captured observations every 30 seconds, and re-fetches the
+  server's profile. It admits itself through the shared gate (`authorization.authorize_target`);
+  a lapse ends every relayed connection and agent, and zero-network stops it at once.
+  `client/helper_status.py` (hook-safe) is what a client needs of it: the lock, the status record
+  and its phases, start and stop by stamped pid. `client/helper_runtime.py` is the SSH
+  `TargetRuntime` and the CLI's one-time registration.
+- `service/client.py` dispatches an admitted SSH root on its connection style (the helper's
+  endpoint, or `ssh -W`), within one deadline for a hook (design v2 section 8.9), and names a
+  transport outage by its closed phase on every surface; never a local service to start.
 
 ### Topology by target
 
@@ -187,12 +221,15 @@ NAMED LOCAL (each an ADR-028 persistent instance root)
   selected "work" ──► <state>/servers/t_1a2b3c4d/run/control.sock ──► service #2 (own vault, ledger)
   selected "lab"  ──► <state>/servers/t_9f8e7d6c/run/control.sock ──► service #3
 
-REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1, none of it built
+REMOTE (local_port, ssh, https; the owner's own server) — ssh built in layer 4; https and
+local_port closed until layer 5
   client host                                             server host (same owner)
 
   ssh: control frames over the forwarded owner-only socket (sshd stream-local forwarding)
-  hook / MCP / CLI / TUI ─► relay helper ──┐
-  hook / MCP / CLI / TUI ─► direct (ssh -W) ┴═ control frames ═► control.sock ─► service
+  relay:  hook / MCP / CLI / TUI ─► <troot>/run/control.sock ─► helper ─► ssh -M -L ═══╗
+  direct: hook / MCP / CLI / TUI ─► ssh -W (shared ControlMaster) ═════════════════════╣
+  server: service ◄─ control.sock ◄─ sshd (stream-local forward) ◄═════════════════════╝
+  helper: background workspace agent per registration, observation drain, profile re-check
   workspace agent ◄══════ workspace_call / workspace_reply frames ══════ workspace hub
 
   https, local_port: REST v1 to the edge the server owner runs
@@ -205,8 +242,9 @@ REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1, n
   human-control and secret channels: never leave the server host
 ```
 
-None of the remote path exists in layer 1: no helper, SSH transport, REST protocol, gateway or
-native edge is built, and a remote root is refused before any dial. The remote path follows
+None of the remote path existed in layer 1. Layer 4 builds the SSH part (the helper, both
+connection styles and the SSH edge); no REST protocol, gateway or native edge is built, and an
+HTTPS or port root is refused before any dial. The remote path follows
 ADR-051's unified model, delivered in later layers: a *level* says where
 the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
 review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of

@@ -223,8 +223,9 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   machine over SSH, and web-hosted servers over HTTPS — and the client workspace agent that lets
   such a server read the agent's working tree are decided by
   [ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903), which
-  delivers them in layers. Layer 1 opens named local servers only; every remote kind stays closed
-  (`remote_kind_unavailable`) and stays in this deferral until the layer that opens it lands.
+  delivers them in layers. Layer 1 opens named local servers only; layer 4 opens a server on
+  another machine over SSH (ADR-052: the helper, relay and direct styles); HTTPS and port servers
+  stay closed (`remote_kind_unavailable`) and stay in this deferral until layer 5 lands.
   Layer 2 ([ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
   adds the shared authorization gate, generations, consent-envelope types and the repository
   egress hold, all closed with the kinds; its remaining follow-ups (the helper's background
@@ -250,8 +251,8 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   because the `status` result they cause discloses only what that call would already have returned
   under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
   cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
-  Remote service exposure is decided for single-owner servers by ADR-051 (Proposed) and not yet open
-  (its layer 1 keeps every remote kind closed); host registrations are unchanged by it. No adapter
+  Remote service exposure is decided for single-owner servers by ADR-051 (Proposed); SSH servers
+  open in layer 4, HTTPS and port servers are not yet open; host registrations are unchanged by it. No adapter
   silently installs or configures hooks; every hook install goes through the host's explicit plugin
   ceremony.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
@@ -259,7 +260,7 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   independent concurrent service writers; the single-user persistent local service and
   authenticated local IPC are v0.1 requirements. *(2026-11-05: ADR-051 (Proposed) defines how
   one owner will reach their own FinishUP service on another machine over SSH or HTTPS through the
-  ordinary control channel; its layer 1 keeps that closed. Multi-user hosting, remote unlock,
+  ordinary control channel; layer 4 opens SSH, HTTPS stays closed until layer 5. Multi-user hosting, remote unlock,
   consent and owner-view ceremonies, and the native installers stay deferred here.)*
 - Standalone public `finishup doctor` CLI command and support-bundle schema. *(2026-09-05: the
   terminal interface's read-only `/doctor` report and `finishup service diagnostics` (one durable
