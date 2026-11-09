@@ -685,3 +685,68 @@ async def test_a_frame_is_written_whole_when_its_caller_stops_waiting() -> None:
     release.set()
     await _until(lambda: len(finished) == 2)
     assert finished == ["written", "written"]
+
+
+async def test_an_agent_whose_authorization_lapsed_mid_task_leaves_the_typed_gap(
+    tmp_path: object,
+) -> None:
+    """ADR-052: an agent whose own connection's authorization lapses (its repository held, the
+    selection moved) answers ``workspace_unavailable`` between the connection's checks; the hub
+    types that loss, and a check that needed the read records the existing
+    ``workspace_agent_unavailable`` gap every receipt format names (no new receipt field)."""
+
+    import os
+    import subprocess
+    from pathlib import Path
+
+    from finishup.application import check_change
+    from finishup.client.workspace_agent import WorkspaceAgentHandler
+    from finishup.domain.receipts import (
+        check_time_change_gap_sentence,
+        check_time_change_unavailable_reason_gap,
+    )
+    from finishup.ports.control import WorkspaceLocator
+
+    root = Path(str(tmp_path)) / "project"
+    root.mkdir()
+    subprocess.run(
+        ("git", "init", "--quiet"),
+        cwd=root,
+        check=True,
+        env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "HOME": os.fspath(root)},
+    )
+
+    class _Authorization:
+        def __init__(self) -> None:
+            self.phase: str | None = None
+
+        def refusal(self) -> str | None:
+            return self.phase
+
+    authorization = _Authorization()
+    agent = WorkspaceAgentHandler(
+        WorkspaceLocator(os.fspath(root.resolve())),
+        protected=(os.fspath(Path(str(tmp_path)) / "state"),),
+        own_authorization=authorization,
+    )
+    hub = _hub()
+    await _register(
+        hub,
+        lambda call: agent.answer(call, workspace_handle=_HANDLE),
+        declaration=agent.declaration,
+    )
+    # Before the lapse the agent answers from the workspace.
+    await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=5.0)
+
+    authorization.phase = "repository_egress_held"
+    with pytest.raises(WorkspaceAgentUnavailable) as lapsed:
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=5.0)
+    assert (lapsed.value.reason, lapsed.value.agent_reason) == (
+        "agent_unavailable",
+        "workspace_unavailable",
+    )
+    reason = check_change._agent_loss_reason(lapsed.value)  # pyright: ignore[reportPrivateUsage]
+    assert reason == "workspace_agent_unavailable"
+    sentence = check_time_change_gap_sentence(check_time_change_unavailable_reason_gap(reason))
+    assert sentence is not None and "workspace agent on the client machine" in sentence
+    assert os.fspath(root) not in sentence
