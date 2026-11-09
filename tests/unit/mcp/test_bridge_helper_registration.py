@@ -9,10 +9,13 @@ server registers nothing.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -152,3 +155,191 @@ async def test_a_bridge_on_a_local_server_registers_nothing(
     assert not targets.servers_dir().exists() or list(targets.servers_dir().glob("t_*")) == []
     assert bridge._HELPER_REGISTRATIONS == {}  # pyright: ignore[reportPrivateUsage]
     await bridge.close_bridge_runtime(runtime)
+
+
+# --- the connection renews its own registration (review of layer 3: C3) ------------------------
+
+
+class _LeaseClock:
+    """The bridge's renewal wait, injected: each ``release`` lets one wait end; ``waiting`` is
+    set whenever the renewal task waits. No time passes in the test."""
+
+    def __init__(self) -> None:
+        self.ticks = asyncio.Semaphore(0)
+        self.waiting = asyncio.Event()
+        self.asked: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.asked.append(seconds)
+        self.waiting.set()
+        await self.ticks.acquire()
+
+    async def next_wait(self) -> None:
+        await asyncio.wait_for(self.waiting.wait(), _WAIT_SECONDS)
+        self.waiting.clear()
+
+
+_WAIT_SECONDS = 10.0
+_T0 = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, moment: datetime) -> list[datetime]:
+    """The registration's clock: what it reads is ``clock[0]``, which the test moves."""
+
+    from finishup.client import helper_registrations
+
+    current = [moment]
+    monkeypatch.setattr(helper_registrations, "_now", lambda: current[0])
+    return current
+
+
+def _renewals(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    from finishup.client import helper_registrations
+
+    done = threading.Event()
+    real = helper_registrations.renew
+
+    def renew(*args: Any, **kwargs: Any) -> object:
+        try:
+            return real(*args, **kwargs)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(helper_registrations, "renew", renew)
+    return done
+
+
+async def test_an_idle_bridge_renews_its_registration_at_half_its_lease(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No other request reuses the connection: its own task renews the registration, so the
+    helper keeps serving the workspace of a bridge that stays connected (C3)."""
+
+    del home, daemon
+    record = _remote(monkeypatch)
+    clock = _LeaseClock()
+    monkeypatch.setattr(bridge, "_lease_wait", clock, raising=False)
+    moment = _clock(monkeypatch, _T0)
+    renewed = _renewals(monkeypatch)
+    runtime = bridge.build_bridge_runtime(
+        host_profile="claude", workspace_locator=WorkspaceLocator(workspace)
+    )
+    try:
+        await bridge.dispatch_status(_status(), runtime)
+        (first,) = _registrations(record)
+        assert first["expires_at"] == "2026-11-09T12:15:00.000Z"
+
+        await clock.next_wait()
+        moment[0] = _T0 + timedelta(minutes=8)
+        clock.ticks.release()
+        assert await asyncio.to_thread(renewed.wait, _WAIT_SECONDS)
+        await clock.next_wait()
+
+        (second,) = _registrations(record)
+        assert second["expires_at"] == "2026-11-09T12:23:00.000Z"
+        assert second["registrant"] == first["registrant"]
+    finally:
+        await bridge.close_bridge_runtime(runtime)
+    assert _registrations(record) == []
+
+
+@pytest.mark.parametrize("ending", ["close", "cursor_roots_changed"])
+async def test_closing_or_cursors_retirement_ends_the_renewal_and_no_renewal_writes_it_back(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """The renewal task belongs to the connection: closing it, or Cursor's roots changing,
+    cancels the task and releases the registration; a renewal already under way when that
+    happens writes nothing back (C3)."""
+
+    from finishup.client import helper_registrations
+
+    del home, daemon
+    record = _remote(monkeypatch)
+    clock = _LeaseClock()
+    monkeypatch.setattr(bridge, "_lease_wait", clock, raising=False)
+    host = "cursor" if ending == "cursor_roots_changed" else "claude"
+    runtime = bridge.build_bridge_runtime(
+        host_profile=cast(bridge.McpHostProfile, host),
+        workspace_locator=WorkspaceLocator(workspace),
+    )
+    await bridge.dispatch_status(_status(), runtime)
+    (lease,) = bridge._HELPER_REGISTRATIONS.values()  # pyright: ignore[reportPrivateUsage]
+    task = lease.task
+    assert task is not None
+    await clock.next_wait()
+    loop = asyncio.get_running_loop()
+    ended = threading.Event()
+    real_register = helper_registrations.register
+
+    async def end() -> None:
+        if ending == "close":
+            await bridge.close_bridge_runtime(runtime)
+        else:
+            await bridge._invalidate_cursor_workspace_binding(runtime)  # pyright: ignore[reportPrivateUsage]
+        ended.set()
+
+    def register_after_the_end(*args: Any, **kwargs: Any) -> object:
+        # The renewal is under way in its worker when the connection ends on the loop.
+        asyncio.run_coroutine_threadsafe(end(), loop)
+        assert ended.wait(_WAIT_SECONDS)
+        return real_register(*args, **kwargs)
+
+    monkeypatch.setattr(helper_registrations, "register", register_after_the_end)
+    clock.ticks.release()
+
+    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), _WAIT_SECONDS)
+    assert task.done()
+    assert _registrations(record) == []
+    assert bridge._HELPER_REGISTRATIONS == {}  # pyright: ignore[reportPrivateUsage]
+    await bridge.close_bridge_runtime(runtime)
+
+
+async def test_one_connections_release_never_removes_another_connections_registration(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two connections of one bridge serving the same workspace (a replacement published before
+    the stale one closes) each own their registration: closing the stale one leaves the new
+    one's lease in place (C3)."""
+
+    from finishup.ports.control import ControlClientKind
+
+    del home, daemon
+    record = _remote(monkeypatch)
+    clock = _LeaseClock()
+    monkeypatch.setattr(bridge, "_lease_wait", clock, raising=False)
+    runtime = bridge.build_bridge_runtime(
+        host_profile="claude", workspace_locator=WorkspaceLocator(workspace)
+    )
+    stale, fresh = [
+        await service_client.connect_service(
+            ControlClientKind.MCP_BRIDGE,
+            workspace_locator=WorkspaceLocator(workspace),
+            serve_workspace=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        await bridge._register_for_helper(runtime, stale)  # pyright: ignore[reportPrivateUsage]
+        await bridge._register_for_helper(runtime, fresh)  # pyright: ignore[reportPrivateUsage]
+        assert len(_registrations(record)) == 2
+
+        await bridge._close_client(stale)  # pyright: ignore[reportPrivateUsage]
+
+        (kept,) = _registrations(record)
+        lease = bridge._HELPER_REGISTRATIONS[id(fresh)]  # pyright: ignore[reportPrivateUsage]
+        assert lease.registration is not None
+        assert kept["registrant"] == lease.registration.registrant
+    finally:
+        await bridge._close_client(stale)  # pyright: ignore[reportPrivateUsage]
+        await bridge._close_client(fresh)  # pyright: ignore[reportPrivateUsage]
+    assert _registrations(record) == []

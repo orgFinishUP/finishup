@@ -1502,7 +1502,8 @@ later process to the default service.
   `server_level_unavailable` in the same SessionStart texts, MCP shapes and drain records as the
   other phases, and only the owner agrees again (`finishup server use NAME` on the trusted
   console; the agent's own shell cannot). The MCP bridge registers its claimed workspace with the
-  target's helper and releases it when it closes. Nothing changes with no server elsewhere.
+  target's helper, renews it from a task the connection owns (an idle bridge keeps it), and
+  releases it when it closes. Nothing changes with no server elsewhere.
 - **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on
   every host, and dormant until remote kinds open. A held or kept repository gets one
   byte-identical SessionStart text per state (`repository_hold.hook_context`: the attach form in

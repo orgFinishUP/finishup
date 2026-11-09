@@ -360,6 +360,10 @@ while all of that still holds, the selection still names its target when it foll
 selection (`selection_changed`; a pinned one is exempt, O1), the gate passes for its repository,
 and its claim derives again from its own worktree under the target's salt (a copied or edited
 record is never served). The MCP bridge is the first registrant; the helper process is layer 4.
+Each claim-bound bridge connection registers under a registrant of its own and owns a renewal
+task that renews at half the lease while the connection lives, idle or not; closing the
+connection or Cursor's roots changing cancels the task and releases the record, and a renewal
+already under way writes nothing back (review of layer 3, C3).
 
 Registration and pruning take the registry lock, the one the owner's `server logout`, `remove`
 and `use` hold (review of layer 3, C2 and C4): `register` re-admits the connection, checks its

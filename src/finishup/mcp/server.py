@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import sys
+import threading
 import time
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextvars import ContextVar
@@ -986,86 +987,210 @@ async def _close_client(client: ServiceClient) -> None:
 
 
 # This bridge's registrations with the helper of a server elsewhere (ADR-052, design v2 section
-# 8.5): one registrant per bridge process; each claim-bound connection with an agent registers its
-# workspace, renews it while the bridge uses it, and releases it when the connection closes,
-# Cursor's roots-changed retirement included.
+# 8.5): each claim-bound connection with an agent registers its workspace under a registrant of its
+# own (so one connection's release never removes another's lease for the same workspace) and owns
+# a renewal task that renews it at half its lease for as long as the connection lives, idle or
+# waiting on a long request alike; closing the connection, and Cursor's roots-changed retirement,
+# cancel that task and release the registration (review of layer 3: C3).
 if TYPE_CHECKING:
+    from finishup.client.authorization import ConnectionAuthorization
     from finishup.client.helper_registrations import Registration
 
-_HELPER_REGISTRATIONS: dict[int, Registration] = {}
-_HELPER_REGISTRANT: list[str] = []
+
+@dataclass(slots=True, eq=False)
+class _HelperLease:
+    """One connection's registration and the task that renews it.
+
+    ``released`` is set before the registration is released, from the event loop; a registration
+    or renewal written meanwhile in a worker thread asks it under the registry lock before it
+    writes, and again after, so a released one is never written back.
+    """
+
+    target_id: str
+    registrant: str
+    registration: Registration | None = None
+    released: threading.Event = field(default_factory=threading.Event)
+    task: asyncio.Task[None] | None = None
+
+    def wanted(self) -> bool:
+        return not self.released.is_set()
+
+    def forget(self) -> None:
+        """This lease's record is gone (released, refused or never written): no sweep needs it."""
+
+        _HELPER_REGISTRANTS.discard((self.target_id, self.registrant))
 
 
-def _helper_registrant() -> str:
-    if not _HELPER_REGISTRANT:
-        from finishup.client.helper_registrations import new_registrant
-
-        _HELPER_REGISTRANT.append(new_registrant())
-    return _HELPER_REGISTRANT[0]
+_HELPER_REGISTRATIONS: dict[int, _HelperLease] = {}
+# Every (target, registrant) this bridge process registered under: Cursor's retirement removes
+# whatever of them is left, a record whose release did not happen included.
+_HELPER_REGISTRANTS: set[tuple[str, str]] = set()
 
 
-def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) -> None:
-    """Register ``client``'s claimed workspace with its target's helper; best effort.
+async def _lease_wait(seconds: float) -> None:
+    """Wait until a lease is due for renewal; a test injects an event-driven tick."""
 
-    Only a claim-bound connection to a server elsewhere that serves its workspace registers; the
-    connection works the same either way (its own agent answers its live calls).
+    await asyncio.sleep(seconds)
+
+
+def _connection_authorization(client: ServiceClient) -> ConnectionAuthorization | None:
+    from finishup.client.authorization import ConnectionAuthorization
+
+    authorization = getattr(client, "authorization", None)
+    return authorization if type(authorization) is ConnectionAuthorization else None
+
+
+def _register_in_worker(
+    lease: _HelperLease, write: Callable[[], Registration | str | None]
+) -> Registration | str | None:
+    """Run one registration or renewal (it takes the registry lock) off the event loop.
+
+    A registration released while this one was written is removed again here, in the same
+    worker, so a release never loses to a write that was already under way.
+    """
+
+    from finishup.client.helper_registrations import Registration, release
+
+    result = write()
+    if isinstance(result, Registration) and not lease.wanted():
+        release(result.target_id, result.claim, result.registrant)
+        return None
+    return result
+
+
+async def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) -> None:
+    """Register ``client``'s claimed workspace with its target's helper and start its renewal.
+
+    Best effort: only a claim-bound connection to a server elsewhere that serves its workspace
+    registers, and the connection works the same either way (its own agent answers its live
+    calls). The write takes the registry lock, in a worker thread.
     """
 
     # A stand-in client (a test's) need not carry either.
     workspace = getattr(client, "remote_workspace", None)
-    authorization = getattr(client, "authorization", None)
-    if workspace is None or authorization is None or not hasattr(authorization, "grant"):
+    authorization = _connection_authorization(client)
+    if workspace is None or authorization is None:
         return
-    from finishup.client.authorization import ConnectionAuthorization
-    from finishup.client.helper_registrations import RegistrationError, register
+    from finishup.client.helper_registrations import (
+        Registration,
+        RegistrationError,
+        new_registrant,
+        register,
+    )
 
-    if type(authorization) is not ConnectionAuthorization:
-        return
-    try:
-        registration = register(
+    source = "mcp_roots" if runtime.host_profile == "cursor" else "mcp_bridge"
+    registrant = new_registrant()
+    lease = _HelperLease(authorization.grant.target_id, registrant)
+    _HELPER_REGISTRANTS.add((lease.target_id, registrant))
+
+    def write() -> Registration | None:
+        return register(
             authorization,
             workspace[0],
             workspace[1],
-            registrant=_helper_registrant(),
-            source="mcp_roots" if runtime.host_profile == "cursor" else "mcp_bridge",
+            registrant=registrant,
+            source=source,
+            wanted=lease.wanted,
         )
+
+    try:
+        registration = await asyncio.to_thread(_register_in_worker, lease, write)
     except (RegistrationError, OSError, ValueError):
+        lease.forget()
         return
-    _HELPER_REGISTRATIONS[id(client)] = registration
-
-
-def _renew_for_helper(client: ServiceClient) -> None:
-    """Renew ``client``'s registration once half its lease has passed; best effort."""
-
-    registration = _HELPER_REGISTRATIONS.get(id(client))
-    authorization = getattr(client, "authorization", None)
-    if registration is None or authorization is None:
+    except BaseException:
+        # Cancelled: the worker may still write; it finds the lease released and removes it.
+        lease.released.set()
+        raise
+    if not isinstance(registration, Registration):
+        lease.forget()
         return
+    lease.registration = registration
+    _HELPER_REGISTRATIONS[id(client)] = lease
+    lease.task = asyncio.create_task(_renew_helper_lease(client, authorization, lease))
+
+
+async def _renew_helper_lease(
+    client: ServiceClient, authorization: ConnectionAuthorization, lease: _HelperLease
+) -> None:
+    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3).
+
+    Ends when the connection has ended (its registration released), when a renewal is refused
+    (``renew`` released it: the selection, record, key, consent or hold changed), or when
+    cancelled by the connection's close or Cursor's retirement.
+    """
+
     from datetime import UTC, datetime, timedelta
 
-    from finishup.client.authorization import ConnectionAuthorization
-    from finishup.client.helper_registrations import LEASE_SECONDS, Registration, renew
+    from finishup.client.helper_registrations import LEASE_SECONDS, Registration, release, renew
     from finishup.config.installation import parse_rfc3339_ms
 
-    if type(authorization) is not ConnectionAuthorization:
+    while True:
+        current = lease.registration
+        if current is None:
+            return
+        due = parse_rfc3339_ms(current.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
+        await _lease_wait(max(0.0, (due - datetime.now(UTC)).total_seconds()))
+        if not lease.wanted():
+            return
+        if getattr(client, "closed", False):
+            # The connection ended without the bridge closing it yet: its lease ends with it.
+            _drop_lease(client, lease)
+            lease.released.set()
+            release(current.target_id, current.claim, current.registrant)
+            lease.forget()
+            return
+
+        def write(registration: Registration = current) -> Registration | str | None:
+            return renew(registration, authorization, wanted=lease.wanted)
+
+        try:
+            renewed = await asyncio.to_thread(_register_in_worker, lease, write)
+        except Exception:  # noqa: BLE001 - best effort: the lease ends, the connection does not
+            renewed = None
+            lease.released.set()
+            release(current.target_id, current.claim, current.registrant)
+        if isinstance(renewed, Registration):
+            lease.registration = renewed
+            continue
+        # Refused (``renew`` released it) or released meanwhile: this lease is over.
+        _drop_lease(client, lease)
+        lease.forget()
         return
-    due = parse_rfc3339_ms(registration.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
-    if datetime.now(UTC) < due:
-        return
-    renewed = renew(registration, authorization)
-    if isinstance(renewed, Registration):
-        _HELPER_REGISTRATIONS[id(client)] = renewed
-    else:
-        _HELPER_REGISTRATIONS.pop(id(client), None)
+
+
+def _drop_lease(client: ServiceClient, lease: _HelperLease) -> None:
+    if _HELPER_REGISTRATIONS.get(id(client)) is lease:
+        del _HELPER_REGISTRATIONS[id(client)]
+
+
+def _end_lease(lease: _HelperLease) -> None:
+    """Stop renewing ``lease``: the flag first, so a renewal under way never writes it back."""
+
+    lease.released.set()
+    task = lease.task
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+        task.add_done_callback(_consume_lease_task)
+
+
+def _consume_lease_task(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def _release_for_helper(client: ServiceClient) -> None:
-    registration = _HELPER_REGISTRATIONS.pop(id(client), None)
+    lease = _HELPER_REGISTRATIONS.pop(id(client), None)
+    if lease is None:
+        return
+    _end_lease(lease)
+    registration = lease.registration
     if registration is None:
         return
     from finishup.client.helper_registrations import release
 
     release(registration.target_id, registration.claim, registration.registrant)
+    lease.forget()
 
 
 async def _discard_client(runtime: BridgeRuntime, client: ServiceClient) -> None:
@@ -1209,7 +1334,6 @@ async def _ensure_service_client(
                 async with slot.lock:
                     if _slot_retired_since(runtime, generation, workspace_locator):
                         raise _retired_binding_error(runtime)
-                _renew_for_helper(existing)
                 return existing
             if waiter is not None:
                 await waiter.wait()
@@ -1235,7 +1359,7 @@ async def _ensure_service_client(
                     )
                 )
                 await connected_attempt.connect()
-                _register_for_helper(runtime, connected_attempt)
+                await _register_for_helper(runtime, connected_attempt)
             except BaseException as exc:
                 if connected_attempt is not None:
                     await _close_client(connected_attempt)
@@ -1959,16 +2083,21 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
 
 
 def _release_bridge_registrations() -> None:
-    """Release every registration this bridge process made, for every target."""
+    """Release every registration this bridge process made, for every target, and cancel every
+    renewal task (a renewal already under way finds its lease released and writes nothing)."""
 
-    if not _HELPER_REGISTRANT:
+    leases = tuple(_HELPER_REGISTRATIONS.values())
+    _HELPER_REGISTRATIONS.clear()
+    for lease in leases:
+        _end_lease(lease)
+    if not _HELPER_REGISTRANTS:
         return
     from finishup.client.helper_registrations import release_registrant
 
-    targets_seen = {registration.target_id for registration in _HELPER_REGISTRATIONS.values()}
-    _HELPER_REGISTRATIONS.clear()
-    for target_id in targets_seen:
-        release_registrant(target_id, _HELPER_REGISTRANT[0])
+    registrants = tuple(_HELPER_REGISTRANTS)
+    _HELPER_REGISTRANTS.clear()
+    for target_id, registrant in registrants:
+        release_registrant(target_id, registrant)
 
 
 def _workspace_locator_for_runtime(runtime: BridgeRuntime) -> WorkspaceLocator | None:

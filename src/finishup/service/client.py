@@ -1261,6 +1261,12 @@ class ServiceClient(ControlClientPort):
 
         return self._remote_workspace
 
+    @property
+    def closed(self) -> bool:
+        """Whether this connection has ended (closed, failed, or its authorization lapsed)."""
+
+        return self._closed
+
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
             self._closed = True

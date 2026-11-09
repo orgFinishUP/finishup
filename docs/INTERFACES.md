@@ -14588,8 +14588,10 @@ still the one admitted, the credential generation and consent read, the limit, t
 `selection_changed`, `credential_changed`, `consent_changed`, `claim_mismatch`, or the gate's
 phase; a dropped record is removed under the lock only while it still holds the bytes judged),
 `RegistrationError` (`registration_refused` with a phase, `registration_limit`,
-`registration_unsafe`, `registration_invalid`). The MCP bridge registers a claim-bound workspace,
-renews it at half-life and releases it on close and when Cursor's roots change.
+`registration_unsafe`, `registration_invalid`). The MCP bridge registers a claim-bound workspace
+under a registrant of that connection's own, renews it at half its lease from a renewal task the
+connection owns (whether or not another request reuses it), and releases it, cancelling that
+task, on close and when Cursor's roots change; a renewal under way then writes nothing.
 
 **Agent routing (`service.workspace_hub`).** A live call: its own connection's agent, else the
 newest background agent, else the newest connection agent. Background work: the newest background
