@@ -633,9 +633,9 @@ def _attachment_recovery_context(reason: str) -> str:
         from finishup.client.repository_hold import hook_context
 
         return hook_context(reason, "attach")
-    from finishup.client.targets import REMOTE_ROOT_REFUSALS
+    from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
 
-    if reason in REMOTE_ROOT_REFUSALS or reason == "server_authorization_changed":
+    if reason in AUTHORIZATION_REFUSAL_PHASES:
         # ADR-051 decision 8: this computer refused the selected server before anything was sent
         # (zero-network, an older disclosure, or any other remote root, which this release does
         # not connect to), or ended a connection whose authorization changed (ADR-052). Name the

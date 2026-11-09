@@ -1,8 +1,9 @@
 """Every surface renders every authorization refusal the same way (ADR-051, ADR-052).
 
-One matrix over the shared gate's six phases (``client.authorization.AUTHORIZATION_REFUSALS``):
+One matrix over the shared gate's eight phases (``client.authorization.AUTHORIZATION_REFUSALS``):
 the zero-network refusal, a stale disclosure, a remote root this release does not connect to, a
-held or kept repository, and a changed authorization. For each, every surface names the closed
+held or kept repository, a changed authorization, and the consent step's two profile refusals
+(a changed profile, a level not agreed to; ADR-052). For each, every surface names the closed
 phase, its fixed summary or text, and the continuation of its way back, as a retryable
 ``service_unavailable``; none tells the owner to start a local service, and none carries a path,
 a server name or a host (the public-boundary canary).
@@ -66,6 +67,8 @@ def test_the_matrix_covers_every_phase_and_each_has_a_summary_and_a_directive() 
         "repository_egress_held",
         "repository_egress_kept",
         "server_authorization_changed",
+        "server_level_unavailable",
+        "server_profile_changed",
         "target_reauthorization_required",
         "target_root_is_remote",
         "zero_network_remote_selected",

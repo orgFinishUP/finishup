@@ -372,6 +372,8 @@ selector_conflict
 semantic_provenance_json_shape_invalid
 semantic_redacted_values_invalid
 server_authorization_changed
+server_level_unavailable
+server_profile_changed
 service_draining
 service_generation_changed
 service_handshake_failed
@@ -579,7 +581,7 @@ def test_protocol_reason_registry_is_exact_and_import_order_independent() -> Non
     # (zero_network_remote_selected, the maintainer's decision of 2026-11-07, and
     # remote_kind_unavailable, the remote kinds this release keeps closed); +2 the repository hold
     # and the owner's kept choice (2026-11-07, round 4); +1 server_authorization_changed (ADR-052).
-    assert len(source_values) == 374
+    assert len(source_values) == 376
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

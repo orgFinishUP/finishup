@@ -190,6 +190,10 @@ _REASONS: Final = frozenset(
         # may reach in this release, and a connection whose selection, record or key changed.
         "target_root_is_remote",
         "server_authorization_changed",
+        # The consent step (``client.server_profile``, ADR-052): what the server offers or needs
+        # changed since the owner consented, or it requires a level they did not agree to.
+        "server_profile_changed",
+        "server_level_unavailable",
     }
 )
 # The refusals ``require_current_authorization`` makes before anything is sent to a remote target.

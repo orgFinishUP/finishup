@@ -598,8 +598,8 @@ def test_a_bridge_whose_root_an_isolation_variable_names_points_to_that_override
 
 def test_only_the_authorization_refusals_are_admitted_among_the_remote_phases() -> None:
     """A remote connection phase outside the gate's refusals stays out of the details: the
-    three remote-root refusals, the repository hold and the owner's kept choice, and a changed
-    authorization (ADR-052)."""
+    three remote-root refusals, the repository hold and the owner's kept choice, a changed
+    authorization, and a changed profile or level (ADR-052)."""
 
     from finishup.protocol.errors import (
         AUTHORIZATION_REFUSAL_PHASES,
@@ -615,6 +615,8 @@ def test_only_the_authorization_refusals_are_admitted_among_the_remote_phases() 
         "repository_egress_held",
         "repository_egress_kept",
         "server_authorization_changed",
+        "server_profile_changed",
+        "server_level_unavailable",
     }
     for phase in REMOTE_CONNECTION_PHASES:
         kept = normalize_safe_details({"phase": phase}).get("phase")

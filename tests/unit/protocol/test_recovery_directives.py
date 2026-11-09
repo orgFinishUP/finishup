@@ -643,11 +643,34 @@ class TestWorkspaceBindingAndServerTargetReasons:
             "repository_egress_held",
             "repository_egress_kept",
             "server_authorization_changed",
+            "server_profile_changed",
+            "server_level_unavailable",
         }
         assert REMOTE_CONNECTION_PHASES <= PROTOCOL_REASON_CODES
         for phase in REMOTE_CONNECTION_PHASES:
             assert re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase)
             assert continuation_for_reason(phase) is not None
+
+    @pytest.mark.parametrize(
+        ("phase", "token"),
+        [
+            ("server_profile_changed", "remote_reconsent"),
+            ("server_level_unavailable", "server_level_decision_required"),
+        ],
+    )
+    def test_a_changed_profile_or_level_asks_the_owner_and_never_agrees_for_them(
+        self, phase: str, token: str
+    ) -> None:
+        """ADR-052 (O5): both refuse before anything is sent; only the owner agrees again, on
+        their own terminal, with 'finishup server use'; the agent never does it for them."""
+
+        assert continuation_for_reason(phase) == token
+        entry = directive_for(token)
+        assert entry is not None and entry.nudge is not None
+        assert "before anything was sent" in entry.directive
+        assert "finishup server use" in entry.nudge
+        assert "Never agree for them" in entry.nudge
+        assert "stays there" not in entry.directive
 
     @pytest.mark.parametrize(
         "token",

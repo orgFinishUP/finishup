@@ -221,9 +221,11 @@ def unavailable_context(phase: str | None) -> str:
         from finishup.client.repository_hold import hook_context
 
         return hook_context(phase, "mapped")
-    from finishup.client.targets import REMOTE_ROOT_REFUSALS
+    from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
 
-    if phase in REMOTE_ROOT_REFUSALS or phase == "server_authorization_changed":
+    if phase in AUTHORIZATION_REFUSAL_PHASES:
+        # Every other refusal of the shared gate (ADR-052): zero-network, an older disclosure,
+        # a remote root, a changed profile or level, or a changed authorization.
         return remote_refusal_context(phase).rstrip()
     return _UNAVAILABLE_CONTEXT
 

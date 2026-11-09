@@ -113,6 +113,8 @@ AUTHORIZATION_REFUSALS: Final = frozenset(
         "repository_egress_held",
         "repository_egress_kept",
         CHANGED,
+        "server_profile_changed",
+        "server_level_unavailable",
     }
 )
 assert AUTHORIZATION_REFUSALS == AUTHORIZATION_REFUSAL_PHASES
@@ -493,6 +495,14 @@ _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
     "repository_egress_kept": (
         "this repository's work is kept on this computer, as its owner chose, so FinishUP refused "
         "this connection to the selected FinishUP server before anything from it was sent"
+    ),
+    "server_profile_changed": (
+        "what the selected FinishUP server offers or needs changed since this computer agreed to "
+        "use it, so FinishUP refused this connection before anything was sent"
+    ),
+    "server_level_unavailable": (
+        "the selected FinishUP server requires more of this computer than its owner agreed to, "
+        "so FinishUP refused this connection before anything was sent"
     ),
     # An open connection ends with this phase whatever changed (``service.client``): it already
     # sent something, so it says FinishUP stopped sending, never that nothing was sent, and that

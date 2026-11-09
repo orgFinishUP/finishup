@@ -874,6 +874,35 @@ _DIRECTIVES: Final = (
             "unknown. Never change servers or keys."
         ),
     ),
+    # What the selected server elsewhere offers or needs (its profile) changed since the owner
+    # consented, or it now requires a level they did not agree to (ADR-052, design v2 section
+    # 2.3): refused before anything was sent; only the owner agrees again, on their own terminal.
+    RecoveryDirective(
+        token="remote_reconsent",
+        directive=(
+            "What the selected FinishUP server elsewhere offers or needs changed since the owner "
+            "agreed to use it, so FinishUP refused this request before anything was sent. Only "
+            "the owner can agree again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with that server's name in their own "
+            "terminal. Never agree for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="server_level_decision_required",
+        directive=(
+            "The selected FinishUP server elsewhere requires more of this computer than the owner "
+            "agreed to for this repository, so FinishUP refused this request before anything was "
+            "sent. Only the owner decides."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with its name, or 'finishup server use local'. "
+            "Never agree for them."
+        ),
+    ),
     RecoveryDirective(
         token="server_on_this_computer_required",
         directive=(
