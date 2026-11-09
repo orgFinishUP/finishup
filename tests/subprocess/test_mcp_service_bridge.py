@@ -246,9 +246,13 @@ def _install_clients(
     remaining = list(clients)
 
     async def connect(
-        _kind: object, *, workspace_locator: object = None, timeout_seconds: float | None = None
+        _kind: object,
+        *,
+        workspace_locator: object = None,
+        timeout_seconds: float | None = None,
+        serve_workspace: bool = False,
     ) -> object:
-        del timeout_seconds
+        del timeout_seconds, serve_workspace
         if observed_locators is not None:
             observed_locators.append(workspace_locator)
         return remaining.pop(0)
@@ -265,9 +269,13 @@ def _install_connect_failure(monkeypatch: pytest.MonkeyPatch, failure: BaseExcep
     """Raise at connect time so `_RECONNECT_REASONS` cannot swallow service_unavailable."""
 
     async def connect(
-        _kind: object, *, workspace_locator: object = None, timeout_seconds: float | None = None
+        _kind: object,
+        *,
+        workspace_locator: object = None,
+        timeout_seconds: float | None = None,
+        serve_workspace: bool = False,
     ) -> object:
-        del _kind, workspace_locator, timeout_seconds
+        del _kind, workspace_locator, timeout_seconds, serve_workspace
         raise failure
 
     monkeypatch.setattr(
