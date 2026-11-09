@@ -3513,8 +3513,10 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_853
-    )  # ADR-051 decision 5 +146 (check-recorded 1.7.0 and receipt-document 1.4.0 repeat their
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_867
+    )  # ADR-051 decision 8, 2026-11-07 round 4 +14 (server-target-status target.repositories: the
+    # member, its held, kept, allowed and here refs, each entry's path, time and choice state, and
+    # here's reported_at); ADR-051 decision 5 +146 (check-recorded 1.7.0 and receipt-document 1.4.0 repeat their
     # predecessors' refs); ADR-051 +47 (version-manifest 2.4.0); decision 5 +2 (server-target-status
     # outside_reads and its listed folder); decision 8 +3 (server-target-status
     # zero_network_selection, its target id and its detail token) +1 (its last_reported_at

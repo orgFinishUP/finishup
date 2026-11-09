@@ -420,6 +420,9 @@ def test_the_disclosure_names_hook_observations_and_the_content_they_carry(home:
         "can name file paths on this computer and hold the contents of files it read, even "
         "outside your project or the folders you list for that server.",
         "Your project folder is named by a keyed label, not its path.",
+        # ADR-051 decision 8 (2026-11-07, round 4): amended in place, it narrows what is sent.
+        "A project whose privacy policy on this computer allows no network use is held: nothing "
+        "from it is sent until you allow it with 'finishup server repositories add'.",
     ):
         assert words in shown
     # The old promise that no path leaves is gone: captured content can name one.
@@ -495,6 +498,148 @@ def test_the_golden_status_vector_carries_a_remote_targets_outside_reads() -> No
         "1.0.0",
         cast(JsonValue, {**payload, "target": {**target, "outside_reads": not_chosen}}),
     )
+
+
+def test_the_golden_status_vector_carries_a_remote_targets_repositories() -> None:
+    """``server-target-status`` 1.0.0 (unreleased, amended in place, ADR-051 decision 8): what a
+    remote target holds, what the owner kept here or allowed, and this folder's state."""
+
+    from pydantic import ValidationError
+
+    from finishup.protocol.schemas import SchemaInstanceInvalid
+    from finishup.protocol.server_target_status import ServerTargetStatusContract
+
+    raw = (
+        Path(__file__).parents[3] / "fixtures/service/server-target-status.case.json"
+    ).read_bytes()
+    payload = cast(dict[str, JsonValue], json.loads(raw))
+    target = cast(dict[str, JsonValue], payload["target"])
+    repositories = cast(dict[str, JsonValue], target["repositories"])
+    assert repositories == {
+        "allowed": [
+            {
+                "allowed_at": "2026-11-07T09:35:00.000Z",
+                "state": "applies",
+                "worktree": "/srv/dev/site",
+            }
+        ],
+        "held": [
+            {
+                "cause": "not_allowed",
+                "reported_at": "2026-11-07T09:30:00.000Z",
+                "worktree": "/srv/dev/ledger",
+            }
+        ],
+        "here": {
+            "cause": "not_allowed",
+            "policy_read": "last_reported",
+            "reported_at": "2026-11-07T09:30:00.000Z",
+            "state": "held",
+        },
+        "kept": [
+            {
+                "kept_at": "2026-11-07T09:40:00.000Z",
+                "state": "applies",
+                "worktree": "/srv/dev/notes",
+            }
+        ],
+        "record": "readable",
+        "reports": "readable",
+    }
+    here = cast(dict[str, JsonValue], repositories["here"])
+    rights: tuple[dict[str, JsonValue], ...] = (
+        {**repositories, "here": None},
+        {**repositories, "here": {**here, "policy_read": "live", "reported_at": None}},
+        {**repositories, "here": {**here, "state": "kept", "cause": None}},
+        {**repositories, "here": {**here, "state": "held", "cause": "grant_changed"}},
+        {
+            **repositories,
+            "here": {
+                "state": "not_reported",
+                "cause": None,
+                "policy_read": None,
+                "reported_at": None,
+            },
+        },
+        {
+            **repositories,
+            "held": [
+                {"worktree": None, "reported_at": here["reported_at"], "cause": "grant_changed"}
+            ],
+        },
+        {
+            **repositories,
+            "reports": "unreadable",
+            "record": "unreadable",
+            "held": [],
+            "kept": [],
+            "allowed": [],
+        },
+    )
+    for right in rights:
+        document = {**payload, "target": {**target, "repositories": right}}
+        validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, document))
+        ServerTargetStatusContract.model_validate(document)
+    wrongs: tuple[dict[str, JsonValue], ...] = (
+        # A cause only on a held repository, and always on one.
+        {**repositories, "here": {**here, "state": "not_held"}},
+        {**repositories, "here": {**here, "cause": None}},
+        # Last reported always says when; live and not reported never do.
+        {**repositories, "here": {**here, "reported_at": None}},
+        {**repositories, "here": {**here, "policy_read": "live"}},
+        {**repositories, "here": {**here, "state": "not_reported", "cause": None}},
+        {**repositories, "here": {**here, "state": "remembered"}},
+        # Paths are absolute, without control characters, at most 1024 characters.
+        {
+            **repositories,
+            "held": [
+                {
+                    "worktree": "relative/path",
+                    "reported_at": here["reported_at"],
+                    "cause": "not_allowed",
+                }
+            ],
+        },
+        {
+            **repositories,
+            "kept": [
+                {"worktree": "/srv/a\u0001b", "kept_at": here["reported_at"], "state": "applies"}
+            ],
+        },
+        {
+            **repositories,
+            "allowed": [
+                {
+                    "worktree": "/" + "x" * 1_024,
+                    "allowed_at": here["reported_at"],
+                    "state": "applies",
+                }
+            ],
+        },
+        {
+            **repositories,
+            "allowed": [
+                {"worktree": "/srv/site", "allowed_at": here["reported_at"], "state": "maybe"}
+            ],
+        },
+        {**repositories, "record": "damaged"},
+        {k: v for k, v in repositories.items() if k != "kept"},
+    )
+    for wrong in wrongs:
+        broken: dict[str, JsonValue] = {**payload, "target": {**target, "repositories": wrong}}
+        with pytest.raises(SchemaInstanceInvalid):
+            validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, broken))
+        with pytest.raises(ValidationError):
+            ServerTargetStatusContract.model_validate(broken)
+    # A target that is not remote carries none, and the field is never left out.
+    local = {
+        **payload,
+        "target": {**target, "kind": "local", "outside_reads": None, "repositories": None},
+    }
+    validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, local))
+    absent = {**payload, "target": {k: v for k, v in target.items() if k != "repositories"}}
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, absent))
 
 
 def test_server_status_json_carries_the_zero_network_item_the_check_reports(

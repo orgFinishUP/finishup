@@ -8,10 +8,14 @@ also carries what that target's server may read outside the claimed project on t
 it, from this client's own record. ``zero_network_selection`` says when this computer forbids
 all network use while a remote server is, or may be, selected (ADR-051 decision 8), by generated
 id and closed tokens, and whether this computer said so now or last reported it (with when); it
-is null otherwise. It is an owner display: the target name, its location
-(a host, a URL) and the listed folders appear here and in ``server list``, ``server status`` and
-``server folders list`` only, never in errors, logs, hook output, or MCP text. The claim salt and
-any credential never appear.
+is null otherwise. For a remote target ``repositories`` says which repositories it holds
+because their privacy policy on this computer allows no network use, which the owner kept on this
+computer, and which it receives anyway, and what is true of the repository in the current folder
+(ADR-051 decision 8, maintainer decision of 2026-11-07, round 4). It is an owner display: the
+target name, its location (a host, a URL), the listed folders and the repositories' worktree
+paths appear here and in ``server list``, ``server status``, ``server folders list`` and
+``server repositories list`` only, never in errors, logs, hook output, or MCP text. The claim salt
+and any credential never appear.
 """
 
 from typing import Annotated, Literal
@@ -20,10 +24,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "SERVER_TARGET_STATUS_SCHEMA_VERSION",
+    "ServerTargetAllowedRepository",
     "ServerTargetAuthorization",
     "ServerTargetDescription",
+    "ServerTargetHeldRepository",
+    "ServerTargetKeptRepository",
     "ServerTargetOutsideReads",
     "ServerTargetProbe",
+    "ServerTargetRepositories",
+    "ServerTargetRepositoryHere",
     "ServerTargetStatusContract",
     "ServerTargetZeroNetworkSelection",
 ]
@@ -39,6 +48,13 @@ type TargetId = Annotated[str, Field(pattern=r"^t_[0-9a-f]{8}$")]
 type ListedFolder = Annotated[
     str, Field(min_length=2, max_length=190, pattern=r"^/[^\x00-\x1f\x7f]+$")
 ]
+# A repository's worktree top as this computer recorded it (owner display, at most 1024).
+type RepositoryPath = Annotated[
+    str, Field(min_length=2, max_length=1024, pattern=r"^/[^\x00-\x1f\x7f]+$")
+]
+# Whether an owner's choice for a repository applies now: it does, its policy here changed since
+# (FinishUP asks again), its policy here allows network use, or this computer never reported it.
+type RepositoryChoiceState = Literal["applies", "grant_changed", "not_needed", "not_reported"]
 
 
 class ServerTargetAuthorization(BaseModel):
@@ -68,6 +84,110 @@ class ServerTargetOutsideReads(BaseModel):
     folders: list[ListedFolder] = Field(max_length=32)
 
 
+class ServerTargetHeldRepository(BaseModel):
+    """A repository held from the target: its policy on this computer allows no network use and
+    the owner has not decided (``not_allowed``), or their choice was for an earlier stretch of it
+    (``grant_changed``). ``worktree`` is null when its path is too long to keep."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worktree: RepositoryPath | None
+    reported_at: Timestamp
+    cause: Literal["not_allowed", "grant_changed"]
+
+
+class ServerTargetKeptRepository(BaseModel):
+    """A repository the owner chose to keep on this computer for the target, and since when."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worktree: RepositoryPath
+    kept_at: Timestamp
+    state: RepositoryChoiceState
+
+
+class ServerTargetAllowedRepository(BaseModel):
+    """A repository the owner allowed the target to receive anyway, and since when."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worktree: RepositoryPath
+    allowed_at: Timestamp
+    state: RepositoryChoiceState
+
+
+class ServerTargetRepositoryHere(BaseModel):
+    """What is true of the repository in the current folder for the target.
+
+    ``held`` (with ``cause``), ``kept`` on this computer, ``sent_anyway``, ``not_held`` (its policy
+    here allows network use), or ``not_reported`` (this computer's FinishUP never said and cannot
+    be asked now). ``policy_read`` is ``live`` when this computer's FinishUP answered now and
+    ``last_reported`` (at ``reported_at``) when it could not be asked; null when not reported.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"state": {"const": "held"}}, "required": ["state"]},
+                    "then": {"properties": {"cause": {"not": {"type": "null"}}}},
+                    "else": {"properties": {"cause": {"type": "null"}}},
+                },
+                {
+                    "if": {
+                        "properties": {"state": {"const": "not_reported"}},
+                        "required": ["state"],
+                    },
+                    "then": {"properties": {"policy_read": {"type": "null"}}},
+                    "else": {"properties": {"policy_read": {"not": {"type": "null"}}}},
+                },
+                {
+                    "if": {
+                        "properties": {"policy_read": {"const": "last_reported"}},
+                        "required": ["policy_read"],
+                    },
+                    "then": {"properties": {"reported_at": {"not": {"type": "null"}}}},
+                    "else": {"properties": {"reported_at": {"type": "null"}}},
+                },
+            ]
+        },
+    )
+
+    state: Literal["held", "kept", "sent_anyway", "not_held", "not_reported"]
+    cause: Literal["not_allowed", "grant_changed"] | None
+    policy_read: Literal["live", "last_reported"] | None
+    reported_at: Timestamp | None
+
+    @model_validator(mode="after")
+    def _facts_match_the_state(self) -> "ServerTargetRepositoryHere":
+        if (self.state == "held") != (self.cause is not None):
+            raise ValueError("repository_here_cause_mismatch")
+        if (self.state == "not_reported") != (self.policy_read is None):
+            raise ValueError("repository_here_policy_read_mismatch")
+        if (self.policy_read == "last_reported") != (self.reported_at is not None):
+            raise ValueError("repository_here_reported_at_mismatch")
+        return self
+
+
+class ServerTargetRepositories(BaseModel):
+    """A remote target's repositories whose privacy policy on this computer allows no network
+    use: ``held`` from it, ``kept`` here by the owner's choice, ``allowed`` to it anyway, and
+    ``here`` (null outside a repository or while the zero-network item is shown). ``reports`` and
+    ``record`` say whether this computer's two records could be read; one that cannot holds
+    nothing (reports) or allows nothing (record)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reports: Literal["readable", "unreadable"]
+    record: Literal["readable", "unreadable"]
+    held: list[ServerTargetHeldRepository] = Field(max_length=256)
+    kept: list[ServerTargetKeptRepository] = Field(max_length=64)
+    allowed: list[ServerTargetAllowedRepository] = Field(max_length=64)
+    here: ServerTargetRepositoryHere | None
+
+
 class ServerTargetDescription(BaseModel):
     """The target the deciding source resolves to (``target_id`` null: not a named target)."""
 
@@ -81,6 +201,9 @@ class ServerTargetDescription(BaseModel):
     authorization: ServerTargetAuthorization | None
     # Null for a target that is not remote: a local server reads under its own privacy policy.
     outside_reads: ServerTargetOutsideReads | None
+    # Null for a target that is not remote: a server on this computer applies this computer's
+    # own privacy policy to each repository, so nothing is held for it (ADR-051 decision 8).
+    repositories: ServerTargetRepositories | None
 
 
 class ServerTargetProbe(BaseModel):
