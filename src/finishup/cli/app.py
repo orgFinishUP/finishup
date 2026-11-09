@@ -57,7 +57,7 @@ from finishup.cli.render import (
     render_human_status,
     render_local_recovery_lines,
 )
-from finishup.cli.rest_server import api_key_app
+from finishup.cli.rest_server import api_key_app, rest_app
 from finishup.cli.server import server_app
 from finishup.client.attribution import connection_attribution
 from finishup.client.workspace_ref import WorkspaceRefNotPortable, start_request_for_connection
@@ -252,6 +252,7 @@ app.add_typer(instance_app, name="instance")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 service_app.add_typer(api_key_app, name="api-key")
+service_app.add_typer(rest_app, name="rest")
 app.add_typer(ai_app, name="ai")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")

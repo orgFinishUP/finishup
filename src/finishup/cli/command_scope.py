@@ -111,6 +111,7 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "service idle-relock": "server_host",
         "service initialize-passphrase": "server_host",
         "service recovery": "server_host",
+        "service rest": "server_host",
         "service restart": "server_host",
         "service rotate-passphrase": "server_host",
         "service run": "server_host",

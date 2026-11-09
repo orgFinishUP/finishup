@@ -34,9 +34,11 @@ from finishup.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
     WorkspaceCall,
+    WorkspaceClaim,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.schemas import load_schema_catalog
@@ -223,6 +225,18 @@ class ScriptedDaemon:
         # only under it. The default is the revision of the test profile a consented target
         # names (``builders.server_profiles``).
         self.profile_revision: ServerProfileRevision | None = TEST_REVISION
+        # When set, a claim is keyed to this handle (as a ready service keys it) and recorded in
+        # ``claims``; otherwise a claim-bound session has no handle, as with a locked vault.
+        self.claim_handle: str | None = None
+        self.claims: list[WorkspaceClaim] = []
+
+    async def _key_claim(self, claim: WorkspaceClaim) -> RepositoryPrivacyContext | None:
+        self.claims.append(claim)
+        return RepositoryPrivacyContext(
+            commitment="hmac-sha256:" + "c" * 64,
+            identity_kind="client_claim",
+            workspace_handle=self.claim_handle,
+        )
 
     def received(self, connection: int = -1) -> list[bytes]:
         """Every frame payload one connection sent the daemon, its hello first."""
@@ -254,6 +268,7 @@ class ScriptedDaemon:
                 profile_revision=None
                 if self.profile_revision is None
                 else (lambda: self.profile_revision),
+                claim_context_resolver=None if self.claim_handle is None else self._key_claim,
             )
             while True:
                 try:

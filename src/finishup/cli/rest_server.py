@@ -292,3 +292,148 @@ def api_key_revoke(key_id: Annotated[str, typer.Argument(help="The key id to rev
     typer.echo(
         f"Revoked API key {key_id}." if changed else f"API key {key_id} was already revoked."
     )
+
+
+_REMEDIES.update(
+    {
+        "rest_edge_invalid": ("--edge is gateway (the default) or native", _USAGE),
+        "rest_listen_invalid": (
+            "give --listen HOST:PORT with an IP address or localhost (port 0 picks a free one)",
+            _USAGE,
+        ),
+        "rest_tls_required": (
+            "give --tls-cert and --tls-key, or --behind-proxy on a loopback address behind a "
+            "TLS-terminating proxy on this host",
+            _USAGE,
+        ),
+        "rest_tls_unusable": (
+            "the certificate and key could not be loaded together, the key file is not your own "
+            "owner-only (0600) file, or they were given with --behind-proxy",
+            _USAGE,
+        ),
+        "rest_proxy_not_loopback": (
+            "--behind-proxy serves plain HTTP, so it listens on a loopback address only",
+            _USAGE,
+        ),
+        "rest_listener_unavailable": (
+            "that address could not be bound (in use, or not this host's); choose another",
+            _UNSAFE,
+        ),
+        "service_already_running": (
+            "the native edge runs this server's service itself; stop the running one first "
+            "('finishup service stop'), or use the default gateway edge beside it",
+            _UNSAFE,
+        ),
+    }
+)
+
+
+@rest_app.command("run")
+def rest_run(
+    listen: Annotated[
+        str, typer.Option("--listen", help="HOST:PORT to listen on (an IP address or localhost).")
+    ],
+    edge: Annotated[
+        str,
+        typer.Option(
+            "--edge",
+            help="gateway (default: a separate process without the vault) or native (inside the "
+            "service; your own security review).",
+        ),
+    ] = "gateway",
+    tls_cert: Annotated[
+        Path | None, typer.Option("--tls-cert", help="PEM certificate chain.")
+    ] = None,
+    tls_key: Annotated[
+        Path | None, typer.Option("--tls-key", help="PEM private key (an owner-only 0600 file).")
+    ] = None,
+    behind_proxy: Annotated[
+        bool,
+        typer.Option(
+            "--behind-proxy", help="Plain HTTP on loopback, behind a TLS-terminating proxy."
+        ),
+    ] = False,
+) -> None:
+    """Serve this server to clients on other computers over HTTPS (REST v1), in the foreground.
+
+    The gateway edge (the default) is a separate process of your user that holds no vault and
+    reaches this server's service over its owner-only control socket, starting it on demand. The
+    native edge runs the service itself with the listener inside it; the process holding the vault
+    is then on the network, and its security review is yours. Stop either with Ctrl-C or SIGTERM.
+    """
+
+    from finishup.config.paths import log_dir
+    from finishup.rest.api_keys import ApiKeyError, ApiKeyStore
+    from finishup.rest.audit import AUDIT_FILE_NAME, FileAuditSink
+    from finishup.rest.listener import ListenerError, RestListener
+
+    if edge not in {"gateway", "native"}:
+        raise _fail("rest_edge_invalid")
+    store = cast(ApiKeyStore, _store())
+    try:
+        keys = store.records()
+    except ApiKeyError as error:
+        raise _fail(error.reason) from None
+    try:
+        listener = RestListener.bind(
+            listen, tls_cert=tls_cert, tls_key=tls_key, behind_proxy=behind_proxy
+        )
+    except ListenerError as error:
+        raise _fail(error.reason) from None
+    audit = FileAuditSink(log_dir() / AUDIT_FILE_NAME)
+    typer.echo(
+        f"Serving REST v1 ({edge} edge) on {listener.scheme} port {listener.port}; "
+        "stop it with Ctrl-C.",
+        err=True,
+    )
+    if not keys:
+        typer.echo(
+            "No API key exists yet: create one with 'finishup service api-key create'.", err=True
+        )
+    if edge == "gateway":
+        _run_gateway(listener, store, audit)
+        return
+    _run_native(listener, store, audit)
+
+
+def _run_gateway(listener: object, store: object, audit: object) -> None:
+    import anyio
+
+    from finishup.gateway.run import serve_gateway
+    from finishup.rest.api_keys import ApiKeyStore
+    from finishup.rest.audit import AuditSink
+    from finishup.rest.listener import RestListener
+
+    async def main() -> None:
+        await serve_gateway(
+            cast(RestListener, listener), cast(ApiKeyStore, store), audit=cast(AuditSink, audit)
+        )
+
+    anyio.run(main)
+
+
+def _run_native(listener: object, store: object, audit: object) -> None:
+    import anyio
+
+    from finishup.rest.api_keys import ApiKeyStore
+    from finishup.rest.audit import AuditSink
+    from finishup.rest.listener import RestListener
+    from finishup.service.daemon import run_service
+    from finishup.service.rest_native import NativeRestEdge
+
+    edge = NativeRestEdge(
+        cast(RestListener, listener), cast(ApiKeyStore, store), audit=cast(AuditSink, audit)
+    )
+
+    async def main() -> None:
+        await run_service(rest_edge=edge)
+
+    try:
+        anyio.run(main)
+    except SystemExit:
+        raise
+    except Exception as error:  # noqa: BLE001 - name the closed reason, never the exception text
+        reason = getattr(error, "reason", None)
+        if reason in {"singleton_held", "service_already_running", "singleton_lock_held"}:
+            raise _fail("service_already_running") from None
+        raise _fail("rest_listener_unavailable") from None

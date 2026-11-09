@@ -157,3 +157,21 @@ def test_the_key_commands_run_only_on_the_server_host() -> None:
     from finishup.cli.command_scope import command_scope
 
     assert command_scope("service api-key create") == "server_host"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        (["--listen", "127.0.0.1:0", "--edge", "proxy"], "rest_edge_invalid"),
+        (["--listen", "example.com:443"], "rest_listen_invalid"),
+        (["--listen", "127.0.0.1:0"], "rest_tls_required"),
+        (["--listen", "0.0.0.0:0", "--behind-proxy"], "rest_proxy_not_loopback"),
+    ],
+)
+def test_rest_run_refuses_before_anything_listens(
+    home: Path, arguments: list[str], reason: str
+) -> None:
+    result = _RUNNER.invoke(cli.app, ["service", "rest", "run", *arguments])
+    assert result.exit_code == 2, result.output
+    assert reason in result.output
+    assert "Serving REST v1" not in result.output
