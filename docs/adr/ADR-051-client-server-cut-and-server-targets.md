@@ -1318,7 +1318,10 @@ mapped form serves resume and compact. CLI, MCP, the terminal interface and the 
 phases as every authorization refusal (ADR-052). `server repositories add|keep|list|remove`,
 `server status` (`target.repositories`) and the terminal interface's `/server` item show and change
 the choices; the group is hidden and `add` refuses `remote_kind_unavailable` while no kind is open
-(O4).
+(O4). No surface recommends `add` then: `server status`, `server repositories list` and `keep`
+show what works (`keep`, `remove`) and say that sending a held repository anyway arrives in a later
+release, and the line after a privacy change names no hold while an earlier gate step refuses the
+server.
 
 **Honest limits.**
 

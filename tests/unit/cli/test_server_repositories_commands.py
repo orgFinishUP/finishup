@@ -45,6 +45,7 @@ from finishup.client.repository_hold import (
     add_override,
     overrides_path,
     read_overrides,
+    remove_override,
 )
 from finishup.config.paths import reset_selection_memo
 from finishup.protocol.canonical import JsonValue
@@ -389,16 +390,25 @@ def test_keep_needs_no_console_and_records_the_choice_by_id_only(
     assert again.exit_code == 0 and "already kept" in again.stdout
 
 
+@pytest.mark.parametrize("kinds", ["closed", "opened"])
 def test_keep_replaces_an_allow_and_says_open_connections_close(
-    remote: targets.ServerTarget, repository: str
+    remote: targets.ServerTarget, repository: str, monkeypatch: pytest.MonkeyPatch, kinds: str
 ) -> None:
+    if kinds == "opened":
+        open_remote_kinds(monkeypatch, "ssh", "https", "local_port")
     key = _held(repository)
     root = targets.target_root(remote.target_id)
     with targets.registry_lock():
         add_override(root, remote.target_id, key, repository, _STAMP)
     result = _invoke("keep", "lab")
     assert result.exit_code == 0, result.output
-    assert "'finishup server repositories add lab'" in result.stdout
+    if kinds == "opened":
+        assert "'finishup server repositories add lab'" in result.stdout
+    else:
+        # 'add' cannot act while no remote kind is open: it is never offered as the way on.
+        assert "repositories add" not in result.stdout
+        assert "Sending it anyway arrives in a later release" in result.stdout
+        assert "'finishup server repositories remove lab' asks again" in result.stdout
     assert "open ones close within about a second" in result.stdout
     (choice,) = read_overrides(root, remote.target_id)
     assert choice.choice == "keep"
@@ -619,6 +629,55 @@ def quiet_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         return ProbeResult("not_running", None, None, None, None, None, None, None, 0)
 
     monkeypatch.setattr(server_cli, "_probe", probe)
+
+
+@pytest.mark.parametrize("kinds", ["closed", "opened"])
+def test_no_surface_offers_add_while_it_cannot_act(
+    remote: targets.ServerTarget,
+    repository: str,
+    quiet_probe: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kinds: str,
+) -> None:
+    """While the remote kinds are closed, 'server repositories add' refuses
+    ``remote_kind_unavailable`` (O4): status, list and keep show what works (keep, remove) and
+    say that sending anyway arrives later. Once a kind opens, they offer it again."""
+
+    if kinds == "opened":
+        open_remote_kinds(monkeypatch, "ssh", "https", "local_port")
+    root = targets.target_root(remote.target_id)
+    key = _held(repository)
+    (tmp_path / "kept").mkdir()
+    kept = "sha256:" + "1" * 64
+    record_repository_report(kept, os.fspath(tmp_path / "kept"), no_network=True, now=_AT)
+    with targets.registry_lock():
+        add_kept(root, remote.target_id, kept, os.fspath(tmp_path / "kept"), _STAMP, now=_AT)
+    texts: list[str] = []
+    held_status = "\n".join(server_cli.status_lines(_status_json()))
+    texts.append(held_status)
+    listed = _invoke("list", "lab")
+    assert listed.exit_code == 0, listed.output
+    texts.append(listed.stdout)
+    with targets.registry_lock():
+        add_override(root, remote.target_id, key, repository, "2026-11-01T00:00:00.000Z", now=_AT)
+    texts.append("\n".join(server_cli.status_lines(_status_json())))  # held again
+    with targets.registry_lock():
+        remove_override(root, remote.target_id, key=key, worktree=repository)
+        add_kept(root, remote.target_id, key, repository, _STAMP, now=_AT)
+    texts.append("\n".join(server_cli.status_lines(_status_json())))  # kept
+    everything = "\n".join(texts)
+    if kinds == "opened":
+        assert "'finishup server repositories add lab'" in held_status
+        assert "To send a held repository anyway" in listed.stdout
+        return
+    assert "repositories add" not in everything
+    assert "'finishup server repositories keep lab'" in held_status
+    assert "sending it anyway arrives in a later release, with servers elsewhere" in held_status
+    assert "Sending a held repository anyway arrives in a later release" in listed.stdout
+    assert "'finishup server repositories remove lab --repository FOLDER'" in listed.stdout
+    assert "'finishup server repositories remove lab' here undoes that choice." in texts[-1]
+    assert "held again" in texts[2] and "'finishup server repositories keep lab'" in texts[2]
 
 
 def test_status_says_what_is_held_kept_and_sent_and_this_folders_state(

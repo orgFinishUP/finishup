@@ -1115,16 +1115,25 @@ def repository_hold_line(worktree: str, record: ServerTarget) -> str | None:
     """The owner line when the repository at ``worktree`` is held or kept for remote ``record``.
 
     Generated ids and closed kinds only; ``None`` when it is neither (not reported, allowed, or
-    allowing network use). File reads and one Git read.
+    allowing network use), and when an earlier step of the gate refuses ``record`` (every remote
+    kind is closed in this release). File reads and one Git read.
     """
 
     import asyncio
     import contextvars
 
+    from finishup.client.authorization import gate
     from finishup.client.everyday_repository import repository_key_for
     from finishup.client.repository_hold import decide
-    from finishup.client.targets import target_root
+    from finishup.client.targets import TargetError, target_root
 
+    try:
+        # The hold is the gate's last step (ADR-052): it is named only where it is what stops a
+        # connection. While the remote kinds are closed an earlier step refuses every server
+        # elsewhere, and 'server repositories add' cannot act, so nothing is said of the hold.
+        gate(record)
+    except TargetError:
+        return None
     try:
         key = contextvars.Context().run(asyncio.run, repository_key_for(worktree))
     except (OSError, RuntimeError, ValueError):

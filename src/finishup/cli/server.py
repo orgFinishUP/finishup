@@ -1296,26 +1296,56 @@ def repository_lines(target: Mapping[str, JsonValue]) -> tuple[str, ...]:
         )
     here = repositories.get("here")
     if isinstance(here, dict):
-        line = _here_line(here, name)
+        line = _here_line(here, name, kind=target.get("kind"))
         if line is not None:
             lines.append(line)
     return tuple(lines)
 
 
-def _here_line(here: Mapping[str, JsonValue], name: str) -> str | None:
+def sending_anyway_open(kind: object) -> bool:
+    """Whether 'server repositories add' can act for a server of ``kind`` in this release.
+
+    While the remote kinds are closed (ADR-052, O4) it refuses ``remote_kind_unavailable``, so no
+    surface recommends it: they show what works (``keep``, ``remove``) and say that sending a held
+    repository anyway arrives in a later release.
+    """
+
+    from finishup.client.authorization import OPEN_REMOTE_KINDS
+
+    return kind in OPEN_REMOTE_KINDS
+
+
+_SEND_ANYWAY_LATER: Final = "sending it anyway arrives in a later release, with servers elsewhere"
+
+
+def _here_line(here: Mapping[str, JsonValue], name: str, *, kind: object = None) -> str | None:
     state = here.get("state")
     reported = (
         f", as this computer last reported at {here.get('reported_at')}"
         if here.get("policy_read") == "last_reported"
         else ""
     )
+    sendable = sending_anyway_open(kind)
     if state == "held" and here.get("cause") == "grant_changed":
+        if not sendable:
+            return (
+                "This folder's repository: held again — its privacy policy here changed after "
+                f"you chose for it{reported}; 'finishup server repositories keep {name}' keeps "
+                f"it here ({_SEND_ANYWAY_LATER})."
+            )
         return (
             "This folder's repository: held again — its privacy policy here changed after you "
             f"chose for it{reported}; 'finishup server repositories add {name}' here sends it "
             f"anyway, and 'finishup server repositories keep {name}' keeps it here."
         )
     if state == "held":
+        if not sendable:
+            return (
+                "This folder's repository: held — its privacy policy on this computer allows no "
+                f"network use{reported}, so nothing from it is sent to this server. To keep it "
+                f"here without being asked again: 'finishup server repositories keep {name}'; "
+                f"{_SEND_ANYWAY_LATER}."
+            )
         return (
             "This folder's repository: held — its privacy policy on this computer allows no "
             f"network use{reported}, so nothing from it is sent to this server. To send it anyway: "
@@ -1323,11 +1353,15 @@ def _here_line(here: Mapping[str, JsonValue], name: str) -> str | None:
             f"asked again: 'finishup server repositories keep {name}'."
         )
     if state == "kept":
+        undo = (
+            f"'finishup server repositories add {name}' here sends it anyway."
+            if sendable
+            else f"'finishup server repositories remove {name}' here undoes that choice."
+        )
         return (
             "This folder's repository: kept on this computer — its privacy policy here allows no "
             f"network use{reported}, and you chose to keep its work here, so nothing from it is "
-            "sent to this server and FinishUP does not ask again. 'finishup server repositories "
-            f"add {name}' here sends it anyway."
+            f"sent to this server and FinishUP does not ask again. {undo}"
         )
     if state == "sent_anyway":
         return (
@@ -2506,12 +2540,17 @@ def keep_repository(record: ServerTarget, here: RepositoryHere, *, named: bool) 
             )
     except RepositoryRecordError as error:
         raise ServerCommandRefused(error.reason) from None
+    send_anyway = (
+        f"'finishup server repositories add{suffix}' in this repository sends it anyway (you "
+        "confirm it in your own terminal); "
+        if sending_anyway_open(record.kind)
+        else f"{_SEND_ANYWAY_LATER[:1].upper()}{_SEND_ANYWAY_LATER[1:]}; "
+    )
     typer.echo(
         f"This repository's work is kept on this computer for {server}: while its privacy "
         "policy here allows no network use, nothing FinishUP reads or claims for it is sent "
         "there, and FinishUP does not ask about it again. What an agent in another folder reads "
-        "and its hooks capture is not covered. 'finishup server repositories add"
-        f"{suffix}' in this repository sends it anyway (you confirm it in your own terminal); "
+        f"and its hooks capture is not covered. {send_anyway}"
         f"'finishup server repositories remove{suffix}' asks again."
     )
     if decision.state == "sent_anyway":
@@ -2723,12 +2762,21 @@ def repository_list_lines(record: ServerTarget) -> tuple[str, ...]:
     if earlier:
         lines.append("  Chosen earlier, not needed now (its policy here allows network use):")
         lines.extend(f"    {_shown(c.worktree)}" for c, _state in earlier)
-    lines.append(
-        f"To send a held repository anyway: 'finishup server repositories add {record.name} "
-        f"--repository FOLDER'. To keep one here without being asked again: 'finishup server "
-        f"repositories keep {record.name} --repository FOLDER'. To undo either: 'finishup server "
-        f"repositories remove {record.name} --repository FOLDER' or '--all'."
+    keep_and_undo = (
+        f"To keep one here without being asked again: 'finishup server repositories keep "
+        f"{record.name} --repository FOLDER'. To undo a choice: 'finishup server repositories "
+        f"remove {record.name} --repository FOLDER' or '--all'."
     )
+    if sending_anyway_open(record.kind):
+        lines.append(
+            f"To send a held repository anyway: 'finishup server repositories add {record.name} "
+            f"--repository FOLDER'. {keep_and_undo}"
+        )
+    else:
+        lines.append(
+            f"Sending a held repository anyway arrives in a later release, with servers "
+            f"elsewhere. {keep_and_undo}"
+        )
     return tuple(lines)
 
 

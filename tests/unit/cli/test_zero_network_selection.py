@@ -2519,6 +2519,7 @@ def test_the_repository_read_works_from_a_cli_commands_event_loop(
     assert anyio.run(command) == "network_permitted"
 
 
+@pytest.mark.parametrize("kinds", ["closed", "opened"])
 @pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
 def test_a_change_here_that_holds_this_repository_says_so_for_a_server_selected_elsewhere(
     home: Path,
@@ -2526,8 +2527,12 @@ def test_a_change_here_that_holds_this_repository_says_so_for_a_server_selected_
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     kind: str,
+    kinds: str,
 ) -> None:
     from finishup.client.everyday_policy import repository_report
+
+    if kinds == "opened":
+        open_remote_kinds(monkeypatch, kind)
 
     monkeypatch.setattr(
         zero_network,
@@ -2546,6 +2551,11 @@ def test_a_change_here_that_holds_this_repository_says_so_for_a_server_selected_
 
     assert repository_report(_repository_key(worktree)) is not None
     err = capsys.readouterr().err.splitlines()
+    if kinds == "closed":
+        # The gate refuses every server elsewhere before the hold, and 'server repositories add'
+        # cannot act: the hold is not named and nothing is offered (ADR-052, O4).
+        assert not any("repositories add" in line or "holds its work" in line for line in err)
+        return
     assert err[0] == (
         "This repository's privacy policy on this computer allows no network use, so FinishUP "
         f"holds its work for the selected server {record.target_id} ({kind}); 'finishup server "
