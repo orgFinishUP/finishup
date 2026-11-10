@@ -17,10 +17,19 @@ from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
     COMPLETENESS_LISTS,
+    MODE_REGULAR,
+    MODE_TREE,
     BundleLimits,
+    GitObject,
     SnapshotManifest,
+    TreeEntry,
+    encode_commit,
+    encode_tree,
+    manifest_from_json,
     manifest_to_json,
     verify_snapshot_bundle,
+    write_bundle,
+    write_pack,
 )
 from finishup.service import code_store
 from finishup.service.code_store import CodeStore, CodeStoreError, StoreLimits, WrappedKey
@@ -343,6 +352,65 @@ def test_a_pack_inflating_past_the_quota_left_is_refused_before_it_is_inflated(
     assert len(inflated) < len(snap.objects)
     # Bob's budget is his own.
     _upload(shared, snap.bundle(), snap_manifest, principal="bob")
+
+
+def _doubled(levels: int, leaf: str, *extra: GitObject) -> tuple[Snapshot, int]:
+    """A snapshot whose tree doubles ``levels`` times over ``leaf`` (a tree id); its file count."""
+
+    objects = {item.oid: item for item in extra}
+    inner = leaf
+    for _ in range(levels):
+        tree = GitObject(
+            "tree",
+            encode_tree([TreeEntry(MODE_TREE, b"a", inner), TreeEntry(MODE_TREE, b"b", inner)]),
+        )
+        objects[tree.oid] = tree
+        inner = tree.oid
+    empty = GitObject("tree", b"")
+    base = GitObject("commit", encode_commit(empty.oid, None))
+    tip = GitObject("commit", encode_commit(inner, base.oid))
+    for item in (empty, base, tip):
+        objects[item.oid] = item
+    return Snapshot(base.oid, tip.oid, empty.oid, inner, objects), 2**levels
+
+
+def _unverified_manifest(snap: Snapshot, files: int) -> bytes:
+    manifest = manifest_from_json(_manifest(snapshot_objects(BASE, CURRENT), b""))
+    return canonical_encode(
+        manifest_to_json(
+            replace(
+                manifest,
+                snapshot=snap.snapshot,
+                base=snap.base,
+                tree=snap.tree,
+                base_tree=snap.base_tree,
+                files=files,
+                bytes=0,
+            )
+        )
+    )
+
+
+def test_a_snapshot_expanding_to_a_billion_files_is_never_admitted(tmp_path: Path) -> None:
+    # A5/B5: dozens of objects, zero content bytes, 2**30 empty files in a checkout.
+    blob = GitObject("blob", b"")
+    leaf = GitObject("tree", encode_tree([TreeEntry(MODE_REGULAR, b"f", blob.oid)]))
+    hostile, files = _doubled(30, leaf.oid, blob, leaf)
+    store = _store(tmp_path)
+    with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+        _upload(store, hostile.bundle(), _unverified_manifest(hostile, files))
+    assert store.have("alice", "repo-1") == ()
+    # The bound holds across uploads: a held subtree placed again is counted from the index.
+    small, small_files = _doubled(6, leaf.oid, blob, leaf)
+    _upload(store, small.bundle(), _unverified_manifest(small, small_files))
+    grown, grown_files = _doubled(16, small.tree)
+    grown_objects = {oid: item for oid, item in grown.objects.items() if oid not in small.objects}
+    incremental = write_bundle(
+        (small.snapshot,), grown.snapshot, 2, write_pack(list(grown_objects.values()))
+    )
+    with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+        _upload(store, incremental, _unverified_manifest(grown, grown_files * small_files))
+    assert store.have("alice", "repo-1") == (small.snapshot,)
 
 
 def test_one_principal_never_reaches_another_s_copy(tmp_path: Path) -> None:

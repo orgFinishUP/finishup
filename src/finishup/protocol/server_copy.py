@@ -18,7 +18,10 @@ with a closed reason, never input text) delta and tag objects, a second ref, an 
 does not verify, a pack trailer that does not verify, unreachable objects, objects missing from
 both the pack and what the receiver already holds, commits of any other shape, trees with an
 invalid, unsorted, duplicate or case-colliding entry, a ``.git`` alias, unknown modes, links that
-are too long or hold a NUL, and every size beyond the caps it is given.
+are too long or hold a NUL, and every size beyond the caps it is given: the inflated bytes of the
+whole pack (before each object is inflated) and what a checkout of either tree expands to (its
+paths, a subtree counted at every place it is referenced). What it verified is what a receiver
+keeps of each object (``Held``), so the next, incremental bundle is held to the same bounds.
 
 ``SnapshotManifest`` (``yoetz.code-snapshot/1``) is the immutable record of one snapshot: the two
 synthetic commits and trees, the original base commit as provenance, the export and worktree
@@ -63,6 +66,8 @@ __all__ = [
     "EVIDENCE_PROVENANCE",
     "L2_RELEASED",
     "MANIFEST_SCHEMA",
+    "MAX_SNAPSHOT_ENTRIES",
+    "MAX_SNAPSHOT_PATH_BYTES",
     "MODE_EXECUTABLE",
     "MODE_GITLINK",
     "MODE_LINK",
@@ -84,6 +89,8 @@ __all__ = [
     "encode_commit",
     "encode_tree",
     "folded_name",
+    "held_from_json",
+    "held_to_json",
     "l2_released",
     "loose_decode",
     "loose_encode",
@@ -151,6 +158,10 @@ _MAX_LINK_BYTES: Final = 4_096
 _MAX_PATH_BYTES: Final = 4_096
 _MAX_COMPONENT_BYTES: Final = 255
 _MAX_TREE_DEPTH: Final = 128
+# What one checkout of a tree may expand to: its paths (files, links, gitlinks and directories,
+# a subtree counted again at every place it is referenced) and the bytes of those paths.
+MAX_SNAPSHOT_ENTRIES: Final = 1_048_576
+MAX_SNAPSHOT_PATH_BYTES: Final = 134_217_728
 _MAX_META_OBJECT_BYTES: Final = 1_048_576
 _MAX_PREREQUISITES: Final = 16
 _CHUNK: Final = 65_536
@@ -392,15 +403,29 @@ class BundleLimits:
     gigabytes. A receiver of a bundle it did not build passes a budget (the store passes what the
     copy's and the principal's quotas still allow); ``None`` keeps only the per-object caps (a
     sender auditing the bundle it just built from its own bytes).
+
+    ``max_entries`` and ``max_path_bytes`` bound what a checkout of the base tree or of the
+    snapshot tree expands to (``tree_too_many_entries``): its paths, every file, link, gitlink
+    and directory, a subtree counted again at every place it is referenced, and the bytes of
+    those paths. A few dozen small trees that reference each other twice describe a billion
+    empty files; they are refused before the snapshot is admitted.
     """
 
     max_file_bytes: int
     max_bundle_bytes: int = 67_108_864
     max_objects: int = 200_000
     max_inflated_bytes: int | None = None
+    max_entries: int = MAX_SNAPSHOT_ENTRIES
+    max_path_bytes: int = MAX_SNAPSHOT_PATH_BYTES
 
     def __post_init__(self) -> None:
-        for value in (self.max_file_bytes, self.max_bundle_bytes, self.max_objects):
+        for value in (
+            self.max_file_bytes,
+            self.max_bundle_bytes,
+            self.max_objects,
+            self.max_entries,
+            self.max_path_bytes,
+        ):
             if type(value) is not int or value < 1:
                 raise CopyError("limits_invalid")
         budget = self.max_inflated_bytes
@@ -558,12 +583,50 @@ def read_bundle(data: bytes, limits: BundleLimits) -> _Bundle:
 @dataclass(frozen=True, slots=True)
 class Held:
     """What the receiver already holds of an object: its kind and, for a tree, the size and the
-    number of files beneath it (for a blob, its size); for a commit, its tree."""
+    number of files beneath it (for a blob, its size); for a commit, its tree.
+
+    For a tree also what a checkout of it expands to, relative to the tree, so the tree can be
+    checked where it is referenced again: ``entries`` (every path beneath it, directories
+    included, a subtree counted at every place it is referenced) and ``names`` (the bytes of
+    those paths, each component with its separator). ``None``: not known (kept before these were
+    recorded); the verifier refuses to reuse a held tree it cannot bound.
+    """
 
     kind: str
     bytes: int = 0
     files: int = 0
     tree: str | None = None
+    entries: int | None = None
+    names: int | None = None
+
+
+def held_to_json(held: Held) -> list[JsonValue]:
+    """``held`` as the receiver keeps it in its index (a fixed-position list)."""
+
+    return [held.kind, held.bytes, held.files, held.tree, held.entries, held.names]
+
+
+def _held_count(value: JsonValue) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    if value is None:
+        return None
+    raise CopyError("held_invalid")
+
+
+def held_from_json(value: JsonValue) -> Held:
+    """An index entry ``held_to_json`` wrote (or the four-member entry written before the
+    expansion bounds were kept: those read as ``None``, unknown)."""
+
+    if type(value) is not list or not 4 <= len(value) <= 6:
+        raise CopyError("held_invalid")
+    members = [*value, None, None][:6]
+    kind, size, files, tree, entries, names = members
+    if kind not in _KINDS or type(size) is not int or type(files) is not int:
+        raise CopyError("held_invalid")
+    if size < 0 or files < 0 or (tree is not None and type(tree) is not str):
+        raise CopyError("held_invalid")
+    return Held(kind, size, files, tree, _held_count(entries), _held_count(names))
 
 
 @dataclass(frozen=True, slots=True)
@@ -573,7 +636,8 @@ class VerifiedSnapshot:
 
     ``tree_bytes``/``tree_files`` are the snapshot tree's size and file count as a checkout would
     hold them (every path counted, gitlinks as empty files); ``new_bytes`` is what the pack adds;
-    ``aggregates`` gives the same size and count for every tree the pack carries.
+    ``aggregates`` gives the same size and count for every tree the pack carries; ``held`` is
+    what a receiver keeps of every object the pack carries (``Held``), for the next bundle.
     """
 
     snapshot: str
@@ -587,18 +651,38 @@ class VerifiedSnapshot:
     new_bytes: int
     tree_bytes: int
     tree_files: int
+    held: Mapping[str, Held] = field(default_factory=dict[str, Held], repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _Shape:
+    """A tree as a checkout expands it: size, files, and its paths and their bytes (``Held``)."""
+
+    bytes: int
+    files: int
+    entries: int
+    names: int
 
 
 class _Walk:
-    __slots__ = ("aggregates", "have", "objects", "reached")
+    __slots__ = ("have", "limits", "objects", "reached", "shapes")
 
     def __init__(
-        self, objects: Mapping[str, GitObject], have: Callable[[str], Held | None]
+        self,
+        objects: Mapping[str, GitObject],
+        have: Callable[[str], Held | None],
+        limits: BundleLimits,
     ) -> None:
         self.objects = objects
         self.have = have
+        self.limits = limits
         self.reached: set[str] = set()
-        self.aggregates: dict[str, tuple[int, int]] = {}
+        self.shapes: dict[str, _Shape] = {}
+
+    def _bound(self, entries: int, names: int) -> None:
+        # Checked as each tree is summed, so a hostile tree's counts never grow past the cap.
+        if entries > self.limits.max_entries or names > self.limits.max_path_bytes:
+            raise CopyError("tree_too_many_entries")
 
     def _held(self, oid: str) -> Held:
         held = self.have(oid)
@@ -620,8 +704,8 @@ class _Walk:
             raise CopyError("link_invalid")
         return len(item.data)
 
-    def tree(self, oid: str, depth: int, path_bytes: int) -> tuple[int, int]:
-        """Walk tree ``oid`` (each entry in the pack or held, typed as named); its size and files."""
+    def tree(self, oid: str, depth: int, path_bytes: int) -> _Shape:
+        """Walk tree ``oid`` (each entry in the pack or held, typed as named); its shape."""
 
         if depth > _MAX_TREE_DEPTH:
             raise CopyError("tree_too_deep")
@@ -630,24 +714,36 @@ class _Walk:
             held = self._held(oid)
             if held.kind != "tree":
                 raise CopyError("tree_entry_type_mismatch")
+            if held.entries is None or held.names is None:
+                raise CopyError("held_tree_unbounded")
             # Held by the receiver: its closure was verified when it was admitted.
-            return held.bytes, held.files
+            shape = _Shape(held.bytes, held.files, held.entries, held.names)
+            self._bound(shape.entries, shape.names)
+            return shape
         if item.kind != "tree":
             raise CopyError("tree_entry_type_mismatch")
         self.reached.add(oid)
-        known = self.aggregates.get(oid)
+        known = self.shapes.get(oid)
         if known is not None:
             return known
         size = 0
         files = 0
+        entries = 0
+        names = 0
         for entry in decode_tree(item.data):
             length = path_bytes + 1 + len(entry.name)
             if length > _MAX_PATH_BYTES:
                 raise CopyError("path_invalid")
+            step = 1 + len(entry.name)
+            entries += 1
+            names += step
             if entry.mode == MODE_TREE:
-                below, count = self.tree(entry.oid, depth + 1, length)
-                size += below
-                files += count
+                below = self.tree(entry.oid, depth + 1, length)
+                size += below.bytes
+                files += below.files
+                entries += below.entries
+                # Every path beneath the subtree is prefixed by this entry's name here.
+                names += below.names + below.entries * step
             elif entry.mode == MODE_GITLINK:
                 if entry.oid in self.objects:
                     raise CopyError("gitlink_content_refused")
@@ -655,8 +751,10 @@ class _Walk:
             else:
                 size += self.blob(entry.oid, entry.mode)
                 files += 1
-        self.aggregates[oid] = (size, files)
-        return size, files
+            self._bound(entries, names)
+        shape = _Shape(size, files, entries, names)
+        self.shapes[oid] = shape
+        return shape
 
 
 def verify_snapshot_bundle(
@@ -676,7 +774,7 @@ def verify_snapshot_bundle(
         if held is None or held.kind != "commit":
             raise CopyError("bundle_prerequisite_unknown")
     objects = read_pack(bundle.pack, limits)
-    walk = _Walk(objects, have)
+    walk = _Walk(objects, have, limits)
     tip = objects.get(bundle.tip)
     if tip is None or tip.kind != "commit":
         raise CopyError("bundle_tip_invalid")
@@ -698,9 +796,20 @@ def verify_snapshot_bundle(
             raise CopyError("bundle_incomplete")
         base_tree = held.tree
     walk.tree(base_tree, 0, 0)
-    tree_bytes, tree_files = walk.tree(tree, 0, 0)
+    shape = walk.tree(tree, 0, 0)
     if walk.reached != set(objects):
         raise CopyError("bundle_unreachable_object")
+    kept: dict[str, Held] = {}
+    for oid, item in objects.items():
+        if item.kind == "blob":
+            kept[oid] = Held("blob", len(item.data))
+        elif item.kind == "tree":
+            below = walk.shapes[oid]
+            kept[oid] = Held(
+                "tree", below.bytes, below.files, entries=below.entries, names=below.names
+            )
+        else:
+            kept[oid] = Held("commit", tree=tree if oid == bundle.tip else base_tree)
     return VerifiedSnapshot(
         snapshot=bundle.tip,
         base=base,
@@ -709,10 +818,11 @@ def verify_snapshot_bundle(
         ref_number=bundle.ref_number,
         prerequisites=bundle.prerequisites,
         objects=objects,
-        aggregates=dict(walk.aggregates),
+        aggregates={oid: (item.bytes, item.files) for oid, item in walk.shapes.items()},
         new_bytes=sum(len(item.data) for item in objects.values()),
-        tree_bytes=tree_bytes,
-        tree_files=tree_files,
+        tree_bytes=shape.bytes,
+        tree_files=shape.files,
+        held=kept,
     )
 
 

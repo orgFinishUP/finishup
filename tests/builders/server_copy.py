@@ -146,9 +146,29 @@ def snapshot_objects(base: Mapping[str, FileValue], current: Mapping[str, FileVa
 def held_lookup(
     objects: Mapping[str, GitObject], trees: Mapping[str, tuple[int, int]]
 ) -> Callable[[str], Held | None]:
-    """A ``have`` callback over ``objects`` already admitted (with tree ``aggregates``)."""
+    """A ``have`` callback over ``objects`` already admitted (with tree ``aggregates``), each
+    held as a receiver keeps it (``Held``: a tree's expansion bounds computed here)."""
 
-    from finishup.protocol.server_copy import decode_commit
+    from finishup.protocol.server_copy import decode_commit, decode_tree
+
+    shapes: dict[str, tuple[int, int]] = {}
+
+    def shape(oid: str) -> tuple[int, int]:
+        known = shapes.get(oid)
+        if known is not None:
+            return known
+        entries = 0
+        names = 0
+        for entry in decode_tree(objects[oid].data):
+            step = 1 + len(entry.name)
+            entries += 1
+            names += step
+            if entry.mode == MODE_TREE:
+                below_entries, below_names = shape(entry.oid)
+                entries += below_entries
+                names += below_names + below_entries * step
+        shapes[oid] = (entries, names)
+        return entries, names
 
     def have(oid: str) -> Held | None:
         item = objects.get(oid)
@@ -158,7 +178,8 @@ def held_lookup(
             return Held("blob", len(item.data))
         if item.kind == "tree":
             size, files = trees[oid]
-            return Held("tree", size, files)
+            entries, names = shape(oid)
+            return Held("tree", size, files, entries=entries, names=names)
         tree, _parent = decode_commit(item.data)
         return Held("commit", tree=tree)
 

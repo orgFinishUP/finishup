@@ -1042,18 +1042,25 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
 
     held: dict[str, Held] = {}
 
-    def tree(oid: str) -> tuple[int, int]:
+    def tree(oid: str) -> Held:
         known = held.get(oid)
         if known is not None:
-            return known.bytes, known.files
+            return known
         item = database.read(oid, limit=1 << 20)
         size = 0
         files = 0
+        entries = 0
+        names = 0
         for entry in decode_tree(item.data):
+            step = 1 + len(entry.name)
+            entries += 1
+            names += step
             if entry.mode == MODE_TREE:
-                below, count = tree(entry.oid)
-                size += below
-                files += count
+                below = tree(entry.oid)
+                size += below.bytes
+                files += below.files
+                entries += below.entries or 0
+                names += (below.names or 0) + (below.entries or 0) * step
             elif entry.mode == MODE_GITLINK:
                 files += 1
             else:
@@ -1062,8 +1069,9 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
                 held[entry.oid] = Held("blob", blob_size)
                 size += blob_size
                 files += 1
-        held[oid] = Held("tree", size, files)
-        return size, files
+        shape = Held("tree", size, files, entries=entries, names=names)
+        held[oid] = shape
+        return shape
 
     for commit in commits:
         snapshot_tree, parent = decode_commit(database.read(commit, limit=limit).data)

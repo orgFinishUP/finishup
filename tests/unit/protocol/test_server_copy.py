@@ -12,7 +12,7 @@ import pytest
 from tests.builders.server_copy import git, git_bytes, held_lookup, snapshot_objects
 
 from finishup.protocol import server_copy
-from finishup.protocol.canonical import canonical_encode
+from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
     COMPLETENESS_LISTS,
@@ -20,12 +20,15 @@ from finishup.protocol.server_copy import (
     BundleLimits,
     CopyError,
     GitObject,
+    Held,
     SnapshotManifest,
     TreeEntry,
     component_refusal,
     decode_commit,
     decode_tree,
     encode_commit,
+    held_from_json,
+    held_to_json,
     loose_decode,
     loose_encode,
     manifest_digest,
@@ -427,6 +430,124 @@ def test_a_tree_nested_beyond_the_bound_is_refused() -> None:
         verify_snapshot_bundle(
             _snapshot_with_tree(inner.data, *chain[:-1]), have=_nothing, limits=LIMITS
         )
+
+
+def _doubling(levels: int, leaf: GitObject) -> list[GitObject]:
+    """Trees each holding two directories that reference the tree before: 2**levels leaves."""
+
+    chain = [leaf]
+    inner = GitObject("tree", _raw_tree((b"100644", b"f", leaf.oid)))
+    chain.append(inner)
+    for _ in range(levels):
+        inner = GitObject(
+            "tree", _raw_tree((b"40000", b"a", inner.oid), (b"40000", b"b", inner.oid))
+        )
+        chain.append(inner)
+    return chain
+
+
+def test_a_tree_that_expands_past_the_entry_budget_is_refused() -> None:
+    # A5/B5: thirty small trees describe a billion empty files, zero content bytes.
+    chain = _doubling(30, GitObject("blob", b""))
+    bundle = _snapshot_with_tree(chain[-1].data, *chain[:-1])
+    assert len(bundle) < 8_192
+    with pytest.raises(CopyError, match="tree_too_many_entries"):
+        verify_snapshot_bundle(bundle, have=_nothing, limits=LIMITS)
+    # Below the budget the same shape is admitted and counted as a checkout expands it.
+    small = _doubling(4, GitObject("blob", b""))
+    verified = verify_snapshot_bundle(
+        _snapshot_with_tree(small[-1].data, *small[:-1]),
+        have=_nothing,
+        limits=replace(LIMITS, max_entries=2**4 + 2 * (2**4 - 1)),
+    )
+    assert verified.tree_files == 16
+    assert verified.held[small[-1].oid].entries == 16 + 2 * (2**4 - 1)
+    with pytest.raises(CopyError, match="tree_too_many_entries"):
+        verify_snapshot_bundle(
+            _snapshot_with_tree(small[-1].data, *small[:-1]),
+            have=_nothing,
+            limits=replace(LIMITS, max_entries=2**4 + 2 * (2**4 - 1) - 1),
+        )
+
+
+def test_directories_count_against_the_entry_budget() -> None:
+    empty = GitObject("tree", b"")
+    two = GitObject("tree", _raw_tree((b"40000", b"c", empty.oid), (b"40000", b"d", empty.oid)))
+    top = _raw_tree((b"40000", b"a", two.oid), (b"40000", b"b", two.oid))
+    bundle = _snapshot_with_tree(top, two)
+    # No file at all: a, b, a/c, a/d, b/c, b/d.
+    verified = verify_snapshot_bundle(bundle, have=_nothing, limits=replace(LIMITS, max_entries=6))
+    assert verified.tree_files == 0
+    with pytest.raises(CopyError, match="tree_too_many_entries"):
+        verify_snapshot_bundle(bundle, have=_nothing, limits=replace(LIMITS, max_entries=5))
+
+
+def test_the_bytes_of_the_expanded_paths_are_bounded() -> None:
+    blob = GitObject("blob", b"x")
+    name = b"n" * 200
+    inner = GitObject("tree", _raw_tree((b"100644", name, blob.oid)))
+    top = _raw_tree((b"40000", b"a" * 200, inner.oid), (b"40000", b"b" * 200, inner.oid))
+    bundle = _snapshot_with_tree(top, inner, blob)
+    # Two directories of 201 bytes and two files of 201 + 201 bytes.
+    total = 2 * 201 + 2 * (201 + 201)
+    verify_snapshot_bundle(bundle, have=_nothing, limits=replace(LIMITS, max_path_bytes=total))
+    with pytest.raises(CopyError, match="tree_too_many_entries"):
+        verify_snapshot_bundle(
+            bundle, have=_nothing, limits=replace(LIMITS, max_path_bytes=total - 1)
+        )
+
+
+def test_a_held_subtree_counts_at_every_place_it_is_referenced_again() -> None:
+    leaf = GitObject("blob", b"")
+    chain = _doubling(6, leaf)
+    first_bundle = _snapshot_with_tree(chain[-1].data, *chain[:-1])
+    first = verify_snapshot_bundle(first_bundle, have=_nothing, limits=LIMITS)
+    held_tree = chain[-1].oid
+    per_copy = first.held[held_tree].entries
+    assert per_copy == 2**6 + 2 * (2**6 - 1)
+
+    def have(oid: str) -> Held | None:
+        return first.held.get(oid)
+
+    # A new snapshot places the held tree under four directories: 4 * (1 + per_copy) entries.
+    top = _raw_tree(*((b"40000", name, held_tree) for name in (b"p", b"q", b"r", b"s")))
+    tree = GitObject("tree", top)
+    empty = GitObject("tree", b"")
+    base = GitObject("commit", encode_commit(empty.oid, None))
+    tip = GitObject("commit", encode_commit(tree.oid, base.oid))
+    bundle = _bundle_of([tip, base, empty, tree], tip.oid, ref=2)
+    expanded = 4 * (1 + per_copy)
+    verified = verify_snapshot_bundle(
+        bundle, have=have, limits=replace(LIMITS, max_entries=expanded)
+    )
+    assert verified.held[tree.oid].entries == expanded
+    with pytest.raises(CopyError, match="tree_too_many_entries"):
+        verify_snapshot_bundle(bundle, have=have, limits=replace(LIMITS, max_entries=expanded - 1))
+    # A held tree whose bounds were never recorded is not reused.
+    unbounded = {oid: replace(item, entries=None) for oid, item in first.held.items()}
+    with pytest.raises(CopyError, match="held_tree_unbounded"):
+        verify_snapshot_bundle(bundle, have=unbounded.get, limits=LIMITS)
+
+
+def test_what_a_receiver_keeps_round_trips_and_older_entries_read_as_unknown() -> None:
+    snap = snapshot_objects(BASE, CURRENT)
+    verified = verify_snapshot_bundle(snap.bundle(), have=_nothing, limits=LIMITS)
+    assert set(verified.held) == set(snap.objects)
+    for item in verified.held.values():
+        assert held_from_json(canonical_entry(held_to_json(item))) == item
+    tree = verified.held[snap.tree]
+    assert tree.entries is not None and tree.entries > tree.files
+    assert held_from_json(["tree", 3, 1, None]) == Held("tree", 3, 1)
+    assert held_from_json(["tree", 3, 1, None]).entries is None
+    for bad in (["tree"], ["tree", -1, 0, None], ["bag", 0, 0, None], {"kind": "tree"}):
+        with pytest.raises(CopyError, match="held_invalid"):
+            held_from_json(bad)  # type: ignore[arg-type]
+
+
+def canonical_entry(value: JsonValue) -> JsonValue:
+    from finishup.protocol.canonical import strict_json_parse
+
+    return strict_json_parse(canonical_encode(value))
 
 
 # --- the policy digest and the manifest ------------------------------------------------------------

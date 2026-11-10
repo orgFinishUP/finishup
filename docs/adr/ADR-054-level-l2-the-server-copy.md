@@ -129,7 +129,13 @@ modes, links over 4 KiB or holding NUL, trees deeper than 128 and sizes over the
 whose objects together inflate past the receiver's budget is refused before the object that
 passes it is inflated (`pack_over_budget`): the store's budget is what the copy's and the
 principal's quotas still allow, so a small pack of many compressible objects never allocates
-more than the quota would refuse afterwards (`code_copy_over_quota`).
+more than the quota would refuse afterwards (`code_copy_over_quota`). What a checkout of the base
+or the snapshot tree expands to is bounded before admission (`tree_too_many_entries`): at most
+1,048,576 paths (files, links, gitlinks and directories, a subtree counted again at every place
+it is referenced) and 128 MiB of path bytes, so a few dozen small trees that reference each other
+twice (a billion empty files) are refused. The verifier also gives the receiver what it keeps of
+each object (`Held`: for a tree, these expansion counts), so a subtree an incremental bundle
+references again is counted from the index; a held tree without them is not reused.
 
 The snapshot manifest, `yoetz.code-snapshot/1`, travels with the bundle: the snapshot and base
 commits and their trees, the original base commit and object format (provenance), the export id,

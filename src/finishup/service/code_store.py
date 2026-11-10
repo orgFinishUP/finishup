@@ -70,6 +70,8 @@ from finishup.protocol.server_copy import (
     GitObject,
     Held,
     SnapshotManifest,
+    held_from_json,
+    held_to_json,
     manifest_digest,
     manifest_from_json,
     manifest_to_json,
@@ -654,10 +656,7 @@ class CodeStore:
 
         def have(oid: str) -> Held | None:
             entry = index.get(oid)
-            if entry is None:
-                return None
-            kind, size, files, tree = entry
-            return Held(cast(str, kind), cast(int, size), cast(int, files), cast(str | None, tree))
+            return None if entry is None else held_from_json(entry)
 
         # What the copy's and the principal's quotas still allow bounds the bytes the pack may
         # inflate to, checked before each object is inflated (a hostile pack never allocates
@@ -708,14 +707,7 @@ class CodeStore:
         _private_directory(folder / "snapshots")
         for oid, item in verified.objects.items():
             self._write_object(upload.copy_key, key, objects_folder, item)
-            if item.kind == "tree":
-                size, files = verified.aggregates[oid]
-                index[oid] = ["tree", size, files, None]
-            elif item.kind == "blob":
-                index[oid] = ["blob", len(item.data), 0, None]
-            else:
-                tree = verified.tree if oid == verified.snapshot else verified.base_tree
-                index[oid] = ["commit", 0, 0, tree]
+            index[oid] = held_to_json(verified.held[oid])
         encoded = canonical_encode(manifest_to_json(manifest))
         _write_private(
             folder / "snapshots" / f"{manifest.snapshot}.enc",
