@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
@@ -195,11 +196,17 @@ def test_server_use_keeps_the_level_and_retention_already_agreed(
     assert envelope.level == "L1"
 
 
+def _plain(text: str) -> str:
+    """Help text without terminal styling: CI forces colour, so options carry escapes."""
+
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
 def test_the_level_options_are_shown_and_refused_for_a_server_on_this_computer(home: Path) -> None:
     del home
-    shown = _RUNNER.invoke(app, ["server", "add", "--help"])
-    assert "--level" in shown.output and "--retention" in shown.output
-    assert "code" in _RUNNER.invoke(app, ["server", "--help"]).output.split("Commands")[-1]
+    shown = _plain(_RUNNER.invoke(app, ["server", "add", "--help"]).output)
+    assert "--level" in shown and "--retention" in shown
+    assert "code" in _plain(_RUNNER.invoke(app, ["server", "--help"]).output).split("Commands")[-1]
     refused = _RUNNER.invoke(app, ["server", "add", "here", "--local", "--level", "L2"])
     assert refused.exit_code != 0
     assert "--level and --retention apply to a server elsewhere" in refused.output
@@ -634,8 +641,8 @@ def test_remove_flags_are_shown_refused_together_and_need_copies_to_ask(
     far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del repository
-    shown = _RUNNER.invoke(app, ["server", "remove", "--help"])
-    assert "--forget-copies" in shown.output and "--keep-copies" in shown.output
+    shown = _plain(_RUNNER.invoke(app, ["server", "remove", "--help"]).output)
+    assert "--forget-copies" in shown and "--keep-copies" in shown
     both = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies", "--keep-copies"])
     assert both.exit_code == 2
     assert "give --forget-copies or --keep-copies, not both" in both.output
