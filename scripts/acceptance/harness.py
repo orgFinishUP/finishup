@@ -88,7 +88,8 @@ def wait_listening(port: int, *, seconds: float, alive: Callable[[], bool]) -> b
         if not alive():
             raise RuntimeError("process_exited_before_listening")
         try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            # Longer than any round trip the WAN gate injects (its namespace delays this too).
+            socket.create_connection(("127.0.0.1", port), timeout=2.0).close()
         except OSError:
             return False
         return True

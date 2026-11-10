@@ -120,6 +120,44 @@ asyncio.run(main())
 """
 
 
+# A fixed CPU workload in a fresh interpreter: the speed of this computer while a style was
+# measured (its time and the probe's own ``import`` time move together with the load on it), so
+# runs made at different times can be compared; it gates nothing.
+CALIBRATION = "import time\nt = time.perf_counter()\nsum(i * i for i in range(2_000_000))\n" + (
+    "print(round((time.perf_counter() - t) * 1000, 1))"
+)
+
+
+def calibration() -> float | None:
+    """The median of three runs of ``CALIBRATION`` (milliseconds); ``None`` if it cannot run."""
+
+    values: list[float] = []
+    for _ in range(3):
+        result = subprocess.run(  # noqa: S603 - this interpreter, a fixed program
+            [sys.executable, "-I", "-c", CALIBRATION], capture_output=True, text=True, check=False
+        )
+        try:
+            values.append(float(result.stdout.strip()))
+        except ValueError:
+            return None
+    return statistics.median(values)
+
+
+def revision() -> str:
+    """This checkout's short commit, ``-dirty`` when its tracked files differ from it."""
+
+    def git(*arguments: str) -> str:
+        return subprocess.run(  # noqa: S603
+            ["git", "-C", str(REPO), *arguments],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+    head = git("rev-parse", "--short", "HEAD")
+    return head + ("-dirty" if git("status", "--porcelain", "--untracked-files=no") else "")
+
+
 def percentile(values: list[float], fraction: float) -> float | None:
     """The nearest-rank percentile (``fraction`` in (0, 1]); ``None`` for no values."""
 
@@ -273,12 +311,7 @@ def inside(args: argparse.Namespace) -> int:
         "rtt_ms": args.rtt_ms,
         "samples": args.samples,
         "budgets_ms": BUDGETS_MS,
-        "commit": subprocess.run(  # noqa: S603
-            ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip(),
+        "commit": revision(),
         "styles": {},
     }
     try:
@@ -292,6 +325,7 @@ def inside(args: argparse.Namespace) -> int:
             except Exception as error:  # noqa: BLE001 - recorded as that style's result
                 results["styles"][cell.name] = {"error": f"{type(error).__name__}: {error}"}
             results["styles"][cell.name]["seconds"] = round(time.monotonic() - began, 1)
+            results["styles"][cell.name]["cpu_calibration_ms"] = calibration()
             print(cell.name, json.dumps(results["styles"][cell.name].get("gate")), flush=True)
     finally:
         run.close()
@@ -326,34 +360,44 @@ def in_namespace(args: argparse.Namespace) -> int:
     ).returncode
 
 
+def _ms(value: object) -> str:
+    return f"{value:.0f}" if isinstance(value, (int, float)) else "–"
+
+
 def render(paths: list[Path]) -> str:
     """A markdown table of WAN gate result files (one row per style and round trip)."""
 
     rows = [
-        "| RTT | Mode | Style | warm connect+status p50/p95 (≤650) | warm process p95 (≤3200) | "
-        "hook cold connect p50/p95 (≤1150), served / failed open as | cold served p50 | "
-        "`server test` p95 | Gate |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| RTT | Mode | Commit | Style | warm connect+status p50/p95 (≤650) | connect / status p50 | "
+        "warm process p95 (≤3200) | hook cold connect p50/p95 (≤1150), served / failed open as | "
+        "cold served p50 | `server test` p95 | import p50, CPU calibration | Gate |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for path in paths:
         document = json.loads(path.read_text())
         for style, result in document["styles"].items():
             if "error" in result:
                 rows.append(
-                    f"| {document['rtt_ms']:g} ms | {document['mode']} | {style} | "
-                    f"error: {result['error']} | | | | | fail |"
+                    f"| {document['rtt_ms']:g} ms | {document['mode']} | {document['commit']} | "
+                    f"{style} | error: {result['error']} | | | | | | | fail |"
                 )
                 continue
             warm, process = result["warm_connect_status"], result["warm_process"]
             hook, cold = result["hook_cold_connect"], result["cold_connect"]
             phases = ", ".join(p.split(":")[-1] or "(none)" for p in hook["failed_open_phases"])
+            parts = result.get("warm_parts") or {}
+            connect = (parts.get("connect") or {}).get("p50")
+            status = (parts.get("status") or {}).get("p50")
+            imported = (parts.get("import") or {}).get("p50")
             rows.append(
-                f"| {document['rtt_ms']:g} ms | {document['mode']} | {style} | "
-                f"{warm['p50']:.0f} / {warm['p95']:.0f} | {process['p95']:.0f} | "
+                f"| {document['rtt_ms']:g} ms | {document['mode']} | {document['commit']} | "
+                f"{style} | {warm['p50']:.0f} / {warm['p95']:.0f} | {_ms(connect)} / {_ms(status)}"
+                f" | {process['p95']:.0f} | "
                 f"{hook['p50']:.0f} / {hook['p95']:.0f}, {hook['served_within_budget']}/{hook['n']}"
                 f" served{', failed open: ' + phases if phases else ''}; next call served "
                 f"{hook['next_call_served']}/{hook['n']} | {cold['p50']:.0f} | "
                 f"{result['server_test']['round_trip_p95_ms']} | "
+                f"{_ms(imported)}, {_ms(result.get('cpu_calibration_ms'))} | "
                 f"{'pass' if result['gate']['pass'] else 'fail'} |"
             )
     return "\n".join(rows) + "\n"
