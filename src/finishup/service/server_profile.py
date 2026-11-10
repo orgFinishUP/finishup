@@ -12,7 +12,9 @@ client decides (design v2 §1).
   offer (``CodeCopyOffer``: the caps of ``code_sync``, the ``retention`` options and the
   ``exclusions`` it enforces, which always include the client's own always-excluded list) **and**
   level L2 is released (``protocol.server_copy.l2_released``); otherwise ``code_sync``,
-  ``retention`` and ``exclusions`` are null, as in layers 3 to 5.
+  ``retention`` and ``exclusions`` are null, as in layers 3 to 5. The service takes its offer
+  from its own ``config.toml`` (``[server.code_copy]`` with ``enabled = true``, config 1.4.0;
+  ``code_copy_offer``) and from nowhere else.
 * ``review``: derived from this service's own ``config.toml``, from the same settings that decide
   whether it can reach an AI provider at all, so the profile never understates it: a profile whose
   semantic capability is an external provider states ``server_policy`` (its owner's privacy policy
@@ -76,6 +78,7 @@ __all__ = [
     "ProfileRevisionStore",
     "ProfileUnavailable",
     "ServerProfileSource",
+    "code_copy_offer",
     "offer_digest",
     "review_offer",
 ]
@@ -162,6 +165,26 @@ def review_offer(config: FinishUpConfig) -> ReviewEgress:
         "server_policy",
         None if primary is None else _provider_token(primary.provider_id),
         None if fallback is None else _provider_token(fallback.provider_id),
+    )
+
+
+def code_copy_offer(config: FinishUpConfig) -> CodeCopyOffer | None:
+    """The code-copy offer ``config``'s ``[server.code_copy]`` table makes (config 1.4.0).
+
+    ``None`` when the table is absent or not ``enabled``: the profile, its digest and every
+    surface are then exactly those of a service without the table. An offer made here is still
+    honoured only while level L2 is released (``ServerProfileSource``).
+    """
+
+    table = config.server.code_copy
+    if table is None or not table.enabled:
+        return None
+    return CodeCopyOffer(
+        max_repo_bytes=table.max_repo_bytes,
+        max_file_bytes=table.max_file_bytes,
+        retention=table.retention_options(),
+        retention_default=table.retention_choice(),
+        exclusions=frozenset(table.exclusions),
     )
 
 

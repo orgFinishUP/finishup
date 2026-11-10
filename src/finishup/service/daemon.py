@@ -264,7 +264,11 @@ from finishup.service.owner_view import (
 )
 from finishup.service.ready_composition import build_ready_application_factory
 from finishup.service.secret_ingress import SecretIngressService
-from finishup.service.server_profile import ProfileUnavailable, ServerProfileSource
+from finishup.service.server_profile import (
+    ProfileUnavailable,
+    ServerProfileSource,
+    code_copy_offer,
+)
 from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRouteMemory
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -5867,8 +5871,9 @@ async def _production_composition(
         observation_gate = asyncio.Lock()
         # One hub: the daemon registers agent connections, the ready application calls them.
         workspace_hub = WorkspaceAgentHub()
-        profile_source = ServerProfileSource.load(config, paths.state)
-        # Level L2 (ADR-054): a service whose profile offers L2 keeps copies; none otherwise.
+        # Level L2 (ADR-054): the offer ``[server.code_copy]`` makes, honoured only while L2 is
+        # released; a service whose profile offers L2 keeps copies, and none otherwise.
+        profile_source = ServerProfileSource.load(config, paths.state, code_copy_offer(config))
         _attach_code_copies(workspace_hub, profile_source, paths.state, vault)
         ready_application_factory = (
             _ready_application_factory

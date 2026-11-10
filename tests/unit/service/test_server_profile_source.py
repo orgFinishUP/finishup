@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from tests.builders.server_copy import release_l2
 
+import finishup.service.daemon as daemon_module
+from finishup.config.load import validate_config_mapping
 from finishup.config.models import (
     ExternalRuntimeProfileConfig,
     FinishUpConfig,
@@ -20,15 +24,16 @@ from finishup.config.write import codex_subscription_runtime, fireworks_provider
 from finishup.domain.code_exclusions import ALWAYS_EXCLUDED
 from finishup.ports.control import ServiceState, ServiceStatus
 from finishup.protocol.canonical import JsonValue
-from finishup.protocol.consent_envelope import Retention, ReviewEgress
+from finishup.protocol.consent_envelope import CodeSync, Retention, ReviewEgress
 from finishup.protocol.schemas import validate_schema_instance
-from finishup.protocol.server_profile import profile_from_json
+from finishup.protocol.server_profile import ProfileLevels, ServerProfile, profile_from_json
 from finishup.service.server_profile import (
     REVISION_FILE_NAME,
     CodeCopyOffer,
     ProfileRevisionStore,
     ProfileUnavailable,
     ServerProfileSource,
+    code_copy_offer,
     offer_digest,
     review_offer,
 )
@@ -348,3 +353,190 @@ def test_a_code_copy_offer_must_name_its_default_among_its_options() -> None:
         CodeCopyOffer(1_000, 10, (Retention("task_close", None),), Retention("days", 7))
     with pytest.raises(ValueError, match="code_copy_offer_invalid"):
         CodeCopyOffer(10, 1_000, (Retention("days", 7),), Retention("days", 7))
+
+
+# --- config 1.4.0: the offer [server.code_copy] makes, and the service composed with it --------
+
+_TABLE = """\
+[server.code_copy]
+enabled = true
+max_repo_bytes = 2097152
+max_file_bytes = 131072
+retention = ["until_forgotten", "days:14", "task_close"]
+retention_default = "days:14"
+exclusions = ["*.sqlite", "fixtures/private/"]
+"""
+_DISABLED = _TABLE.replace("enabled = true", "enabled = false")
+_TABLE_OFFER = CodeCopyOffer(
+    max_repo_bytes=2_097_152,
+    max_file_bytes=131_072,
+    retention=(
+        Retention("until_forgotten", None),
+        Retention("days", 14),
+        Retention("task_close", None),
+    ),
+    retention_default=Retention("days", 14),
+    exclusions=frozenset({"*.sqlite", "fixtures/private/"}),
+)
+
+
+def _configured(text: str) -> FinishUpConfig:
+    return validate_config_mapping(tomllib.loads(text))
+
+
+def _states_the_table(profile: ServerProfile) -> None:
+    """``profile`` offers L2 with exactly the table's caps, retention and exclusions."""
+
+    assert profile.levels == ProfileLevels(("L1", "L2"), "L1")
+    assert profile.code_sync == CodeSync(frozenset({"git-bundle-1"}), 2_097_152, 131_072)
+    assert profile.retention is not None
+    assert set(profile.retention.options) == set(_TABLE_OFFER.retention)
+    assert len(profile.retention.options) == 3
+    assert profile.retention.default == Retention("days", 14)
+    # The server's own patterns together with the client's always-excluded list, nothing else.
+    assert profile.exclusions == frozenset({"*.sqlite", "fixtures/private/", *ALWAYS_EXCLUDED})
+
+
+def test_an_enabled_server_code_copy_table_is_exactly_the_offer() -> None:
+    assert code_copy_offer(_configured(_TABLE)) == _TABLE_OFFER
+    defaults = code_copy_offer(_configured("[server.code_copy]\nenabled = true\n"))
+    assert defaults == CodeCopyOffer(
+        max_repo_bytes=67_108_864,
+        max_file_bytes=16_777_216,
+        retention=(
+            Retention("task_close", None),
+            Retention("days", 30),
+            Retention("until_forgotten", None),
+        ),
+        retention_default=Retention("days", 30),
+    )
+
+
+@pytest.mark.parametrize("text", ["", "[server]\n", "[server.code_copy]\n", _DISABLED])
+def test_no_table_or_a_disabled_one_offers_nothing_and_keeps_the_profile_byte_for_byte(
+    state: Path, text: str
+) -> None:
+    config = _configured(text)
+    assert code_copy_offer(config) is None
+    plain = ServerProfileSource.load(FinishUpConfig(), state)
+    with release_l2():
+        source = ServerProfileSource.load(config, state, code_copy_offer(config))
+        assert not source.keeps_copies
+        assert offer_digest(config, code_copy_offer(config)) == offer_digest(FinishUpConfig())
+        assert source.document(_STATUS, _MANIFEST) == plain.document(_STATUS, _MANIFEST)
+    # The same offer keeps the revision a consent was made under: nobody is asked again.
+    assert source.revision == plain.revision
+
+
+def test_a_released_table_offers_l2_with_exactly_its_terms(state: Path) -> None:
+    config = _configured(_TABLE)
+    plain = ServerProfileSource.load(FinishUpConfig(), state)
+    with release_l2():
+        source = ServerProfileSource.load(config, state, code_copy_offer(config))
+        assert source.keeps_copies
+        document = source.document(_STATUS, _MANIFEST)
+    validate_schema_instance("server-profile", "1.0.0", cast(JsonValue, document))
+    _states_the_table(profile_from_json(json.dumps(document).encode()))
+    assert plain.revision is not None and source.revision is not None
+    assert source.revision.issuer == plain.revision.issuer
+    assert source.revision.revision == plain.revision.revision + 1
+
+
+def test_an_enabled_table_offers_nothing_while_l2_is_unreleased(state: Path) -> None:
+    config = _configured(_TABLE)
+    plain = ServerProfileSource.load(FinishUpConfig(), state)
+
+    source = ServerProfileSource.load(config, state, code_copy_offer(config))
+
+    assert not source.keeps_copies
+    assert source.revision == plain.revision
+    assert source.document(_STATUS, _MANIFEST) == plain.document(_STATUS, _MANIFEST)
+
+
+class _Listener:
+    def __init__(self) -> None:
+        self._closed = asyncio.Event()
+
+    async def accept(self) -> object:
+        await self._closed.wait()
+        raise RuntimeError("closed")
+
+    async def aclose(self) -> None:
+        self._closed.set()
+
+
+async def _composed(root: Path, config: FinishUpConfig) -> Any:  # noqa: ANN401
+    """The packaged daemon's real composition under ``root``, with listeners that bind nothing."""
+
+    metadata = root / "state"
+    paths = daemon_module._ProductionPaths(  # pyright: ignore[reportPrivateUsage]
+        root / "data",
+        metadata / "service-generation.json",
+        metadata / "unlock-throttle.json",
+        metadata / "service.lock",
+        metadata,
+    )
+
+    async def bind() -> _Listener:
+        return _Listener()
+
+    binders = daemon_module._ListenerBinders(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, bind), cast(Any, bind), cast(Any, bind)
+    )
+    return await daemon_module._production_composition(  # pyright: ignore[reportPrivateUsage]
+        _config=config, _paths=paths, _binders=binders
+    )
+
+
+async def _close(composition: Any) -> None:  # noqa: ANN401
+    copies = composition.workspace_hub.code_copies
+    if copies is not None:
+        copies.stop_expiry()
+    daemon = daemon_module.ServiceDaemon(_composition=composition)
+    await daemon.start()
+    await daemon.close()
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_the_service_takes_its_l2_offer_from_its_config_only_while_l2_is_released(
+    tmp_path: Path,
+) -> None:
+    enabled = _configured(_TABLE)
+    with release_l2():
+        composed = await _composed(tmp_path / "released", enabled)
+        try:
+            source = composed.server_profile
+            assert source.keeps_copies and source.code_copy == _TABLE_OFFER
+            assert composed.workspace_hub.code_copies is not None
+            _states_the_table(source.profile(_STATUS, _MANIFEST))
+        finally:
+            await _close(composed)
+
+    digests: dict[str, str] = {}
+    for name, config, released in (
+        ("plain", FinishUpConfig(), True),
+        ("absent", _configured("[server]\n"), True),
+        ("disabled", _configured(_DISABLED), True),
+        ("unreleased", enabled, False),
+    ):
+        if released:
+            with release_l2():
+                composed = await _composed(tmp_path / name, config)
+        else:
+            composed = await _composed(tmp_path / name, config)
+        try:
+            source = composed.server_profile
+            assert not source.keeps_copies, name
+            assert composed.workspace_hub.code_copies is None, name
+            profile = source.profile(_STATUS, _MANIFEST)
+            assert profile.levels.offered == ("L1",), name
+            assert (profile.code_sync, profile.retention, profile.exclusions) == (None, None, None)
+            digests[name] = profile.profile_digest
+        finally:
+            await _close(composed)
+    assert set(digests.values()) == {offer_digest(FinishUpConfig())}
