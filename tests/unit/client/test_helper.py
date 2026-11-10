@@ -15,6 +15,8 @@ import socket
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -994,8 +996,6 @@ def test_one_background_agent_serves_a_workspace_however_many_processes_register
     hold sixteen agents, and the client's own connections need room too), served under the
     registration that holds it longest."""
 
-    from types import SimpleNamespace
-
     from finishup.client import helper_registrations
 
     record, root = ssh_target
@@ -1017,27 +1017,28 @@ def test_one_background_agent_serves_a_workspace_however_many_processes_register
         return tuple(served_now[0])
 
     monkeypatch.setattr(helper_registrations, "served_workspaces", served)
-    opened: list[object] = []
-    closed: list[object] = []
+    opened: list[SimpleNamespace] = []
+    closed: list[SimpleNamespace] = []
 
     class Agent:
         alive = True
 
-        def __init__(self, registration: object) -> None:
+        def __init__(self, registration: SimpleNamespace) -> None:
             self.registration = registration
 
         async def aclose(self) -> None:
             closed.append(self.registration)
 
     async def opener(*arguments: object) -> Agent:
-        opened.append(arguments[2])
-        return Agent(arguments[2])
+        registration = cast(SimpleNamespace, arguments[2])
+        opened.append(registration)
+        return Agent(registration)
 
     async def run() -> None:
         helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
         monkeypatch.setattr(helper, "_admitted", lambda: object())
         await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
-        assert [(row.worktree, row.registrant) for row in opened] == [  # pyright: ignore[reportAttributeAccessIssue]
+        assert [(row.worktree, row.registrant) for row in opened] == [
             ("/w/one", "r19"),
             ("/w/two", "r99"),
         ]
@@ -1046,6 +1047,6 @@ def test_one_background_agent_serves_a_workspace_however_many_processes_register
         served_now[0] = rows[1:20]
         await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
         assert len(opened) == 2
-        assert [row.worktree for row in closed] == ["/w/two"]  # pyright: ignore[reportAttributeAccessIssue]
+        assert [row.worktree for row in closed] == ["/w/two"]
 
     asyncio.run(run())
