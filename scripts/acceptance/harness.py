@@ -552,16 +552,35 @@ class Server:
                 Reply(r"Confirm passphrase", self.passphrase),
             ],
         )
+        if result.exit_code != 0:
+            print(self.run.redact(result.transcript), file=sys.stderr)
         return result.exit_code == 0
 
-    def unlock(self) -> bool:
+    def vault_state(self) -> str | None:
+        """The service's vault state (``locked``, ``ready``...), ``None`` while it does not answer."""
+
         status = self.srv("service", "status", "--json")
-        if "locked" not in status.stdout and "vault_locked" not in status.stdout:
+        if status.returncode != 0:
+            return None
+        return str(json_of(status.stdout).get("state"))
+
+    def unlock(self) -> bool:
+        """Wait (bounded) until the service answers, then unlock its vault if it is locked."""
+
+        state: list[str | None] = [None]
+
+        def answers() -> bool:
+            state[0] = self.vault_state()
+            return state[0] is not None
+
+        if not wait_until(answers, seconds=60, interval=0.3):
+            return False
+        if state[0] != "locked":
             return True
         result = self.ceremony(
             ["service", "unlock", "--json"], [Reply(r"Passphrase", self.passphrase)]
         )
-        return result.exit_code == 0
+        return result.exit_code == 0 and self.vault_state() not in {None, "locked"}
 
     def api_key(self, label: str, scope: str = "operator") -> Path:
         path = self.root.parent / f"{self.name}-{label}.key"
@@ -623,6 +642,11 @@ class Server:
         if not wait_listening(port, seconds=60, alive=lambda: process.poll() is None):
             raise RuntimeError("edge_did_not_listen")
         self.edge = process
+        if edge == "native" and not wait_until(
+            lambda: self.vault_state() is not None, seconds=60, interval=0.3
+        ):
+            # The native edge is the service: it answers its own control socket once ready.
+            raise RuntimeError("native_service_did_not_answer")
         return process
 
     def new_profile_revision(self) -> bool:
