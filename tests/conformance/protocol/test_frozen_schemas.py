@@ -41,7 +41,9 @@ _EXPECTED_MEMBER_COUNT = (
 # ADR-051 +4 control envelopes 2.10.0, +1 isolation-report 1.1.0, +1 server-target-status 1.0.0
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 66  # #1118 reviewer-reply; #1119 batch, ai-status;
 # ADR-051 server-target-status; ADR-052 server-profile; ADR-053 the seven rest-* documents
-_EXPECTED_EVENT_VERSION_COUNT = 31  # #1239 +1 contact-expectation-declared; ADR-054 +1 content-forgotten
+_EXPECTED_EVENT_VERSION_COUNT = (
+    31  # #1239 +1 contact-expectation-declared; ADR-054 +1 content-forgotten
+)
 
 
 def _schema_module() -> Any:

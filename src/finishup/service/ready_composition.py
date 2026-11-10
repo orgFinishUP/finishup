@@ -240,7 +240,14 @@ from finishup.domain.coordination import (
     ProjectTextStore,
     WorkState,
 )
-from finishup.domain.events import CheckChangeShownFiles, RuntimeProfile, SessionOpenedPayload
+from finishup.domain.events import (
+    AcceptedEvent,
+    CheckChangeShownFiles,
+    PublicationChannel,
+    RuntimeProfile,
+    SessionOpenedPayload,
+)
+from finishup.domain.evidence_provenance import ContentForgotten, EvidenceProvenance
 from finishup.domain.findings import (
     Finding,
     SemanticDispatchKind,
@@ -7268,6 +7275,61 @@ class _RoutedCoordinationDetailStore:
                 await released
 
 
+def _copy_evidence_source(
+    hub: WorkspaceAgentHub | None,
+) -> Callable[[str, TaskRuntime], Awaitable[EvidenceProvenance | None]] | None:
+    """The receipt's source of a claim-bound task's evidence account (level L2, ADR-054).
+
+    Two parts, combined: what the server's copy recorded for the task while it serves it (counts
+    per token, the fenced reads, the snapshot last read; ``CodeCopies.provenance``), and what the
+    task's own ledger keeps of a copy that was forgotten (the latest ``content_forgotten`` event:
+    its recorded counts, when and why). None for a task with neither, so its receipt keeps the
+    level-L1 words. A forgotten copy whose event cannot be read raises: the receipt then says the
+    evidence's source is unknown rather than that the server did not read the repository.
+    """
+
+    if hub is None:
+        return None
+
+    async def account(handle: str, runtime: TaskRuntime) -> EvidenceProvenance | None:
+        del handle  # the task, not the handle, owns the account
+        from finishup.kernel.forgotten_content import latest_content_forgotten
+
+        records = [record async for record in runtime.ledger.load_events(runtime.session_id)]
+        marker = latest_content_forgotten(records)
+        forgotten: EvidenceProvenance | None = None
+        if marker is not None:
+            if marker.payload is None:
+                raise LookupError("content_forgotten_unreadable")
+            recorded = marker.payload.provenance
+            forgotten = EvidenceProvenance(
+                recorded.reads,
+                recorded.fenced_reads,
+                None,
+                ContentForgotten(marker.at, marker.payload.reason),
+            )
+        copies = hub.code_copies
+        live = (
+            None if copies is None else await asyncio.to_thread(copies.provenance, runtime.task_id)
+        )
+        found = live if forgotten is None else forgotten if live is None else forgotten.plus(live)
+        if found is None:
+            return None
+        # A claim-bound task's hook observations were captured on the client (ADR-051 decision
+        # 12): the ledger itself says how many were accepted, so they are counted from it.
+        observed = sum(
+            1
+            for record in records
+            if type(record) is AcceptedEvent
+            and record.publication_channel is PublicationChannel.HOOK_OBSERVED
+        )
+        if observed:
+            found = found.plus(EvidenceProvenance({"client_observation": observed}))
+        return found
+
+    return account
+
+
 async def provide_service_ready_context(
     service_generation: int,
     vault_generation: int,
@@ -8990,6 +9052,7 @@ async def provide_service_ready_context(
         input_snapshot_scope=input_snapshot_scope,
         conversation_review_context=conversation_review_context,
         lineage_parent_refresh=lineage_manifest_coordinator.sweep_parent_of,
+        evidence_provenance=_copy_evidence_source(workspace_hub),
     )
 
 

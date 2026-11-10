@@ -148,8 +148,9 @@ def server_code_list(
 # What forget says after the server answered: what FinishUP does not manage, and what stays.
 FORGET_TRAILER: Final = (
     "Copies of that server's folder in backups its owner made are not managed by FinishUP "
-    "and stay until they are removed there. Evidence already recorded in your tasks there "
-    "(captured changes, review excerpts) is kept with the task."
+    "and stay until they are removed there. The tasks that read the copy lose the captured "
+    "changes and review excerpts they kept from it and say that their content was forgotten; "
+    "their findings and checks stay."
 )
 # Why ``forget --all`` could not forget one repository's copy, and what the owner can do.
 _NOT_FORGOTTEN: Final[dict[str, str]] = {

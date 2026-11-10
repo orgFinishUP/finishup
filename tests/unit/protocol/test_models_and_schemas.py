@@ -3572,7 +3572,9 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     assert event_versions is catalog.event_schema_versions
     # #1118 unit 2: reviewer-reply; #1119: batch, ai-status; ADR-051: server-target-status
     assert len(request_versions) == 66
-    assert len(event_versions) == 31  # #1239 contact_expectation_declared; ADR-054 content_forgotten
+    assert (
+        len(event_versions) == 31
+    )  # #1239 contact_expectation_declared; ADR-054 content_forgotten
     assert request_versions["ai-status"] == "1.0.0"
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
     assert tuple(event_versions) == tuple(sorted(event_versions, key=str.encode))

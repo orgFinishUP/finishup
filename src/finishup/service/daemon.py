@@ -2867,6 +2867,10 @@ class ServiceDaemon:
             copies.attach_task_closed(
                 _lineage_task_closed(getattr(lineage, "store", None), asyncio.get_running_loop())
             )
+        if copies is not None:
+            # U20: a forgotten or expired copy's tasks record that their content was forgotten
+            # and lose the excerpts they derived from it; pending ones are retried until done.
+            copies.attach_erasure(_copy_erasure(application, asyncio.get_running_loop()))
         if (
             not callable(recommendation_refresh)
             and not callable(observation_sweep)
@@ -5648,6 +5652,45 @@ def _attach_code_copies(
     copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts)
     copies.start_expiry()
     hub.attach_code_copies(copies)
+
+
+def _copy_erasure(application: object, loop: asyncio.AbstractEventLoop) -> Callable[[object], bool]:
+    """Erase one forgotten task's derived content (``CodeCopies.attach_erasure``, ADR-054 U20).
+
+    Runs E's ``forget_task_content`` on the service loop from the erasure's own thread: the
+    task's ledger records ``content_forgotten`` first, then its content objects are erased. True
+    only when nothing is left to retry for that task; anything else (a slow or failed run, a call
+    from the loop itself, a closed loop) keeps the pending record, retried at the next forget,
+    expiry or service start.
+    """
+
+    from finishup.application.content_forgetting import forget_task_content
+
+    def erase(pending: object) -> bool:
+        if loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                forget_task_content(
+                    cast(Any, application),
+                    cast(str, getattr(pending, "task_id")),
+                    forget_id=cast(str, getattr(pending, "forget_id")),
+                    reason=cast(Any, getattr(pending, "reason")),
+                    provenance=getattr(pending, "account"),
+                ),
+                loop,
+            )
+            report = future.result(timeout=120.0)
+        except Exception:  # noqa: BLE001 - retried later; nothing is claimed done
+            return False
+        return getattr(report, "complete", False) is True
+
+    return erase
 
 
 def _lineage_task_closed(store: object, loop: asyncio.AbstractEventLoop) -> Callable[[str], bool]:
