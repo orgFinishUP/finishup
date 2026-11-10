@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from builders.control_relay import ScriptedDaemon, memory_pair, scripted_service
+from builders.control_relay import service_status as service_client_status
 from builders.server_profiles import profile_document
 from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.adapters.control.unix_socket import LocalControlTransportError
@@ -419,6 +420,62 @@ def test_a_helper_of_another_build_of_this_release_is_replaced_only_when_it_pred
     else:
         assert error is not None and error.reason == "service_incompatible"
         assert stops == [] and helper.spawns == []
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_a_server_of_another_release_is_remote_incompatible_never_the_local_restart(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    """A server elsewhere answers another schema manifest (it was not upgraded with this client):
+    ``remote_incompatible``, its owner upgrades it, never ``finishup service restart`` here.
+    When this process is the stale one (a newer build runs the helper), ``service_incompatible``
+    (the bridge asks to reopen)."""
+
+    from finishup.service import control_protocol
+    from finishup.service.control_protocol import read_control_frame, write_control_frame
+
+    _record, root = ssh_selected
+    write_connection_style(root, "direct")
+
+    async def foreign_server(stream: ControlStream) -> None:
+        await read_control_frame(stream)
+        wire = control_protocol._hello_result_wire(  # pyright: ignore[reportPrivateUsage]
+            service_client_status(),
+            control_protocol._released_allowed_for(  # pyright: ignore[reportPrivateUsage]
+                ControlClientKind.CLI
+            ),
+        )
+        await write_control_frame(stream, {**wire, "schema_manifest_digest": "sha256:" + "e" * 64})
+
+    serving: list[asyncio.Task[None]] = []
+
+    async def open_stream(  # noqa: ANN202
+        _ssh: str,
+        _root: Path,
+        _record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        del expected, deadline
+        client_end, server_end = memory_pair()
+        serving.append(asyncio.create_task(foreign_server(server_end)))
+        return client_end
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
+    monkeypatch.setattr(service_client, "newer_helper_build_holds_selection", lambda: stale)
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            await connect_service(ControlClientKind.CLI)
+        return raised.value
+
+    error = asyncio.run(run())
+    if stale:
+        assert (error.reason, error.phase) == ("service_incompatible", None)
+    else:
+        assert (error.reason, error.phase) == ("service_unavailable", "remote_incompatible")
 
 
 def test_the_holder_of_a_remote_root_is_its_helper_and_moves_with_its_status(

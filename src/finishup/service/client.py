@@ -2434,6 +2434,8 @@ async def _connect_service_attempt(
             raise ControlError("service_unavailable", retryable=True) from exc
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
+        if transport != "unix" and exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
+            raise _remote_release_mismatch() from exc
         raise _protocol_error(exc) from exc
     except BaseException:
         if stream is not None:
@@ -2743,6 +2745,21 @@ async def _reach_remote(
                 correlation_id=error.correlation_id,
             ) from error
         raise
+
+
+def _remote_release_mismatch() -> ControlError:
+    """A server elsewhere answered with another schema manifest or protocol.
+
+    Self-hosted servers keep release lockstep with their clients (U18): the server's owner
+    upgrades it (``remote_incompatible``); no service of this computer is involved, so the
+    local ``service restart`` remedy is never named. Unless this process is the stale one: a
+    newer build of this release now runs the target's helper (this process predates an
+    in-place upgrade), which ``service_incompatible`` names (the bridge asks to reopen).
+    """
+
+    if newer_helper_build_holds_selection():
+        return ControlError("service_incompatible", retryable=True)
+    return ControlError("service_unavailable", retryable=True, phase="remote_incompatible")
 
 
 def _helper_is_newer_build(root: Path, pid: int, version: str) -> bool:
