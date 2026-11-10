@@ -274,6 +274,7 @@ __all__ = [
     "ContactExpectationDeclaredPayload",
     "MAX_DECLARED_QUIET_SECONDS",
     "CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION",
+    "STATUS_HISTORY_OMITTED_FAMILIES",
     "ContentForgottenPayload",
     "is_content_forgotten_record",
     "WorkWrittenOffPayload",
@@ -442,6 +443,10 @@ EVENT_FAMILIES: Final = (
     "contact_expectation_declared",
     "content_forgotten",
 )
+# ADR-054: service-written families the released status-result history contracts (1.4.0, 1.5.0)
+# cannot name in their closed summary codes. Status history omits their rows; the projection
+# carries what they record (``content_forgotten``: its marker, which receipts render).
+STATUS_HISTORY_OMITTED_FAMILIES: Final = frozenset({"content_forgotten"})
 
 
 class RuntimeProfile(str, Enum):  # noqa: UP042 - exact wire enum base

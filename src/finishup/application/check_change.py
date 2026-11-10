@@ -271,6 +271,16 @@ async def _resolve(
     return ref
 
 
+async def _erased(runtime: TaskRuntime, object_id: str) -> bool:
+    """Whether the task's ledger records ``object_id`` as erased with forgotten content."""
+
+    reader = getattr(runtime.ledger, "erased_object_ids", None)
+    if not callable(reader):
+        return False
+    erased = await cast(Callable[[], Awaitable[frozenset[str]]], reader)()
+    return object_id in erased
+
+
 async def _load_task_base(runtime: TaskRuntime, request_id: str) -> TaskChangeBase | None:
     return (await _load_task_base_and_start(runtime, request_id))[0]
 
@@ -1014,12 +1024,19 @@ async def recover_check_time_change(runtime: TaskRuntime, binding: object) -> Ch
     fields = cast(dict[str, object], pointer)
     if set(fields) != {"commitment", "envelope_digest", "object_id"}:
         raise ValueError("check_change_binding_invalid")
-    ref = await _resolve(
-        runtime,
-        cast(str, fields["object_id"]),
-        cast(str, fields["envelope_digest"]),
-        CHECK_CHANGE_MEDIA_TYPE,
-    )
+    try:
+        ref = await _resolve(
+            runtime,
+            cast(str, fields["object_id"]),
+            cast(str, fields["envelope_digest"]),
+            CHECK_CHANGE_MEDIA_TYPE,
+        )
+    except ValueError:
+        # ADR-054 (U20): a change erased with the forgotten server copy it was read from is a
+        # disclosed absence, never a corrupt job; any other unreadable object still refuses.
+        if await _erased(runtime, cast(str, fields["object_id"])):
+            return CheckChangeOutcome(unavailable=True, reason="content_forgotten")
+        raise
     if ref.commitment != fields["commitment"]:
         raise ValueError("check_change_binding_invalid")
     return CheckChangeOutcome(CheckTimeChange(ref, decode_check_change(await _read(runtime, ref))))

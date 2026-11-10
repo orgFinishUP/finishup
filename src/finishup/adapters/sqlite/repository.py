@@ -3030,6 +3030,53 @@ class SqliteLedger:
             [await self._resolve_pointer(p, TASK_INPUT_SNAPSHOT_MEDIA_TYPE) for p in pointers]
         )
 
+    async def record_erased_objects(self, refs: tuple[ObjectRef, ...]) -> None:
+        """Mark ``refs`` erased in the object inventory, before their files are deleted (ADR-054).
+
+        Owner ruling U20: a forgotten server copy's derived content objects are erased. Each one
+        reads ``redacted`` from here on, so it leaves every live object set (orphan sweeps,
+        backups, upgrades) and a reader that meets its missing file can tell a forgotten object
+        from a corrupt one. An object the inventory never held (a check's change object is named
+        only from inside its case object) joins it as ``redacted``. Never an event's payload
+        object: that is refused (``erased_object_is_event_payload``) and marks nothing. One
+        transaction, and idempotent.
+        """
+
+        if type(refs) is not tuple or any(type(ref) is not ObjectRef for ref in refs):
+            raise ValueError("erased_objects_invalid")
+        if any(ref.metadata.kind is ObjectKind.EVENT_PAYLOAD for ref in refs):
+            raise ValueError("erased_object_is_event_payload")
+        await self._ensure_recovered()
+        payload_ids = {record.payload_ref.object_id for record in self._state.records}
+        if any(ref.object_id in payload_ids for ref in refs):
+            raise ValueError("erased_object_is_event_payload")
+        async with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._verify_owner()
+                for ref in refs:
+                    self._inventory_object(ref)
+                    self._db.execute(
+                        "UPDATE objects SET state='redacted' WHERE object_id=? "
+                        "AND state IN ('present','redacted')",
+                        (ref.object_id,),
+                    )
+                self._db.execute("COMMIT")
+            except BaseException:
+                if self._db.get_autocommit() is False:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    async def erased_object_ids(self) -> frozenset[str]:
+        """Every object the inventory records as erased (``redacted``), for typed reads."""
+
+        await self._ensure_recovered()
+        async with self._lock:
+            rows = self._db.execute(
+                "SELECT object_id FROM objects WHERE state='redacted'"
+            ).fetchall()
+        return frozenset(cast(str, row[0]) for row in rows)
+
     async def _update_meta(
         self, key: str, change: Callable[[object | None], object | None]
     ) -> object | None:

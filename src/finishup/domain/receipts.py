@@ -525,6 +525,12 @@ CHECK_TIME_CHANGE_UNAVAILABLE_REASONS: Final[Mapping[str, str]] = MappingProxyTy
             "releases: install the same release on both, including on the client machine, the "
             "computer that holds the project, and check again."
         ),
+        # ADR-054 (owner ruling U20): the check's stored change was erased when the server's copy
+        # of the code it was read from was forgotten (by its owner, or when it expired).
+        "content_forgotten": (
+            "the change this check captured was deleted when the server's copy of the code it "
+            "was read from was forgotten, by its owner or when the copy expired."
+        ),
     }
 )
 _CHECK_TIME_CHANGE_REASON_PREFIX: Final = CHECK_TIME_CHANGE_UNAVAILABLE_GAP + "_"

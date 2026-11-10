@@ -23,6 +23,7 @@ from finishup.domain.events import (
     REVIEW_CHECK_EVENT_SCHEMA_VERSION,
     REVIEWER_CHECK_EVENT_SCHEMA_VERSION,
     SEMANTIC_EVENT_SCHEMA_VERSION,
+    STATUS_HISTORY_OMITTED_FAMILIES,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -59,7 +60,6 @@ from finishup.domain.events import (
     UnknownEvent,
     WriterChain,
     encode_payload,
-    is_content_forgotten_record,
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
@@ -1795,7 +1795,7 @@ def _projection_items(
         for row in records:
             if row.session_id != session:
                 continue
-            if is_content_forgotten_record(row):
+            if type(row) is AcceptedEvent and row.schema.name in STATUS_HISTORY_OMITTED_FAMILIES:
                 # ADR-054 (U20): the released status-result contracts (1.4.0, 1.5.0) cannot name
                 # this service-written family, so a history row would fail their closed summary
                 # codes. The task projection carries its marker, which receipts render instead.
