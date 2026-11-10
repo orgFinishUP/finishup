@@ -14337,7 +14337,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestAgentContract"]).RestAgentContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentContract"]
+            ).RestAgentContract
         ),
     ),
     _RegistryEntry(
@@ -14347,7 +14349,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestAgentDeclarationContract"]).RestAgentDeclarationContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentDeclarationContract"]
+            ).RestAgentDeclarationContract
         ),
     ),
     _RegistryEntry(
@@ -14357,7 +14361,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestAgentWorkContract"]).RestAgentWorkContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentWorkContract"]
+            ).RestAgentWorkContract
         ),
     ),
     _RegistryEntry(
@@ -14367,7 +14373,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestDiscoveryContract"]).RestDiscoveryContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestDiscoveryContract"]
+            ).RestDiscoveryContract
         ),
     ),
     _RegistryEntry(
@@ -14377,7 +14385,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestErrorContract"]).RestErrorContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestErrorContract"]
+            ).RestErrorContract
         ),
     ),
     _RegistryEntry(
@@ -14387,7 +14397,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestOperationContract"]).RestOperationContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestOperationContract"]
+            ).RestOperationContract
         ),
     ),
     _RegistryEntry(
@@ -14397,7 +14409,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "network-control",
         lambda: (
-            __import__("finishup.rest.contract_models", fromlist=["RestSessionContract"]).RestSessionContract
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestSessionContract"]
+            ).RestSessionContract
         ),
     ),
     # ADR-052: what a FinishUP server offers and requires (design v2 section 2.2).
