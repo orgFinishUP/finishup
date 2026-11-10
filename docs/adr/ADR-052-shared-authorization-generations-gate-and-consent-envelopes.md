@@ -422,19 +422,28 @@ the owner's agent), its stderr in `log/helper.stderr`, and resolves every path u
 `selection_override(<target root>)`.
 
 - **One per target.** The flock `state/helper.lock`, stamped with the holder's pid, package
-  version and schema-manifest digest. A client stops or supersedes a helper only by that stamped
-  pid, never by a process name or path.
+  version and schema-manifest digest. The stamp is advisory (the release a client compares, the
+  status latch): a client stops or supersedes a helper only through the target's stop epoch
+  (below), never by signalling a pid (a stamped pid may belong to another process once the helper
+  exited) and never by a process name or path.
 - **Started on demand, never by `service run`.** In the relay style a connecting client that finds
   nothing answering on `<troot>/run/control.sock` spawns it and waits for it within its own
-  deadline; a holder stamped by an older release of this client is stopped by its stamped pid and
-  replaced, a newer one never. In the direct style a process that registered a workspace (the MCP
+  deadline; a holder stamped by an older release of this client is stopped through the stop epoch
+  and replaced, a newer one never. In the direct style a process that registered a workspace (the MCP
   bridge, a CLI command) starts it when none runs, as does `server connect`. A client dialling
   while the helper ends its idle exit starts its successor; any other stop (`server use`,
   `disconnect`, `remove`, zero-network) has no successor in that client's wait (A-HANDOFF).
 - **Stopped** by `server disconnect`, `server remove`, a `server use` that leaves the target and
-  `server set --style`: SIGTERM to the stamped pid, then a bounded wait for the lock. One that does
-  not release it is `target_still_connected` (`remove` then removes nothing). The OpenSSH master
-  is asked to exit through its control socket (`ssh -S <troot>/run/m -O exit`).
+  `server set --style`: the stop replaces the target's owner-only stop epoch
+  (`state/helper-epoch`, `yoetz.helper-epoch/1`, a random token), which the helper reads on its
+  one-second tick and stops for; no process is ever signalled. A stop succeeds only once the lock
+  is seen free (a lock held under an unreadable stamp is not "stopped"); one that does not see it
+  free in time is `target_still_connected` (`remove` then removes nothing). A helper is spawned
+  with the epoch its spawner read (`helper run --epoch`, hidden); one that finds another epoch once
+  it holds the lock (a stop came while it was starting) records `stopped`/`stop_requested` and
+  exits without binding or sending anything, so a stop also fences a pending start. The OpenSSH
+  master is asked to exit through its control socket (`ssh -S <troot>/run/m -O exit`), and the
+  direct style's master record is removed (decision 20).
 - **Idle exit** 15 minutes after its last relayed client connection while it serves no
   registration (in the direct style a live registration is its client).
 - **Reaping (RE-3).** The spawner reaps exactly its own child on a daemon thread; a spawner that
@@ -455,10 +464,18 @@ the target's root (not selection-bound; the owner's `server use` of another serv
 helper instead), it reads the generation, then the record again (a record removed, replaced or
 changed meanwhile is `server_authorization_changed`) and runs gate steps 2 to 5. The helper's
 relayed connections, its background agents and its drain run only under an admission that
-refuses nothing now; its profile refresh needs steps 2 to 4 only (zero-network, the disclosure,
-the kind), since the refresh is how the consent catches up. A lapse (the owner's credential bump
-on `server remove`, O8; a consent or record change) ends every relayed connection and every agent
-and records `unavailable` with the phase; the next local connection is admitted again. While this
+refuses nothing now; the captured admission is asked again right before every hello the helper
+forwards and every remote `service start` it asks for (the master's start, the channel's open and
+the start all await, and the authorization may change meanwhile). Its profile refresh needs steps
+2 to 4 only (zero-network, the disclosure, the kind), since the refresh is how the consent catches
+up, and it is scheduled on those alone, not under the admission: a consent that no longer admits
+the cached profile (an interrupted narrowing) is repaired by it. A lapse (the owner's credential
+bump on `server remove`, O8; a consent or record change), whether one relay's frame check, the
+refresh or the watch sees it, ends every relayed connection made under that admission (both
+directions) and every agent before another admission is taken, and records `unavailable` with the
+phase; the next local connection is admitted again. Each upstream attempt (the master's start, the
+channel, the hello and the server's first answer) is bounded at 30 seconds (`remote_unreachable`
+past it), and the stream it opened is closed on every failure and on a cancellation. While this
 computer last reported a zero-network policy the helper relays nothing, records
 `zero_network_remote_selected`, asks its master to exit and stops at once, with no last delivery
 (ADR-051 decision 8).
@@ -490,12 +507,13 @@ Design v2 section 1.2 (U21). The owner's choice is `config/connection-style.json
   refuses (its service is not running) starts the server's own `<launcher> service start` over the
   master, at most once per 30 seconds and only for a client's connection (A-SVC-RESTART).
 - **Direct** (advanced; approach B's seam). Each dialing process opens `ssh -S <troot>/run/m -o
-  ControlMaster=auto -o ControlPersist=15m … -W <remote control.sock>`, with FinishUP's own
-  variables removed from the child's environment; `service.client` dials it in place of the local
-  endpoint and the connection is an ordinary `ServiceClient`, so the gate runs before the dial and
-  the authorization before every frame and on its watch. A stopped server service is started once
-  through the launcher, on that client's demand. The helper still runs for the background agents,
-  the drain and the refresh.
+  ControlMaster=no … -W <remote control.sock>` through the target's verified master
+  (`ssh -M -S <troot>/run/m -o ControlPersist=15m -N`, started and recorded by whichever process
+  needs it first, decision 20), with FinishUP's own variables removed from the child's
+  environment; `service.client` dials it in place of the local endpoint and the connection is an
+  ordinary `ServiceClient`, so the gate runs before the dial and the authorization before every
+  frame and on its watch. A stopped server service is started once through the launcher, on that
+  client's demand. The helper still runs for the background agents, the drain and the refresh.
 - **`finishup server set NAME --style relay|direct`** (`client_only`, shown in help) chooses among
   the styles the server's last profile offers (`server_profile.styles_offered`: edge `ssh-control`
   offers relay and direct; a target with no readable profile offers none). Refusals:
@@ -612,6 +630,51 @@ start budget, never a local service.
 - **Imports:** a hook loads neither `client.helper`, `client.helper_runtime` nor
   `client.ssh_discovery` (the hook import-diet test); it reaches an SSH server through
   `client.helper_status` and `client.ssh_transport` only, lazily.
+- **Failure classification:** why a direct stream ended (`ssh`'s exit and its diagnostics) is
+  asked only within what is left of the connection's deadline, and not at all once it passed; the
+  stream's close stays bounded (50 ms), and a close that bound cancels still kills and reaps its
+  `ssh` (decision 20).
+
+### 20. The consented host key on every connection; OpenSSH's own limits (layer 4 review)
+
+The review of layer 4 (Codex, findings B1 to B5) made these binding:
+
+- **Every new OpenSSH connection verifies the consented host key before any hello.**
+  `known_hosts` decides whether OpenSSH connects; the owner's consent is bound to one key (the
+  envelope's endpoint identity, `server_profile.consented_host_key`, read again for each
+  connection). Every connection FinishUP makes to a target runs at `-o LogLevel=DEBUG1` (an option,
+  never `-v`, so a master backgrounded by `ControlPersist` leaves its standard error to
+  `/dev/null`) and is used only once its own `debug1: Server host key:` line named exactly that
+  key; another key, or none, is `remote_identity_changed` and nothing is sent. So a key that
+  rotated, with `known_hosts` updated and the server's installation and profile revision
+  unchanged, is refused until the owner agrees again (`server use`).
+  - The relay's master is ready only when its forward listens and it verified the key; a running
+    master is reused only for the key it verified, so a re-consent replaces it.
+  - The direct style's master is started only by `ssh_transport.ensure_direct_master`, under the
+    owner-only lock `state/ssh-master.lock`; its key line is read and compared before it is
+    recorded in `state/ssh-master.json` (`yoetz.ssh-master/1`: the key and the control socket's
+    device and inode). A master is ridden only when that record names the current consent's key
+    and its socket and it answers `-O check`; anything else at `run/m` (an older master, another
+    consent's, a relay's, a stale socket) is asked to exit and replaced. A `-W` stream never
+    becomes a master (`ControlMaster=no`) and is handed back only after OpenSSH printed that it
+    rode the master (`mux_client_request_stdio_fwd: master session id`) or verified the key over a
+    connection of its own (the master had just gone).
+  - A remote `service start` that connected on its own is checked the same way after it ran (it
+    carries no hello, only the fixed launcher command).
+- **Socket paths.** OpenSSH takes a socket path with spaces as written (the default root on macOS
+  lives under "Application Support"), but splits `-L` on `:` and expands `%` tokens and `${VAR}`
+  in forward and control paths. Paths holding `:`, `%`, `$` or a control character are refused
+  (`remote_unreachable` at connect); `server add ssh://` refuses `ssh_path_unusable` before
+  anything reaches the server when this computer's target folder holds one, and again for the
+  endpoint the server reports, before the consent and the record.
+- **Bounded output.** Every fixed OpenSSH command (discovery's probes, the profile fetch, a
+  remote start, the masters) has its standard output and error read as they arrive and bounded
+  while read (64 KiB each; discovery: the report bound and its newline); past a bound the command
+  is killed by its own pid and reaped at once, and the failure is `remote_incompatible`.
+- **Termination and reaping.** A killed command's pipes are drained and dropped so its wait ends
+  even when a pipe was paused on an unread buffer. A direct stream's close that its caller's bound
+  cancels kills its `ssh` at once and hands the wait to a task of its own, so the child is ended
+  and reaped whatever the caller does next.
 
 ## Honest limits
 
@@ -638,7 +701,12 @@ start budget, never a local service.
     parsed (the client's own connection checks what it sends and answers).
 11. The SSH endpoint identity is the host key the owner's OpenSSH verified against the owner's
     `known_hosts`; FinishUP never writes `known_hosts`, and a host certificate (`@cert-authority`)
-    is not supported as an identity (it fails closed as `remote_identity_changed`).
+    is not supported as an identity (it fails closed as `remote_identity_changed`). Every
+    connection is verified from OpenSSH's own `DEBUG1` lines (decision 20): an OpenSSH that prints
+    no `Server host key` line, or no multiplexing line for a `-W` stream, fails closed, and so does
+    a `ProxyJump` route, whose jump host prints a key line of its own (checked on OpenSSH 9.6).
+    A master that verified the consented key before the server's key rotated is still ridden until
+    it exits (it is that server's own authenticated connection); `server disconnect` ends it.
 12. SSH is owner-equivalent: anyone who can log in as the service owner over SSH reaches that
     service's control socket, as they could on the server host itself (ADR-008 amendment,
     layer 4).
@@ -659,6 +727,8 @@ start budget, never a local service.
 | Layer 4: a client starts an SSH target's helper (`state/helper.lock`, its status, its master) | `server disconnect`, `server remove`, a `server use` that leaves the target, `server set --style`; its idle exit | `server status [--json]` (`target.connection.helper`) |
 | Layer 4: `server set NAME --style direct` | `server set NAME --style relay` | `server status [--json]` (`target.connection.style`) |
 | Layer 4: a client the server refused leaves `state/profile-refresh-requested` | the helper's next refresh takes it | `server status` (consent) after the refresh |
+| Layer 4 review: a stop writes `state/helper-epoch` (a new token) | none needed: it only fences helpers started before it; `server remove` removes it with the root | the helper's status (`stopped`, `stop_requested`) |
+| Layer 4 review: a direct-style master is started and recorded (`state/ssh-master.json`, `state/ssh-master.lock`) | `server disconnect`, `remove`, `use <other>`, `set --style` (`-O exit` and the record removed); its own 15-minute `ControlPersist` idle exit (the record then names a socket that is gone and is never ridden) | `ssh -S <troot>/run/m -O check`; the record |
 
 ## Consequences
 
@@ -672,7 +742,9 @@ renders all six phases alike. Layer 3 adds `server_profile_changed` and `server_
 control error code `server_profile_changed`, the `server_profile` method and the `server-profile`
 schema. Layer 4 adds no protocol reason code: the five transport phases were registered in layer 1
 and are now rendered on every surface (decision 18); its new refusals (`remote_launcher_not_found`,
-`remote_host_key_unconfirmed`, `style_invalid`, `style_not_applicable`, `style_unavailable`,
-`helper_target_invalid`, `helper_failed`) are `finishup server` and `finishup helper` command
-texts, and `server-target-status` 1.0.0 (unreleased) is amended in place with
-`target.connection`.
+`remote_host_key_unconfirmed`, `ssh_path_unusable`, `style_invalid`, `style_not_applicable`,
+`style_unavailable`, `helper_target_invalid`, `helper_failed`) are `finishup server` and `finishup
+helper` command texts, and `server-target-status` 1.0.0 (unreleased) is amended in place with
+`target.connection`. Its owner-only records beneath an SSH target root (`yoetz.helper-status/1`,
+`yoetz.connection-style/1`, `yoetz.helper-epoch/1`, `yoetz.ssh-master/1`) are local files, never on
+the wire.

@@ -489,7 +489,8 @@ no host session (Codex, Claude Code, Cursor) has run against an SSH server yet (
   way, `remote_service_not_running` → start it on the server, `remote_incompatible` → the same
   release on both). The helper's own records are beneath the target's client root
   (`state/helper-status.json`, `log/helper.stderr`).
-- **Stop one.** `finishup server disconnect NAME` stops this computer's helper by its stamped pid
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper (it moves the
+  target's owner-only stop epoch, which the helper reads within a second; no process is signalled)
   and ends the OpenSSH master (`ssh -O exit`); the server's FinishUP keeps running. Never stop a
   helper or an `ssh` process by pattern: `ps`-matching `finishup` or `ssh` also hits the owner's
   other sessions. `server remove NAME` stops both and removes only this computer's record.

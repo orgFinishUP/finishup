@@ -205,8 +205,8 @@ PR CI, and skips where `ssh`, `sshd` or `ssh-keygen` is missing or `sshd` cannot
 
 Never register a host (Codex, Claude Code, Cursor) against such a client with a bare `finishup`
 resolved through `PATH`: register it with the absolute launcher you tested (issue #604). Stop what
-you started with `finishup server disconnect NAME` (the helper by its stamped pid, the master
-with `ssh -O exit`) and `finishup server remove NAME`, then the `sshd` by its PID; remove the
+you started with `finishup server disconnect NAME` (the helper through its stop epoch, which signals
+no process; the master with `ssh -O exit`) and `finishup server remove NAME`, then the `sshd` by its PID; remove the
 private folders last.
 
 ## Concurrency
