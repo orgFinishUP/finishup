@@ -1714,7 +1714,7 @@ def test_a_target_removed_during_a_slow_logout_stays_removed(
     real_lock = targets.registry_lock
 
     @contextlib.contextmanager
-    def removed_first() -> Iterator[None]:
+    def removed_first() -> Generator[None]:
         with real_lock():
             targets.remove_target_root(record)
         with real_lock():
