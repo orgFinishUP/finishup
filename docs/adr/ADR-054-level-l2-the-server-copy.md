@@ -487,8 +487,10 @@ snapshot it started with even when another check of the task moves the pin meanw
 fills the manifest's `subject_state` with the same subject-state digest its agent computes for an
 approved check, or `null` when it cannot be captured. An approved check of a task the copy serves
 is its own evidence job: it syncs first (purpose `check`) **without** moving the task's pin, and
-is compared with the snapshot that sync named, fixed before it runs (the task's pinned snapshot
-when the sync names none); a run whose subject-state digest differs is `stale` /
+is compared with the subject-state commitment the client returned with that sync, fixed before
+it runs, also when the snapshot was unchanged and nothing was uploaded (staging an edit changes the
+commitment, not the sanitized snapshot; the task's pinned snapshot's commitment when the sync names
+none); a run whose subject-state digest differs is `stale` /
 `subject_state_mismatch` and records the bounded event `code_snapshot_mismatch`; never a pass.
 
 ### 14. Per-evidence provenance, the receipts and O7

@@ -844,3 +844,38 @@ def test_a_review_keeps_reading_the_snapshot_it_started_with(tmp_path: Path) -> 
     assert later == (b"second\n", 7)
     assert _client_only(hub) == []
     assert copies.reader_view(HANDLE, TASK) is not None
+
+
+def test_a_staged_edit_that_leaves_the_snapshot_unchanged_is_no_snapshot_mismatch(
+    tmp_path: Path,
+) -> None:
+    # Staging an edit changes the client's subject-state commitment but not the sanitized
+    # snapshot: the sync uploads nothing, and the check is compared with the commitment the
+    # client returned with that sync, never the older one the stored manifest kept.
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    approval = _smoke_approval()
+    access = RoutedObservationWorkspace(cast(WorkspaceAgentHub, hub), cast(Any, None))
+    handle = access.open(HANDLE)
+    runner = access.runner({approval.approval_commitment: approval})
+    (root / "a.py").write_bytes(b"edited\n")
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+        routed.capture(HANDLE, base)
+    stored = copies.pinned_manifest(HANDLE, TASK)
+    assert stored is not None
+    git(root, "add", "a.py")
+    staged = subject_state_digest(root)
+    assert staged is not None and staged != stored.subject_state
+    hub.run_result = _passed(approval, staged)
+    with evidence_task_scope(TASK):
+        result = runner.run(ApprovedCheckCommand(handle, approval, staged))
+    assert result.status is ApprovedCheckStatus.PASSED
+    # Nothing was uploaded for it: the snapshot is the one already held.
+    assert copies.pinned_manifest(HANDLE, TASK) == stored
+    # A subject the client never committed to with a sync is still never a pass.
+    other = "sha256:" + hashlib.sha256(b"another subject").hexdigest()
+    hub.run_result = _passed(approval, other)
+    with evidence_task_scope(TASK):
+        mismatch = runner.run(ApprovedCheckCommand(handle, approval, other))
+    assert mismatch.status is ApprovedCheckStatus.STALE

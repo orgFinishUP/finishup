@@ -1145,8 +1145,9 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
     Level L2 (ADR-054, design v2 §8.6): a check of a task whose evidence the server reads from
     its copy is bound to the copy too, as its own evidence job. The copy is synced first, without
     moving the task's pin (a review keeps reading the snapshot its check captured), and the job
-    keeps the snapshot that sync named and its subject-state commitment (``_CopyJob``, fixed
-    before the check runs). A check
+    keeps the snapshot that sync named and the subject-state commitment the client returned with
+    it, even when the snapshot was unchanged and nothing was uploaded (``_CopyJob``, fixed before
+    the check runs). A check
     whose subject state differs from that commitment ran against another subject than the copy
     holds, and its result is ``stale`` / ``subject_state_mismatch`` (recorded as
     ``code_snapshot_mismatch``), never a pass. A sync that names no snapshot (refused or failed)
@@ -1181,9 +1182,9 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
         # No task: the sync never moves the task's pin, which its reviews read.
         outcome = copies.sync_blocking(workspace, purpose="check", base_commit=original)
         if outcome.outcome in {"synced", "unchanged"} and outcome.snapshot is not None:
-            synced = copies.snapshot_manifest(workspace, outcome.snapshot)
-            subject = None if synced is None else synced.subject_state
-            return _CopyJob(copies, task, outcome.snapshot, subject)
+            # The commitment the client returned with this sync, also when the snapshot was
+            # unchanged and nothing was uploaded: the stored manifest may hold an older one.
+            return _CopyJob(copies, task, outcome.snapshot, outcome.subject_state)
         return _CopyJob(copies, task, pinned.snapshot, pinned.subject_state)
 
     def _against_copy(

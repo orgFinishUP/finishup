@@ -153,12 +153,17 @@ class VaultCopyKeyring:
 
 @dataclass(frozen=True, slots=True)
 class SyncOutcome:
-    """What one sync did: ``synced`` (``snapshot`` named), ``unchanged`` or a closed refusal."""
+    """What one sync did: ``synced`` (``snapshot`` named), ``unchanged`` or a closed refusal.
+
+    ``subject_state`` is the subject-state commitment the client returned with this sync's
+    manifest (design v2 §8.6), also when nothing was uploaded: staging an edit changes it
+    without changing the sanitized snapshot, whose stored manifest keeps the earlier one."""
 
     outcome: Literal["synced", "unchanged", "refused", "unavailable"]
     reason: str | None = None
     snapshot: str | None = None
     synced_at: str | None = None
+    subject_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,7 +369,7 @@ class CodeCopies:
             if manifest.snapshot not in self._store.have(COPY_PRINCIPAL, claim.commitment):
                 return SyncOutcome("unavailable", "code_snapshot_unknown")
             self._pin(claim, task_id, manifest.snapshot, now)
-            return SyncOutcome("unchanged", None, manifest.snapshot, now)
+            return SyncOutcome("unchanged", None, manifest.snapshot, now, manifest.subject_state)
         assert prepared.sync_id is not None and prepared.sha256 is not None  # noqa: S101
         from finishup.protocol.canonical import canonical_encode
         from finishup.protocol.server_copy import manifest_to_json
@@ -404,7 +409,7 @@ class CodeCopies:
         except CodeStoreError as error:
             return SyncOutcome("refused", error.reason)
         self._pin(claim, task_id, manifest.snapshot, now)
-        return SyncOutcome("synced", None, manifest.snapshot, now)
+        return SyncOutcome("synced", None, manifest.snapshot, now, manifest.subject_state)
 
     def _pin(
         self, claim: _Claim, task_id: str | None, snapshot: str, synced_at: str | None = None
@@ -567,13 +572,6 @@ class CodeCopies:
         view = CopyView(claim.commitment, manifest, entry.stale, entry.synced_at)
         _bind(claim.commitment, task_id, view, first=True)
         return view
-
-    def snapshot_manifest(self, handle: str, snapshot: str) -> SnapshotManifest | None:
-        """The stored manifest of ``snapshot`` in ``handle``'s copy, or None."""
-
-        with self._lock:
-            claim = self._claims.get(handle)
-        return None if claim is None else self._manifest(claim.commitment, snapshot)
 
     def pinned_manifest(self, handle: str, task_id: str | None) -> SnapshotManifest | None:
         """The snapshot ``task_id`` is pinned to in ``handle``'s copy (served or not), or None."""
@@ -793,7 +791,9 @@ def _bound(commitment: str, task_id: str) -> object:
     return bindings.get(("code_copy", commitment, task_id), _UNBOUND)
 
 
-def _bind(commitment: str, task_id: str | None, view: CopyView | None, *, first: bool = False) -> None:
+def _bind(
+    commitment: str, task_id: str | None, view: CopyView | None, *, first: bool = False
+) -> None:
     """Bind the current evidence job's reads of ``task_id`` to ``view`` (None: the client).
 
     A sync that serves the job rebinds it; a reviewer read binds only the job's first."""
