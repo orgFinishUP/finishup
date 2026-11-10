@@ -609,7 +609,7 @@ class _Exporter:
         self.policy = policy
         self.database = database
         self.lfs: frozenset[bytes] = frozenset()
-        self.counts = dict.fromkeys(COMPLETENESS_COUNTS, 0)
+        self.counts: dict[str, int] = dict.fromkeys(COMPLETENESS_COUNTS, 0)
 
     # Each path goes through the same checks, in the same order, on both sides.
     def _name_refusal(self, path: bytes, mode: bytes) -> str | None:

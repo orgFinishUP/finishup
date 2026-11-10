@@ -36,9 +36,9 @@ LIMITS = StoreLimits(max_file_bytes=65_536, max_repo_bytes=1_048_576)
 class MemoryKeyring:
     """The vault's per-copy keys, in memory: AES key wrap, discard deletes the key."""
 
-    keys: dict[str, bytes] = field(default_factory=dict)
+    keys: dict[str, bytes] = field(default_factory=dict[str, bytes])
     locked: bool = False
-    discarded: list[str] = field(default_factory=list)
+    discarded: list[str] = field(default_factory=list[str])
 
     def wrap(self, copy_id: str, data_key: bytes) -> WrappedKey:
         if self.locked:
@@ -338,7 +338,11 @@ def test_forget_fences_an_upload_already_in_flight(
         store.commit(str(upload), "alice", "repo-1", revision=REVISION, worktree=WORKTREE)
     # Even if the upload survived the forget, its epoch fences it (the tombstone came first).
     upload = _upload(store, bundle, _manifest(snap, bundle), commit=False)
-    monkeypatch.setattr(CodeStore, "_drop_upload", lambda _self, _upload_id: None)
+
+    def keep_upload(_self: CodeStore, _upload_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(CodeStore, "_drop_upload", keep_upload)
     store.forget("alice", "repo-1")
     monkeypatch.undo()
     with pytest.raises(CodeStoreError, match="code_copy_forgotten"):

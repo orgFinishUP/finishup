@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import replace
-from typing import TYPE_CHECKING, Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final, cast
 
 import typer
 
@@ -37,9 +37,10 @@ from finishup.cli.server import (
 from finishup.protocol.server_copy import L2_RELEASED
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from finishup.client.code_copy_settings import RepositoryCodeSettings
     from finishup.client.targets import ServerTarget
-    from finishup.protocol.canonical import JsonValue
 
 __all__ = ["code_app"]
 
@@ -55,11 +56,19 @@ _JSON_OPTION = Annotated[bool, typer.Option("--json", help="Print JSON.")]
 _MAX_ALLOW_BYTES: Final = 1 << 30
 
 
+def _field(value: object, key: str) -> object:
+    """``value[key]`` when ``value`` is a JSON object, else None."""
+
+    if not isinstance(value, dict):
+        return None
+    return cast("dict[str, object]", value).get(key)
+
+
 def _selected() -> ServerTarget:
     return _repository_target(None)
 
 
-async def _ask_server(worktree: str, action: str) -> dict[str, JsonValue]:
+async def _ask_server(worktree: str, action: str) -> dict[str, object]:
     from finishup.cli.app import build_service_client
     from finishup.ports.control import ControlClientKind, WorkspaceLocator
 
@@ -72,7 +81,7 @@ async def _ask_server(worktree: str, action: str) -> dict[str, JsonValue]:
         await client.close()
 
 
-def _server_answer(worktree: str, action: str) -> dict[str, JsonValue]:
+def _server_answer(worktree: str, action: str) -> dict[str, object]:
     from finishup.cli.app import run_async
     from finishup.ports.control import ControlError
 
@@ -102,20 +111,19 @@ def server_code_list(
 
         typer.echo(json.dumps(answer, sort_keys=True))
         return
-    copy = answer.get("copy")
-    if not isinstance(copy, dict):
+    copy = _field(answer, "copy")
+    if copy is None:
         typer.echo(f"{record.name} keeps no copy of this repository.")
         return
-    retention = copy.get("retention")
+    retention = _field(copy, "retention")
     kept = "until you forget it"
-    if isinstance(retention, dict):
-        if retention.get("kind") == "days":
-            kept = f"for {retention.get('days')} days after its last sync"
-        elif retention.get("kind") == "task_close":
-            kept = "until the tasks that read it are closed"
+    if _field(retention, "kind") == "days":
+        kept = f"for {_field(retention, 'days')} days after its last sync"
+    elif _field(retention, "kind") == "task_close":
+        kept = "until the tasks that read it are closed"
     typer.echo(
-        f"{record.name} keeps a copy of this repository: {copy.get('snapshots')} snapshot(s), "
-        f"{copy.get('stored_bytes')} bytes, last synced {copy.get('last_sync_at') or 'never'}, "
+        f"{record.name} keeps a copy of this repository: {_field(copy, 'snapshots')} snapshot(s), "
+        f"{_field(copy, 'stored_bytes')} bytes, last synced {_field(copy, 'last_sync_at') or 'never'}, "
         f"kept {kept}."
     )
 
@@ -145,13 +153,14 @@ def server_code_forget(
 
         typer.echo(json.dumps(answer, sort_keys=True))
         return
-    forgot = answer.get("forgot")
-    if not isinstance(forgot, dict) or not forgot.get("copies"):
+    forgot = _field(answer, "forgot")
+    if not _field(forgot, "copies"):
         typer.echo(f"{record.name} kept no copy of this repository; nothing was deleted.")
     else:
         typer.echo(
-            f"{record.name} deleted its copy of this repository: {forgot.get('snapshots')} "
-            f"snapshot(s), {forgot.get('objects')} stored objects, {forgot.get('bytes')} bytes."
+            f"{record.name} deleted its copy of this repository: {_field(forgot, 'snapshots')} "
+            f"snapshot(s), {_field(forgot, 'objects')} stored objects, {_field(forgot, 'bytes')} "
+            "bytes."
         )
     typer.echo(
         "Copies of that server's folder in backups its owner made are not managed by FinishUP "
@@ -176,14 +185,14 @@ def _settings(record: ServerTarget, key: str) -> RepositoryCodeSettings:
 def _update(
     record: ServerTarget,
     key: str,
-    change: object,
+    change: Callable[[RepositoryCodeSettings], RepositoryCodeSettings],
 ) -> RepositoryCodeSettings:
     from finishup.client.code_copy_settings import CodeCopySettingsError, update_settings
     from finishup.client.targets import registry_lock, target_root
 
     try:
         with registry_lock():
-            return update_settings(target_root(record.target_id), record.target_id, key, change)  # type: ignore[arg-type]
+            return update_settings(target_root(record.target_id), record.target_id, key, change)
     except CodeCopySettingsError as error:
         raise ServerCommandRefused(error.reason) from None
 
@@ -216,11 +225,11 @@ def server_code_exclude_add(pattern: str, repository: _REPOSITORY_OPTION = None)
         raise ServerCommandRefused("usage", message="that pattern cannot be recorded")
     record = _selected()
     here = repository_here(repository)
-    _update(
-        record,
-        here.key,
-        lambda s: replace(s, exclude=tuple(sorted({*s.exclude, pattern}))),
-    )
+
+    def add(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        return replace(settings, exclude=tuple(sorted({*settings.exclude, pattern})))
+
+    _update(record, here.key, add)
     typer.echo(f"Files matching {pattern} are left out of this repository's copy on {record.name}.")
 
 
@@ -238,11 +247,13 @@ def server_code_exclude_remove(pattern: str, repository: _REPOSITORY_OPTION = No
         record,
         (f"Files matching {pattern} will be sent to {record.name} in this repository's copy.",),
     )
-    _update(
-        record,
-        here.key,
-        lambda s: replace(s, exclude=tuple(item for item in s.exclude if item != pattern)),
-    )
+
+    def remove(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        return replace(
+            settings, exclude=tuple(item for item in settings.exclude if item != pattern)
+        )
+
+    _update(record, here.key, remove)
     typer.echo(f"{pattern} is no longer left out of this repository's copy on {record.name}.")
 
 
@@ -297,11 +308,11 @@ def server_code_allow(file: str, repository: _REPOSITORY_OPTION = None) -> None:
             "scanned again.",
         ),
     )
-    _update(
-        record,
-        here.key,
-        lambda s: replace(s, allow=tuple(sorted({*s.allow, (relative, content)}))),
-    )
+
+    def allow(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        return replace(settings, allow=tuple(sorted({*settings.allow, (relative, content)})))
+
+    _update(record, here.key, allow)
     typer.echo(f"{relative} is sent as it is now at the next sync.")
 
 
@@ -313,7 +324,11 @@ def server_code_level(value: str, repository: _REPOSITORY_OPTION = None) -> None
     record = _selected()
     here = repository_here(repository)
     if value == "L1":
-        _update(record, here.key, lambda s: replace(s, level="L1"))
+
+        def keep(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+            return replace(settings, level="L1")
+
+        _update(record, here.key, keep)
         typer.echo(
             f"This repository is kept at level L1 on {record.name}: nothing more of its code is "
             "sent. What was sent before stays there until you run 'finishup server code forget'."
@@ -328,5 +343,9 @@ def server_code_level(value: str, repository: _REPOSITORY_OPTION = None) -> None
         record,
         (f"This repository will follow the level you agreed to for {record.name} again.",),
     )
-    _update(record, here.key, lambda s: replace(s, level=None))
+
+    def follow(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        return replace(settings, level=None)
+
+    _update(record, here.key, follow)
     typer.echo(f"This repository follows the level you agreed to for {record.name} again.")

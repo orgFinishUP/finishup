@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,7 +166,7 @@ def held_lookup(
 
 
 @contextmanager
-def release_l2() -> Iterator[None]:
+def release_l2() -> Generator[None]:
     """Turn the unreleased level L2 on for the duration of a test (``l2_released``)."""
 
     from finishup.protocol.server_copy import enable_unreleased_l2

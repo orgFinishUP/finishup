@@ -892,7 +892,7 @@ def _object_member(value: JsonValue, keys: frozenset[str]) -> Mapping[str, JsonV
     if type(value) is not dict:
         raise CopyError("manifest_invalid")
     source = cast(dict[str, JsonValue], value)
-    if set(source) != keys:
+    if frozenset(source) != keys:
         raise CopyError("manifest_invalid")
     return source
 

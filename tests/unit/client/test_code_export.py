@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -394,7 +395,11 @@ def test_the_audit_refuses_a_bundle_with_anything_not_admitted(
     root = _repository(tmp_path, {"a.txt": b"a\n"})
     real = code_export.write_pack
     stray = GitObject("blob", b"history the exporter never admitted\n")
-    monkeypatch.setattr(code_export, "write_pack", lambda objects: real([*objects, stray]))
+
+    def with_stray(objects: Sequence[GitObject]) -> bytes:
+        return real([*objects, stray])
+
+    monkeypatch.setattr(code_export, "write_pack", with_stray)
     with pytest.raises(ExportRefused, match="code_export_audit_failed"):
         _export(root, tmp_path)
     monkeypatch.setattr(code_export, "write_pack", real)

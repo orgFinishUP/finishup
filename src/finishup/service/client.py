@@ -2077,7 +2077,7 @@ class ServiceClient(ControlClientPort):
         except ProfileError:
             raise ControlError("frame_invalid") from None
 
-    async def code_copy(self, action: Literal["status", "forget"]) -> dict[str, JsonValue]:
+    async def code_copy(self, action: Literal["status", "forget"]) -> dict[str, object]:
         """The server's copy of this connection's claimed repository (level L2, ADR-054):
         ``status`` (what it holds, or null) or ``forget`` (exactly what was deleted)."""
 
@@ -2085,9 +2085,12 @@ class ServiceClient(ControlClientPort):
             raise ValueError("code_copy_action_invalid")
         body = await self._invoke(ControlMethod.CODE_COPY, JsonObject({"action": action}))
         plain = strict_json_parse(canonical_encode(cast(JsonValue, body)))
-        if type(plain) is not dict or plain.get("action") != action:
+        if type(plain) is not dict:
             raise ControlError("frame_invalid")
-        return cast(dict[str, JsonValue], plain)
+        answer = cast(dict[str, object], plain)
+        if answer.get("action") != action:
+            raise ControlError("frame_invalid")
+        return answer
 
     async def lock(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_LOCK, JsonObject({})))

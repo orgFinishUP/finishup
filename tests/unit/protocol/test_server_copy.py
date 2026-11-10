@@ -424,7 +424,7 @@ def test_the_policy_digest_is_order_free_and_moves_with_every_member() -> None:
 
 def _manifest() -> SnapshotManifest:
     snap = snapshot_objects(BASE, CURRENT)
-    lists = {name: () for name in COMPLETENESS_LISTS}
+    lists: dict[str, tuple[str, ...]] = {name: () for name in COMPLETENESS_LISTS}
     lists["held_for_content"] = ("config/prod.yaml",)
     lists["excluded"] = (".env", "keys/server.pem")
     return SnapshotManifest(

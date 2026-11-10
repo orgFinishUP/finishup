@@ -19,7 +19,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from finishup import __version__
-from finishup.cli import server_code as _server_code  # noqa: F401 - registers "server code"
+from finishup.cli import server_code as _server_code
 from finishup.cli.agent_start import AGENT_START_HANDOFF
 from finishup.cli.ai import ai_app, register_credential_remove
 from finishup.cli.bootstrap import (
@@ -272,6 +272,8 @@ app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
 app.add_typer(project_app, name="project")
 app.add_typer(server_app, name="server")
+# Importing it registered the hidden 'server code' group on the server app (level L2, ADR-054).
+_SERVER_CODE_APP: Final = _server_code.code_app
 app.add_typer(helper_app, name="helper")
 
 

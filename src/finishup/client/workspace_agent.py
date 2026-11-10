@@ -480,7 +480,7 @@ class WorkspaceAgentHandler:
             raise ValueError("workspace_agent_protected_invalid")
         if code_sync is not None and role != "background":
             raise ValueError("workspace_agent_code_sync_role_invalid")
-        syncing = frozenset() if code_sync is None else _CODE_SYNC_OPERATIONS
+        syncing: frozenset[str] = frozenset() if code_sync is None else _CODE_SYNC_OPERATIONS
         offered = tuple(
             sorted(
                 (

@@ -202,7 +202,7 @@ def test_an_admitted_sync_is_read_back_in_chunks_and_holds_the_consented_policy(
     assert not prepared.unchanged and prepared.sync_id is not None
     assert (prepared.retention_kind, prepared.retention_days) == ("days", 7)
     assert prepared.manifest.lists["excluded"] == (".env",)
-    chunks = []
+    chunks: list[bytes] = []
     for offset in range(0, prepared.size, 100):
         chunks.append(responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, offset, 100)))
     bundle = b"".join(chunks)

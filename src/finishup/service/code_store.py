@@ -441,7 +441,7 @@ class CodeStore:
             raise CodeStoreError("code_upload_invalid")
         kind, days = retention
         if kind not in {"task_close", "days", "until_forgotten"} or (
-            (kind == "days") != (type(days) is int and days is not None and 0 <= days <= 36_500)
+            (kind == "days") != (isinstance(days, int) and 0 <= days <= 36_500)
         ):
             raise CodeStoreError("code_upload_invalid")
         copy_key = self.copy_key(principal, repository)

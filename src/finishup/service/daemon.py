@@ -2762,7 +2762,7 @@ class ServiceDaemon:
             or context.identity_kind != "client_claim"
         ):
             raise ControlError("method_forbidden")
-        action = request.body.get("action")
+        action = cast("Mapping[str, object]", request.body).get("action")
         from finishup.service.code_copy import COPY_PRINCIPAL
 
         commitment = context.commitment

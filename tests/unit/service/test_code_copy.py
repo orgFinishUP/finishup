@@ -108,7 +108,7 @@ def _copies(tmp_path: Path, *, unchanged: bool = False) -> tuple[CodeCopies, Fak
         StoreLimits(max_file_bytes=65_536, max_repo_bytes=1 << 20),
     )
     store.open()
-    copies = CodeCopies(store, hub, lambda: REVISION)  # type: ignore[arg-type]
+    copies = CodeCopies(store, hub, lambda: REVISION)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     hub.code_copies = copies
     return copies, hub, store
 
@@ -147,8 +147,10 @@ def test_a_snapshot_for_another_worktree_or_revision_is_refused(tmp_path: Path) 
     copies.remember(HANDLE, COMMITMENT, "sha256:" + "9" * 64)
     assert copies.sync_blocking(HANDLE, purpose="check").reason == "code_manifest_mismatch"
     copies = CodeCopies(
-        store, _hub, lambda: ServerProfileRevision("a" * 32, 3, REVISION.profile_digest)
-    )  # type: ignore[arg-type]
+        store,
+        _hub,  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+        lambda: ServerProfileRevision("a" * 32, 3, REVISION.profile_digest),
+    )
     copies.remember(HANDLE, COMMITMENT, WORKTREE)
     assert copies.sync_blocking(HANDLE, purpose="check").reason == "server_profile_changed"
     assert store.copies("claim") == ()
@@ -282,7 +284,7 @@ def test_code_copy_status_and_forget_say_exactly_what_is_kept_and_deleted(tmp_pa
         validate_schema_instance(
             "control-result",
             "2.10.0",
-            {
+            {  # pyright: ignore[reportArgumentType]
                 "protocol_version": "1.0",
                 "rpc_id": "rpc_12345678-1234-4123-8123-123456789abc",
                 "service_instance_id": "svc_12345678-1234-4123-8123-123456789abc",
