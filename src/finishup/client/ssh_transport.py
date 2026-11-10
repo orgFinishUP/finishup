@@ -111,6 +111,10 @@ _REMOTE_COMMAND_SECONDS: Final = 30.0
 _POLL_SECONDS: Final = 0.05
 _STDERR_TAIL_BYTES: Final = 8_192
 _MAX_RECEIVE_BYTES: Final = 65_536
+# What one fixed remote command or probe may write on each stream before it is killed.
+_MAX_OUTPUT_BYTES: Final = 65_536
+_READ_CHUNK: Final = 8_192
+_REAP_SECONDS: Final = 5.0
 _EXIT_WAIT_SECONDS: Final = 1.0
 _TERMINATE_WAIT_SECONDS: Final = 0.5
 _UNREACHABLE: Final = "remote_unreachable"
@@ -558,13 +562,37 @@ def require_host_key(stderr: bytes, expected: str | None) -> None:
         raise UpstreamUnavailable(_IDENTITY_CHANGED)
 
 
-async def run_ssh(argv: Sequence[str], *, seconds: float) -> tuple[int | None, bytes, bytes]:
+class _OutputExceeded(Exception):
+    """One of a command's streams outgrew its bound while it was read."""
+
+
+async def _read_bounded(reader: asyncio.StreamReader | None, limit: int, sink: bytearray) -> None:
+    """Read ``reader`` to its end into ``sink``; ``_OutputExceeded`` past ``limit`` bytes."""
+
+    if reader is None:
+        return
+    while chunk := await reader.read(_READ_CHUNK):
+        if len(sink) + len(chunk) > limit:
+            raise _OutputExceeded
+        sink.extend(chunk)
+
+
+async def run_ssh(
+    argv: Sequence[str],
+    *,
+    seconds: float,
+    stdout_limit: int = _MAX_OUTPUT_BYTES,
+    stderr_limit: int = _MAX_OUTPUT_BYTES,
+) -> tuple[int | None, bytes, bytes]:
     """Run one fixed ``ssh`` argv to completion within ``seconds``: ``(code, stdout, stderr)``.
 
     ``code`` is ``None`` when it could not start or outlived its bound (it is then killed, by its
-    own pid). Standard input is never the caller's; a host-key question OpenSSH asks (only with
-    ``probe_argv(ask=True)``) is asked on the controlling terminal (``/dev/tty``), which the child
-    shares with this process.
+    own pid, and reaped). Both streams are read as they arrive and bounded while they are read
+    (64 KiB each by default): a command that writes more is killed and reaped at once and
+    raises ``UpstreamUnavailable("remote_incompatible")`` (a launcher that is not this release's
+    FinishUP), so a faulty or hostile one never fills this process's memory. Standard input is
+    never the caller's; a host-key question OpenSSH asks (only with ``probe_argv(ask=True)``) is
+    asked on the controlling terminal (``/dev/tty``), which the child shares with this process.
     """
 
     try:
@@ -578,22 +606,59 @@ async def run_ssh(argv: Sequence[str], *, seconds: float) -> tuple[int | None, b
         )
     except OSError:
         return None, b"", b""
+    stdout, stderr = bytearray(), bytearray()
+    readers = (
+        asyncio.create_task(_read_bounded(process.stdout, stdout_limit, stdout)),
+        asyncio.create_task(_read_bounded(process.stderr, stderr_limit, stderr)),
+    )
     try:
         async with asyncio.timeout(seconds):
-            stdout, stderr = await process.communicate()
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        with contextlib.suppress(Exception):
+            await asyncio.wait(readers, return_when=asyncio.FIRST_EXCEPTION)
+            for reader in readers:
+                if reader.done() and reader.exception() is not None:
+                    raise _OutputExceeded
+            await asyncio.gather(*readers)
             await process.wait()
+    except TimeoutError:
+        await _kill_and_reap(process, readers)
         return None, b"", b""
+    except _OutputExceeded:
+        await _kill_and_reap(process, readers)
+        raise UpstreamUnavailable("remote_incompatible") from None
     except BaseException:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        with contextlib.suppress(Exception):
-            await asyncio.shield(process.wait())
+        await _kill_and_reap(process, readers)
         raise
-    return process.returncode, stdout, stderr
+    return process.returncode, bytes(stdout), bytes(stderr)
+
+
+async def _discard(reader: asyncio.StreamReader | None) -> None:
+    if reader is None:
+        return
+    with contextlib.suppress(Exception):
+        while await reader.read(_READ_CHUNK):
+            pass
+
+
+async def _kill_and_reap(
+    process: asyncio.subprocess.Process, readers: Sequence[asyncio.Task[None]] = ()
+) -> None:
+    """Kill ``process`` by its own pid and wait for it, a cancellation of the caller included.
+
+    Its stream readers end; what is left in its pipes is read and dropped, so a pipe paused on
+    an unread buffer still reaches its end and the wait finishes (bounded: a process that
+    handed its pipe on keeps nothing waiting here). The system's child watcher reaps it once it
+    exits, whatever this wait sees.
+    """
+
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    for reader in readers:
+        reader.cancel()
+    await asyncio.gather(*readers, return_exceptions=True)
+    ending = asyncio.gather(_discard(process.stdout), _discard(process.stderr), process.wait())
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(_REAP_SECONDS):
+            await asyncio.shield(ending)
 
 
 def _owned_socket(path: Path) -> tuple[int, int] | None:

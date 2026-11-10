@@ -179,3 +179,22 @@ def test_the_profile_source_fetches_a_recorded_target_and_asks_only_inside_the_c
 
     with pytest.raises(TargetRuntimeError, match="remote_launcher_not_found"):
         fetch_profile(replace(record, remote_launcher=None), ssh=server.ssh)
+
+
+def test_a_launcher_that_writes_without_end_is_refused_as_another_release(
+    server: FakeServer,
+) -> None:
+    """B3: discovery reads the launcher's answer bounded; past it the probe is killed."""
+
+    server.set(profile="x" * 4_000_000)
+    with pytest.raises(TargetRuntimeError) as raised:
+        discover(
+            user="owner",
+            host="lab.example",
+            port=22,
+            remote_root=None,
+            remote_launcher="/srv/bin/finishup",
+            question=None,
+            ssh=server.ssh,
+        )
+    assert raised.value.phase == "remote_incompatible"

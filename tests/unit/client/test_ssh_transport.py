@@ -527,8 +527,8 @@ def test_the_relay_master_is_ready_only_once_it_verified_the_consented_key(
         else:
             return None, master.alive
         finally:
-            if printed == "consented":
-                await master.close()
+            # Whatever happened, the stand-in this test started is stopped by its own pid.
+            await master.close()
 
     reason, alive = asyncio.run(run())
     if printed == "consented":
@@ -700,3 +700,42 @@ def test_a_direct_stream_is_used_only_once_openssh_said_how_it_reached_the_serve
         return None
 
     assert asyncio.run(run()) == reason
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_a_command_that_writes_too_much_is_killed_while_it_writes(
+    tmp_path: Path, stream: str
+) -> None:
+    """B3: each stream is bounded as it is read; the writer is killed and reaped at once."""
+
+    import sys
+
+    progress = tmp_path / "progress"
+    writer = tmp_path / "writer"
+    target = "sys.stdout" if stream == "stdout" else "sys.stderr"
+    writer.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        f"out = {target}.buffer\n"
+        f"progress = open({str(progress)!r}, 'w')\n"
+        "for written in range(1, 257):\n"
+        "    out.write(b'x' * 16384)\n"
+        "    out.flush()\n"
+        "    progress.seek(0); progress.write(str(written)); progress.flush()\n"
+        f"open({str(tmp_path / 'done')!r}, 'w').close()\n",
+        encoding="utf-8",
+    )
+    writer.chmod(0o700)
+
+    async def run() -> str:
+        try:
+            await run_ssh((str(writer),), seconds=60.0)
+        except UpstreamUnavailable as error:
+            return error.reason
+        return "returned"
+
+    assert asyncio.run(run()) == "remote_incompatible"
+    # Four MiB were to be written; it was stopped a few chunks past the 64 KiB bound (what the
+    # pipe still held), never allowed to finish.
+    assert not (tmp_path / "done").exists()
+    assert int(progress.read_text() or "0") < 32

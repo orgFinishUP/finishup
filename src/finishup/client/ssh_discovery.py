@@ -82,6 +82,8 @@ _ASK_SECONDS: Final = 180.0
 # ``service profile`` may start the server's service first.
 _PROFILE_SECONDS: Final = 60.0
 _MAX_REPORT_BYTES: Final = 65_536
+# OpenSSH's own verbose lines for one connection, and the launcher's diagnostics, fit well within.
+_MAX_DIAGNOSTIC_BYTES: Final = 65_536
 _MAX_PATH_TEXT: Final = 1_024
 _SSH_FAILED: Final = 255
 
@@ -179,7 +181,16 @@ class _Prober:
                 command=command,
                 ask=ask,
             )
-            code, stdout, stderr = await run_ssh(argv, seconds=_ASK_SECONDS if ask else seconds)
+            try:
+                code, stdout, stderr = await run_ssh(
+                    argv,
+                    seconds=_ASK_SECONDS if ask else seconds,
+                    stdout_limit=_MAX_REPORT_BYTES + 1,  # the closing newline
+                    stderr_limit=_MAX_DIAGNOSTIC_BYTES,
+                )
+            except UpstreamUnavailable as error:
+                # It wrote more than any FinishUP of this release would: killed while it wrote.
+                raise _refused(error.reason) from None
             if code is None:
                 raise _refused("remote_unreachable")
             if code == _SSH_FAILED and host_key_changed(stderr):
