@@ -140,7 +140,9 @@ is checked against the mode it is reused as, as a blob in the pack is: never a l
 kept as a valid link target (at most 4 KiB, no NUL), and never past the file cap applied now. A
 subtree, held or already walked elsewhere in the same bundle, is checked again where it is
 placed: the index keeps each tree's height and longest path, so grafting it beneath more
-directories cannot pass the depth (128) or path-length (4 KiB) bounds.
+directories cannot pass the depth (128) or path-length (4 KiB) bounds. A held commit is a
+snapshot's base only if it was kept as one (no parent): a later snapshot on a held snapshot commit
+is refused as the same three commits sent whole are (`commit_not_synthetic`).
 
 The snapshot manifest, `yoetz.code-snapshot/1`, travels with the bundle: the snapshot and base
 commits and their trees, the original base commit and object format (provenance), the export id,

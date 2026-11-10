@@ -480,6 +480,35 @@ def test_a_held_subtree_grafted_deeper_is_refused_by_the_index_bounds(tmp_path: 
             _upload(store, bundle, manifest)
 
 
+def test_a_snapshot_on_a_held_snapshot_commit_is_refused(tmp_path: Path) -> None:
+    # B10: the copy keeps which held commits are bases; a held snapshot commit is not one.
+    store = _store(tmp_path)
+    first = snapshot_objects(BASE, CURRENT)
+    _upload(store, first.bundle(), _manifest(first, first.bundle()))
+    blob = GitObject("blob", b"new\n")
+    tree = GitObject("tree", encode_tree([TreeEntry(MODE_REGULAR, b"n", blob.oid)]))
+    for parent, admitted in ((first.snapshot, False), (first.base, True)):
+        tip = GitObject("commit", encode_commit(tree.oid, parent))
+        objects = {tip.oid: tip, tree.oid: tree, blob.oid: blob}
+        snap = Snapshot(parent, tip.oid, first.base_tree, tree.oid, objects)
+        manifest = canonical_encode(
+            manifest_to_json(
+                replace(manifest_from_json(_unverified_manifest(snap, 1)), bytes=len(blob.data))
+            )
+        )
+        if parent == first.snapshot:
+            manifest = canonical_encode(
+                manifest_to_json(replace(manifest_from_json(manifest), base_tree=first.tree))
+            )
+        bundle = write_bundle((first.snapshot,), tip.oid, 2, write_pack(list(objects.values())))
+        if admitted:
+            _upload(store, bundle, manifest)
+            continue
+        with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+            _upload(store, bundle, manifest)
+        assert store.have("alice", "repo-1") == (first.snapshot,)
+
+
 def test_one_principal_never_reaches_another_s_copy(tmp_path: Path) -> None:
     store = _store(tmp_path)
     snap = snapshot_objects(BASE, CURRENT)

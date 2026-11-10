@@ -191,8 +191,8 @@ def held_lookup(
                 height=height,
                 longest=longest,
             )
-        tree, _parent = decode_commit(item.data)
-        return Held("commit", tree=tree)
+        tree, parent = decode_commit(item.data)
+        return Held("commit", tree=tree, parentless=parent is None)
 
     return have
 

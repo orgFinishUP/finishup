@@ -1095,11 +1095,11 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
     for commit in commits:
         snapshot_tree, parent = decode_commit(database.read(commit, limit=limit).data)
         tree(snapshot_tree)
-        held[commit] = Held("commit", tree=snapshot_tree)
+        held[commit] = Held("commit", tree=snapshot_tree, parentless=parent is None)
         if parent is not None:
-            base_tree, _none = decode_commit(database.read(parent, limit=limit).data)
+            base_tree, grandparent = decode_commit(database.read(parent, limit=limit).data)
             tree(base_tree)
-            held[parent] = Held("commit", tree=base_tree)
+            held[parent] = Held("commit", tree=base_tree, parentless=grandparent is None)
     return held
 
 

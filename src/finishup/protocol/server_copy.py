@@ -593,7 +593,8 @@ class Held:
     more directories is still held to the depth and path-length bounds. For a blob whether it
     may be a link's
     target (``link_safe``: at most 4 KiB, no NUL), so a blob held as a file is never reused as a
-    link it could not be. ``None``: not known (kept before these were recorded); the verifier
+    link it could not be. For a commit whether it has no parent (``parentless``): only a base
+    commit may be a later snapshot's base, so a held snapshot commit never becomes one. ``None``: not known (kept before these were recorded); the verifier
     refuses a reuse it cannot check.
     """
 
@@ -606,10 +607,11 @@ class Held:
     link_safe: bool | None = None
     height: int | None = None
     longest: int | None = None
+    parentless: bool | None = None
 
 
 # The members after the first four were added later: an older entry reads them as unknown.
-_HELD_MEMBERS: Final = 9
+_HELD_MEMBERS: Final = 10
 
 
 def held_to_json(held: Held) -> list[JsonValue]:
@@ -625,6 +627,7 @@ def held_to_json(held: Held) -> list[JsonValue]:
         held.link_safe,
         held.height,
         held.longest,
+        held.parentless,
     ]
 
 
@@ -649,7 +652,7 @@ def held_from_json(value: JsonValue) -> Held:
     if type(value) is not list or not 4 <= len(value) <= _HELD_MEMBERS:
         raise CopyError("held_invalid")
     members: list[JsonValue] = [*value, *([None] * (_HELD_MEMBERS - len(value)))]
-    kind, size, files, tree, entries, names, link_safe, height, longest = members
+    kind, size, files, tree, entries, names, link_safe, height, longest, parentless = members
     if kind not in _KINDS or type(size) is not int or type(files) is not int:
         raise CopyError("held_invalid")
     if size < 0 or files < 0 or (tree is not None and type(tree) is not str):
@@ -664,6 +667,7 @@ def held_from_json(value: JsonValue) -> Held:
         _held_flag(link_safe),
         _held_count(height),
         _held_count(longest),
+        _held_flag(parentless),
     )
 
 
@@ -869,6 +873,10 @@ def verify_snapshot_bundle(
         held = have(base)
         if held is None or held.kind != "commit" or held.tree is None:
             raise CopyError("bundle_incomplete")
+        if held.parentless is not True:
+            # A held snapshot commit (or one whose role was never kept) is no base: a base has
+            # no parent, as a base commit in the pack must not (three commits of ancestry).
+            raise CopyError("commit_not_synthetic")
         base_tree = held.tree
     walk.tree(base_tree, 0, 0)
     shape = walk.tree(tree, 0, 0)
@@ -890,7 +898,10 @@ def verify_snapshot_bundle(
                 longest=below.longest,
             )
         else:
-            kept[oid] = Held("commit", tree=tree if oid == bundle.tip else base_tree)
+            snapshot = oid == bundle.tip
+            kept[oid] = Held(
+                "commit", tree=tree if snapshot else base_tree, parentless=not snapshot
+            )
     return VerifiedSnapshot(
         snapshot=bundle.tip,
         base=base,

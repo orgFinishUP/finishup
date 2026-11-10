@@ -669,6 +669,40 @@ def test_a_held_subtree_grafted_beneath_more_directories_keeps_the_bounds() -> N
         verify_snapshot_bundle(grafted(1, held_deep), have=unknown.get, limits=LIMITS)
 
 
+def test_a_held_snapshot_commit_is_never_the_base_of_a_later_snapshot() -> None:
+    # B10: the complete bundle of three commits is refused; the held route must be too.
+    first_snap = snapshot_objects(BASE, CURRENT)
+    first = verify_snapshot_bundle(first_snap.bundle(), have=_nothing, limits=LIMITS)
+    assert first.held[first_snap.base].parentless is True
+    assert first.held[first_snap.snapshot].parentless is False
+
+    def have(oid: str) -> Held | None:
+        return first.held.get(oid)
+
+    blob = GitObject("blob", b"new\n")
+    tree = GitObject("tree", _raw_tree((b"100644", b"n", blob.oid)))
+    on_snapshot = GitObject("commit", encode_commit(tree.oid, first_snap.snapshot))
+    bundle = _bundle_of([on_snapshot, tree, blob], on_snapshot.oid, ref=2)
+    with pytest.raises(CopyError, match="commit_not_synthetic"):
+        verify_snapshot_bundle(bundle, have=have, limits=LIMITS)
+    # The same ancestry sent whole is refused alike.
+    whole = [*first_snap.objects.values(), on_snapshot, tree, blob]
+    with pytest.raises(CopyError, match="commit_not_synthetic"):
+        verify_snapshot_bundle(_bundle_of(whole, on_snapshot.oid), have=_nothing, limits=LIMITS)
+    # On the held base commit it is a snapshot like any other.
+    on_base = GitObject("commit", encode_commit(tree.oid, first_snap.base))
+    again = verify_snapshot_bundle(
+        _bundle_of([on_base, tree, blob], on_base.oid, ref=2), have=have, limits=LIMITS
+    )
+    assert again.base == first_snap.base and again.base_tree == first_snap.base_tree
+    # A held commit whose role was never kept is not taken as a base.
+    unknown = {oid: replace(item, parentless=None) for oid, item in first.held.items()}
+    with pytest.raises(CopyError, match="commit_not_synthetic"):
+        verify_snapshot_bundle(
+            _bundle_of([on_base, tree, blob], on_base.oid, ref=2), have=unknown.get, limits=LIMITS
+        )
+
+
 def test_what_a_receiver_keeps_round_trips_and_older_entries_read_as_unknown() -> None:
     snap = snapshot_objects(BASE, CURRENT)
     verified = verify_snapshot_bundle(snap.bundle(), have=_nothing, limits=LIMITS)
