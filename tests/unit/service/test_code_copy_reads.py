@@ -323,6 +323,32 @@ def test_an_offline_client_s_reads_come_from_the_copy_as_last_synced_and_checks_
     assert raised.value.reason == "no_agent"
 
 
+def test_a_reviewer_read_after_an_offline_check_is_a_stale_read_and_a_fresh_sync_ends_it(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, {"src/a.py": b"synced\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    state = os.fspath(tmp_path / "state")
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), HANDLE)
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+        hub.offline = True
+        routed.capture(HANDLE, base)
+        read = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(state,), expired=lambda: False)
+    assert read == (b"synced\n", 7)
+    account = copies.provenance(TASK)
+    assert account is not None
+    # The capture and the reviewer's read both read the copy as last synced.
+    assert (account.count("stale_copy_read"), account.count("server_copy_read")) == (2, 1)
+    hub.offline = False
+    with evidence_task_scope(TASK):
+        routed.capture(HANDLE, base)
+        reads.read_text_beneath(HANDLE, "src/a.py", excluded=(state,), expired=lambda: False)
+    account = copies.provenance(TASK)
+    assert account is not None
+    assert (account.count("stale_copy_read"), account.count("server_copy_read")) == (2, 3)
+
+
 def test_a_refused_sync_never_reads_the_copy(tmp_path: Path) -> None:
     root = _repository(tmp_path, {"a.py": b"a\n"})
     hub, copies, routed = _service(tmp_path, root)

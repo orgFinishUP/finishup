@@ -483,6 +483,7 @@ class CodeCopies:
                 task_id,
                 view.manifest.snapshot,
                 served=True,
+                stale=view.stale,
             )
         except CodeStoreError:
             return
@@ -516,7 +517,9 @@ class CodeCopies:
         manifest = self._manifest(claim.commitment, entry.snapshot)
         if manifest is None:
             return None
-        return CopyView(claim.commitment, manifest, False, entry.synced_at)
+        # A reviewer's read reads what its check read: stale when that check was served while
+        # the client was offline.
+        return CopyView(claim.commitment, manifest, entry.stale, entry.synced_at)
 
     def pinned_manifest(self, handle: str, task_id: str | None) -> SnapshotManifest | None:
         """The snapshot ``task_id`` is pinned to in ``handle``'s copy (served or not), or None."""
