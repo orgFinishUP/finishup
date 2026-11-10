@@ -9,8 +9,8 @@ registration API (decisions 9 to 12); layer 4 builds the unified helper, the SSH
 relay and direct styles, SSH discovery, and opens the `ssh` kind (decisions 13 to 19); layer 5
 carries this authorization over REST and opens `https` and `local_port` (decisions 20 to 23; the
 REST contract itself is [ADR-053](ADR-053-rest-v1-public-contract.md)); layer 6 builds level L2's
-server copy, unreleased, in its own record ([ADR-054](ADR-054-level-l2-the-server-copy.md)), and
-what L2 still needs is recorded as **not built** in decision 8.
+server copy and releases it, in its own record ([ADR-054](ADR-054-level-l2-the-server-copy.md)),
+which completes what decision 8 lists for L2.
 Design gates: privacy/egress (what may reach a server elsewhere, and when it stops; in layer 4 the
 first network edge, in layer 5 the second) and storage (three new owner-only client records; in
 layer 4 the helper's records). Maintainer acknowledgement: the
@@ -257,9 +257,12 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
 - **O6 — stricter everywhere.** Anything incomparable or unknown, `task_close` against `days:N`
   included, asks again; L2 → L1 is a narrowing that reduces coverage, typed so receipts can show it
   in a later layer; exclusions narrow only by an exact pattern superset; key scope only by subset.
-- **O7 — an honest limit.** A held repository fenced from another repository's outside reads is
-  not counted on receipts in layer 2; the count lands with level-L2 provenance (layer 6), since it
-  needs a workspace-agent reply reason on the wire.
+- **O7 — an honest limit, counted from layer 6.** A held repository fenced from another
+  repository's outside reads is not counted on receipts in layer 2. From layer 6 the workspace
+  agent's outside-read answers carry the count (`OutsideInputsRead.fenced`,
+  `OutsideSnapshotsRead.fenced`, control 2.10.0 amended in place), and a level-L2 task's receipt
+  shows it with its evidence provenance (ADR-054 decision 14); a level-L1 task's receipt still
+  does not.
 - **O8 — owner actions only.** The credential generation bumps on `login`, `logout` and `remove`,
   never on an automatic token refresh. A credential change ends every remote connection, the
   helper's relay included, from layer 4 on (built: for an SSH target the owner's `server remove`
@@ -291,19 +294,19 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
   register its workspace with the helper (its own connection answers its live calls) and adds
   only a server on this computer (an SSH or HTTPS server is added in a terminal, where OpenSSH can
   ask or the API key is typed).
-- **Level L2 (layer 6; [ADR-054](ADR-054-level-l2-the-server-copy.md)), built and unreleased**
-  (`protocol.server_copy.L2_RELEASED` is `False`): code sync in the helper only (design v2 section
+- **Level L2 (layer 6; [ADR-054](ADR-054-level-l2-the-server-copy.md)), built and released**
+  (`protocol.server_copy.L2_RELEASED` is `True`): code sync in the helper only (design v2 section
   4.2), with no sync while the gate refuses (the gate runs again and the hold is checked before
   anything is read for a bundle); stopping future sends and forgetting retained copies kept apart
-  (design v2 section 8.10; FR-7), forget being the only way to remove what was sent; consent at L2
-  with a retention chosen among those offered; the revision on every sync (named by the server,
-  checked by the helper and at the server's commit); and the owner's per-repository choices, in a
-  record of their own rather than the per-target repository map (ADR-054, *Owner questions*).
-  **Still open:** the `[server]` configuration table offering L2 (it needs config 1.4.0); reads
-  from the copy; task pins and the `task_close` expiry; per-evidence provenance on receipts with
-  the receipt count of fenced reads (O7) and the receipt line for a narrowing that reduced
-  coverage; and deleting the excerpts derived from a forgotten copy (a storage design gate). L2
-  stays unreleased until they exist.
+  (design v2 section 8.10; FR-7), forget being the only way to remove what was sent, and it erases
+  the excerpts tasks derived from the copy too; consent at L2 with a retention chosen among those
+  offered; the revision on every sync (named by the server, checked by the helper and at the
+  server's commit); the owner's per-repository choices, in a record of their own rather than the
+  per-target repository map (ADR-054, *Owner rulings*); the `[server.code_copy]` table offering
+  L2, as config 1.4.0; reads from the copy, task pins and the `task_close` expiry; and
+  per-evidence provenance on receipts with the receipt count of fenced reads (O7). **Still open:**
+  the receipt line for a narrowing that reduced coverage (the consent records it, and `server
+  status` shows it, `coverage_reduced`).
 - **Lifecycle (layer 7):** upgrade over running bridges, helpers and REST gateways, the WAN timing
   gate, and the host × surface × operating system acceptance rows for the hold, the generation and
   the helper (FR-6), and for a service restarted under a new profile revision. macOS (the helper's
@@ -327,8 +330,9 @@ counted on its own, section 2.4) and its revision.
   unknown member or value refuses the whole document, so nothing the client does not understand
   can be agreed to.
 - **Where the offer comes from (layer 3's decision).** Levels are pinned by the release: L1
-  offered and required (a server elsewhere always keeps the tasks), L2 never offered before
-  layer 6, which adds a configuration table for it. Review egress is derived from the server's own
+  offered and required (a server elsewhere always keeps the tasks); from layer 6, L2 offered
+  too when the server owner's `[server.code_copy]` table (config 1.4.0) enables an offer
+  (ADR-054 decision 16). Review egress is derived from the server's own
   `config.toml` (its semantic capability and provider), the settings that decide whether it can
   reach an AI provider at all, so the profile never understates it: an external provider states
   `server_policy` (its owner's privacy policy decides) and names, by closed tokens, every provider
@@ -403,8 +407,9 @@ counted on its own, section 2.4) and its revision.
   outside-read question, and take the typed name; the terminal interface reads it on its loop
   thread (SRV-6). Agents only ever get the `remote_reconsent` directive.
 - **The per-repository override map** is the per-target `repositories.json` of decision 5's hold:
-  with one remote level its only override is L0 (`keep`); layer 6 adds L1/L2 entries with their
-  own consent.
+  with one remote level its only override is L0 (`keep`); layer 6 keeps it at `/1` and records
+  the owner's per-repository L2 choices in a record of their own, `config/code-copy.json`
+  (ADR-054 decision 10 and owner ruling 4).
 
 ### 11. The helper's workspace registration API (layer 3)
 

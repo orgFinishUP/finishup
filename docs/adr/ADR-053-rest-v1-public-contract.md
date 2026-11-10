@@ -225,7 +225,11 @@ contract 1.0.0, still unreleased, gains the claim-bound `code_copy` method (a re
 copy, `status` or `forget`) in the `agent` scope and so in `operator`, since making a server keep
 less is never an operator privilege. Because the contract is unreleased, its entry in
 `fixtures/service/rest-api-manifests.case.json` was amended in place rather than added as a new
-version (decision 5). Level L2 itself stays unreleased, so no server answers it yet.
+version (decision 5). Layer 6's second part amends the same entry's digest in place again, for
+the optional `evidence_provenance` member of receipt-result 1.5.0 (unreleased; ADR-054 decision
+14); `code_copy` itself is unchanged. A
+server answers it once its owner's `[server.code_copy]` table offers level L2 (ADR-054 decision
+16).
 
 ### 7. API keys
 
@@ -549,10 +553,10 @@ advertises.
    follow-up.
 8. A receipt's frozen version slice holds 64 entries: the next layer that adds operation schemas
    needs a receipt-document version bump.
-9. Not released: the server copy and its code sync over REST (built in layer 6 and kept
-   unreleased, ADR-054). Not built: the WAN timing gate and an upgrade over running gateways and
-   helpers (layer 7); adding an HTTPS server from the terminal interface; OAuth credential
-   sources; an official service (another repository).
+9. The server copy and its code sync over REST are built and released in layer 6 (ADR-054),
+   offered only by a server whose owner enables it. Not built: the WAN timing gate and an upgrade
+   over running gateways and helpers (layer 7); adding an HTTPS server from the terminal
+   interface; OAuth credential sources; an official service (another repository).
 
 ## Reverse states
 

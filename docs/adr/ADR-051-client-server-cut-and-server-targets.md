@@ -17,7 +17,7 @@ connection styles, SSH discovery and the host key OpenSSH verified as the endpoi
 layer 5. **Layer 5** opens them over REST v1, the public network contract recorded in
 [ADR-053](ADR-053-rest-v1-public-contract.md), with the gateway and native server edges, API keys
 and the compatibility window (*Built in layer 5* below; ADR-052 decisions 20 to 23). **Layer 6**
-builds level L2's server copy, unreleased in this build, recorded in
+builds level L2's server copy and releases it, recorded in
 [ADR-054](ADR-054-level-l2-the-server-copy.md) (*Built in layer 6* below). Design
 gates: protocol (control
 envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
@@ -112,7 +112,7 @@ every later layer, document and surface uses the same ones.
 
 | Axis | Values | Chosen by |
 |---|---|---|
-| **Level** — where the work happens | **L0 local**: everything on this computer (the default, unchanged). **L1 code-here**: the server keeps tasks, ledger and review; this computer's workspace agent answers the server's eighteen bounded workspace operations (decision 5). **L2 server-copy**: the server also keeps a synced copy of the repository and reads it itself; approved checks still run on this computer. | The user, per server, with a per-repository override, within what the server offers. |
+| **Level** — where the work happens | **L0 local**: everything on this computer (the default, unchanged). **L1 code-here**: the server keeps tasks, ledger and review; this computer's workspace agent answers the server's eighteen bounded workspace operations (decision 5). **L2 server-copy**: the server also keeps a synced copy of the repository, which this computer's helper sends it, and reads evidence from it itself; outside reads and approved checks are still answered on this computer (ADR-054). | The user, per server, with a per-repository override, within what the server offers. |
 | **Connection style** — how this computer reaches the server | **unix**: the owner-only Unix endpoint of a local or named-local root (today's code path). **relay**: client processes reach the server through one local background helper per server, which holds the key and a warm upstream. **direct**: each client process dials the server itself. | The client, from what the server offers; relay is the default for SSH and HTTPS, direct an advanced option. |
 | **Server edge** — how the server is reached | **ssh**: `sshd` forwards a stream-local channel into the owner-only control socket (no API key). **gateway**: a separate same-user process with no vault re-enters the service through its control socket. **native**: a listener inside the service process. | The server's owner. |
 
@@ -335,24 +335,28 @@ against both edges over real TLS, and an end-to-end run of the CLI).
 
 ### Built in layer 6, and not yet built
 
-The record is [ADR-054](ADR-054-level-l2-the-server-copy.md). **Level L2 stays unreleased**
-(`protocol.server_copy.L2_RELEASED` is `False`; an architecture test pins it): no server profile
-offers L2, `--level L2` is refused `server_level_unavailable`, the level options and `finishup
-server code` are hidden from help, no helper declares the sync operations and no service keeps
-copies. Every surface behaves as in layer 5.
+The record is [ADR-054](ADR-054-level-l2-the-server-copy.md). **Level L2 is released**
+(`protocol.server_copy.L2_RELEASED` is `True`; `tests/unit/architecture/test_level_l2_released.py`
+names every protection it rests on), and level L1 stays the default byte for byte: a server offers
+L2 only when its owner's `[server.code_copy]` table (config 1.4.0) enables an offer, and a client
+sends a copy only after its owner consents at L2 on the trusted console.
 
-**Built, exercised in process and in a real-network harness that turns L2 on in its own process
-only:** the `git-bundle-1` wire format and its one verifier; the sanitized exporter with its
+**Built:** the `git-bundle-1` wire format and its one verifier; the sanitized exporter with its
 always-excluded names and content scan; the pull sync, two workspace operations in a new `copy`
 family (decision 5's catalogue grows from eighteen operations to twenty) answered only by the
 target's helper after the gate runs again; the server's encrypted copy store with its quotas,
-forget and expiry; the claim-bound `code_copy` method; consent at L2 with a retention; and the
-owner's per-repository choices.
+forget and expiry (`days:N` and `task_close`); the claim-bound `code_copy` method; consent at L2
+with a retention; the owner's per-repository choices; reads served from a pinned snapshot of the
+copy, stale reads while the client is offline, and approved checks and outside reads still
+answered by the client's agent; the subject-state commitment and `code_snapshot_mismatch`;
+per-evidence provenance in every receipt rendering, with the count of fenced reads (O7); the
+erasure of the excerpts derived from a forgotten copy, with a "content forgotten" marker; and
+`server code forget --all`, `server code allow list|remove` and `server remove` offering to forget
+first. The write side ran over real networks on Linux; the rest is exercised in process.
 
-**Not yet built:** reads from the copy (every read still goes to the client's workspace agent, as
-at L1), task pins and the `task_close` expiry, per-evidence provenance on receipts, deleting the
-excerpts derived from a forgotten copy, the `[server]` configuration table that would make an
-offer, and any macOS or WSL 2 run (ADR-054, *Not built*); then layer 7's lifecycle validation.
+**Not yet built:** the terminal interface's L2 flows (CLI only), any macOS or WSL 2 run, and a
+Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*); then
+layer 7's lifecycle validation.
 
 ## Decisions
 
@@ -660,6 +664,9 @@ remote kinds only, so they are dormant in layer 1, where the `server folders` gr
     `read_text_beneath`, `list_beneath`, `lstat_candidates`;
   - **observation:** `open_workspace` (returns an opaque remote handle), `load_check_policy`,
     `subject_state_capture`, `list_changed_paths`, `inspect`, `run_approved_check`.
+  - **copy** (layer 6, [ADR-054](ADR-054-level-l2-the-server-copy.md) decision 4):
+    `code_sync_prepare` and `code_sync_read`, level L2's pull sync, declared only by the target's
+    helper; twenty operations in all.
 - **Real adapters, existing fences.** The agent runs each operation against the same local
   adapters the service uses today, with all their fences: owner-UID checks, ignore rules, link
   refusal, object verification, size and time bounds, the approved-check sandbox. Two
@@ -1559,8 +1566,9 @@ it still refuses before the console for a kind that is closed.
    entry is dropped for its size.
 4. A request already under way may finish; open connections end within about a second. "Nothing
    more", never "never sent"; what the server received stays there.
-5. Fencing covers recorded worktrees only (at most eight per repository), and a fenced read is not
-   counted on receipts (O7; the count lands with level-L2 provenance).
+5. Fencing covers recorded worktrees only (at most eight per repository). A fenced read is
+   counted only on the receipt of a level-L2 task, whose evidence account carries it (O7;
+   ADR-054 decision 14); a level-L1 task's receipt does not count it.
 6. Connections that name no repository are not held.
 7. A same-user process can edit either record; the trusted console stops agents from using
    FinishUP's own commands, not same-user file writes. A hand edit does end open connections
@@ -1823,7 +1831,8 @@ client's wait.
   `state/ssh-master.json` and its lock, `state/profile-refresh-requested` and `log/helper.stderr`
   (INTERFACES, *SSH servers and the helper*). Socket paths may hold spaces (the default root on
   macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. From
-  layer 6 the helper also answers level L2's code-sync calls, which stay unreleased (ADR-054).
+  layer 6 the helper also answers level L2's code-sync calls for a target consented at L2
+  (ADR-054).
 - **SSH edge.** `sshd` on the server must allow stream-local forwarding; it connects to the
   server's owner-only control socket as the login user, so the service's peer-UID check passes
   unchanged and the SSH login is the service owner (ADR-008 amendment, layer 4).
