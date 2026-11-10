@@ -70,6 +70,13 @@ _FORBIDDEN: Final = (
     "finishup.gateway",
     "starlette",
     "uvicorn",
+    # ADR-054 (layer 6, design v2 section 8.9): level L2's exporter, its content scan, the helper's
+    # sync responder and the server's copy store never load on a hook's path: hooks never sync.
+    "finishup.client.code_export",
+    "finishup.client.code_secrets",
+    "finishup.client.code_sync",
+    "finishup.service.code_copy",
+    "finishup.service.code_store",
 )
 # Drift ceiling: the measured set after the diet is well under this, so a
 # future eager import shows up here even if it is not on the named list.
