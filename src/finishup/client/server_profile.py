@@ -101,8 +101,10 @@ __all__ = [
     "FetchedProfile",
     "ProfileSource",
     "consent_verdict",
+    "consented_endpoint_identity",
     "consented_host_key",
     "endpoint_origin",
+    "forget_cached_profile",
     "read_cached_profile",
     "read_consented_envelope",
     "record_consent",
@@ -441,6 +443,28 @@ def consented_host_key(root: Path) -> str | None:
     return envelope.endpoint.identity
 
 
+def consented_endpoint_identity(root: Path) -> tuple[str, str | None] | None:
+    """The endpoint identity the owner's consent for the target at ``root`` is bound to.
+
+    ``(identity_type, identity)`` of the consented envelope's endpoint: for an HTTPS or port
+    target, ``tls_pin`` and the pin, ``tls_ca_file`` and the ``sha256:`` of the CA file's bytes,
+    or ``tls_system_ca`` and ``None``. A transport compares it with the trust it actually loaded
+    before any credential is sent (``client.rest_client``). ``None`` when the record, its consent
+    or the envelope cannot be read (fail closed). Never raises; file reads only.
+    """
+
+    try:
+        record = read_target(root)
+        if record is None or record.consent is None:
+            return None
+        envelope = read_consented_envelope(root, record.consent)
+    except Exception:  # noqa: BLE001 - a consent that cannot be read binds nothing
+        return None
+    if envelope is None:
+        return None
+    return envelope.endpoint.identity_type, envelope.endpoint.identity
+
+
 def consent_verdict(record: ServerTarget) -> ConsentVerdict:
     """The consent step for remote ``record`` (see the module text). Never raises; reads only."""
 
@@ -568,6 +592,19 @@ def record_consent(
     )
     write_target(root, consented)
     return consented
+
+
+def forget_cached_profile(root: Path) -> None:
+    """Remove the target's cached profile: what it says no longer describes this computer's
+    credential (a key stored without the server's answer, ``server login``). Until a profile is
+    fetched with the key now stored and compared with the consent, the consent step refuses
+    (``server_profile_changed``) and nothing is sent. The caller holds the registry lock; raises
+    ``TargetError`` when the cache cannot be removed."""
+
+    try:
+        _cache_path(root).unlink(missing_ok=True)
+    except OSError:
+        raise TargetError("target_root_unsafe") from None
 
 
 def refresh_profile(

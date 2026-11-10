@@ -94,9 +94,16 @@ def lab(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Lab]:
                 *,
                 key: str | None,
                 transport: Any = None,
+                consented: bool = False,
             ) -> RestTransport:
                 del transport
-                return original(cls, target, key=key, transport=httpx.ASGITransport(app=app.asgi()))
+                return original(
+                    cls,
+                    target,
+                    key=key,
+                    transport=httpx.ASGITransport(app=app.asgi()),
+                    consented=consented,
+                )
 
             monkeypatch.setattr(RestTransport, "for_target", classmethod(for_target))
             yield _Lab(record, root, backend, app, keys, key)
@@ -255,3 +262,76 @@ async def test_the_direct_style_reads_the_key_itself_and_sends_nothing_without_o
             await connect_service_on_demand(ControlClientKind.CLI, timeout_seconds=10.0)
         assert refused.value.phase == "remote_auth_failed"
         assert len(lab.backend.sessions) == before
+
+
+async def test_a_relayed_rest_stream_sends_nothing_once_its_repository_is_held(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3: the helper binds each relayed REST stream to the admission it was opened under and to
+    the repository its hello claims; a hold that lands after the relay was admitted withholds the
+    stream's next request, though the helper's target-wide admission still admits."""
+
+    import base64
+    from collections.abc import Mapping
+    from typing import cast
+
+    from finishup.client import repository_hold
+    from finishup.client.workspace_claim import worktree_digest
+    from finishup.service.control_protocol import decode_control_frame
+
+    salt = base64.b64decode(str(lab.record.claim_salt))
+    held: list[str] = []
+    def held_now(_root: Path, _target: str) -> tuple[str, ...]:
+        return tuple(held)
+
+    monkeypatch.setattr(repository_hold, "held_worktrees", held_now)
+    hello: dict[str, object] = dict(
+        decode_control_frame(hello_frame(agent=True, server_profile=TEST_REVISION))
+    )
+    claim = dict(cast(Mapping[str, object], hello["workspace_claim"]))
+    claim["worktree"] = worktree_digest("/work/held", salt)
+    hello["workspace_claim"] = claim
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh)
+    client, local = _pair()
+    relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+    try:
+        async with asyncio.timeout(10):
+            await client.send_all(encode_control_frame(hello))
+            assert await client.receive(65_536)  # admitted: session and agent registered
+            held.append("/work/held")
+            await client.send_all(_call_frame())
+            answered = await client.receive(65_536)
+        # The stream ends (its agent's next poll is withheld too) or answers the call as never
+        # sent; either way nothing more of that repository reached the server.
+        assert answered == b"" or b'"code":"service_unavailable"' in answered
+        assert lab.backend.calls == []
+        assert len(lab.backend.agents) == 1
+    finally:
+        await client.aclose()
+        await asyncio.wait_for(relay, timeout=10)
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_rest_profile_refresh_asks_before_each_of_its_requests(lab: _Lab) -> None:
+    """B2: the helper's background refresh stops between its requests once it may not send
+    (here: the helper is stopping after discovery was asked)."""
+
+    from finishup.client import helper as helper_module
+
+    helper = Helper(lab.root, lab.record)
+    asked: list[bool] = []
+    original = helper._may_refresh_send  # pyright: ignore[reportPrivateUsage]
+
+    def may_send() -> bool:
+        allowed = original()
+        asked.append(allowed)
+        if len(asked) == 1:
+            helper.request_stop("stop_requested")  # lands while discovery is answered
+        return allowed
+
+    with pytest.raises(helper_module.UpstreamUnavailable):
+        await helper_module._refresh_over_rest(  # pyright: ignore[reportPrivateUsage]
+            lab.record, may_send=may_send
+        )
+    assert asked == [True, False]
+    assert lab.backend.sessions == []

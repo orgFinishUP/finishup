@@ -100,6 +100,8 @@ class _Server:
     base: Path
     discovery: bytes | None = None
     reachable: bool = True
+    # When set, ``GET /v1/server`` answers ``200`` with these bytes (a broken or foreign server).
+    profile_body: bytes | None = None
 
     def key_file(self, key: str | None = None, name: str = "laptop.key") -> Path:
         path = self.base / name
@@ -140,6 +142,10 @@ def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Server]:
                     await send({"type": "http.response.start", "status": 200, "headers": []})
                     await send({"type": "http.response.body", "body": served.discovery})
                     return
+                if served.profile_body is not None and scope.get("path") == "/v1/server":
+                    await send({"type": "http.response.start", "status": 200, "headers": []})
+                    await send({"type": "http.response.body", "body": served.profile_body})
+                    return
                 await inner(scope, receive, send)
 
             original = RestTransport.for_target.__func__  # type: ignore[attr-defined]
@@ -150,9 +156,16 @@ def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Server]:
                 *,
                 key: str | None,
                 transport: Any = None,
+                consented: bool = False,
             ) -> RestTransport:
                 del transport
-                return original(cls, target, key=key, transport=httpx.ASGITransport(app=gate))
+                return original(
+                    cls,
+                    target,
+                    key=key,
+                    transport=httpx.ASGITransport(app=gate),
+                    consented=consented,
+                )
 
             monkeypatch.setattr(RestTransport, "for_target", classmethod(for_target))
             yield served
@@ -348,3 +361,4 @@ def test_status_names_the_https_connection(
     assert status.exit_code == 0, status.output
     connection = json.loads(status.stdout)["target"]["connection"]
     assert connection["style"] == "relay" and connection["styles_offered"] == ["relay", "direct"]
+

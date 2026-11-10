@@ -24,7 +24,7 @@ from builders.server_targets import ambient_home
 from builders.tls_material import TlsMaterial, make_tls
 from finishup.client import rest_client
 from finishup.client.credentials import KeyringOrFileCredential
-from finishup.client.rest_client import RestTransport, RestUnavailable, load_key, observed_identity
+from finishup.client.rest_client import RestTransport, RestUnavailable, load_key, load_trust
 from finishup.client.targets import new_remote_target, read_target, registry_lock, write_target
 from finishup.rest.listener import RestListener
 
@@ -181,10 +181,10 @@ def test_the_observed_identity_is_the_pin_the_ca_digest_or_the_system_store(
                 "anchored", "https", base_url="https://b.example", ca_file=str(tls.ca_file)
             )
             system, _ = new_remote_target("system", "https", base_url="https://c.example")
-        assert observed_identity(pinned) == ("tls_pin", tls.pin)
-        kind, digest = observed_identity(anchored)
+        assert load_trust(pinned).endpoint == ("tls_pin", tls.pin)
+        kind, digest = load_trust(anchored).endpoint
         assert kind == "tls_ca_file" and digest is not None and digest.startswith("sha256:")
-        assert observed_identity(system) == ("tls_system_ca", None)
+        assert load_trust(system).endpoint == ("tls_system_ca", None)
 
 
 async def test_the_key_is_read_where_the_record_says_now_and_off_the_event_loop(
@@ -233,3 +233,118 @@ async def test_the_key_is_read_where_the_record_says_now_and_off_the_event_loop(
         finally:
             release.set()
             ticker.cancel()
+
+
+def test_a_key_read_that_never_returns_cannot_hold_the_process_open() -> None:
+    """B4: a blocked store read (a locked keyring's prompt) is abandoned when its budget ends;
+    neither ``asyncio.run``'s shutdown nor the interpreter's exit waits for it, so a direct-style
+    hook still ends within its budget."""
+
+    import subprocess
+    import sys
+    import time
+
+    program = (
+        "import asyncio, threading\n"
+        "from finishup.client import rest_client\n"
+        "rest_client._read_key = lambda _target: threading.Event().wait() or 'never'\n"
+        "async def main():\n"
+        "    try:\n"
+        "        await rest_client.load_key('t_00000000', seconds=0.2)\n"
+        "    except rest_client.RestUnavailable as error:\n"
+        "        print(error.reason, flush=True)\n"
+        "asyncio.run(main())\n"
+    )
+    started = time.monotonic()
+    finished = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert finished.returncode == 0, finished.stderr
+    assert finished.stdout.strip() == "remote_auth_failed"
+    assert time.monotonic() - started < 15
+
+
+async def test_a_replaced_ca_file_sends_nothing_until_the_owner_agrees_again(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, tls: TlsMaterial
+) -> None:
+    """B1 over real TLS: the owner consented to one CA; the file now holds another CA that does
+    verify this server. A connection made on the owner's behalf compares the identity of the
+    exact bytes it loaded with the consented one before any byte: nothing reaches the server."""
+
+    import hashlib
+
+    from builders.server_profiles import consent_to
+
+    consented_ca = make_tls(tls.ca_file.parent / "consented").ca_file.read_bytes()
+    with ambient_home(monkeypatch):
+        anchor = Path.home() / "anchor-ca.pem"
+        anchor.write_bytes(consented_ca)
+        with registry_lock():
+            record, _root = new_remote_target(
+                "lab", "https", base_url=server.url, ca_file=str(anchor)
+            )
+        consent_to(
+            record,
+            identity="sha256:" + hashlib.sha256(consented_ca).hexdigest(),
+            identity_type="tls_ca_file",
+        )
+        # Replaced: the server's own CA, which does verify it.
+        anchor.write_bytes(server.tls.ca_file.read_bytes())
+        with pytest.raises(RestUnavailable) as refused:
+            RestTransport.for_target(record, key="fuk_0123456789ab_" + "A" * 43, consented=True)
+        assert refused.value.reason == "remote_identity_changed"
+        assert server.seen == []
+        # The owner's own discovery (no consent bound yet) observes the CA it actually loaded.
+        unbound = RestTransport.for_target(record, key=None)
+        try:
+            assert (await unbound.request("GET", "/discovered")).status == 200
+            assert unbound.identity == (
+                "tls_ca_file",
+                "sha256:" + hashlib.sha256(server.tls.ca_file.read_bytes()).hexdigest(),
+            )
+        finally:
+            await unbound.aclose()
+        # Agreed again to the CA in the file now: the bound connection is made.
+        consent_to(
+            record,
+            identity="sha256:" + hashlib.sha256(server.tls.ca_file.read_bytes()).hexdigest(),
+            identity_type="tls_ca_file",
+        )
+        bound = RestTransport.for_target(record, key="fuk_0123456789ab_" + "A" * 43, consented=True)
+        try:
+            assert (await bound.request("GET", "/bound")).status == 200
+        finally:
+            await bound.aclose()
+    assert server.seen == ["/discovered", "/bound"]
+
+
+async def test_the_identity_is_the_bytes_the_tls_context_holds(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, tls: TlsMaterial
+) -> None:
+    """B1: the CA file is read once per transport: replacing it afterwards changes neither the
+    trust that transport verifies with nor the identity it reports."""
+
+    import hashlib
+
+    other_ca = make_tls(tls.ca_file.parent / "other").ca_file.read_bytes()
+    with ambient_home(monkeypatch):
+        anchor = Path.home() / "anchor-ca.pem"
+        anchor.write_bytes(server.tls.ca_file.read_bytes())
+        with registry_lock():
+            record, _root = new_remote_target(
+                "lab", "https", base_url=server.url, ca_file=str(anchor)
+            )
+        transport = RestTransport.for_target(record, key=None)
+        anchor.write_bytes(other_ca)
+        try:
+            assert (await transport.request("GET", "/same-trust")).status == 200
+            assert transport.identity[1] == (
+                "sha256:" + hashlib.sha256(server.tls.ca_file.read_bytes()).hexdigest()
+            )
+        finally:
+            await transport.aclose()
+        assert load_trust(record).identity == "sha256:" + hashlib.sha256(other_ca).hexdigest()

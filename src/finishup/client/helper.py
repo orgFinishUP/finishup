@@ -42,11 +42,13 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
+import hmac
 import os
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -257,8 +259,10 @@ class RestUpstream:
     Each stream is a ``client.rest_stream.RestControlStream`` (the frame-to-REST mapping) over one
     warm ``RestTransport`` (TLS and keep-alive shared by every relayed connection). The key is read
     off the event loop (A-KEYRING-LOOP) from where the record says it lives now, again whenever
-    the owner's credential generation moved (A-CRED-STALE); nothing is sent while ``may_send``
-    refuses (A-STOP-DELETE). The server's own edge starts its service, so this never does.
+    the owner's credential generation moved (A-CRED-STALE); the transport is bound to the
+    consented endpoint identity (its CA bytes or pin, ``RestTransport.for_target(consented=True)``)
+    and made again whenever that consent changes; nothing is sent while ``may_send`` refuses
+    (A-STOP-DELETE). The server's own edge starts its service, so this never does.
     """
 
     def __init__(self, root: Path, record: ServerTarget, *, may_send: Callable[[], bool]) -> None:
@@ -280,9 +284,10 @@ class RestUpstream:
 
     async def ensure(self) -> None:
         from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
+        from finishup.client.server_profile import consented_endpoint_identity
 
         async with self._lock:
-            stamp = self._credential_stamp()
+            stamp = (self._credential_stamp(), consented_endpoint_identity(self._root))
             if self._transport is not None and not self._transport.closed:
                 if stamp == self._credential:
                     return
@@ -290,7 +295,7 @@ class RestUpstream:
                 self._transport = None
             try:
                 key = await load_key(self._record.target_id)
-                self._transport = RestTransport.for_target(self._record, key=key)
+                self._transport = RestTransport.for_target(self._record, key=key, consented=True)
             except RestUnavailable as error:
                 raise UpstreamUnavailable(error.reason) from None
             self._credential = stamp
@@ -335,9 +340,21 @@ _UPSTREAM_PHASES: Final = frozenset(
         "remote_incompatible",
         "remote_service_not_running",
         "remote_unreachable",
+        "repository_egress_held",
+        "server_authorization_changed",
         "server_profile_changed",
     }
 )
+
+
+def _claimed_worktree(hello: Mapping[str, object]) -> str | None:
+    """The keyed worktree digest a hello's claim names (``None`` without a claim)."""
+
+    claim = hello.get("workspace_claim")
+    if not isinstance(claim, Mapping):
+        return None
+    worktree = cast(Mapping[str, object], claim).get("worktree")
+    return worktree if type(worktree) is str else None
 
 
 class _RelayEnded(Exception):
@@ -586,9 +603,11 @@ async def _refresh_over_ssh(record: ServerTarget) -> None:
     await asyncio.to_thread(record_it)
 
 
-async def _refresh_over_rest(record: ServerTarget) -> None:
+async def _refresh_over_rest(
+    record: ServerTarget, *, may_send: Callable[[], bool] | None = None
+) -> None:
     """Fetch an HTTPS server's profile (``GET /v1/server``) and record it under the registry
-    lock (ADR-053)."""
+    lock (ADR-053): over the consented trust only, asking ``may_send`` before each request."""
 
     from finishup.client.rest_client import RestUnavailable
     from finishup.client.rest_discovery import fetch_profile_async
@@ -596,7 +615,9 @@ async def _refresh_over_rest(record: ServerTarget) -> None:
     from finishup.client.targets import registry_lock
 
     try:
-        fetched: FetchedProfile = await fetch_profile_async(record)
+        fetched: FetchedProfile = await fetch_profile_async(
+            record, consented=True, may_send=may_send
+        )
     except RestUnavailable as error:
         raise UpstreamUnavailable(error.reason) from None
 
@@ -652,7 +673,9 @@ class Helper:
         self._refresh_interval = refresh_interval
         self._agent_opener = agent_opener
         self._refresher: Refresher = refresher or (
-            _refresh_over_rest if record.kind in _REST_KINDS else _refresh_over_ssh
+            functools.partial(_refresh_over_rest, may_send=self._may_refresh_send)
+            if record.kind in _REST_KINDS
+            else _refresh_over_ssh
         )
         self._tick = tick or (lambda: asyncio.sleep(min(_TICK_SECONDS, drain_interval)))
         self._clock = clock
@@ -839,7 +862,12 @@ class Helper:
         return admission.refusal() is None
 
     async def _open_channel(
-        self, hello: bytes, admission: ConnectionAuthorization, *, restart: bool
+        self,
+        hello: bytes,
+        admission: ConnectionAuthorization,
+        *,
+        restart: bool,
+        bound: Callable[[], str | None] | None = None,
     ) -> tuple[ControlStream, bytes]:
         """One upstream stream with the hello sent, and the first answered bytes.
 
@@ -850,7 +878,7 @@ class Helper:
         """
 
         for attempt in range(2):
-            upstream, first = await self._attempt(hello, admission)
+            upstream, first = await self._attempt(hello, admission, bound)
             if first:
                 return upstream, first
             named = await _stream_failure(upstream)
@@ -871,7 +899,10 @@ class Helper:
         raise UpstreamUnavailable("remote_service_not_running")
 
     async def _attempt(
-        self, hello: bytes, admission: ConnectionAuthorization
+        self,
+        hello: bytes,
+        admission: ConnectionAuthorization,
+        bound: Callable[[], str | None] | None = None,
     ) -> tuple[ControlStream, bytes]:
         """One bounded upstream attempt: the stream and the server's first answer (``b""``: none).
 
@@ -885,6 +916,11 @@ class Helper:
             async with asyncio.timeout(self._setup_seconds):
                 await self._upstream.ensure()
                 upstream = await self._upstream.open_stream()
+                bind = getattr(upstream, "bind", None)
+                if bound is not None and callable(bind):
+                    # A stream that sends on its own (REST: retries, long-polls, the agent's
+                    # registration) asks this relay's own admission and repository first.
+                    bind(bound)
                 if not self._may_forward(admission):
                     self._lapse(admission)
                     raise _RelayEnded
@@ -927,9 +963,13 @@ class Helper:
             admission = self._admitted()
             if admission is None:
                 return
+            worktree = _claimed_worktree(hello)
             try:
                 upstream, first = await self._open_channel(
-                    encode_control_frame(hello), admission, restart=not own
+                    encode_control_frame(hello),
+                    admission,
+                    restart=not own,
+                    bound=lambda: self._relay_refusal(admission, worktree),
                 )
             except UpstreamUnavailable as error:
                 self._write_status("unavailable", error.reason)
@@ -953,6 +993,39 @@ class Helper:
                     await upstream.aclose()
             with contextlib.suppress(Exception):
                 await local.aclose()
+
+    def _relay_refusal(
+        self, admission: ConnectionAuthorization, worktree: str | None
+    ) -> str | None:
+        """What withholds a relayed stream's own next request (design v2 section 8.3).
+
+        The admission the relay was opened under (zero-network, a lapse, the helper stopping:
+        ``server_authorization_changed``), then the repository its hello claims: a worktree of
+        a repository held or kept from this target now (``client.repository_hold``, the fence
+        the helper's agents use) is ``repository_egress_held``. The client checks its own exact
+        repository before each frame it writes; this covers what a REST stream sends between
+        them (a lost answer's resend, ``operation_limit`` retries, polls).
+        """
+
+        if not self._may_forward(admission) or not self._may_send():
+            return "server_authorization_changed"
+        if worktree is not None and self._worktree_held(worktree):
+            return "repository_egress_held"
+        return None
+
+    def _worktree_held(self, worktree: str) -> bool:
+        from finishup.client.repository_hold import held_worktrees
+        from finishup.client.workspace_claim import worktree_digest
+
+        try:
+            salt = base64.b64decode(cast(str, self._record.claim_salt), validate=True)
+            for path in held_worktrees(self._root, self._record.target_id):
+                with contextlib.suppress(ValueError):
+                    if hmac.compare_digest(worktree_digest(path, salt), worktree):
+                        return True
+        except (TypeError, ValueError, binascii.Error):
+            return True  # a salt that cannot be read fences everything
+        return False
 
     async def _pump_checked(
         self, source: ControlStream, sink: ControlStream, admission: ConnectionAuthorization
@@ -1125,6 +1198,14 @@ class Helper:
             and used is not None
             and now - used < self._refresh_interval
         )
+
+    def _may_refresh_send(self) -> bool:
+        """Asked before each request of a REST profile refresh: not stopping, not zero-network,
+        and gate steps 2 to 4 (``_may_refresh``) still pass."""
+
+        if self._stop.is_set() or self._zero_network():
+            return False
+        return self._may_refresh()
 
     def _may_refresh(self) -> bool:
         """Gate steps 2 to 4 only: the refresh is how the consent catches up with the server."""

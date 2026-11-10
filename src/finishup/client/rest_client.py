@@ -9,7 +9,13 @@ target's helper (its relay and its background agents), and discovery and profile
   digest right after the handshake and before any request byte (the pin replaces chain and
   host-name validation, as the owner chose; approach A's pinned network backend), ``--ca-file``
   trusts that CA only (host name checked), and otherwise this computer's system store. A CA file
-  that cannot be read sends nothing.
+  that cannot be read sends nothing. The CA file is read **once** per transport (``load_trust``):
+  the same bytes become the TLS context and the identity the transport reports, so the identity a
+  consent binds is exactly the trust that verifies the server. Every connection made on the
+  owner's behalf after the consent (``for_target(..., consented=True)``: the helper, the direct
+  style, the profile refresh, a login check) compares that identity with the consented one before
+  any byte is sent: a CA file replaced since is ``remote_identity_changed`` until the owner agrees
+  again.
 * **No proxies and no redirects**: proxy variables are ignored (the hop goes only where the
   record says) and a ``3xx`` is never followed, so no credential is ever carried elsewhere
   (design v2 section 8.8).
@@ -30,7 +36,9 @@ this contract (``remote_incompatible``), no service answering there
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import re
 import ssl
 import threading
 from collections.abc import Iterable, Mapping
@@ -49,6 +57,7 @@ from finishup.rest.contract import (
     current_api_manifest,
     encode_claim_header,
     encode_revision_header,
+    parse_api_key,
     parse_rest_error,
 )
 
@@ -62,8 +71,9 @@ __all__ = [
     "RestAnswer",
     "RestTransport",
     "RestUnavailable",
+    "TlsTrust",
     "load_key",
-    "observed_identity",
+    "load_trust",
 ]
 
 # The largest control frame plus room for its envelope (the REST answer is the frame's body).
@@ -192,48 +202,87 @@ class _PinnedTransport(httpx.AsyncHTTPTransport):
         )
 
 
-def _context_for(ca_file: str | None) -> ssl.SSLContext:
-    """The verifying context: the recorded CA only, or this computer's system store."""
+_MAX_CA_FILE_BYTES: Final = 1_048_576
+_PEM_CERTIFICATE: Final = re.compile(
+    rb"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n\t ]+-----END CERTIFICATE-----"
+)
 
-    try:
-        context = (
-            ssl.create_default_context()
-            if ca_file is None
-            else ssl.create_default_context(cafile=ca_file)
-        )
-    except (OSError, ssl.SSLError, ValueError):
-        # A CA file that was moved, is unreadable or holds no certificate verifies nobody.
-        raise RestUnavailable("remote_unreachable") from None
+
+@dataclass(frozen=True, slots=True)
+class TlsTrust:
+    """The trust one transport verifies a server with, and the endpoint identity it observes
+    (design v2 section 8.2): ``tls_pin`` and the pin, ``tls_ca_file`` and the ``sha256:`` of the
+    CA file's bytes as read for ``context``, or ``tls_system_ca`` and ``None``."""
+
+    identity_type: str
+    identity: str | None
+    context: ssl.SSLContext | None = None
+    pin: str | None = None
+
+    @property
+    def endpoint(self) -> tuple[str, str | None]:
+        return self.identity_type, self.identity
+
+
+def _verifying(context: ssl.SSLContext) -> ssl.SSLContext:
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
 
 
-def _transport(ca_file: str | None, tls_pin: str | None) -> httpx.AsyncBaseTransport:
+def _ca_trust(ca_file: str, *, build: bool) -> TlsTrust:
+    """One bounded read of the owner's CA file: its digest, and (``build``) a context holding
+    exactly the certificates in those bytes."""
+
+    try:
+        with open(ca_file, "rb") as handle:  # noqa: PTH123 - the owner's own file
+            data = handle.read(_MAX_CA_FILE_BYTES + 1)
+    except OSError:
+        # A CA file that was moved or is unreadable verifies nobody.
+        raise RestUnavailable("remote_unreachable") from None
+    if len(data) > _MAX_CA_FILE_BYTES:
+        raise RestUnavailable("remote_unreachable")
+    identity = "sha256:" + hashlib.sha256(data).hexdigest()
+    if not build:
+        return TlsTrust("tls_ca_file", identity)
+    blocks = _PEM_CERTIFICATE.findall(data)
+    if not blocks:
+        # A CA file that holds no certificate verifies nobody.
+        raise RestUnavailable("remote_unreachable")
+    try:
+        context = ssl.create_default_context(cadata=b"\n".join(blocks).decode("ascii"))
+    except (ssl.SSLError, ValueError):
+        raise RestUnavailable("remote_unreachable") from None
+    return TlsTrust("tls_ca_file", identity, _verifying(context))
+
+
+def _trust_for(ca_file: str | None, tls_pin: str | None, *, build: bool = True) -> TlsTrust:
     if tls_pin is not None:
-        return _PinnedTransport(tls_pin)
-    return httpx.AsyncHTTPTransport(verify=_context_for(ca_file), trust_env=False)
+        return TlsTrust("tls_pin", tls_pin, pin=tls_pin)
+    if ca_file is not None:
+        return _ca_trust(ca_file, build=build)
+    if not build:
+        return TlsTrust("tls_system_ca", None)
+    try:
+        context = ssl.create_default_context()
+    except (OSError, ssl.SSLError, ValueError):
+        raise RestUnavailable("remote_unreachable") from None
+    return TlsTrust("tls_system_ca", None, _verifying(context))
 
 
-def observed_identity(record: ServerTarget) -> tuple[str, str | None]:
-    """The endpoint identity a connection under ``record``'s trust observes (design v2 §8.2).
+def load_trust(record: ServerTarget) -> TlsTrust:
+    """The trust a connection under ``record`` verifies with, read now (see the module text).
 
-    ``tls_pin`` and its pin; ``tls_ca_file`` and the ``sha256:`` of the CA file's bytes (the
-    trust anchor the owner chose: replacing it changes the consent); ``tls_system_ca`` and none.
-    Raises ``RestUnavailable`` when the CA file cannot be read.
+    Raises ``RestUnavailable("remote_unreachable")`` when the CA file cannot be read or holds no
+    certificate.
     """
 
-    if record.tls_pin is not None:
-        return "tls_pin", record.tls_pin
-    if record.ca_file is not None:
-        try:
-            with open(record.ca_file, "rb") as handle:  # noqa: PTH123 - the owner's own file
-                data = handle.read(1_048_577)
-        except OSError:
-            raise RestUnavailable("remote_unreachable") from None
-        if len(data) > 1_048_576:
-            raise RestUnavailable("remote_unreachable")
-        return "tls_ca_file", "sha256:" + hashlib.sha256(data).hexdigest()
-    return "tls_system_ca", None
+    return _trust_for(record.ca_file, record.tls_pin)
+
+
+def _transport(trust: TlsTrust) -> httpx.AsyncBaseTransport:
+    if trust.pin is not None:
+        return _PinnedTransport(trust.pin)
+    return httpx.AsyncHTTPTransport(verify=cast(ssl.SSLContext, trust.context), trust_env=False)
 
 
 def _is_identity_failure(error: BaseException) -> bool:
@@ -279,12 +328,38 @@ async def load_key(target_id: str, *, seconds: float = 10.0) -> str:
     """The target's API key, read in a worker thread within ``seconds`` (A-KEYRING-LOOP).
 
     A store that does not answer in time (a locked keyring showing a prompt) is
-    ``remote_auth_failed`` for this attempt; the event loop never waits on it.
+    ``remote_auth_failed`` for this attempt; the event loop never waits on it. The read runs on a
+    daemon thread of its own, never the loop's default executor: a read still blocked when the
+    caller gives up is abandoned, so it can hold neither the loop's shutdown (``asyncio.run``
+    joins its default executor) nor the interpreter's exit, and a hook ends within its budget.
     """
 
+    loop = asyncio.get_running_loop()
+    answer: asyncio.Future[str] = loop.create_future()
+
+    def settle(value: str | None, failure: BaseException | None) -> None:
+        if answer.done():
+            return
+        if failure is not None:
+            answer.set_exception(failure)
+        else:
+            answer.set_result(cast(str, value))
+
+    def read() -> None:
+        try:
+            value = _read_key(target_id)
+        except BaseException as error:  # noqa: BLE001 - handed to the waiting loop
+            failure: BaseException | None = error
+            value = None
+        else:
+            failure = None
+        with contextlib.suppress(RuntimeError):  # the loop closed: nobody waits any more
+            loop.call_soon_threadsafe(settle, value, failure)
+
+    threading.Thread(target=read, name="finishup-key-read", daemon=True).start()
     try:
         async with asyncio.timeout(seconds):
-            return await asyncio.to_thread(_read_key, target_id)
+            return await answer
     except TimeoutError:
         raise RestUnavailable("remote_auth_failed") from None
 
@@ -303,11 +378,14 @@ class RestTransport:
         ca_file: str | None = None,
         tls_pin: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        trust: TlsTrust | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._key = key
+        # A transport handed in (a test's in-memory one) still reports the record's identity.
+        self._trust = trust or _trust_for(ca_file, tls_pin, build=transport is None)
         self._client = httpx.AsyncClient(
-            transport=transport or _transport(ca_file, tls_pin),
+            transport=transport or _transport(self._trust),
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(CONNECT_SECONDS, read=_REQUEST_READ_SECONDS),
@@ -325,16 +403,43 @@ class RestTransport:
         *,
         key: str | None,
         transport: httpx.AsyncBaseTransport | None = None,
+        consented: bool = False,
     ) -> RestTransport:
+        """A transport under ``record``'s trust, read now.
+
+        ``consented``: a connection made on the owner's behalf after the consent. The identity of
+        the trust just loaded (the CA file's bytes in this context, the pin, the system store)
+        must be the one the consented envelope names, else ``remote_identity_changed`` before any
+        byte is sent; no consent at all is ``remote_identity_changed`` too (nothing to bind).
+        """
+
         if record.base_url is None:
             raise RestUnavailable("remote_unreachable")
-        return cls(
-            record.base_url,
-            key=key,
-            ca_file=record.ca_file,
-            tls_pin=record.tls_pin,
-            transport=transport,
-        )
+        trust = _trust_for(record.ca_file, record.tls_pin, build=transport is None)
+        if consented:
+            from finishup.client.server_profile import consented_endpoint_identity
+            from finishup.client.targets import TargetError, target_root
+
+            try:
+                expected = consented_endpoint_identity(target_root(record.target_id))
+            except TargetError:
+                expected = None
+            if expected is None or expected != trust.endpoint:
+                raise RestUnavailable("remote_identity_changed")
+        return cls(record.base_url, key=key, transport=transport, trust=trust)
+
+    @property
+    def key_id(self) -> str | None:
+        """The id of the key this transport sends (``None`` without one)."""
+
+        parsed = parse_api_key(self._key)
+        return None if parsed is None else parsed.key_id
+
+    @property
+    def identity(self) -> tuple[str, str | None]:
+        """The endpoint identity of the trust this transport verifies with (``TlsTrust``)."""
+
+        return self._trust.endpoint
 
     @property
     def closed(self) -> bool:
@@ -375,18 +480,24 @@ class RestTransport:
         params: Mapping[str, str] | None = None,
         poll: bool = False,
         limit: int = MAX_RESPONSE_BYTES,
+        seconds: float | None = None,
     ) -> RestAnswer:
         """One request; its answer bounded to ``limit`` bytes.
 
-        ``poll`` gives a long-poll its longer read bound. Raises ``RestUnavailable`` for a transport
-        failure, a redirect or an answer past the bound; a ``rest-error`` refusal is an answer.
+        ``poll`` gives a long-poll its longer read bound; ``seconds``, when given, bounds the
+        connect and the read further (a caller's remaining deadline). Raises ``RestUnavailable``
+        for a transport failure, a redirect or an answer past the bound; a ``rest-error`` refusal
+        is an answer.
         """
 
         if self._closed:
             raise RestUnavailable("remote_unreachable")
-        timeout = httpx.Timeout(
-            CONNECT_SECONDS, read=_POLL_READ_SECONDS if poll else _REQUEST_READ_SECONDS
-        )
+        read = _POLL_READ_SECONDS if poll else _REQUEST_READ_SECONDS
+        connect = CONNECT_SECONDS
+        if seconds is not None:
+            read = max(0.001, min(read, seconds))
+            connect = max(0.001, min(connect, seconds))
+        timeout = httpx.Timeout(connect, read=read)
         try:
             async with self._client.stream(
                 method,

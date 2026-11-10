@@ -88,15 +88,20 @@ TEST_REVISION = _revision_of(profile_document())
 
 
 def fetched(
-    record: ServerTarget, document: dict[str, Any] | None = None, *, identity: str | None = None
+    record: ServerTarget,
+    document: dict[str, Any] | None = None,
+    *,
+    identity: str | None = None,
+    identity_type: str | None = None,
 ) -> FetchedProfile:
-    """``document`` as ``record``'s transport would hand it over (SSH pins a host key)."""
+    """``document`` as ``record``'s transport would hand it over (SSH pins a host key; an
+    HTTPS identity is a pin unless ``identity_type`` says otherwise)."""
 
     encoded = json.dumps(document or profile_document()).encode("utf-8")
     if record.kind == "ssh":
         return FetchedProfile(encoded, "ssh_host_key", identity or HOST_KEY)
     if identity is not None:
-        return FetchedProfile(encoded, "tls_pin", identity)
+        return FetchedProfile(encoded, identity_type or "tls_pin", identity)
     return FetchedProfile(encoded, "tls_system_ca", None)
 
 
@@ -106,6 +111,7 @@ def consent_to(
     *,
     lock: bool = True,
     identity: str | None = None,
+    identity_type: str | None = None,
 ) -> ServerTarget:
     """Record the owner's consent to ``document`` at level L1 for ``record``; the new record.
 
@@ -114,7 +120,7 @@ def consent_to(
     ``HOST_KEY``).
     """
 
-    profile = fetched(record, document, identity=identity)
+    profile = fetched(record, document, identity=identity, identity_type=identity_type)
 
     def write() -> ServerTarget:
         stored = targets.read_target(targets.target_root(record.target_id))

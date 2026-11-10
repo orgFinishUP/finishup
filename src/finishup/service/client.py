@@ -2767,7 +2767,9 @@ async def _connect_direct_rest(
 
     async def dial() -> ControlStream:
         try:
-            transport = RestTransport.for_target(record, key=key)
+            # Bound to the consented identity: a CA file replaced since is refused before the
+            # key is sent (``remote_identity_changed``).
+            transport = RestTransport.for_target(record, key=key, consented=True)
         except RestUnavailable as error:
             raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
         return RestControlStream(transport, may_send=may_send, owns_transport=True)

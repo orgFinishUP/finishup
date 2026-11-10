@@ -9,12 +9,17 @@ Design v2 sections 2.1, 2.2 and 8.8, for ``https`` and ``local_port`` targets:
    profile route ``/v1/server``, and serve this release's REST API manifest (U18); anything else
    is ``remote_incompatible`` and the key is never asked for. A redirect is never followed.
 2. **The profile, with the key.** ``GET /v1/server`` answers ``server-profile`` 1.0.0 with the
-   caller's key (id, scope, principal). The endpoint identity the consent binds to is what this
-   client's own trust observed (``rest_client.observed_identity``), never what the server says.
+   caller's key (id, scope, principal). It is validated here, before anything is made of it: a
+   document this release cannot read, or one naming another key than the one sent, is
+   ``remote_incompatible``. The endpoint identity the consent binds to is the identity of the trust
+   the transport verified with (``rest_client.TlsTrust``: the CA file's bytes as loaded into its
+   TLS context), never what the server says. A fetch made after the consent (the helper's
+   refresh, a login check) is bound to the consented identity before its first byte, and asks
+   ``may_send`` before each of its requests.
 3. **The key check** (``server login``, approach A's ``96cc87298``): the same profile fetch with
    the key being stored. A key the server refuses, a server whose certificate does not match the
-   recorded trust, or one of another contract stores nothing; a server that does not answer keeps
-   the key as not verified yet.
+   recorded trust, or one of another contract (an invalid profile included) stores nothing; a
+   server that does not answer keeps the key as not verified yet.
 
 ``RestProfileSource`` is the ``client.server_profile.ProfileSource`` of both kinds. Never imported
 or run on a hook's path (design v2 section 8.9).
@@ -24,12 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from finishup.client.rest_client import RestTransport, RestUnavailable, load_key, observed_identity
+from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
 from finishup.client.server_profile import FetchedProfile
+from finishup.protocol.server_profile import ProfileError, profile_from_json
 from finishup.rest.contract import (
     MAX_DISCOVERY_BYTES,
     MAX_DOCUMENT_BYTES,
@@ -84,8 +90,32 @@ async def discover(transport: RestTransport) -> Discovery:
     return discovery
 
 
-async def _profile(transport: RestTransport, record: ServerTarget) -> FetchedProfile:
+def _ask(may_send: Callable[[], bool] | None) -> None:
+    """Withhold the next request when ``may_send`` refuses (a background refresh's own gate)."""
+
+    if may_send is not None and not may_send():
+        raise RestUnavailable("remote_unreachable")
+
+
+def _validated(document: bytes, transport: RestTransport) -> None:
+    """The profile is one this release reads, naming the key that was sent; else
+    ``remote_incompatible`` (nothing is recorded or stored from it)."""
+
+    try:
+        profile = profile_from_json(document)
+    except ProfileError:
+        raise RestUnavailable("remote_incompatible") from None
+    if profile.key.id is None or profile.key.id != transport.key_id:
+        raise RestUnavailable("remote_incompatible")
+
+
+async def _profile(
+    transport: RestTransport, record: ServerTarget, *, may_send: Callable[[], bool] | None = None
+) -> FetchedProfile:
+    del record
+    _ask(may_send)
     await discover(transport)
+    _ask(may_send)
     answer = await transport.request(
         "GET", PROFILE_PATH, headers=transport.headers(), limit=MAX_DOCUMENT_BYTES
     )
@@ -99,22 +129,30 @@ async def _profile(transport: RestTransport, record: ServerTarget) -> FetchedPro
         )
     if answer.status != 200:
         raise RestUnavailable("remote_incompatible")
-    identity_type, identity = observed_identity(record)
+    _validated(answer.body, transport)
+    identity_type, identity = transport.identity
     return FetchedProfile(answer.body, identity_type, identity)
 
 
 async def fetch_profile_async(
-    record: ServerTarget, *, key: str | None = None, transport: RestTransport | None = None
+    record: ServerTarget,
+    *,
+    key: str | None = None,
+    transport: RestTransport | None = None,
+    consented: bool = False,
+    may_send: Callable[[], bool] | None = None,
 ) -> FetchedProfile:
     """``record``'s profile: discovery, then ``GET /v1/server`` with ``key`` (else the stored
-    one, read off the event loop). Raises ``RestUnavailable`` with a closed phase."""
+    one, read off the event loop). ``consented`` binds the transport to the consented identity
+    (``RestTransport.for_target``); ``may_send`` is asked before each request. Raises
+    ``RestUnavailable`` with a closed phase."""
 
     if transport is not None:
-        return await _profile(transport, record)
+        return await _profile(transport, record, may_send=may_send)
     chosen = key if key is not None else await load_key(record.target_id)
-    own = RestTransport.for_target(record, key=chosen)
+    own = RestTransport.for_target(record, key=chosen, consented=consented)
     try:
-        return await _profile(own, record)
+        return await _profile(own, record, may_send=may_send)
     finally:
         await own.aclose()
 
@@ -153,10 +191,13 @@ def check_discovery(record: ServerTarget) -> Discovery:
     return _run(run())
 
 
-def fetch_profile(record: ServerTarget, *, key: str | None = None) -> FetchedProfile:
-    """``fetch_profile_async`` for a synchronous caller (``server add``, ``server use``)."""
+def fetch_profile(
+    record: ServerTarget, *, key: str | None = None, consented: bool = False
+) -> FetchedProfile:
+    """``fetch_profile_async`` for a synchronous caller (``server add``, ``server use``,
+    ``server login``)."""
 
-    return _run(fetch_profile_async(record, key=key))
+    return _run(fetch_profile_async(record, key=key, consented=consented))
 
 
 class RestProfileSource:
@@ -188,12 +229,15 @@ def check_key(record: ServerTarget, key: str) -> KeyCheck:
     """Check ``key`` with ``record``'s server before it is stored (``server login``).
 
     A refused key (``remote_auth_failed``), a certificate that does not match the recorded trust
-    (``remote_identity_changed``) or another contract (``remote_incompatible``) raise
+    or, for a target the owner consented to, the consented identity (``remote_identity_changed``),
+    or another contract, an invalid profile included (``remote_incompatible``), raise
     ``RestUnavailable``: nothing is stored. A server that does not answer is ``unanswered``.
     """
 
     try:
-        return KeyCheck("accepted", fetch_profile(record, key=key))
+        return KeyCheck(
+            "accepted", fetch_profile(record, key=key, consented=record.consent is not None)
+        )
     except RestUnavailable as error:
         if error.reason in {"remote_unreachable", "remote_service_not_running"}:
             return KeyCheck("unanswered", None, error.reason)

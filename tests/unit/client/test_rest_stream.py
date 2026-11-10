@@ -15,7 +15,7 @@ import asyncio
 import os
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -256,6 +256,8 @@ class _Scripted(RestTransport):
         super().__init__("https://scripted.test", key="fuk_test")
         self.script = script
         self.sent: list[tuple[str, str, Mapping[str, str]]] = []
+        # Per request: its ``wait_ms`` (or None) and its own time bound (or None).
+        self.bounds: list[tuple[str | None, float | None]] = []
 
     async def request(  # type: ignore[override]
         self,
@@ -267,9 +269,11 @@ class _Scripted(RestTransport):
         params: Mapping[str, str] | None = None,
         poll: bool = False,
         limit: int = 0,
+        seconds: float | None = None,
     ) -> RestAnswer:
-        del content, params, poll, limit
+        del content, poll, limit
         self.sent.append((method, path, dict(headers or {})))
+        self.bounds.append(((params or {}).get("wait_ms"), seconds))
         return await self.script(method, path, dict(headers or {}))
 
 
@@ -424,3 +428,216 @@ async def test_close_sends_nothing_under_zero_network_and_never_waits_past_its_b
         assert loop.time() - started < 3.0
         deletes = [path for method, path, _headers in transport.sent if method == "DELETE"]
         assert bool(deletes) is allowed
+
+
+# --- review fixes (layer 5 review) --------------------------------------------------------------
+
+
+async def test_a_call_names_the_connections_own_agent(edge: _Edge) -> None:
+    """A1-4: once the hello registered the agent, every call carries it, so the server gives
+    the call's workspace operations to this connection's agent first."""
+
+    binding = ClientWorkspaceBinding(claim=_CLAIM, agent=cast(Any, _Agent()))
+    client, _stream = await edge.connect(binding=binding)
+    try:
+        (recorded,) = edge.backend.agents
+        await client.service_status()
+        assert edge.backend.call_agents == [recorded.handle]
+    finally:
+        await client.close()
+    plain, _stream = await edge.connect()
+    try:
+        await plain.service_status()
+        assert edge.backend.call_agents == [recorded.handle, None]
+    finally:
+        await plain.close()
+
+
+def _registration_script(
+    sending: dict[str, bool],
+) -> Callable[[str, str, Mapping[str, str]], Awaitable[RestAnswer]]:
+    from finishup.rest.contract import (
+        AgentRegistration,
+        Session,
+        agent_registration_document,
+        session_document,
+    )
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        del headers
+        if path == "/v1/session":
+            # The authorization changes while the session's answer is on its way.
+            sending["now"] = False
+            return RestAnswer(
+                200,
+                {},
+                session_document(
+                    Session(STATUS, "client_claim", "client:0123456789abcdef", TEST_REVISION)
+                ),
+            )
+        if method == "POST" and path == "/v1/agents":
+            return RestAnswer(
+                201,
+                {},
+                agent_registration_document(
+                    AgentRegistration("agt_" + "0" * 32, "client:0123456789abcdef", 60_000)
+                ),
+            )
+        return _error(404, "route_unknown")
+
+    return script
+
+
+@pytest.mark.parametrize("how", ["may_send", "bound"])
+async def test_the_agents_registration_is_never_sent_once_the_authorization_refuses(
+    how: str,
+) -> None:
+    """B2 (and B3's binding): a lapse, a hold or zero-network that lands while ``/v1/session``
+    is answered stops the registration; neither the key nor the claim is sent again."""
+
+    sending = {"now": True}
+    transport = _Scripted(_registration_script(sending))
+    if how == "may_send":
+        stream = RestControlStream(transport, may_send=lambda: sending["now"])
+    else:
+        stream = RestControlStream(transport)
+        stream.bind(lambda: None if sending["now"] else "repository_egress_held")
+    from finishup.service.control_protocol import ControlProtocolError
+
+    with pytest.raises(ControlProtocolError):
+        # The hello is never answered: the stream ends before the agent is registered.
+        await asyncio.wait_for(
+            client_handshake(
+                stream,
+                ControlClientKind.MCP_BRIDGE,
+                "0.3.0",
+                workspace_claim=_CLAIM,
+                workspace_agent=AGENT_DECLARATION,
+                server_profile=TEST_REVISION,
+            ),
+            timeout=10,
+        )
+    assert [(method, path) for method, path, _headers in transport.sent] == [("GET", "/v1/session")]
+    expected = "server_authorization_changed" if how == "may_send" else "repository_egress_held"
+    assert await stream.failure_phase() == expected
+    await stream.aclose()
+
+
+async def test_a_call_never_sends_or_waits_past_its_own_deadline() -> None:
+    """B5: one absolute deadline across the POST's retries, the waits between them and every
+    request's own bound; no POST is sent again after it, and the outcome is unknown."""
+
+    loop = asyncio.get_running_loop()
+    posted: list[float] = []
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        del headers
+        if path == "/v1/session":
+            return _session_answer()
+        if method == "POST":
+            posted.append(loop.time())
+        raise RestUnavailable("remote_unreachable")
+
+    transport = _Scripted(script)
+    stream = RestControlStream(transport)
+    await _open(stream)
+    call = replace(_call(), deadline_ms=400)
+    started = loop.time()
+    await stream.send_all(encode_control_frame(call))
+    result = await _result_of(stream)
+    assert cast(Mapping[str, Any], result["body"])["code"] == "request_timeout"
+    assert posted and all(at - started < 0.4 for at in posted)
+    assert len(posted) < 3
+    post_bounds = [
+        bound
+        for (method, _path, _h), bound in zip(transport.sent, transport.bounds, strict=True)
+        if method == "POST"
+    ]
+    assert all(seconds is not None and seconds <= 0.4 for _wait, seconds in post_bounds)
+    await stream.aclose()
+
+
+async def test_a_long_poll_never_waits_past_the_calls_deadline() -> None:
+    """B5: the polls' ``wait_ms`` and bounds shrink with what is left of the deadline, and the
+    call ends ``request_timeout`` at it instead of polling on."""
+
+    from finishup.rest.contract import operation_pending_document
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        if path == "/v1/session":
+            return _session_answer()
+        operation = headers.get("finishup-operation-id") or path.rsplit("/", 1)[-1]
+        # A server that keeps the long-poll open as long as it was asked to, then says pending.
+        wait = transport.bounds[-1][0]
+        await asyncio.sleep(int(wait or "0") / 1000)
+        del method
+        return RestAnswer(202, {}, operation_pending_document(operation))
+
+    transport = _Scripted(script)
+    stream = RestControlStream(transport)
+    await _open(stream)
+    call = replace(_call(), deadline_ms=1_500)
+    await stream.send_all(encode_control_frame(call))
+    result = await _result_of(stream)
+    assert cast(Mapping[str, Any], result["body"])["code"] == "request_timeout"
+    waits = [int(wait) for wait, _seconds in transport.bounds if wait is not None]
+    assert waits and all(wait <= 1_500 for wait in waits)
+    assert all(seconds is not None and seconds <= 1.5 for _w, seconds in transport.bounds[1:])
+    await stream.aclose()
+
+
+async def test_a_cancel_refused_before_admission_is_sent_again_whatever_the_answer_order() -> None:
+    """B6: the DELETE leaves before the POST is admitted, the POST's ``202`` comes back first,
+    then the DELETE's ``operation_unknown``: the cancel is sent again, and the call stops."""
+
+    from finishup.rest.contract import operation_pending_document
+
+    delete_sent = asyncio.Event()
+    polled = asyncio.Event()
+    second_delete = asyncio.Event()
+    deletes: list[str] = []
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        if path == "/v1/session":
+            return _session_answer()
+        if method == "POST":
+            await delete_sent.wait()
+            return RestAnswer(202, {}, operation_pending_document(headers["finishup-operation-id"]))
+        if method == "DELETE":
+            deletes.append(path)
+            if len(deletes) == 1:
+                delete_sent.set()
+                await polled.wait()  # the 202 was taken (the poll began) before this answer
+                return _error(404, "operation_unknown")
+            second_delete.set()
+            return RestAnswer(204, {}, b"")
+        polled.set()
+        await second_delete.wait()
+        return RestAnswer(
+            200,
+            {
+                "finishup-outcome": "error",
+                "finishup-service-instance": STATUS.service_instance_id,
+                "finishup-service-generation": STATUS.service_generation,
+            },
+            b'{"code":"request_cancelled","retryable":true}',
+        )
+
+    from finishup.ports.control import ControlCancelRequest
+
+    stream = RestControlStream(_Scripted(script))
+    await _open(stream)
+    call = _call()
+    cancel = ControlCancelRequest(
+        kind="cancel",
+        protocol_version="1.0",
+        rpc_id=new_id(IdKind.CONTROL_RPC),
+        service_instance_id=call.service_instance_id,
+        service_generation=call.service_generation,
+        target_rpc_id=call.rpc_id,
+    )
+    await stream.send_all(encode_control_frame(call) + encode_control_frame(cancel))
+    result = await _result_of(stream)
+    assert cast(Mapping[str, Any], result["body"])["code"] == "request_cancelled"
+    assert deletes == [f"/v1/operations/{call.rpc_id}"] * 2
+    await stream.aclose()

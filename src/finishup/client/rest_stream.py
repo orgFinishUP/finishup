@@ -18,7 +18,9 @@ per-frame check) holds over REST unchanged. Underneath is the one REST client
   (``failure_phase``): ``server_profile_changed`` (409), ``remote_auth_failed`` (401),
   ``remote_incompatible`` (404, 412, a document this release refuses), ``remote_service_not_running``
   (503), or the transport's phase. A hello declaring an agent whose claim was keyed registers it
-  (``POST /v1/agents``) and starts one work long-poll.
+  (``POST /v1/agents``) and starts one work long-poll; every call then names that agent
+  (``finishup-agent``), so the server gives the call's workspace operations to this connection's
+  own agent first, as it does on a control connection.
 * **Pushed workspace calls.** Each call a poll returns is written to the client as its
   ``workspace_call`` frame, in order; each ``workspace_reply`` the client writes is
   ``POST /v1/agents/{id}/replies``. An agent the server no longer knows (``agent_unknown``: its
@@ -30,12 +32,20 @@ per-frame check) holds over REST unchanged. Underneath is the one REST client
   ``operation_limit`` refusal (never dispatched) is retried with growing waits within the call's
   deadline. A ``409`` is the call's ``server_profile_changed`` error result.
 * **Cancellation order.** A ``cancel`` always follows its call: the client wrote the call frame
-  first, so its ``POST`` is already on its way when ``DELETE`` is sent. A ``DELETE`` that reaches the
-  server before the server admitted the call answers ``operation_unknown`` and changes nothing; it is
-  sent again once the ``POST`` is answered. A call answered done drops its cancel (the result is
+  first, so its ``POST`` is already on its way when ``DELETE`` is sent. A ``DELETE`` sent before the
+  server admitted the call answers ``operation_unknown`` and changes nothing: whatever order the
+  answers come back in, it is sent again once the ``POST`` was answered, while the call runs (a
+  ``DELETE`` that was not answered too). A call answered done drops its cancel (the result is
   final); one still running goes on to its own ``request_cancelled`` result.
-* **Deadlines.** A call's ``deadline_ms`` bounds its waits and retries; the caller's own deadline
-  (a hook's, layer 4 decision 17) still spans the whole connection.
+* **Deadlines.** A call's ``deadline_ms`` is one absolute deadline for everything the call sends
+  and waits for: every request's own bound, every retry's wait and every long-poll's ``wait_ms``
+  end with it, and no ``POST`` is sent again after it (its result is then ``request_timeout``:
+  the caller stopped waiting and the outcome is unknown). The caller's own deadline (a hook's,
+  layer 4 decision 17) still spans the whole connection.
+* **Authorization before every request.** ``may_send`` (and every check ``bind`` adds: a relayed
+  stream's own admission and repository) is asked right before each request, the agent's
+  registration, every retry and every poll included; once it refuses, nothing more is sent (the
+  stream ends ``server_authorization_changed``, or the bound check's own phase).
 * **Reconnect and unknown outcomes.** A ``POST`` whose answer was lost is sent again with the same
   operation id, at most ``_ATTEMPTS`` times (the server answers the operation it already admitted:
   at most once). A poll that fails is retried the same way. When a call's outcome cannot be learned
@@ -82,6 +92,7 @@ from finishup.protocol.server_profile import (
 )
 from finishup.rest.contract import (
     AGENTS_PATH,
+    HEADER_AGENT,
     HEADER_DEADLINE_MS,
     HEADER_HOST_PROFILE,
     HEADER_OPERATION_ID,
@@ -118,6 +129,9 @@ _BUSY_TOTAL_SECONDS: Final = 30.0
 _CLOSE_SECONDS: Final = 1.0
 _WAIT_PARAM: Final = str(MAX_WAIT_MS)
 _MAX_WORK_BYTES: Final = MAX_CONTROL_FRAME_BYTES * 2
+# A long-poll's answer needs this much time past its ``wait_ms`` to come back.
+_POLL_MARGIN_SECONDS: Final = 1.0
+_WITHHELD: Final = "server_authorization_changed"
 
 
 class RestPeerIdentity:
@@ -137,6 +151,19 @@ class _Call:
     done: bool = False
     cancel_wanted: bool = False
     cancel_sent: bool = False
+    cancel_attempts: int = 0
+
+
+class _Withheld(Exception):
+    """Nothing may be sent now: the stream's authorization refused (``phase``)."""
+
+    def __init__(self, phase: str) -> None:
+        self.phase = phase
+        super().__init__(phase)
+
+
+class _DeadlinePassed(Exception):
+    """The call's own deadline passed: nothing more is sent or waited for."""
 
 
 def _phase_of(answer: RestAnswer) -> str:
@@ -165,7 +192,8 @@ class RestControlStream:
         owns_transport: bool = False,
     ) -> None:
         self._transport = transport
-        self._may_send = may_send or (lambda: True)
+        self._may_send_now = may_send or (lambda: True)
+        self._checks: list[Callable[[], str | None]] = []
         self._owns_transport = owns_transport
         self._peer = RestPeerIdentity()
         self._inbound = bytearray()
@@ -198,6 +226,40 @@ class RestControlStream:
         """The closed remote phase this stream ended with, if it can name one."""
 
         return self._failure
+
+    def bind(self, refusal: Callable[[], str | None]) -> None:
+        """Add a check asked before every request: a refusal (its phase) withholds the request.
+
+        The helper binds each relayed stream to the admission it was opened under and to the
+        repository its hello claims (design v2 section 8.3), so the stream's own retries and
+        polls stop as soon as either refuses, not only when the client next writes a frame.
+        """
+
+        self._checks.append(refusal)
+
+    def _withheld(self) -> str | None:
+        """The phase that withholds the next request now; ``None`` when it may be sent."""
+
+        for check in self._checks:
+            try:
+                phase = check()
+            except Exception:  # noqa: BLE001 - a check that cannot be made withholds
+                return _WITHHELD
+            if phase is not None:
+                return phase
+        try:
+            allowed = self._may_send_now()
+        except Exception:  # noqa: BLE001 - a check that cannot be made withholds
+            return _WITHHELD
+        return None if allowed else _WITHHELD
+
+    def _may_send(self) -> bool:
+        return self._withheld() is None
+
+    def _require_sendable(self) -> None:
+        phase = self._withheld()
+        if phase is not None:
+            raise _Withheld(phase)
 
     # --- the ControlStream surface ------------------------------------------------------------
 
@@ -344,23 +406,39 @@ class RestControlStream:
             self._end("remote_unreachable")
 
     async def _with_retries(
-        self, send: Callable[[], Awaitable[RestAnswer]], *, attempts: int = _ATTEMPTS
+        self,
+        send: Callable[[float | None], Awaitable[RestAnswer]],
+        *,
+        attempts: int = _ATTEMPTS,
+        deadline: float | None = None,
     ) -> RestAnswer:
-        """One idempotent request, sent again (bounded) when its answer was lost."""
+        """One idempotent request, sent again (bounded) when its answer was lost.
 
+        The stream's authorization is asked before every attempt (``_Withheld``). With a
+        ``deadline`` (the loop's clock), no attempt starts after it, each attempt is bounded by
+        what is left of it (``send`` receives the seconds left), and a wait between attempts never
+        outlasts it (``_DeadlinePassed``).
+        """
+
+        loop = asyncio.get_running_loop()
         delay = _RETRY_FIRST_SECONDS
         last: RestUnavailable | None = None
         for attempt in range(attempts):
-            if not self._may_send():
-                raise RestUnavailable("remote_unreachable")
+            left = None if deadline is None else deadline - loop.time()
+            if left is not None and left <= 0:
+                raise _DeadlinePassed
+            self._require_sendable()
             try:
-                return await send()
+                return await send(left)
             except RestUnavailable as error:
                 if error.reason != "remote_unreachable":
                     raise
                 last = error
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(delay)
+                    pause = delay if deadline is None else min(delay, deadline - loop.time())
+                    if pause <= 0:
+                        raise _DeadlinePassed from None
+                    await asyncio.sleep(pause)
                     delay *= 2
         assert last is not None
         raise last
@@ -398,10 +476,13 @@ class RestControlStream:
                 revision=self._revision, claim=self._claim, client_kind=self._kind
             )
             answer = await self._with_retries(
-                lambda: self._transport.request("GET", SESSION_PATH, headers=headers)
+                lambda _left: self._transport.request("GET", SESSION_PATH, headers=headers)
             )
         except RestUnavailable as error:
             self._end(error.reason)
+            return
+        except _Withheld as withheld:
+            self._end(withheld.phase)
             return
         if answer.status != 200:
             self._end(_phase_of(answer))
@@ -442,6 +523,9 @@ class RestControlStream:
             headers = self._transport.headers(
                 revision=self._revision, claim=self._claim, client_kind=self._kind
             )
+            # Asked again here: the session's answer took time, and a lapse, a hold or
+            # zero-network since then sends neither the key nor the claim again.
+            self._require_sendable()
             answer = await self._transport.request(
                 "POST",
                 AGENTS_PATH,
@@ -450,6 +534,9 @@ class RestControlStream:
             )
         except RestUnavailable as error:
             self._end(error.reason)
+            return False
+        except _Withheld as withheld:
+            self._end(withheld.phase)
             return False
         if answer.status == 503 and answer.rest_error == "workspace_agent_unavailable":
             # The service cannot key the claim now: no agent answers, as over the socket.
@@ -475,12 +562,15 @@ class RestControlStream:
             try:
                 headers = self._transport.headers(revision=self._revision)
                 answer = await self._with_retries(
-                    lambda: self._transport.request(
+                    lambda _left: self._transport.request(
                         "GET", path, headers=headers, params={"wait_ms": _WAIT_PARAM}, poll=True
                     )
                 )
             except RestUnavailable as error:
                 self._end(error.reason)
+                return
+            except _Withheld as withheld:
+                self._end(withheld.phase)
                 return
             if answer.status == 404:
                 # The server no longer knows this agent: the connection is gone (a dropped
@@ -518,6 +608,8 @@ class RestControlStream:
             revision=self._revision, claim=self._claim, client_kind=self._kind
         )
         headers[HEADER_OPERATION_ID] = call.rpc_id
+        if self._agent_id is not None:
+            headers[HEADER_AGENT] = self._agent_id
         headers[HEADER_SERVICE_INSTANCE] = call.service_instance_id
         headers[HEADER_SERVICE_GENERATION] = call.service_generation
         if call.deadline_ms is not None:
@@ -547,26 +639,33 @@ class RestControlStream:
     async def _call(self, call: _Call, frame: Mapping[str, JsonValue]) -> None:
         request = call.request
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + (
-            _BUSY_TOTAL_SECONDS if request.deadline_ms is None else request.deadline_ms / 1000
-        )
+        # One absolute deadline for the whole call (its ``deadline_ms``); a call with none still
+        # bounds its ``operation_limit`` retries, but is polled until the server answers it.
+        deadline = None if request.deadline_ms is None else loop.time() + request.deadline_ms / 1000
+        busy_until = loop.time() + _BUSY_TOTAL_SECONDS if deadline is None else deadline
         body = canonical_encode(frame["body"])
         path = f"/v1/{request.method.value}"
         busy = _BUSY_FIRST_SECONDS
+        sent = False
+
+        def post(left: float | None) -> Awaitable[RestAnswer]:
+            nonlocal sent
+            sent = True
+            return self._transport.request(
+                "POST",
+                path,
+                headers=headers,
+                content=body,
+                params={"wait_ms": self._wait_param(left)},
+                poll=True,
+                seconds=left,
+            )
+
         try:
             headers = self._call_headers(request)
             while True:
-                answer = await self._with_retries(
-                    lambda: self._transport.request(
-                        "POST",
-                        path,
-                        headers=headers,
-                        content=body,
-                        params={"wait_ms": _WAIT_PARAM},
-                        poll=True,
-                    )
-                )
-                if answer.rest_error == "operation_limit" and loop.time() + busy < deadline:
+                answer = await self._with_retries(post, deadline=deadline)
+                if answer.rest_error == "operation_limit" and loop.time() + busy < busy_until:
                     # Never dispatched: sent again after a growing wait, within the deadline.
                     await asyncio.sleep(busy)
                     busy = min(busy * 2, _BUSY_MAX_SECONDS)
@@ -579,13 +678,15 @@ class RestControlStream:
                     await self._send_cancel(call)
                 poll_headers = self._transport.headers(revision=self._revision)
                 answer = await self._with_retries(
-                    lambda: self._transport.request(
+                    lambda left: self._transport.request(
                         "GET",
                         f"/v1/operations/{request.rpc_id}",
                         headers=poll_headers,
-                        params={"wait_ms": _WAIT_PARAM},
+                        params={"wait_ms": self._wait_param(left)},
                         poll=True,
-                    )
+                        seconds=left,
+                    ),
+                    deadline=deadline,
                 )
             call.pending = False
         except RestUnavailable as error:
@@ -594,6 +695,23 @@ class RestControlStream:
                 call, self._result(request, ControlError("request_timeout", retryable=True))
             )
             self._end(error.reason)
+            return
+        except _DeadlinePassed:
+            # Its caller stopped waiting: nothing more is sent for it, and whether an earlier
+            # POST was admitted is unknown (the server forgets the operation on its own).
+            self._finish(
+                call, self._result(request, ControlError("request_timeout", retryable=True))
+            )
+            return
+        except _Withheld as withheld:
+            # Nothing more may be sent: never sent is a refusal, sent once is an unknown outcome.
+            error = (
+                ControlError("request_timeout", retryable=True)
+                if sent
+                else ControlError("service_unavailable", retryable=True)
+            )
+            self._finish(call, self._result(request, error))
+            self._end(withheld.phase)
             return
         if answer.status == 200:
             self._finish(call, self._answered(request, answer))
@@ -615,11 +733,30 @@ class RestControlStream:
         if reason == "frame_too_large":
             self._finish(call, self._result(request, ControlError("frame_too_large")))
             return
+        if reason == "agent_unknown":
+            # This connection's agent is gone at the server (its lease, a restart): as after a
+            # dropped control connection, the call did not run and the client connects again.
+            self._finish(
+                call, self._result(request, ControlError("service_unavailable", retryable=True))
+            )
+            self._agent_id = None
+            self._end(None)
+            return
         phase = _phase_of(answer)
         self._finish(
             call, self._result(request, ControlError("service_unavailable", retryable=True))
         )
         self._end(phase)
+
+    @staticmethod
+    def _wait_param(left: float | None) -> str:
+        """A long-poll's ``wait_ms``: the most the server allows, and short enough of the deadline
+        for the answer to come back before it (halving as it nears, so the polls stay few)."""
+
+        if left is None:
+            return _WAIT_PARAM
+        wait = max(left - _POLL_MARGIN_SECONDS, left / 2)
+        return str(max(0, min(MAX_WAIT_MS, int(wait * 1000))))
 
     def _answered(self, request: ControlCallRequest, answer: RestAnswer) -> object:
         outcome = answer.headers.get(HEADER_OUTCOME)
@@ -651,13 +788,17 @@ class RestControlStream:
             # Sent now: its call was already written to the server (the client wrote the call
             # frame first). A DELETE that reaches the server before it admitted the call answers
             # ``operation_unknown`` and changes nothing; it is then sent again once the call's
-            # POST is answered, so a cancel never acts before its call (cancellation order).
+            # POST was answered, so a cancel never acts before its call (cancellation order).
             self._spawn(self._send_cancel(call))
 
     async def _send_cancel(self, call: _Call) -> None:
         if call.cancel_sent or call.done or not self._may_send():
             return
         call.cancel_sent = True
+        call.cancel_attempts += 1
+        # Whether the call's POST was answered before this DELETE left: only a DELETE sent after
+        # it can be known to have reached an admitted operation.
+        after_admission = call.admitted.is_set()
         try:
             answer = await self._transport.request(
                 "DELETE",
@@ -665,7 +806,12 @@ class RestControlStream:
                 headers=self._transport.headers(),
             )
         except RestUnavailable:
-            call.cancel_sent = False
+            answer = None
+        if answer is not None and (answer.status < 400 or after_admission):
+            # Taken (or the operation is gone at the server): nothing more to send.
             return
-        if answer.status == 404 and not call.admitted.is_set():
-            call.cancel_sent = False
+        # Not taken: before admission, whatever order the answers came back in (the POST's 202
+        # may have arrived while this DELETE was on its way), or not answered at all.
+        call.cancel_sent = False
+        if call.admitted.is_set() and not call.done and call.cancel_attempts < _ATTEMPTS:
+            self._spawn(self._send_cancel(call))

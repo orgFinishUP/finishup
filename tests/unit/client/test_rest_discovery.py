@@ -9,6 +9,7 @@ answer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -80,8 +81,8 @@ async def test_discovery_sends_no_credential_and_the_profile_is_bound_to_the_obs
     watching = _Watching(app.asgi())
     with ambient_home(monkeypatch):
         record = _record(monkeypatch)
-        transport = RestTransport(
-            "https://lab.example", key=key, transport=httpx.ASGITransport(app=watching)
+        transport = RestTransport.for_target(
+            record, key=key, transport=httpx.ASGITransport(app=watching)
         )
         try:
             fetched = await fetch_profile_async(record, transport=transport)
@@ -188,8 +189,8 @@ async def test_discovery_of_a_server_with_this_manifest_but_another_route_is_ref
 def test_a_key_check_keeps_a_key_only_when_the_server_could_not_judge_it(
     monkeypatch: pytest.MonkeyPatch, raised: str, expected: str | None
 ) -> None:
-    def refuse(_record: object, *, key: str | None = None) -> object:
-        del key
+    def refuse(_record: object, *, key: str | None = None, consented: bool = False) -> object:
+        del key, consented
         raise RestUnavailable(raised)
 
     monkeypatch.setattr(rest_discovery, "fetch_profile", refuse)
@@ -202,3 +203,54 @@ def test_a_key_check_keeps_a_key_only_when_the_server_could_not_judge_it(
         else:
             checked = check_key(record, "fuk_0123456789ab_" + "A" * 43)
             assert (checked.outcome, checked.phase) == (expected, raised)
+
+
+@pytest.mark.parametrize("profile", [b"{}", b"not json", None], ids=["empty", "garbled", "other"])
+async def test_a_profile_answer_this_release_cannot_use_is_incompatible(
+    monkeypatch: pytest.MonkeyPatch, app_and_key: tuple[RestApp, str], profile: bytes | None
+) -> None:
+    """B7: a ``200`` from ``/v1/server`` is a key check's success only for a valid profile that
+    names the key sent; anything else is ``remote_incompatible`` (so ``login`` stores nothing)."""
+
+    from builders.server_profiles import profile_document
+    from finishup.client.server_profile import FetchedProfile
+
+    app, key = app_and_key
+    if profile is None:
+        document = profile_document()
+        document["key"] = {"id": "0" * 12, "scope": "agent", "principal": "p_" + "1" * 16}
+        profile = json.dumps(document).encode()
+    inner = app.asgi()
+
+    async def answering(scope: MutableMapping[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope["path"] == "/v1/server":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": profile})
+            return
+        await inner(scope, receive, send)
+
+    with ambient_home(monkeypatch):
+        record = _record(monkeypatch)
+        transport = RestTransport.for_target(
+            record, key=key, transport=httpx.ASGITransport(app=answering)
+        )
+        try:
+            with pytest.raises(RestUnavailable) as refused:
+                await fetch_profile_async(record, transport=transport)
+        finally:
+            await transport.aclose()
+        assert refused.value.reason == "remote_incompatible"
+
+        async def fetched_with(*_arguments: object, **_options: object) -> FetchedProfile:
+            own = RestTransport.for_target(
+                record, key=key, transport=httpx.ASGITransport(app=answering)
+            )
+            try:
+                return await fetch_profile_async(record, transport=own)
+            finally:
+                await own.aclose()
+
+        monkeypatch.setattr(rest_discovery, "fetch_profile_async", fetched_with)
+        with pytest.raises(RestUnavailable) as check:
+            await asyncio.to_thread(check_key, record, key)
+        assert check.value.reason == "remote_incompatible"
