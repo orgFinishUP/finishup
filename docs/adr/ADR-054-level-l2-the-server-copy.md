@@ -309,6 +309,15 @@ removed at once after a failure and at the next start after a crash, so nothing 
 the quota accounting and no later upload can lean on an uncommitted object. A service start also
 removes staged uploads and folders without a record.
 
+An unchanged sync (the client finds the copy already holds its snapshot, so nothing is uploaded)
+still refreshes the copy (`refresh`): under the epoch the sync began with (a forget since refuses,
+`code_copy_forgotten`), the client's manifest is checked against the stored one (the same synthetic
+commits, trees, size and file count; else `code_manifest_mismatch`) and bound to the revision and
+worktree as at commit, then the stored manifest takes its metadata (subject state, sync time,
+revision, policy, completeness), and the record the retention of the consent as it is now and
+`last_sync_at`. So a consent changed from `until_forgotten` to `days:7` holds without a new tree,
+and a copy in use never expires as if it were idle.
+
 ### 7. Forget, the tombstone, the fence and every repository at once
 
 Forget advances the copy's epoch in the tombstone record (`yoetz.code-copy-tombstones/1`)

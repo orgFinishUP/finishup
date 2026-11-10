@@ -32,6 +32,14 @@ index, its ``stored_bytes``) is in force, and what the journal names is removed 
 failure and at the next start after a crash, so no byte is ever kept outside the quota accounting
 and no later upload can treat an uncommitted object as held.
 
+**An unchanged sync (``refresh``).** When the client finds that the copy already holds its
+snapshot, nothing is uploaded, but the sync still happened: under the epoch the sync began with (a
+forget since refuses, ``code_copy_forgotten``), the client's manifest is checked against the one
+stored (the same synthetic commits, trees, size and file count) and bound to the revision and
+worktree as at ``commit``, then the stored manifest takes its metadata (subject state, sync time,
+revision, policy and completeness), the record its retention (the consent as it is now) and
+``last_sync_at``, so a changed retention holds and a copy in use does not expire as if idle.
+
 **Forget (§4.3, U20, §8.7).** ``forget`` first advances the copy's **epoch** in the tombstone record
 (fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), records
 the pinned tasks' erasures (every one or none), then deletes the copy's folder durably: the record
@@ -847,6 +855,67 @@ class CodeStore:
             shutil.rmtree(self._copy_folder(upload.copy_key), ignore_errors=True)
             self._keyring.discard(cast(str, record["copy_id"]))
             raise
+
+    def refresh(
+        self,
+        principal: str,
+        repository: str,
+        *,
+        manifest: bytes,
+        retention: tuple[RetentionKind, int | None],
+        epoch: int,
+        revision: tuple[str, int, str],
+        worktree: str,
+    ) -> SnapshotManifest:
+        """An unchanged sync of a snapshot this copy holds (see the module text); the manifest
+        as now stored. Raises ``code_snapshot_unknown`` when the copy does not hold it."""
+
+        kind, days = retention
+        if kind not in {"task_close", "days", "until_forgotten"} or (
+            (kind == "days") != (isinstance(days, int) and 0 <= days <= 36_500)
+        ):
+            raise CodeStoreError("code_upload_invalid")
+        try:
+            fresh = manifest_from_json(manifest)
+        except CopyError as error:
+            raise CodeStoreError("code_manifest_invalid") from error
+        if (fresh.issuer, fresh.revision, fresh.profile_digest) != revision:
+            raise CodeStoreError("server_profile_changed")
+        if fresh.worktree != worktree:
+            raise CodeStoreError("code_manifest_mismatch")
+        copy_key = self.copy_key(principal, repository)
+        with self._lock:
+            if self._epoch(copy_key) != epoch:
+                raise CodeStoreError("code_copy_forgotten")
+            record = self._read_record(copy_key)
+            if record is None or fresh.snapshot not in cast(list[str], record["snapshots"]):
+                raise CodeStoreError("code_snapshot_unknown")
+            stored = self._snapshot(copy_key, fresh.snapshot)
+            if (
+                stored.base,
+                stored.tree,
+                stored.base_tree,
+                stored.bytes,
+                stored.files,
+            ) != (fresh.base, fresh.tree, fresh.base_tree, fresh.bytes, fresh.files):
+                raise CodeStoreError("code_manifest_mismatch")
+            key = self._data_key(copy_key, record)
+            _write_private(
+                self._copy_folder(copy_key) / "snapshots" / f"{fresh.snapshot}.enc",
+                self._seal(
+                    key,
+                    _MANIFEST_AAD + copy_key.encode() + fresh.snapshot.encode(),
+                    canonical_encode(manifest_to_json(fresh)),
+                ),
+            )
+            record.update(
+                {
+                    "last_sync_at": format_rfc3339_ms(self._clock()),
+                    "retention": {"kind": kind, "days": days},
+                }
+            )
+            self._write_record(copy_key, record)
+            return fresh
 
     def _admit(
         self,

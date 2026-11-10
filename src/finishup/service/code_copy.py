@@ -367,8 +367,25 @@ class CodeCopies:
         manifest = prepared.manifest
         now = format_rfc3339_ms(datetime.now(UTC))
         if prepared.unchanged:
-            if manifest.snapshot not in self._store.have(COPY_PRINCIPAL, claim.commitment):
-                return SyncOutcome("unavailable", "code_snapshot_unknown")
+            # Nothing to upload, but the sync happened: the stored manifest's metadata, the
+            # retention and the sync time are refreshed, under the epoch the sync began with.
+            from finishup.protocol.canonical import canonical_encode as encode
+            from finishup.protocol.server_copy import manifest_to_json as to_json
+
+            try:
+                self._store.refresh(
+                    COPY_PRINCIPAL,
+                    claim.commitment,
+                    manifest=encode(to_json(manifest)),
+                    retention=(prepared.retention_kind, prepared.retention_days),
+                    epoch=epoch,
+                    revision=(revision.issuer, revision.revision, revision.profile_digest),
+                    worktree=claim.worktree or "",
+                )
+            except CodeStoreError as error:
+                if error.reason == "code_snapshot_unknown":
+                    return SyncOutcome("unavailable", "code_snapshot_unknown")
+                return SyncOutcome("refused", error.reason)
             self._pin(claim, task_id, manifest.snapshot, now)
             return SyncOutcome("unchanged", None, manifest.snapshot, now, manifest.subject_state)
         assert prepared.sync_id is not None and prepared.sha256 is not None  # noqa: S101

@@ -871,8 +871,12 @@ def test_a_staged_edit_that_leaves_the_snapshot_unchanged_is_no_snapshot_mismatc
     with evidence_task_scope(TASK):
         result = runner.run(ApprovedCheckCommand(handle, approval, staged))
     assert result.status is ApprovedCheckStatus.PASSED
-    # Nothing was uploaded for it: the snapshot is the one already held.
-    assert copies.pinned_manifest(HANDLE, TASK) == stored
+    # Nothing was uploaded for it: the snapshot is the one already held, whose stored manifest
+    # now carries the commitment that sync returned (an unchanged sync refreshes its metadata).
+    refreshed = copies.pinned_manifest(HANDLE, TASK)
+    assert refreshed is not None and refreshed.snapshot == stored.snapshot
+    assert (refreshed.tree, refreshed.base) == (stored.tree, stored.base)
+    assert refreshed.subject_state == staged
     # A subject the client never committed to with a sync is still never a pass.
     other = "sha256:" + hashlib.sha256(b"another subject").hexdigest()
     hub.run_result = _passed(approval, other)

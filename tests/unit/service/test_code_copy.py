@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,37 @@ def test_a_chunk_the_helper_refuses_after_the_prepare_is_a_refusal_and_admits_no
         None,
         None,
     )
+
+
+def test_an_unchanged_sync_refreshes_the_copy_s_retention_and_sync_time(tmp_path: Path) -> None:
+    """C2: the consent changed from until_forgotten to days:7 while the tree stayed the same."""
+
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    hub.prepared = replace(hub.prepared, retention_kind="until_forgotten", retention_days=None)
+    assert copies.sync_blocking(HANDLE, purpose="check").outcome == "synced"
+    (before,) = store.copies("claim")
+    assert before.retention_kind == "until_forgotten"
+    hub.prepared = CodeSyncPrepared(
+        True,
+        None,
+        replace(hub.prepared.manifest, subject_state="sha256:" + "5" * 64),
+        0,
+        None,
+        "days",
+        7,
+    )
+    outcome = copies.sync_blocking(HANDLE, purpose="check")
+    assert outcome.outcome == "unchanged"
+    (after,) = store.copies("claim")
+    assert (after.retention_kind, after.retention_days) == ("days", 7)
+    assert (after.last_sync_at or "") >= (before.last_sync_at or "")
+    stored = store.snapshot("claim", COMMITMENT, outcome.snapshot or "")
+    assert stored.subject_state == "sha256:" + "5" * 64
+    # A manifest that is not the held snapshot's is refused, never stored.
+    hub.prepared = replace(hub.prepared, manifest=replace(hub.prepared.manifest, files=99))
+    refused = copies.sync_blocking(HANDLE, purpose="check")
+    assert (refused.outcome, refused.reason) == ("refused", "code_manifest_mismatch")
 
 
 def test_a_snapshot_for_another_worktree_or_revision_is_refused(tmp_path: Path) -> None:

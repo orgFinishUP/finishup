@@ -607,6 +607,84 @@ def test_expiry_follows_the_retention_chosen(tmp_path: Path) -> None:
     assert [summary.retention_kind for summary in store.copies("alice")] == ["until_forgotten"]
 
 
+def test_an_unchanged_sync_refreshes_retention_metadata_and_sync_time(tmp_path: Path) -> None:
+    """C2: nothing is uploaded, but the consent as it is now and the sync time hold."""
+
+    clock = Clock()
+    store = _store(tmp_path, clock=clock)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    epoch = store.epoch("alice", "repo-1")
+    clock.now += timedelta(days=3)
+    fresh = _manifest(
+        snap,
+        snap.bundle(),
+        subject_state="sha256:" + "5" * 64,
+        synced_at="2026-11-13T08:00:00.000Z",
+    )
+    refreshed = store.refresh(
+        "alice",
+        "repo-1",
+        manifest=fresh,
+        retention=("days", 1),
+        epoch=epoch,
+        revision=REVISION,
+        worktree=WORKTREE,
+    )
+    assert refreshed.subject_state == "sha256:" + "5" * 64
+    stored = store.snapshot("alice", "repo-1", snap.snapshot)
+    assert stored.subject_state == refreshed.subject_state
+    assert stored.synced_at == "2026-11-13T08:00:00.000Z"
+    (summary,) = store.copies("alice")
+    assert (summary.retention_kind, summary.retention_days) == ("days", 1)
+    assert summary.last_sync_at == "2026-11-13T08:00:00.000Z"
+    # In use: kept a day after the last sync, not three days after the upload ...
+    clock.now += timedelta(hours=23)
+    assert store.expire(task_closed=lambda _task: False).copies == 0
+    # ... and the shorter retention chosen since holds.
+    clock.now += timedelta(hours=2)
+    assert store.expire(task_closed=lambda _task: False).copies == 1
+    assert store.copies("alice") == ()
+
+
+def test_an_unchanged_sync_is_validated_and_fenced_by_a_forget(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    epoch = store.epoch("alice", "repo-1")
+    other = snapshot_objects(BASE, {**CURRENT, "src/other.py": b"other\n"})
+
+    def refresh(manifest: bytes, **changes: object) -> CodeStoreError:
+        values: dict[str, object] = {
+            "manifest": manifest,
+            "retention": ("days", 1),
+            "epoch": epoch,
+            "revision": REVISION,
+            "worktree": WORKTREE,
+        }
+        values.update(changes)
+        with pytest.raises(CodeStoreError) as raised:
+            store.refresh("alice", "repo-1", **values)  # type: ignore[arg-type]
+        return raised.value
+
+    same = _manifest(snap, snap.bundle())
+    assert refresh(_manifest(other, other.bundle())).reason == "code_snapshot_unknown"
+    assert refresh(_manifest(snap, snap.bundle(), tree=other.tree)).reason == (
+        "code_manifest_mismatch"
+    )
+    assert refresh(_manifest(snap, snap.bundle(), files=99)).reason == "code_manifest_mismatch"
+    assert refresh(same, worktree="sha256:" + "9" * 64).reason == "code_manifest_mismatch"
+    assert refresh(same, revision=("a" * 32, 3, REVISION[2])).reason == "server_profile_changed"
+    assert refresh(same, retention=("days", None)).reason == "code_upload_invalid"
+    assert refresh(b"{}").reason == "code_manifest_invalid"
+    (summary,) = store.copies("alice")
+    assert summary.retention_kind == "until_forgotten"
+    # A forget since the sync began fences it: nothing is refreshed or made again.
+    assert store.forget("alice", "repo-1").copies == 1
+    assert refresh(same).reason == "code_copy_forgotten"
+    assert store.copies("alice") == ()
+
+
 def test_the_closed_task_question_is_asked_with_the_store_free(tmp_path: Path) -> None:
     """The question may wait for the service loop, which may be waiting for this store: it is
     asked with the lock released, and a copy a task pinned meanwhile is not forgotten."""
