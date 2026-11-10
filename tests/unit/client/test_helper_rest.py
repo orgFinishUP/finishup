@@ -281,6 +281,7 @@ async def test_a_relayed_rest_stream_sends_nothing_once_its_repository_is_held(
 
     salt = base64.b64decode(str(lab.record.claim_salt))
     held: list[str] = []
+
     def held_now(_root: Path, _target: str) -> tuple[str, ...]:
         return tuple(held)
 
