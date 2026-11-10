@@ -558,15 +558,17 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
    `until_forgotten` one for the server's owner.
 7. Expiry runs at service start and every 10 minutes, so a copy past its retention stays until the
    next run. A `task_close` copy no task was pinned to does not expire on `task_close`.
-8. A server whose owner turns the offer off (or removes the table) no longer builds its copy store:
-   the copies it already keeps stay in its state folder, encrypted, and neither expire nor can be
-   forgotten until the offer is on again.
+8. A server whose owner turns the offer off (or removes the table) keeps the copies an earlier offer
+   left, encrypted, without serving them: nothing is synced or read from them (a sync is refused
+   `server_level_unavailable` before the client is asked), and they can still be listed, forgotten
+   and expire, and their tasks' excerpts erased.
 9. The checks run once per sync, at `code_sync_prepare`; `code_sync_read` serves only the bundle
    prepared then, for at most two minutes; a chunk the server already read stays with it.
 10. `max_repo_bytes` above 64 MiB is accepted, but a sync over 64 MiB or 200,000 objects fails the
     export's audit.
 11. Evidence counts are buffered (written at each sync, account, forget and expiry and every 32
-    reads), so a crash can lose a few counts.
+    reads), so a crash or a service stop can lose a few counts (the real-network run showed one
+    copy read uncounted after a stop).
 12. Copy-served evidence: commit ids are synthetic; task inputs named by an absolute client path
     are not found in the copy; a file tracked but not committed that matches `.gitignore` reads as
     ignored, and every file in the copy counts as not ignored; after a service restart the
@@ -580,20 +582,30 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     challenge discrepancies and uncertainties, correctness advisories) is kept; no status surface
     shows the marker; the privacy-audit review packet is held only in service memory, never on
     disk. At most 4,096 tasks wait in the pending-erasure record.
-14. The real-network run recorded is the first part's, on Linux only: the gateway edge over real
-    TLS, the native edge and a private `sshd`; consent at L2 on the trusted console; a sync at
-    start and at a check (`operation_not_declared` until the helper's background agent
-    registered, then `synced`, then `unchanged`); `server code list`; a server store holding no
-    plaintext; the hold and zero network refused before any bundle (the export database
-    unchanged); forget (one snapshot, 10 objects, 732 bytes); a sync in flight refused
-    `code_copy_forgotten`; a `days:7` expiry with the time simulated. The second part's reads,
-    pins, provenance, `task_close` expiry and erasure are exercised in process.
+14. The real-network runs were on Linux only. The first part's: the gateway edge over real TLS,
+    the native edge and a private `sshd`; consent at L2; syncs at start and at a check; `server
+    code list`; a store holding no plaintext; the hold and zero network refused before any bundle;
+    forget; a sync in flight refused `code_copy_forgotten`; a `days:7` expiry with the time
+    simulated. The released build's, with the offer from a real `[server.code_copy]` table: on the
+    gateway and native edges and over a private `sshd` (relay), consent at L2, the task base and a
+    check read from the copy, the receipt's evidence lines in text, JSON (`evidence_provenance`) and
+    the CLI's rendering, the L2 status line; on the gateway edge also an offline client's check
+    read from the copy as last synced (`stale_copy_read`), the hold and zero network refused before
+    any bundle, `allow add|list|remove`, forget with the content-forgotten marker in text and JSON
+    and the erasure recorded, a sync in flight fenced, a `task_close` expiry after the task closed
+    and a restart, and `forget --all`; `server remove --forget-copies` (native) and `server remove`
+    asking on the trusted console (`sshd`). Not run over a network: a reviewer read from the copy
+    (it needs an AI-powered review against a real provider credential), the erasure of real
+    captured excerpts (no review held any) and an approved check while offline (none configured);
+    each is covered in process. Over REST, a client whose helper stopped without closing its
+    connection is noticed only when the sync's 60-second wait ends (`deadline_exceeded`), so that
+    check returned `operation_pending` while the server finished it.
 
 ## Reverse states
 
 | Way in | Way out | Way to see it |
 |---|---|---|
-| The server's owner offers L2: `[server.code_copy] enabled = true`, then a service restart | `enabled = false` or no table, then a restart (clients are asked again; see honest limit 8) | The disclosure `server add\|use` shows a client's owner; `server code list` refused `server_level_unavailable` when there is no offer |
+| The server's owner offers L2: `[server.code_copy] enabled = true`, then a service restart | `enabled = false` or no table, then a restart (clients are asked again; the copies kept can still be listed, forgotten and expire: honest limit 8) | The disclosure `server add\|use` shows a client's owner; `server code list` refused `server_level_unavailable` when there is no offer |
 | Consent at L2: `server add\|use NAME --level L2 [--retention …]` on the trusted console | `server use NAME --level L1` (future sends stop; the copy stays until forgotten or expired); `server use local` or another server; `server remove` (asks to forget first; `--forget-copies`, `--keep-copies`) | `server status [--json]` (`target.consent`); the status line of an L2 connection |
 | A sync stores a snapshot on the server and objects in this computer's export folder | `server code forget [--repository FOLDER]` or `server code forget --all` (deletes the copy there, the export folder here and the tasks' derived excerpts); a `days:N` or `task_close` expiry | `server code list [--json]`; the bounded events `code_copy_sync_<outcome>` and `code_copy_expiry`; a receipt's evidence lines |
 | A task reads evidence from the copy | Forget or expiry erase what it derived (decision 15); the erasure itself is deliberately one-way | The receipt's `evidence_provenance` member and its lines, the content-forgotten marker after a forget |

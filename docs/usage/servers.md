@@ -373,9 +373,9 @@ exclusions = ["*.sqlite", "datasets/"]
 A key FinishUP does not know is refused as `unknown_config_key`, and a value it cannot use as
 `config_value_invalid`; both name only the key. Every value is checked even while `enabled` is
 `false`. After a change, the people who use your server are asked to agree again. To stop offering it, set
-`enabled = false` (or remove the table) and restart: nothing more is sent, but the copies already
-kept stay in your server's FinishUP folder, encrypted, and neither expire nor can be forgotten
-until you offer it again.
+`enabled = false` (or remove the table) and restart: nothing more is sent or read from the copies
+already kept, which stay in your server's FinishUP folder, encrypted, until they expire or the
+people who sent them forget them (`finishup server code forget` still works).
 
 ### Choosing it on your computer
 

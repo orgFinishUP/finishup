@@ -352,7 +352,8 @@ answered by the client's agent; the subject-state commitment and `code_snapshot_
 per-evidence provenance in every receipt rendering, with the count of fenced reads (O7); the
 erasure of the excerpts derived from a forgotten copy, with a "content forgotten" marker; and
 `server code forget --all`, `server code allow list|remove` and `server remove` offering to forget
-first. The write side ran over real networks on Linux; the rest is exercised in process.
+first. Both parts ran over real networks on Linux (gateway and native REST edges over real TLS,
+and a private `sshd`; ADR-054 honest limit 14 names what ran and what is covered in process only).
 
 **Not yet built:** the terminal interface's L2 flows (CLI only), any macOS or WSL 2 run, and a
 Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*); then
