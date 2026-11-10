@@ -736,9 +736,17 @@ it with `remote_reconsent`.
 `GET /v1/server` is the HTTPS profile source (`client.rest_discovery.RestProfileSource`,
 `PROFILE_SOURCES["https"]` and `["local_port"]`), used by `server add`, `server use`, `server
 login` and the helper's refresh; it answers `server-profile` 1.0.0 with the caller's key (`{id,
-scope, principal}`) and the edge `rest-1`. The endpoint identity recorded in the cache is what this
-client's own TLS trust observed, never what the server says: `tls_pin` (the pin), `tls_ca_file`
-(the `sha256` of the CA file, so replacing it changes the consent) or `tls_system_ca`. The
+scope, principal}`) and the edge `rest-1`, and counts only when it is a profile this release reads
+naming the key that was sent (`remote_incompatible` otherwise). The endpoint identity recorded in
+the cache is what this client's own TLS trust observed, never what the server says: `tls_pin` (the
+pin), `tls_ca_file` (the `sha256` of the CA file's bytes **as loaded into the TLS context**: one
+read per transport, so the bytes consented to are the bytes that verify the server) or
+`tls_system_ca`. A connection made on the owner's behalf after the consent (the helper's upstream,
+the direct style, the helper's refresh, a `login` check) compares that identity with the consented
+envelope's before any byte is sent, so a CA file replaced since is `remote_identity_changed` and
+nothing (no key, no claim) reaches a server only the new CA trusts until the owner agrees again
+(`finishup server use NAME`, layer-5 review). The helper's refresh also asks, before each of its
+requests, that it is not stopping, not zero-network and that gate steps 2 to 4 still pass. The
 consent's principal is the key's id and principal, so another key is another identity and asks
 again (decision 23).
 
@@ -752,13 +760,20 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   `<troot>/run/control.sock` exactly as for SSH. The helper's upstream is `RestUpstream`: each
   relayed connection is one `RestControlStream` (ADR-053 decision 11) over one warm TLS transport;
   the helper still refuses a hello that names a `workspace_locator` or no revision and checks every
-  later client frame against its own admission before it is forwarded (FR-2). Only the helper
-  reads the API key. It never starts an HTTPS server's service: the server's edge does, for a
+  later client frame against its own admission before it is forwarded (FR-2). A REST stream also
+  sends on its own (a lost answer's resend, `operation_limit` retries, long-polls, the agent's
+  registration), so the helper binds each relayed stream to the admission it was opened under and
+  to the repository its hello claims, asked before every such request: a lapse ends it
+  `server_authorization_changed`, and the claim's worktree digest among the worktrees held or kept
+  from that target now (`repository_hold.held_worktrees`, the fence its agents use) ends it
+  `repository_egress_held` (layer-5 review). Only the helper reads the API key. It never starts an HTTPS server's service: the server's edge does, for a
   client's request.
 - **Direct** (advanced). Each dialing process (hooks, the MCP bridge, CLI commands) reads the key
   itself and runs a `ServiceClient` over its own `RestControlStream`; the gate runs before the
-  dial, and the authorization before every frame and on its watch (FR-2 unchanged). The helper
-  still runs for the background agents, the drain and the refresh.
+  dial, and the authorization before every frame and on its watch (FR-2 unchanged); the stream asks
+  the same repository-bound admission before each request it makes on its own (the agent's
+  registration, retries, polls). The helper still runs for the background agents, the drain and
+  the refresh.
 - **Who reads the key.** Unlike SSH, the style decides which processes read a FinishUP credential
   (ADR-008 amendment, layer 5), and `server set` says so; it is still not an authorization change
   and moves no generation. A key the owner changes moves the credential generation, which every
@@ -779,23 +794,28 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   file, is checked with the server (`GET /v1/server`) before it is kept (ADR-051 decision 7): a key
   the server refuses (`remote_auth_failed`), an identity that does not match the recorded trust
   (`remote_identity_changed`) or another contract (`remote_incompatible`) stores nothing, and the
-  command says why; a server that does not answer keeps the key "not verified yet", checked on the
-  first connection or by `finishup server test NAME`. Then the key is stored; under the registry
-  lock the record's `credential` is written field by field from the record as stored (SRV-12, the
-  login half; a target removed meanwhile keeps no key), the credential generation is bumped (O8:
-  every connection made under the old key, the helper's relay included, ends with
-  `server_authorization_changed`) and the fetched profile is recorded (`refresh_profile`); then the
-  helper is stopped through its stop epoch, so the next client starts one with the key stored now
-  (A-CRED-STALE). A stop that does not finish in time is named, with `finishup server disconnect
-  NAME` as the fix.
+  command says why; the profile is validated before anything changes. A server that does not
+  answer keeps the key "not verified yet". Then, in one registry-locked step on the record as
+  stored now (SRV-12, the login half; a target removed meanwhile keeps no key), the key is stored,
+  the record's `credential` written, the credential generation bumped (O8: every connection made
+  under the old key, the helper's relay included, ends with `server_authorization_changed`) and the
+  fetched profile recorded (`refresh_profile`); concurrent logins and logouts are serialized by
+  that lock, so no key is ever paired with another key's profile. A key not verified removes the
+  profile cached for the previous key instead (`forget_cached_profile`): the consent step (gate
+  step 5) then refuses `server_profile_changed` and nothing is sent under the new key until its
+  own profile is fetched and compared with the consent (`finishup server use NAME` once the server
+  is up, or the helper's refresh), so work never flows under the old consent with an unchecked key
+  (layer-5 review). The helper is stopped through its stop epoch whatever happens after the key was
+  stored, so the next client starts one with the key stored now (A-CRED-STALE). A stop that does not
+  finish in time is named, with `finishup server disconnect NAME` as the fix.
 - **A new key is a new identity.** The consent envelope's principal is the key's id and principal
   (decision 6), so a key the server answers under another id, a rotated one included (rotation
   keeps the principal and so the tasks), is not the identity the owner agreed to: `login` says to
   agree again with `finishup server use NAME` on the owner's terminal, and until then the gate
   refuses `server_profile_changed`.
-- **`finishup server logout NAME`** is offline: it deletes the key, bumps the generation under the
-  registry lock (a target removed meanwhile is left alone) and stops the helper, which may hold the
-  deleted key in memory. The next request is `remote_auth_failed` before any byte is sent.
+- **`finishup server logout NAME`** is offline: under the registry lock it deletes the key the
+  record names now, writes the record and bumps the generation (a target removed meanwhile is left
+  alone), then stops the helper, which may hold the deleted key in memory. The next request is `remote_auth_failed` before any byte is sent.
 
 ## Honest limits
 

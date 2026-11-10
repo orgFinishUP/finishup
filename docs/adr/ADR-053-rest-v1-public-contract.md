@@ -89,7 +89,8 @@ routes, which are reverse paths); `finishup-workspace-claim:
 <git_common_root|directory>:sha256:<hex>:sha256:<hex>`; `finishup-client-kind` (absent is `cli`);
 `finishup-service-instance` and `finishup-service-generation` (on calls, from the session);
 `finishup-operation-id` (the control rpc id, idempotent per key); `finishup-deadline-ms`;
-`finishup-route-profile`; `finishup-host-profile`. Response headers: `finishup-outcome`,
+`finishup-route-profile`; `finishup-host-profile`; `finishup-agent` (on a call: the agent the
+calling connection registered, layer-5 review). Response headers: `finishup-outcome`,
 `finishup-operation-id`, `finishup-service-instance`, `finishup-service-generation`,
 `finishup-workspace-handle` and `location`.
 
@@ -98,19 +99,36 @@ routes, which are reverse paths); `finishup-workspace-claim:
 On every request, first refusal wins:
 
 1. an `Origin` header is present: `origin_forbidden` (browsers and DNS rebinding);
-2. the unauthenticated budget, for discovery and every request no key authenticated: token buckets
-   per peer address (20, refilled 5 per second) and in total (200, refilled 50 per second); over
-   either, `rate_limited` and nothing more is read;
+2. the unauthenticated budget, for discovery (whatever its method) and for every refusal of a
+   request no key authenticated, whatever its reason (a duplicated `authorization` header's
+   `header_invalid` included): token buckets per peer address (20, refilled 5 per second) and in
+   total (200, refilled 50 per second); over either, `rate_limited` and nothing more is read;
 3. the bearer key: `api_key_invalid`, `api_key_revoked`, `api_key_expired`, or
    `server_keys_unusable` while the server's key file cannot be used;
 4. the client's API manifest: `header_invalid` when absent, `api_manifest_unsupported` when this
    server does not serve it;
 5. the consented profile revision: `header_invalid` when absent, `server_profile_changed` when it is
-   not the revision the service issues now, before any work (ADR-052 decisions 10 and 21);
+   not the revision the service issues now, before any work (ADR-052 decisions 10 and 21). The
+   routes ask the backend (`RestBackend.admit`: the native edge compares the issued revision, the
+   gateway sends a hello naming only that revision) **before they read a body** (a call, an
+   agent's registration, a reply), so a stale call is never answered `202` or read whole; the
+   session, the dispatch and the registration check again where the work is done;
 6. the key's scope as a method allow-list: an out-of-scope call is answered with the control
    protocol's own `method_forbidden` result and never dispatched;
 7. the claim, namespaced by the key's principal (decision 6) before the backend sees it;
-8. the per-key caps: 32 pending operations (`operation_limit`) and 16 agents (`agent_limit`).
+8. the per-key caps: 32 pending operations (`operation_limit`) and 16 agents (`agent_limit`); a
+   registration holds its agent slot from before it reaches the backend until it is registered or
+   fails, so concurrent registrations never pass the cap.
+
+A call naming `finishup-agent` is sent to that agent first, as a control connection's call goes to
+the agent its own hello declared (design v2 section 8.5): the agent must be the caller's own, live,
+and registered for the call's claim and revision (`agent_unknown`, or `server_profile_changed`
+for another revision). The native edge dispatches the call under that agent's hub channel
+(`live_call_scope`); the gateway writes it on the agent's own control connection and reads its
+result there. Once a call's frame reached the service, a result that cannot be read (no answer to
+the cancel in time, the connection lost) is `request_timeout` (outcome unknown), never
+`request_cancelled`. An agent's handle is let go when the agent is ended (`DELETE`, its lease, its
+key, the service's side).
 
 A start needs a claim (`workspace_claim_required`) and a `workspace_ref` must be a `client:` handle
 (`frame_invalid`): no path on the client is ever named over the network. A transport or
@@ -143,9 +161,13 @@ Seven documents, all 1.0.0, generated under `schemas/service/` from `rest.contra
 the schema generator and the resource ripple: `rest-error`, `rest-discovery`, `rest-session`,
 `rest-operation`, `rest-agent`, `rest-agent-declaration` (the `POST /v1/agents` body: the
 operations the agent answers, its largest reply and its `role`, `connection` or `background`) and
-`rest-agent-work`. They carry the new artifact role `network-control`. `rest.contract` is the
-runtime parser (no pydantic on the client's path); a conformance test keeps parser and schemas
-agreeing on the golden vectors in `fixtures/service/rest.case.json`, with rejections. No document
+`rest-agent-work`, whose every call is exactly the control wire's `workspace_call` frame (its
+schema is that branch of `control-result` 2.10.0, and the parser validates each call the same way,
+so a server can never hand a client an undefined call; layer-5 review). They carry the new artifact
+role `network-control`. `rest.contract` is the runtime parser (no pydantic on the client's path); a
+conformance test keeps parser and schemas agreeing on the golden vectors in
+`fixtures/service/rest.case.json`, with rejections (a non-empty work and three malformed ones
+included). No document
 carries a path, a host name, an owner-typed label or a key. A receipt's frozen version slice
 (64 entries, bound by receipt-document 1.0.0 to 1.4.0 and receipt-result 1.5.0) leaves the `rest-*`
 family out: those documents describe no operation a receipt records, while the version manifest
@@ -304,14 +326,17 @@ fetches.
   certificate's DER right after the handshake, before any request byte, and replaces chain and
   host-name validation, as the owner chose; `--ca-file F` trusts that CA only, with the host name
   checked; otherwise this computer's system store (Python's default verify paths). A CA file that
-  cannot be read sends nothing.
+  cannot be read, or holds no PEM certificate, sends nothing. The CA file is read once per
+  transport (`load_trust`): those bytes are both the TLS context and the identity the transport
+  reports (layer-5 review).
 - **No proxies and no redirects.** Proxy variables are ignored and a `3xx` is never followed
   (`remote_incompatible`), so the hop goes only where the record says and no credential is carried
   elsewhere.
 - **Bounded answers.** A body past the largest control frame plus 64 KiB is refused unread.
-- **The key** is read off the event loop, one read at a time (A-KEYRING-LOOP), from where the
-  record says it lives now (A-CRED-STALE); a store that does not answer within the caller's budget
-  is `remote_auth_failed` for that attempt. A target with no key is `remote_auth_failed` before any
+- **The key** is read off the event loop, one read at a time (A-KEYRING-LOOP), on a daemon thread
+  of its own (never the loop's default executor, so a blocked read holds neither the loop's
+  shutdown nor the process's exit), from where the record says it lives now (A-CRED-STALE); a store
+  that does not answer within the caller's budget is `remote_auth_failed` for that attempt. A target with no key is `remote_auth_failed` before any
   byte is sent: that is ADR-052's gate step 6, made where the key is read (ADR-052 decision 20).
 - **Closed failures**, never naming a host, URL or body: the TLS identity refused
   (`remote_identity_changed`), no connection or a timeout (`remote_unreachable`), the key refused
@@ -320,7 +345,15 @@ fetches.
   (`remote_service_not_running`, 503).
 - **The endpoint identity** the consent binds to is what this client's own trust observed, never
   what the server says: `tls_pin` with the pin, `tls_ca_file` with the `sha256` of the CA file's
-  bytes (replacing the CA file changes the consent), or `tls_system_ca`.
+  bytes as loaded into the TLS context, or `tls_system_ca`. Every connection made on the owner's
+  behalf after the consent (the helper's upstream, the direct style, the helper's profile refresh,
+  a `login` check: `RestTransport.for_target(consented=True)`) compares that identity with the
+  consented envelope's before any byte is sent: a CA file replaced since is
+  `remote_identity_changed` until the owner agrees again with `finishup server use NAME`. Only the
+  owner's own `server add` and `server use` fetch a profile unbound, and the identity they record is
+  the one their transport loaded.
+- **The profile** (`GET /v1/server`) counts only when it is a `server-profile` this release reads
+  that names the key that was sent; anything else is `remote_incompatible`.
 
 ### 11. The frame-to-REST mapping (design v2 section 8.4)
 
@@ -337,7 +370,8 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   the hello result the service would give. A refusal ends the stream unanswered and names its phase:
   `server_profile_changed` (409), `remote_auth_failed` (401), `remote_incompatible` (404, 412, a
   refused document), `remote_service_not_running` (503), or the transport's phase. A hello that
-  declares an agent registers it (`POST /v1/agents`) and starts one work long-poll.
+  declares an agent registers it (`POST /v1/agents`) and starts one work long-poll; every call then
+  names that agent (`finishup-agent`).
 - **Pushed workspace calls.** Each call a poll returns is written to the client as its
   `workspace_call` frame, in order; each `workspace_reply` the client writes is
   `POST /v1/agents/{id}/replies`. `agent_unknown` (its lease ran out, the service restarted, its
@@ -348,10 +382,11 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   host profiles; a `202` is long-polled until it answers; `operation_limit` (never dispatched) is
   retried with growing waits within the call's deadline; a `409` is the call's
   `server_profile_changed` error result.
-- **Cancellation order.** A cancel always follows its call's `POST`. A `DELETE` that reaches the
-  server before the server admitted the call changes nothing (`operation_unknown`) and is sent
-  again once the `POST` is answered. A call answered done drops its cancel; one still running goes
-  on to its own `request_cancelled` result.
+- **Cancellation order.** A cancel always follows its call's `POST`. A `DELETE` sent before the
+  server admitted the call changes nothing (`operation_unknown`): whatever order the two answers
+  come back in, it is sent again once the `POST` was answered while the call runs (so is one that
+  was not answered, at most three times). A call answered done drops its cancel; one still running
+  goes on to its own `request_cancelled` result.
 - **Reconnect and unknown outcomes.** A `POST` whose answer was lost is sent again with the same
   operation id, at most three times (the server answers the operation it already admitted). When a
   call's outcome cannot be learned (its answer is gone, `operation_unknown`, or the server stayed
@@ -360,8 +395,18 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   ends. The workflow `request_id` in every body is untouched, so it stays the kernel's idempotency
   key across a helper's or a bridge's restart; the operation id is stable across HTTP retries
   within one stream.
-- **Deadlines.** A call's `deadline_ms` bounds its waits and retries; the caller's own deadline (a
-  hook's, ADR-052 decision 19) still spans the whole connection.
+- **Deadlines.** A call's `deadline_ms` is one absolute deadline for all it sends and waits for:
+  each request's own bound, each wait between retries and each long-poll's `wait_ms` end with it,
+  and no `POST` is sent again after it (the call's result is then `request_timeout`, outcome
+  unknown). The caller's own deadline (a hook's, ADR-052 decision 19) still spans the whole
+  connection.
+- **Authorization before every request.** The stream asks its `may_send` (the direct style: the
+  connection's repository-bound admission) and every check `bind` added before each request, the
+  agent's registration, every retry and every poll included; once one refuses, nothing more is
+  sent. The helper binds each relayed stream to the admission it was opened under and to the
+  repository its hello claims (the claim's worktree digest against the worktrees held or kept from
+  that target now, the fence its own agents use), so the stream's own retries and polls stop on a
+  lapse or a hold without waiting for the client's next frame or watch.
 - **Close (A-STOP-DELETE).** Courtesy `DELETE`s for the agent and for calls still running, bounded
   at one second in all, and never sent once nothing may be sent (this computer is zero-network, or
   the admission lapsed); the server ends an agent whose polls stop and forgets answers on its own.
@@ -394,14 +439,21 @@ address that names none of the open kinds (`http://`, another scheme).
   (`credential_not_applicable` otherwise); zero-network refusal first; the key is checked with the
   server before it is kept: a refused key, an identity that does not match the recorded trust or
   another contract stores nothing and says why; a server that does not answer keeps the key "not
-  verified yet" (checked on the first connection; `finishup server test NAME`). Then the record's
-  `credential` is written field by field from the stored record under the registry lock (SRV-12),
-  the credential generation is bumped (every connection under the old key ends, O8), the fetched
-  profile is recorded, and the helper is stopped (A-CRED-STALE). The consent is bound to the key's
+  verified yet". The profile is validated before anything changes (a document this release cannot
+  use stores nothing). Then, in one registry-locked step on the record as stored now (SRV-12), the
+  key is stored, the record's `credential` written, the credential generation bumped (every
+  connection under the old key ends, O8) and the fetched profile recorded; a key that was not
+  verified instead removes the profile cached for the previous key, so the consent step refuses
+  (`server_profile_changed`) and nothing is sent until this key's own profile is fetched and
+  compared with the consent (`finishup server use NAME` once the server is up, or the helper's
+  refresh). The helper is stopped whatever happens after the key was stored (A-CRED-STALE). The consent is bound to the key's
   id and principal, so a new key (a rotation included, though it keeps the principal) says to
   agree again with `finishup server use NAME` (ADR-052 decision 23).
-- **`finishup server logout NAME`**: offline; deletes the key, bumps the credential generation and
-  stops the helper.
+- **`finishup server logout NAME`**: offline; under the registry lock, deletes the key the record
+  names now, writes the record and bumps the credential generation; then stops the helper.
+- **Base URLs** never hold a `.` or `..` path segment (`target_url_invalid`), and an official
+  origin never matches one: the client library resolves such a segment away before sending, so
+  the request would leave the recorded prefix.
 - **Styles.** Edge `rest-1` offers `relay` and `direct`; `finishup server set NAME --style
   relay|direct` covers HTTPS and port targets. In the relay style (the default) only the helper
   reads the API key; in the direct style each dialing process (hooks, the MCP bridge, CLI commands)

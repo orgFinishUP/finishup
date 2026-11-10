@@ -201,17 +201,22 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   you can read), checks it with the server, shows what the server offers and asks you to type the
   name. A key the server refuses adds nothing. The key is kept in your system's credential store,
   or in a file only you can read, and never shown again. Your agreement is bound to the trust you
-  chose and to the key. See [FinishUP servers](docs/usage/servers.md) and
+  chose (the exact CA file you gave: if that file is replaced, FinishUP sends nothing, not even the
+  key, until you agree again with `server use`) and to the key. An address with a `.` or `..`
+  segment in its path is refused. See [FinishUP servers](docs/usage/servers.md) and
   [ADR-053](docs/adr/ADR-053-rest-v1-public-contract.md).
 - **`finishup server login NAME` and `finishup server logout NAME`** (now in help). `login` checks
   a new key with the server before it keeps it (one the server does not answer about is kept "not
-  verified yet"), ends every connection made with the old key and stops the helper; a new key asks
-  you to agree again with `server use`. `logout` deletes the key on this computer and stops the
+  verified yet", and nothing is sent to that server until the key is checked with `server use`),
+  ends every connection made with the old key and stops the helper; a new key asks you to agree
+  again with `server use`. `logout` deletes the key on this computer and stops the
   helper, sending nothing.
 - **The same helper and styles as SSH.** By default (relay) FinishUP's helper keeps one HTTPS
   connection and is the only program that reads the API key; `finishup server set NAME --style
   direct` has each program (hooks, FinishUP's tools, commands) read the key and connect itself.
-  `server status` shows the style, whether a key is stored and the helper's last phase.
+  `server status` shows the style, whether a key is stored and the helper's last phase. Every
+  request (a retry and a wait for an answer included) is checked against your current agreement,
+  zero-network and a repository you held first, and never outlives the call's own deadline.
 - **Serve a FinishUP over HTTPS.** `finishup service rest run --listen HOST:PORT --tls-cert F
   --tls-key F` (or `--behind-proxy` on loopback behind your own TLS proxy) serves this computer's
   FinishUP to others, in the foreground, under your own supervisor. By default it runs as a

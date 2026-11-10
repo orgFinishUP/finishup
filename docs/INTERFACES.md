@@ -14819,7 +14819,7 @@ imported at runtime), `rest.api_keys` (`ApiKeyStore`, `ApiKeyRecord`, `ApiKeyErr
 `finishup.gateway` (side GATEWAY: SHARED modules and `service.client` only):
 `gateway.backend.ControlSocketBackend` and `gateway.run.serve_gateway`. `service.rest_native`
 (SERVER): `NativeBackend` and `NativeRestEdge` (`run_service(rest_edge=…)`). Client side:
-`client.rest_client` (`RestTransport`, `RestUnavailable`, `load_key`, `observed_identity`,
+`client.rest_client` (`RestTransport`, `RestUnavailable`, `load_key`, `load_trust`, `TlsTrust`,
 `MAX_RESPONSE_BYTES`), `client.rest_stream.RestControlStream`, `client.rest_discovery`
 (`discover`, `check_discovery`, `fetch_profile`, `fetch_profile_async`, `check_key`, `KeyCheck`,
 `RestProfileSource`) and `client.helper.RestUpstream`. CLI: `cli.rest_server` (`api_key_app`,
@@ -14848,16 +14848,29 @@ request but `GET /v1/server` and the two `DELETE` routes); `finishup-workspace-c
 `<git_common_root|directory>:sha256:<hex>:sha256:<hex>`; `finishup-client-kind` (a
 `ControlClientKind`; absent is `cli`); `finishup-service-instance`, `finishup-service-generation`;
 `finishup-operation-id` (`rpc_<uuid4>`, idempotent per key); `finishup-deadline-ms`;
-`finishup-route-profile`; `finishup-host-profile` (`generic|codex|claude|cursor`). Response:
+`finishup-route-profile`; `finishup-host-profile` (`generic|codex|claude|cursor`);
+`finishup-agent` (`agt_<32 hex>`, on a call: the agent the calling connection registered; it must
+be the caller's own, live, of the same claim and revision, else `agent_unknown`). Response:
 `finishup-outcome`, `finishup-operation-id`, `finishup-service-instance`,
 `finishup-service-generation`, `finishup-workspace-handle`, `location`.
 
 **Order of checks** on every request (first refusal wins): `Origin` present; the unauthenticated
-budget (per peer 20, refilled 5 per second; in total 200, refilled 50 per second; discovery and
-every request no key authenticated); the key; the API manifest; the revision (before any work);
-the scope (an out-of-scope call answers the control `method_forbidden` result, never dispatched;
+budget (per peer 20, refilled 5 per second; in total 200, refilled 50 per second; discovery,
+whatever its method, and every refusal of a request no key authenticated, whatever its reason);
+the key; the API manifest; the revision (before any work: `RestBackend.admit(client_kind,
+revision, start_service)` is asked before any body is read, and the work checks again); the scope
+(an out-of-scope call answers the control `method_forbidden` result, never dispatched;
 `observation_ingest` only with a claim); the claim, namespaced by the key's principal
-(`rest.contract.claim_for_principal`, domain `yoetz/claim-principal/v1`); the per-key caps. A start
+(`rest.contract.claim_for_principal`, domain `yoetz/claim-principal/v1`); the per-key caps (a
+registration holds its agent slot while it waits for the backend). `RestBackend.dispatch(...,
+agent=)` takes the calling connection's registered `AgentHandle` (its `binding` is the backend's
+own: the native edge's hub channel, the gateway's agent connection); a call whose frame reached the
+service and whose result cannot be read is `request_timeout`; handles of ended agents are let go.
+Each `rest-agent-work` call is exactly a control `workspace_call` frame (`parse_agent_work`
+validates it with `control_protocol.parse_workspace_call`). The key file's folder must be
+owner-only and link-free, and the file is judged by the opened descriptor (`fstat`); a key
+`create` stored but whose folder could not be flushed is revoked before it fails
+(`ApiKeyError.active_key_id` names one that could not be). A start
 needs a claim and a `workspace_ref` must be a `client:` handle. Operation answers are kept 120
 seconds (`OPERATION_RESULT_SECONDS`; at most 64 per key, 1,024 and 64 MiB in all); an id whose
 answer was dropped stays spent 900 seconds (`SPENT_OPERATION_SECONDS`).
@@ -14968,11 +14981,16 @@ over REST.
   NAME https://HOST'", exit 2) while `OFFICIAL_ENDPOINT_ORIGINS` is empty.
 - `finishup server login NAME [--key-file F]`: "Stored the API key for NAME (ID) in the platform
   credential store|an owner-only file; the server accepted it." or "…, not verified yet: the
-  server did not answer (PHASE). It is checked on the first connection; run 'finishup server test
-  NAME' once the server is up."; then, for a key that is a new identity, "This key is a different
+  server did not answer (PHASE). FinishUP sends nothing to that server until the key is checked:
+  once the server is up, run 'finishup server use NAME' here (it checks the key and asks you
+  again), or log in again." (the profile cached for the previous key is removed, so gate step 5
+  refuses `server_profile_changed` until then); then, for a key that is a new identity, "This key is a different
   identity at that server than the one you agreed to, so FinishUP asks you again before it
   connects: run 'finishup server use NAME' here." A refused key, a changed identity or another
-  contract prints its phase with a sentence saying nothing was stored. `credential_not_applicable`
+  contract (an invalid profile, or one naming another key, included) prints its phase with a
+  sentence saying nothing was stored. The key, the record, the generation and the profile are
+  changed in one registry-locked step; `logout` deletes the key under the same lock.
+  `credential_not_applicable`
   ("only HTTPS targets take an API key; SSH targets use your OpenSSH keys and agent") for SSH.
 - `finishup server logout NAME`: "Deleted the API key for ID." or "No API key was stored for ID.".
   Both `login` and `logout` stop the helper and print, on stderr, "The connection this computer
@@ -14987,16 +15005,27 @@ over REST.
 **Official origins** (`client.server_folders`): `OfficialOrigin(host, port=443, path_prefix="",
 scheme="https")` with `url()` and `matches(base_url)`; `OFFICIAL_ENDPOINT_ORIGINS`, a tuple of
 them (empty; replaces `OFFICIAL_ENDPOINT_HOSTS`); `official_address(kind, base_url, *, ca_file,
-tls_pin)` (an `https` target matching an origin with neither `ca_file` nor `tls_pin`);
+tls_pin)` (an `https` target matching an origin with neither `ca_file` nor `tls_pin`; a base URL
+with a `.` or `..` path segment never matches, and `targets.normalize_https_url` refuses one,
+`target_url_invalid`);
 `official_preset_url()` (the first origin's URL, or `None`); `official_endpoint(record)`.
 
-**Client transport.** `RestTransport.for_target(record, key=…)`: httpx with no proxy variables and
-no redirects; TLS by `tls_pin` (the leaf's DER `sha256` checked after the handshake, before any
-request byte), `ca_file` (that CA only, host name checked) or the system store; answers bounded by
-`MAX_RESPONSE_BYTES` (the largest control frame plus 64 KiB). `load_key(target_id, *, seconds=10)`
-reads the key in a worker thread; no key, or no answer in time, is `remote_auth_failed`.
-`observed_identity(record)` is the endpoint identity recorded with a fetched profile:
-`("tls_pin", pin)`, `("tls_ca_file", "sha256:<hex of the CA file>")` or `("tls_system_ca", None)`.
+**Client transport.** `RestTransport.for_target(record, key=…, consented=False)`: httpx with no
+proxy variables and no redirects; TLS by `tls_pin` (the leaf's DER `sha256` checked after the
+handshake, before any request byte), `ca_file` (that CA only, host name checked) or the system
+store; answers bounded by `MAX_RESPONSE_BYTES` (the largest control frame plus 64 KiB).
+`load_trust(record) -> TlsTrust` reads the CA file once: `TlsTrust.context` holds exactly its PEM
+certificates and `TlsTrust.endpoint` is the identity recorded with a fetched profile, `("tls_pin",
+pin)`, `("tls_ca_file", "sha256:<hex of those bytes>")` or `("tls_system_ca", None)`
+(`RestTransport.identity`; it replaces layer 5's `observed_identity`, which read the file a second
+time). `consented=True` (the helper's upstream, the direct style, the helper's refresh, a login
+check) compares that identity with `server_profile.consented_endpoint_identity(root)` before any
+byte and refuses `remote_identity_changed`. `request(..., seconds=…)` bounds one request by a
+caller's remaining deadline. `load_key(target_id, *, seconds=10)` reads the key on a daemon thread
+of its own (abandoned, never joined, when its budget ends); no key, or no answer in time, is
+`remote_auth_failed`. `RestControlStream.bind(refusal)` adds a check asked before every request
+the stream makes (the helper binds a relayed stream's admission and claimed repository);
+`server_profile.forget_cached_profile(root)` removes the cache (an unverified login).
 Failure phases (`RestUnavailable.reason`): `remote_identity_changed`, `remote_unreachable`,
 `remote_auth_failed`, `remote_incompatible`, `remote_service_not_running`. `RestControlStream`
 states `await_hello`, `opening`, `open`, `ended`, `closing`, `closed`; `failure_phase()` names

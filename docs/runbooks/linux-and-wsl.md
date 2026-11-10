@@ -539,15 +539,19 @@ session (Codex, Claude Code, Cursor) has run against an HTTPS server yet (layer 
 - **On the client.** `finishup server add NAME https://HOST[:PORT][/BASE]` (or `--port PORT` for
   this computer's loopback) trusts the system store by default: Python's default verify paths,
   which on Linux are the distribution's CA bundle. A private CA is given with `--ca-file F`
-  (absolute or relative to the working directory; its bytes are part of the consent, so replacing
-  the file asks again), a self-signed server with `--tls-pin sha256:<64 hex>` (the leaf
+  (absolute or relative to the working directory; its bytes are part of the consent: the file is
+  read once per connection and those bytes are compared with the consented ones before anything,
+  the key included, is sent, so a replaced file is `remote_identity_changed` until
+  `finishup server use NAME` asks again; it must hold PEM certificates), a self-signed server with `--tls-pin sha256:<64 hex>` (the leaf
   certificate's DER digest). Proxy variables (`HTTPS_PROXY` and the rest) are ignored and
   redirects are never followed. The key is stored in the system credential store, or, where none
   is usable (most headless hosts), in the owner-only file `<target root>/config/credential`.
 - **Check a connection.** `finishup server status NAME` shows the style, whether a key is stored
   (`API key: keyring|file|none`) and the helper's last phase; `finishup server test NAME` probes
-  over the real transport. A failure names its closed phase and continuation
-  (`remote_unreachable`, `remote_auth_failed` → `finishup server login NAME`,
+  over the real transport. A key stored by `login` while the server did not answer sends nothing
+  until `finishup server use NAME` checks it (`server_profile_changed` until then). A failure names
+  its closed phase and continuation (`remote_unreachable`, `remote_auth_failed` → `finishup server
+  login NAME`,
   `remote_identity_changed` → verify the certificate another way, `remote_service_not_running`,
   `remote_incompatible` → the same release on both).
 - **Stop one.** `finishup server disconnect NAME` stops this computer's helper through its stop
