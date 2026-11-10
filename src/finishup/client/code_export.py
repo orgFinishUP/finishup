@@ -8,7 +8,10 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    zero-network marker, the consent at L2 and the repository's own level. A refusal raises
    before any file is read and before any object is written.
 2. The **base** (the original commit the task started from, ``HEAD`` by default) is listed with
-   ``git ls-tree`` and its blobs read with ``git cat-file``; the **current tree** is every
+   ``git ls-tree`` and its blobs read with ``git cat-file``. A base the server names is exported
+   only when this export database chose it itself from ``HEAD`` for an earlier snapshot (its
+   ``bases``) or it is ``HEAD`` now: a server that knows an older commit's id never gets that
+   commit's tree (files deleted before the task began, old secrets) (``code_export_base_unknown``); the **current tree** is every
    git-visible file: tracked (``git ls-files --stage``) and untracked-not-ignored
    (``--exclude-standard`` with the ignore file the owner's own Git configuration names, at Git's
    own precedence), read from the worktree without following any link (each directory opened
@@ -100,6 +103,9 @@ __all__ = [
 EXPORT_SCHEMA: Final = "yoetz.code-export/1"
 _EXPORT_NAME: Final = "export.json"
 _MAX_SENT: Final = 64
+# The bases this export database chose itself from ``HEAD`` (newest last): a server may name only
+# one of them, or the current ``HEAD``, as the base of a later snapshot.
+_MAX_BASES: Final = 64
 _MAX_LISTED: Final = 256
 _MAX_LINK_BYTES: Final = 4_096
 _MAX_LFS_POINTER_BYTES: Final = 1_024
@@ -159,11 +165,13 @@ def _recordable_root(value: object) -> bool:
     return len(encoded) <= _MAX_ROOT_BYTES and value.isprintable()
 
 
-type _Record = tuple[str, int, tuple[str, ...], str | None]
+type _Record = tuple[str, int, tuple[str, ...], str | None, tuple[str, ...]]
+_RECORD_MEMBERS: Final = frozenset({"schema", "export_id", "next_ref", "sent", "root"})
 
 
 def _read_export_record(path: Path) -> _Record | None:
-    """``(export id, next ref, sent, root)`` from ``export.json``; None when there is none.
+    """``(export id, next ref, sent, root, bases)`` from ``export.json``; None when there is none
+    (a record written before ``bases`` was kept reads as having chosen none).
 
     Raises ``ExportRefused("code_export_unsafe")`` for a record that is not an owner-only regular
     file; a record that cannot be parsed or names a value out of shape is None too: nothing it
@@ -194,7 +202,7 @@ def _read_export_record(path: Path) -> _Record | None:
     try:
         value = strict_json_parse(encoded.rstrip(b"\n"))
         source = cast(dict[str, JsonValue], value)
-        if set(source) != {"schema", "export_id", "next_ref", "sent", "root"}:
+        if set(source) not in (_RECORD_MEMBERS, _RECORD_MEMBERS | {"bases"}):
             raise ValueError("members")
         if source["schema"] != EXPORT_SCHEMA:
             raise ValueError("schema")
@@ -208,9 +216,15 @@ def _read_export_record(path: Path) -> _Record | None:
             raise ValueError("sent")
         if root is not None and not _recordable_root(root):
             raise ValueError("root")
+        listed = source.get("bases", [])
+        if type(listed) is not list or len(listed) > _MAX_BASES:
+            raise ValueError("bases")
+        bases = tuple(cast(list[str], listed))
+        if any(not _HEX.match(item.encode()) for item in bases):
+            raise ValueError("bases")
     except (ValueError, TypeError, AttributeError):
         return None
-    return export_id, next_ref, sent, cast(str | None, root)
+    return export_id, next_ref, sent, cast(str | None, root), bases
 
 
 class ExportDatabase:
@@ -221,11 +235,14 @@ class ExportDatabase:
     the next ref number, the snapshot commits sent (the local mirror of the server's have-set,
     newest last) and ``root``: the repository's folder the latest sync read (its worktree's top,
     an absolute path; ``null`` before a sync read one, or for a path that cannot be shown), which
-    ``server code forget --all`` claims to forget that repository's copy. Everything owner-only;
-    never the repository's own object store, and this computer's own record: never sent.
+    ``server code forget --all`` claims to forget that repository's copy, and ``bases``: the
+    original commits this database chose itself from ``HEAD`` as a snapshot's base (newest last,
+    bounded), the only ones a server may name as a later snapshot's base besides ``HEAD`` now.
+    Everything owner-only; never the repository's own object store, and this computer's own record:
+    never sent.
     """
 
-    __slots__ = ("_export_id", "_folder", "_next_ref", "_root", "_scanned", "_sent")
+    __slots__ = ("_bases", "_export_id", "_folder", "_next_ref", "_root", "_scanned", "_sent")
 
     def __init__(self, folder: Path) -> None:
         self._folder = folder
@@ -242,9 +259,10 @@ class ExportDatabase:
             self._next_ref = 1
             self._sent: tuple[str, ...] = ()
             self._root: str | None = None
+            self._bases: tuple[str, ...] = ()
             self._write_record()
         else:
-            self._export_id, self._next_ref, self._sent, self._root = record
+            self._export_id, self._next_ref, self._sent, self._root, self._bases = record
 
     @property
     def export_id(self) -> str:
@@ -266,6 +284,22 @@ class ExportDatabase:
 
         return self._root
 
+    @property
+    def bases(self) -> tuple[str, ...]:
+        """The original commits this database chose itself as a snapshot's base (see the class)."""
+
+        return self._bases
+
+    def remember_base(self, commit: str) -> None:
+        """Record a base this export chose itself from ``HEAD`` (newest last, bounded; written
+        only when it changes)."""
+
+        if self._bases[-1:] == (commit,):
+            return
+        bases = tuple(item for item in self._bases if item != commit) + (commit,)
+        self._bases = bases[-_MAX_BASES:]
+        self._write_record()
+
     def _record_path(self) -> Path:
         return self._folder / _EXPORT_NAME
 
@@ -276,6 +310,7 @@ class ExportDatabase:
             "next_ref": self._next_ref,
             "sent": list(self._sent),
             "root": self._root,
+            "bases": list(self._bases),
         }
         self._write_file(self._record_path(), canonical_encode(document) + b"\n")
 
@@ -1110,26 +1145,35 @@ def _build_tree(
 
 
 def _resolve_base(
-    root: Path, requested: str | None
+    root: Path, requested: str | None, chosen: Iterable[str]
 ) -> tuple[str | None, Literal["sha1", "sha256"]]:
+    """The base commit to export and the repository's object format.
+
+    Unnamed: ``HEAD`` (None when it is unborn). Named by the server: only a base this export
+    database chose itself from ``HEAD`` earlier (``chosen``) or ``HEAD`` now, and only when it is a
+    commit here; any other commit, however the server learned its id, is refused
+    (``code_export_base_unknown``) before anything of it is listed or read.
+    """
+
     try:
         named = _git(root, "rev-parse", "--show-object-format", check=False).strip()
     except ExportRefused:
         named = b""
     object_format: Literal["sha1", "sha256"] = "sha256" if named == b"sha256" else "sha1"
+    head = _git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).strip()
+    if head and not _HEX.match(head):
+        raise ExportRefused("code_export_git_failed")
+    current = head.decode("ascii") if head else None
     if requested is not None:
         if not _HEX.match(requested.encode()):
+            raise ExportRefused("code_export_base_unknown")
+        if requested != current and requested not in set(chosen):
             raise ExportRefused("code_export_base_unknown")
         found = _git(root, "rev-parse", "--verify", "-q", requested + "^{commit}", check=False)
         if found.strip().decode() != requested:
             raise ExportRefused("code_export_base_unknown")
         return requested, object_format
-    head = _git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).strip()
-    if not head:
-        return None, object_format
-    if not _HEX.match(head):
-        raise ExportRefused("code_export_git_failed")
-    return head.decode("ascii"), object_format
+    return current, object_format
 
 
 def _listed(paths: Iterable[bytes]) -> tuple[tuple[str, ...], int]:
@@ -1225,7 +1269,7 @@ def export_snapshot(
     root = Path(os.fsdecode(top))
     # The folder ``server code forget --all`` claims to forget this repository's copy.
     database.remember_root(root)
-    base_commit, object_format = _resolve_base(root, request.base_commit)
+    base_commit, object_format = _resolve_base(root, request.base_commit, database.bases)
     try:
         root_fd = os.open(root, _OPEN_DIRECTORY)
     except OSError:
@@ -1311,11 +1355,21 @@ def export_snapshot(
         bytes=tree_bytes,
     )
     if snapshot_object.oid in held:
+        _remember_base(database, base_commit)
         return PreparedExport(manifest, b"", True, ref_number)
     send = [item for oid, item in objects.items() if oid not in held]
     bundle = write_bundle(have, snapshot_object.oid, ref_number, write_pack(send))
     _audit(bundle, held, objects, manifest, policy)
+    _remember_base(database, base_commit)
     return PreparedExport(manifest, bundle, False, ref_number)
+
+
+def _remember_base(database: ExportDatabase, base_commit: str | None) -> None:
+    """The base of a snapshot ready to send is one a later snapshot may name (``HEAD`` then, or
+    one chosen earlier, kept newest)."""
+
+    if base_commit is not None:
+        database.remember_base(base_commit)
 
 
 def _audit(

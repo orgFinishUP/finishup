@@ -159,7 +159,11 @@ which a level-L2 task's receipt counts (decision 14).
 
 `client.code_export` is the sanitized exporter, and only the helper runs it (decision 4). Its gate
 runs first (FR-7): a refusal raises before any file is read or any object written. The **base** is
-the original commit, listed with `git ls-tree` and read with `git cat-file`; the **current tree**
+the original commit, listed with `git ls-tree` and read with `git cat-file`. A base the server names
+is exported only when the export database chose that commit itself from `HEAD` for an earlier
+snapshot (its `bases`, the 64 newest kept) or it is `HEAD` now; any other commit, however the
+server learned its id, is refused before anything of it is listed (`code_export_base_unknown`,
+answered as `code_export_failed`), so files deleted before the task began never leave. The **current tree**
 is every git-visible file, tracked or untracked but not ignored (the ignore file the owner's own Git
 configuration names — `core.excludesFile` from the repository's or the global configuration,
 includes followed, else `$XDG_CONFIG_HOME/git/ignore` — at Git's own precedence; a configuration Git

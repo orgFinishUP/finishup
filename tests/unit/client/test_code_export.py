@@ -608,6 +608,82 @@ def test_names_that_are_not_safe_tree_entries_are_counted_not_sent(tmp_path: Pat
     assert prepared.manifest.counts["unrepresentable"] == 1
 
 
+def _objects(folder: Path) -> list[Path]:
+    return sorted(path for path in (folder / "objects").rglob("*") if path.is_file())
+
+
+def test_a_base_the_server_names_is_one_this_export_chose_itself_or_head_now(
+    tmp_path: Path,
+) -> None:
+    """B1: a server that knows an older commit's id never gets that commit's tree."""
+
+    root = _repository(tmp_path, {"app.py": b"1\n", "old_notes.txt": b"deleted before the task\n"})
+    old = git(root, "rev-parse", "HEAD").strip()
+    (root / "old_notes.txt").unlink()
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "drop the notes")
+    task_base = git(root, "rev-parse", "HEAD").strip()
+    folder = tmp_path / "export"
+    database = ExportDatabase(folder)
+    # A commit this export never chose: refused before anything of it is listed, read or written.
+    with pytest.raises(ExportRefused, match="code_export_base_unknown"):
+        export_snapshot(_request(root, base_commit=old), POLICY, database, gate=_open)
+    assert _objects(folder) == [] and database.bases == ()
+    # The task's base: this export chooses HEAD itself and records it.
+    first = export_snapshot(_request(root, purpose="base"), POLICY, database, gate=_open)
+    assert first.manifest.original_base == task_base and database.bases == (task_base,)
+    assert ExportDatabase(folder).bases == (task_base,)
+    # HEAD moves on; a later check may name the base this export chose, never the older commit.
+    (root / "app.py").write_bytes(b"2\n")
+    git(root, "commit", "-q", "-am", "work")
+    head = git(root, "rev-parse", "HEAD").strip()
+    check = export_snapshot(_request(root, base_commit=task_base), POLICY, database, gate=_open)
+    assert check.manifest.original_base == task_base
+    assert _tree_of(check, tmp_path) == {"app.py": "100644"}
+    with pytest.raises(ExportRefused, match="code_export_base_unknown"):
+        export_snapshot(_request(root, base_commit=old), POLICY, database, gate=_open)
+    # HEAD now is always a base this computer would choose itself.
+    fresh = ExportDatabase(tmp_path / "other")
+    named = export_snapshot(_request(root, base_commit=head), POLICY, fresh, gate=_open)
+    assert named.manifest.original_base == head and fresh.bases == (head,)
+    # A base that is not a commit here, or not an object id, is refused too.
+    for value in ("0" * 40, "HEAD~1", git(root, "rev-parse", "HEAD^{tree}").strip()):
+        with pytest.raises(ExportRefused, match="code_export_base_unknown"):
+            export_snapshot(_request(root, base_commit=value), POLICY, fresh, gate=_open)
+
+
+def test_the_chosen_bases_are_bounded_and_a_record_out_of_shape_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "code-export" / ("b" * 32)
+    database = ExportDatabase(folder)
+    commits = [f"{index:040x}" for index in range(70)]
+    for commit in commits:
+        database.remember_base(commit)
+    assert database.bases == tuple(commits[-64:])
+    database.remember_base(commits[10 + 6])  # one chosen again is kept as the newest
+    assert database.bases[-1] == commits[16] and len(database.bases) == 64
+    assert _record(folder)["bases"] == list(database.bases)
+    first = database.export_id
+    # A record written before bases were kept reads as having chosen none.
+    document = _record(folder)
+    del document["bases"]
+    (folder / "export.json").write_bytes(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    older = ExportDatabase(folder)
+    assert older.export_id == first and older.bases == ()
+    for bad in (["HEAD"], "0" * 40, [7], ["0" * 40] * 65):
+        document["bases"] = bad
+        (folder / "export.json").write_bytes(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        fresh = ExportDatabase(folder)
+        assert fresh.export_id != first and fresh.bases == (), bad
+        first = fresh.export_id
+        document = _record(folder)
+
+
 def test_an_unborn_and_a_sha256_repository_export_alike(tmp_path: Path) -> None:
     root = _repository(tmp_path, {}, commit=False)
     (root / "first.txt").write_bytes(b"first\n")

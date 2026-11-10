@@ -233,6 +233,32 @@ def test_a_bundle_prepared_by_one_agent_is_read_through_another_of_the_same_work
     assert not again.unchanged and export_folder(record.target_id, _key(repository)).is_dir()
 
 
+def test_a_base_the_server_names_is_exported_only_when_this_computer_chose_it(
+    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
+) -> None:
+    """B1: the server names the task's base; it never gets an arbitrary earlier commit."""
+
+    record, document = l2_target
+    first = git(repository, "rev-parse", "HEAD").strip()
+    git(repository, "commit", "-q", "-am", "second")
+    responder = _responder(record, repository)
+    key = _key(repository)
+    with release_l2():
+        assert _refused(responder, _arguments(document, purpose="check", base_commit=first)) == (
+            "code_export_failed"
+        )
+        prepared = responder.prepare(_arguments(document))
+        task_base = prepared.manifest.original_base
+        assert task_base != first
+        git(repository, "commit", "-q", "--allow-empty", "-m", "third")
+        named = responder.prepare(_arguments(document, purpose="check", base_commit=task_base))
+        assert named.manifest.original_base == task_base
+        assert _refused(responder, _arguments(document, purpose="check", base_commit=first)) == (
+            "code_export_failed"
+        )
+    assert export_folder(record.target_id, key).is_dir()
+
+
 # --- the sync fence ``server remove`` raises while it forgets (E2) -------------------------------------
 
 
