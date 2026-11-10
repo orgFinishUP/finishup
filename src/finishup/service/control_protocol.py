@@ -656,7 +656,9 @@ def _decode_control_payload(payload: bytes) -> ControlFrame:
     """Decode one frame body whose length prefix the caller has already checked."""
 
     try:
-        parsed = strict_json_parse(payload)
+        # ``canonical_encode`` makes the parse's profile walk itself (the same checks in the
+        # same order), and every refusal is ``frame_invalid`` either way: one walk, not two.
+        parsed = strict_json_parse(payload, validate=False)
         if canonical_encode(parsed) != payload or not isinstance(parsed, Mapping):
             _fail("frame_invalid")
         schema_name = _schema_name_for_frame(parsed)
