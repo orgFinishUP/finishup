@@ -80,6 +80,7 @@ __all__ = [
     "decode_tree",
     "encode_commit",
     "encode_tree",
+    "folded_name",
     "loose_decode",
     "loose_encode",
     "manifest_digest",
@@ -217,7 +218,10 @@ def loose_decode(raw: bytes, expected: str, *, limit: int) -> GitObject:
 # --- paths and trees ------------------------------------------------------------------------------
 
 
-def _folded(name: bytes) -> str:
+def folded_name(name: bytes) -> str:
+    """``name`` as a case-insensitive, normalizing filesystem compares it (raises for non-UTF-8):
+    two names with the same fold are one file on such a filesystem."""
+
     text = name.decode("utf-8")
     return unicodedata.normalize("NFC", _IGNORABLE.sub("", text)).casefold()
 
@@ -236,7 +240,7 @@ def component_refusal(name: bytes, mode: bytes) -> str | None:
     if len(name) > _MAX_COMPONENT_BYTES:
         return "path_invalid"
     try:
-        folded = _folded(name)
+        folded = folded_name(name)
     except UnicodeDecodeError:
         return "path_not_utf8"
     trimmed = folded.rstrip(". ")
@@ -298,7 +302,7 @@ def decode_tree(data: bytes) -> tuple[TreeEntry, ...]:
         if previous is not None and key <= previous:
             raise CopyError("tree_unsorted")
         previous = key
-        fold = _folded(name)
+        fold = folded_name(name)
         if fold in folded:
             raise CopyError("tree_case_collision")
         folded.add(fold)
