@@ -546,17 +546,20 @@ advertises.
 6. The REST edge and HTTPS targets ran for real on Linux only (the conformance kit, 18 cases, nine
    per edge over real TLS from a throwaway CA, and an end-to-end run of add, use, relay and direct,
    a changed profile, login with a rotated key, logout, the native edge with `--port` and a pin,
-   disconnect and remove). macOS and WSL 2 have no recorded run (owner: layer 7). The system store
+   disconnect and remove), and every REST cell of the layer-7
+   [acceptance matrix](../runbooks/acceptance-matrix.md) (both edges, both styles, L1 and L2).
+   macOS and WSL 2 have no recorded run (owner: the maintainer). The system store
    is Python's default verify paths: on macOS a python.org Python may need its certificates
    installed; untested.
-7. PR CI does not run `tests/conformance/rest/` (it starts real services); a job for it is a
-   follow-up.
+7. PR CI does not run `tests/conformance/rest/` (it starts real services); the real-network
+   workflow (`real-network.yml`, layer 7) does, on pull requests to any branch.
 8. A receipt's frozen version slice holds 64 entries: the next layer that adds operation schemas
    needs a receipt-document version bump.
 9. The server copy and its code sync over REST are built and released in layer 6 (ADR-054),
-   offered only by a server whose owner enables it. Not built: the WAN timing gate and an upgrade
-   over running gateways and helpers (layer 7); adding an HTTPS server from the terminal
-   interface; OAuth credential sources; an official service (another repository).
+   offered only by a server whose owner enables it. Layer 7 measured the WAN timing gate (not met
+   for direct HTTPS at a 100 ms round trip; ADR-052 decision 24) and ran an upgrade over running
+   helpers. Not built: adding an HTTPS server from the terminal interface; OAuth credential
+   sources; an official service (another repository).
 
 ## Reverse states
 

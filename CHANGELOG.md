@@ -280,6 +280,30 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   [FinishUP servers](docs/usage/servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2) and
   [ADR-054](docs/adr/ADR-054-level-l2-the-server-copy.md).
 
+### Servers elsewhere across upgrades and slow networks (#1308)
+
+- **An upgrade no longer makes helpers flap.** When FinishUP is upgraded in place while an agent
+  session is open, that session's MCP bridge keeps running its earlier build. Between two builds
+  of one version, the bridge and the newer commands used to replace each other's background
+  helper on every use. A helper started after a process is now never replaced by it; the older
+  session is told to reopen instead of being told to run `finishup service restart`.
+- **A server that was not upgraded says so.** When this computer runs a newer release than its SSH
+  server, the error is now `remote_incompatible` ("install the same release on both"), not "the
+  running local service … run `finishup service restart`", which repaired nothing.
+- **The direct style notices a changed server.** In the direct style, a request refused because the
+  server's profile changed now starts the background helper to read the new profile, so `finishup
+  server status` shows the change (and a profile that only asks for less is adjusted) instead of
+  calling the consent current while every request is refused.
+- **A server that does not answer in time is named.** In the direct style, a hook or command whose
+  server elsewhere did not answer within its time now names `remote_unreachable`, as the relay
+  style does, instead of reading as this computer's own service being down.
+- **Tested for real on Linux.** Every combination of server kind, edge, connection style and level
+  passed end to end, as did an upgrade over a running helper, bridge and service; Claude Code and
+  the Cursor agent started FinishUP's MCP server and Codex listed it. On a network with a 100 ms
+  round trip, the required startup gate's 0.65 s is exceeded for SSH and for direct HTTPS. macOS
+  and Windows through WSL 2 are not tested yet. See the
+  [acceptance matrix](docs/runbooks/acceptance-matrix.md).
+
 ### Added
 
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy

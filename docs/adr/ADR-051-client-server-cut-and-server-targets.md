@@ -279,9 +279,10 @@ and `server login` for every kind. `server logout` refuses an SSH target
 
 **Not yet built:** HTTPS and port servers, `server login`, the REST client, both HTTP server
 edges, discovery with the official origin preset and API-key direct disclosure (layer 5); the
-server copy, code sync in the helper and level L2 (layer 6); the WAN timing gate, an upgrade over
-running helpers and bridges, and the host × surface × operating system acceptance rows,
-including every macOS and WSL 2 run (layer 7). The terminal interface's `/server` still adds only
+server copy, code sync in the helper and level L2 (layer 6). Layer 7 ran the compatibility matrix,
+an upgrade over running helpers and bridges, the WAN timing gate and the Linux host rows
+([acceptance matrix](../runbooks/acceptance-matrix.md)); every macOS and WSL 2 run is still
+missing (owner: the maintainer). The terminal interface's `/server` still adds only
 a server on this computer (an SSH server is added with `finishup server add NAME ssh://…` in a
 terminal, because OpenSSH's host-key question needs the raw terminal), its `use` of an SSH target
 never lets OpenSSH ask, and it does not register its workspace with the helper (its own
@@ -356,8 +357,8 @@ first. Both parts ran over real networks on Linux (gateway and native REST edges
 and a private `sshd`; ADR-054 honest limit 14 names what ran and what is covered in process only).
 
 **Not yet built:** the terminal interface's L2 flows (CLI only), any macOS or WSL 2 run, and a
-Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*); then
-layer 7's lifecycle validation.
+Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*).
+Layer 7's lifecycle validation ran on Linux ([acceptance matrix](../runbooks/acceptance-matrix.md)).
 
 ## Decisions
 

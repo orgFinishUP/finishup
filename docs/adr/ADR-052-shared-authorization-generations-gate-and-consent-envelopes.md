@@ -307,12 +307,12 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
   per-evidence provenance on receipts with the receipt count of fenced reads (O7). **Still open:**
   the receipt line for a narrowing that reduced coverage (the consent records it, and `server
   status` shows it, `coverage_reduced`).
-- **Lifecycle (layer 7):** upgrade over running bridges, helpers and REST gateways, the WAN timing
-  gate, and the host × surface × operating system acceptance rows for the hold, the generation and
-  the helper (FR-6), and for a service restarted under a new profile revision. macOS (the helper's
-  reaping under `launchd`, `/private/tmp`, the Homebrew launcher path, the system certificate
-  store of a python.org Python) and WSL 2 have no recorded run of the helper, of SSH or of HTTPS
-  yet.
+- **Lifecycle (layer 7, decision 24):** ran on Linux: the compatibility matrix (every cell), an
+  upgrade over a running older helper, MCP bridge and service, the WAN timing gate, and the Linux
+  host rows ([acceptance matrix](../runbooks/acceptance-matrix.md)). macOS (the helper's reaping
+  under `launchd`, `/private/tmp`, the Homebrew launcher path, the system certificate store of a
+  python.org Python) and WSL 2 still have no recorded run of the helper, of SSH or of HTTPS (owner:
+  the maintainer; see the runbook's gaps).
 
 ### 9. The server profile and its revision (layer 3)
 
@@ -843,6 +843,38 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   record names now, writes the record and bumps the generation (a target removed meanwhile is left
   alone), then stops the helper, which may hold the deleted key in memory. The next request is `remote_auth_failed` before any byte is sent.
 
+### 24. Lifecycle across an upgrade and on a slow network (layer 7)
+
+Found by running the compatibility matrix, an upgrade over running processes and the WAN timing
+gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each holds on every surface.
+
+1. **A direct-style refusal of the consented revision starts the helper.** The direct style has no
+   helper on its path, so a `server_profile_changed` refusal also starts the target's helper
+   (client-owned, vault-less) unless one runs: it fetches the profile itself (never on the
+   request's or a hook's path), so `server status` names the change and a narrowing is adjusted.
+2. **Every remote outage names its phase.** A direct stream (`ssh -W` or REST) that does not answer
+   within the deadline is `remote_unreachable`, as through the helper; never a phaseless outage a
+   hook or the CLI renders as this computer's service being down.
+3. **A server elsewhere of another release is `remote_incompatible`.** A schema-manifest or
+   protocol mismatch over a remote transport is the server's release (self-hosted servers keep
+   lockstep, U18: its owner upgrades it; continuation `remote_release_mismatch`), never
+   `service_incompatible` with the local `service restart` remedy, unless this process is the
+   stale one (point 4).
+4. **Two builds of one version are ordered by start time.** A helper left by an older release is
+   replaced through its stop epoch, and one a newer release started never is (decision 13). Two
+   builds of one version cannot be ordered by version: a helper of this release but another build
+   that started after a process belongs to the newer installation (that process runs a retained
+   runtime from before an in-place upgrade), so it is never replaced by that process, which gets
+   `service_incompatible`; the MCP bridge then asks to reopen the session. Before this, a newer CLI
+   and an older bridge replaced each other's helper on every use. A bridge from a build without
+   this rule still does until its session is reopened.
+5. **The WAN gate (design v2 section 8.9) is measured, not yet met.** At a 100 ms round trip the
+   startup gate's warm connect and status exceeds 650 ms at p95 for the SSH styles and for direct
+   HTTPS (relay HTTPS meets it); the cold hook path ends within its budget and fails open naming
+   `remote_unreachable` in every style. The budget on a WAN, or fewer round trips on the
+   claim-bound connect, is an owner decision; `server test` warns only above a 200 ms round trip,
+   which is too lax for that path.
+
 ## Honest limits
 
 1. Before layer 4 no server elsewhere could be used, so nothing was held; from layer 4 an SSH
@@ -879,14 +911,16 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
     service's control socket, as they could on the server host itself (ADR-008 amendment,
     layer 4).
 13. Real OpenSSH was exercised on Linux only (the capability tests against a private `sshd`, and an
-    end-to-end run); macOS and WSL 2 have no recorded run (layer 7), and PR CI does not run the
-    capability tests.
+    end-to-end run, and every SSH cell of the layer-7 acceptance matrix); macOS and WSL 2 have no
+    recorded run (owner: the maintainer), and PR CI does not run the capability tests (the
+    real-network workflow does).
 14. In the direct style every dialing process reads the API key (decision 22); in the relay style
     only the helper does. Either way any process running as the same user can read the stored key
     (ADR-051 decision 7), and an API key is a bearer credential within its scope (ADR-053).
 15. Real HTTPS (TLS from a throwaway CA and a pin, both server edges) was exercised on Linux only:
-    the REST conformance kit and an end-to-end run of the CLI. macOS and WSL 2 have no recorded
-    run (layer 7), and PR CI does not run the conformance kit.
+    the REST conformance kit and an end-to-end run of the CLI, and every REST cell of the layer-7
+    acceptance matrix. macOS and WSL 2 have no recorded run (owner: the maintainer), and PR CI does
+    not run the conformance kit (the real-network workflow does).
 16. A key changed outside FinishUP (in the platform store, or the key file edited by hand) moves no
     credential generation: a running helper may keep using the key it read until the owner's next
     `login`, `logout` or `remove` moves the generation, or it restarts (decision 4).
