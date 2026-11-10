@@ -14772,7 +14772,13 @@ at most once per 30 s, for a client's connection only; a last drain bounded to 2
 **Service client.** `connect_service` and `connect_service_on_demand` reach an admitted SSH root
 through its transport: the relay style dials `<troot>/run/control.sock` (transport `connector`),
 starting the helper when nothing answers and replacing one an older release stamped; the direct
-style dials `ssh -W` (transport `ssh`). `connect_service_via(dial, client_kind, *,
+style dials `ssh -W` (transport `ssh`). Over `connector`, a connection whose binding claims a
+workspace writes the relay binding first (`helper_status.relay_binding(repository_key)`: `0xFF`,
+`yoetz-relay/1 `, the binding's `ClientWorkspaceBinding.repository_key`, a newline;
+`RELAY_BINDING_BYTES` long; `read_relay_binding`, `starts_relay_binding`); the helper binds the
+relay and its REST stream to that repository's hold and never forwards it, and refuses a claim
+without it. A dialed stream with `bind` (a REST stream) is bound to the connection's own
+authorization (a refusal names `server_authorization_changed`). `connect_service_via(dial, client_kind, *,
 workspace_binding, authorization, transport, timeout_seconds=5.0) -> ServiceClient` is the
 handshake over a stream a caller dials itself (the helper's background agents).
 `ServiceClient.wait_closed()`. A `server_profile_changed` refusal from the server leaves the

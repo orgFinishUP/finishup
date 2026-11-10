@@ -473,6 +473,10 @@ class ClientWorkspaceBinding:
     # The worktree top level the claim was made for, on this computer only (never sent): what a
     # registration with the target's helper names (ADR-052, ``client.helper_registrations``).
     worktree: str | None = field(default=None, repr=False)
+    # The repository key the binding's hold is decided by (``client.repository_hold``), on this
+    # computer only: the target's helper binds a relayed connection to it (``helper_status``'s
+    # relay binding), never sent anywhere else.
+    repository_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
@@ -2300,6 +2304,19 @@ async def _connect_service_attempt(
     try:
         async with asyncio.timeout(timeout_seconds):
             stream = await (connect_control() if dial is None else _remote_dial(dial))
+            if (
+                transport == "connector"
+                and workspace_binding is not None
+                and workspace_binding.repository_key is not None
+            ):
+                # Through the target's helper: the repository this connection's own admission is
+                # bound to, on this local connection only (the helper binds its relay to it and
+                # never forwards it; ``client.helper_status``).
+                from finishup.client.helper_status import relay_binding
+
+                await stream.send_all(relay_binding(workspace_binding.repository_key))
+        if authorization is not None:
+            _bind_stream(stream, authorization)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
@@ -2378,6 +2395,22 @@ async def _connect_service_attempt(
         if stream is not None:
             await _best_effort_close_stream(stream)
         raise
+
+
+def _bind_stream(stream: ControlStream, authorization: AuthorizationCheck) -> None:
+    """Bind a stream that sends on its own (a REST stream's retries, polls and registration) to
+    the connection's own authorization, its repository's hold included: once it refuses, the
+    stream sends nothing more, not only when the client next writes a frame. An open connection
+    ends ``server_authorization_changed`` whatever the refusal names."""
+
+    bind = getattr(stream, "bind", None)
+    if not callable(bind):
+        return
+
+    def refusal() -> str | None:
+        return None if authorization.refusal() is None else "server_authorization_changed"
+
+    bind(refusal)
 
 
 async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlStream:

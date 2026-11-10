@@ -11,7 +11,12 @@ one spawned before such a stop never serves. Its roles:
    channel of its OpenSSH master's ``-L`` forward into the server's owner-only control socket. It
    reads the hello (a hello naming a ``workspace_locator`` is never forwarded: a path on this
    computer never leaves it), and every later client frame is checked against the helper's own
-   admission before it is forwarded (ADR-052, FR-2); frames from the server pass unparsed.
+   admission before it is forwarded (ADR-052, FR-2); frames from the server pass unparsed. A
+   connection that claims a workspace names, before its hello and on this computer only, the
+   repository key its own admission is bound to (``helper_status``'s relay binding): the relay,
+   and a REST stream's own retries and polls, are then bound to that repository's hold
+   (``ConnectionAuthorization.for_repository``), never to the worktrees a record lists. A hello
+   that claims a workspace without it is never forwarded.
 2. **Background workspace agent** per registration (``client.helper_registrations``, FR-1): a
    claim-bound connection whose agent declares ``role: background``, built through
    ``remote_workspace_binding`` under the helper's admission, so the repository hold is decided
@@ -43,7 +48,6 @@ import base64
 import binascii
 import contextlib
 import functools
-import hmac
 import os
 import signal
 import socket
@@ -67,6 +71,7 @@ from finishup.adapters.control.unix_socket import (
 from finishup.client.attribution import ConnectionTransport
 from finishup.client.helper_status import (
     HELPER_IDLE_SECONDS,
+    RELAY_BINDING_BYTES,
     ConnectionStyle,
     HelperLock,
     HelperLockBusy,
@@ -77,6 +82,8 @@ from finishup.client.helper_status import (
     read_connection_style,
     read_helper_epoch,
     read_helper_status,
+    read_relay_binding,
+    starts_relay_binding,
     take_profile_refresh_request,
     write_helper_status,
 )
@@ -347,14 +354,50 @@ _UPSTREAM_PHASES: Final = frozenset(
 )
 
 
-def _claimed_worktree(hello: Mapping[str, object]) -> str | None:
-    """The keyed worktree digest a hello's claim names (``None`` without a claim)."""
+class _Pushback:
+    """A local stream's reads with the bytes already read put back in front (the first byte a
+    relay reads to tell its repository binding from a hello)."""
 
-    claim = hello.get("workspace_claim")
-    if not isinstance(claim, Mapping):
+    __slots__ = ("_data", "_stream")
+
+    def __init__(self, stream: ControlStream, data: bytes) -> None:
+        self._stream = stream
+        self._data = data
+
+    async def receive(self, max_bytes: int) -> bytes:
+        if self._data:
+            chunk, self._data = self._data[:max_bytes], self._data[max_bytes:]
+            return chunk
+        return await self._stream.receive(max_bytes)
+
+
+async def _read_exactly(stream: ControlStream, count: int) -> bytes | None:
+    data = bytearray()
+    while len(data) < count:
+        chunk = await stream.receive(count - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
+async def _relay_start(stream: ControlStream) -> tuple[str | None, Mapping[str, object]] | None:
+    """A relayed connection's repository binding (``None`` without one) and its hello; ``None``
+    when neither can be read. Raises what ``read_control_frame`` raises."""
+
+    first = await stream.receive(1)
+    if not first:
         return None
-    worktree = cast(Mapping[str, object], claim).get("worktree")
-    return worktree if type(worktree) is str else None
+    key: str | None = None
+    if starts_relay_binding(first):
+        rest = await _read_exactly(stream, RELAY_BINDING_BYTES - 1)
+        key = None if rest is None else read_relay_binding(first + rest)
+        if key is None:
+            return None
+        hello = await read_control_frame(stream)
+    else:
+        hello = await read_control_frame(cast(ControlStream, _Pushback(stream, first)))
+    return key, hello
 
 
 class _RelayEnded(Exception):
@@ -949,27 +992,34 @@ class Helper:
                 return
             try:
                 async with asyncio.timeout(_HELLO_SECONDS):
-                    hello = await read_control_frame(local)
+                    started = await _relay_start(local)
             except (TimeoutError, ControlProtocolError, LocalControlTransportError):
                 return
+            if started is None:
+                return
+            key, hello = started
             if (
                 "connection_nonce" not in hello
                 or hello.get("workspace_locator") is not None
                 or hello.get("server_profile") is None
+                or (hello.get("workspace_claim") is not None and key is None)
             ):
-                # Not a hello, a hello naming a path on this computer, or one bound to no
-                # consented profile revision: never forwarded.
+                # Not a hello, a hello naming a path on this computer, one bound to no consented
+                # profile revision, or one claiming a workspace without naming the repository
+                # its admission is bound to: never forwarded.
                 return
             admission = self._admitted()
             if admission is None:
                 return
-            worktree = _claimed_worktree(hello)
+            # This relay's own repository: its hold, by the repository's key, withholds the
+            # relay's frames and its REST stream's own requests (design v2 section 8.3).
+            repository = None if key is None else admission.for_repository(key)
             try:
                 upstream, first = await self._open_channel(
                     encode_control_frame(hello),
                     admission,
                     restart=not own,
-                    bound=lambda: self._relay_refusal(admission, worktree),
+                    bound=lambda: self._relay_refusal(admission, repository),
                 )
             except UpstreamUnavailable as error:
                 self._write_status("unavailable", error.reason)
@@ -977,7 +1027,7 @@ class Helper:
             self._last_upstream_use = self._clock()
             self._write_status("ready", None)
             await local.send_all(first)
-            await self._pump_both(local, upstream, admission)
+            await self._pump_both(local, upstream, admission, repository)
         except (asyncio.CancelledError, _RelayEnded):
             pass
         except Exception:  # noqa: BLE001 - a relay fault ends this connection only
@@ -995,42 +1045,35 @@ class Helper:
                 await local.aclose()
 
     def _relay_refusal(
-        self, admission: ConnectionAuthorization, worktree: str | None
+        self, admission: ConnectionAuthorization, repository: ConnectionAuthorization | None
     ) -> str | None:
         """What withholds a relayed stream's own next request (design v2 section 8.3).
 
         The admission the relay was opened under (zero-network, a lapse, the helper stopping:
-        ``server_authorization_changed``), then the repository its hello claims: a worktree of
-        a repository held or kept from this target now (``client.repository_hold``, the fence
-        the helper's agents use) is ``repository_egress_held``. The client checks its own exact
-        repository before each frame it writes; this covers what a REST stream sends between
-        them (a lost answer's resend, ``operation_limit`` retries, polls).
+        ``server_authorization_changed``), then the repository the client named for it: that
+        admission bound to the repository's key (``ConnectionAuthorization.for_repository``), so
+        a repository held or kept from this target now refuses with its own phase
+        (``repository_egress_held``, ``repository_egress_kept``), whichever worktree the relay
+        serves. The client checks its own repository before each frame it writes; this covers what
+        a REST stream sends between them (a lost answer's resend, ``operation_limit`` retries,
+        polls).
         """
 
         if not self._may_forward(admission) or not self._may_send():
             return "server_authorization_changed"
-        if worktree is not None and self._worktree_held(worktree):
-            return "repository_egress_held"
+        if repository is not None:
+            return repository.refusal()
         return None
 
-    def _worktree_held(self, worktree: str) -> bool:
-        from finishup.client.repository_hold import held_worktrees
-        from finishup.client.workspace_claim import worktree_digest
-
-        try:
-            salt = base64.b64decode(cast(str, self._record.claim_salt), validate=True)
-            for path in held_worktrees(self._root, self._record.target_id):
-                with contextlib.suppress(ValueError):
-                    if hmac.compare_digest(worktree_digest(path, salt), worktree):
-                        return True
-        except (TypeError, ValueError, binascii.Error):
-            return True  # a salt that cannot be read fences everything
-        return False
-
     async def _pump_checked(
-        self, source: ControlStream, sink: ControlStream, admission: ConnectionAuthorization
+        self,
+        source: ControlStream,
+        sink: ControlStream,
+        admission: ConnectionAuthorization,
+        repository: ConnectionAuthorization | None = None,
     ) -> None:
-        """Client to server, frame by frame: each frame is checked before it is forwarded."""
+        """Client to server, frame by frame: each frame is checked before it is forwarded, against
+        the helper's admission and the relay's own repository."""
 
         buffer = bytearray()
         while chunk := await source.receive(_PUMP_CHUNK):
@@ -1046,6 +1089,10 @@ class Helper:
                     # What this connection was admitted under changed: nothing more is sent,
                     # over this relay or any other made under it.
                     self._lapse(admission)
+                    raise _RelayEnded
+                if repository is not None and repository.refusal() is not None:
+                    # This relay's repository is held or kept now: this relay ends; the others,
+                    # made for other repositories, go on.
                     raise _RelayEnded
                 frame = bytes(buffer[:end])
                 del buffer[:end]
@@ -1065,10 +1112,14 @@ class Helper:
                 await shutdown()
 
     async def _pump_both(
-        self, local: ControlStream, upstream: ControlStream, admission: ConnectionAuthorization
+        self,
+        local: ControlStream,
+        upstream: ControlStream,
+        admission: ConnectionAuthorization,
+        repository: ConnectionAuthorization | None = None,
     ) -> None:
         tasks = (
-            asyncio.create_task(self._pump_checked(local, upstream, admission)),
+            asyncio.create_task(self._pump_checked(local, upstream, admission, repository)),
             asyncio.create_task(self._pump(upstream, local)),
         )
         try:

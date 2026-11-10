@@ -763,10 +763,12 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   later client frame against its own admission before it is forwarded (FR-2). A REST stream also
   sends on its own (a lost answer's resend, `operation_limit` retries, long-polls, the agent's
   registration), so the helper binds each relayed stream to the admission it was opened under and
-  to the repository its hello claims, asked before every such request: a lapse ends it
-  `server_authorization_changed`, and the claim's worktree digest among the worktrees held or kept
-  from that target now (`repository_hold.held_worktrees`, the fence its agents use) ends it
-  `repository_egress_held` (layer-5 review). Only the helper reads the API key. It never starts an HTTPS server's service: the server's edge does, for a
+  to the repository its client named, asked before every such request and every relayed frame: a
+  lapse ends it `server_authorization_changed`, and a hold of that repository, decided by its
+  repository key (`ConnectionAuthorization.for_repository`), ends it `repository_egress_held` or
+  `repository_egress_kept`, whatever worktrees the everyday record still lists (layer-5 review). The
+  client names that key before its hello on the local connection only (`helper_status`'s relay
+  binding, never forwarded); a relayed hello that claims a workspace without it is never sent. Only the helper reads the API key. It never starts an HTTPS server's service: the server's edge does, for a
   client's request.
 - **Direct** (advanced). Each dialing process (hooks, the MCP bridge, CLI commands) reads the key
   itself and runs a `ServiceClient` over its own `RestControlStream`; the gate runs before the

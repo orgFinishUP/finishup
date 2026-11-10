@@ -23,11 +23,15 @@ from typing import Any
 import httpx
 import pytest
 
-from builders.control_relay import hello_frame
+from builders.control_relay import RELAY_KEY, hello_frame, relay_binding_frame
 from builders.rest_backend import STATUS, ScriptedRestBackend
 from builders.server_profiles import TEST_REVISION, consent_to, profile_document
 from builders.server_targets import ambient_home, open_remote_kinds
-from finishup.adapters.control.unix_socket import AuthenticatedUnixStream, authenticate_peer
+from finishup.adapters.control.unix_socket import (
+    AuthenticatedUnixStream,
+    LocalControlTransportError,
+    authenticate_peer,
+)
 from finishup.client import rest_client, targets
 from finishup.client.authorization import bump_credential_generation
 from finishup.client.credentials import KeyringOrFileCredential
@@ -264,52 +268,128 @@ async def test_the_direct_style_reads_the_key_itself_and_sends_nothing_without_o
         assert len(lab.backend.sessions) == before
 
 
+def _held_by_key(key: str) -> None:
+    """The everyday FinishUP reports repository ``key`` allows no network use now, from a worktree
+    other than any a relay serves (the one relayed was evicted from the record, or never listed)."""
+
+    from finishup.client.everyday_policy import record_repository_report
+
+    assert record_repository_report(key, "/work/elsewhere", no_network=True)
+
+
+def _relay_hello() -> bytes:
+    return hello_frame(agent=True, server_profile=TEST_REVISION)
+
+
 async def test_a_relayed_rest_stream_sends_nothing_once_its_repository_is_held(
     lab: _Lab, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """B3: the helper binds each relayed REST stream to the admission it was opened under and to
-    the repository its hello claims; a hold that lands after the relay was admitted withholds the
-    stream's next request, though the helper's target-wide admission still admits."""
+    """B3: the helper binds each relayed connection, and its REST stream's own requests, to the
+    repository key the client named for it: a hold of that repository that lands after the relay
+    was admitted withholds the next request, though the record lists none of the relay's
+    worktrees and the helper's target-wide admission still admits."""
 
-    import base64
-    from collections.abc import Mapping
-    from typing import cast
+    from collections.abc import Callable
 
-    from finishup.client import repository_hold
-    from finishup.client.workspace_claim import worktree_digest
-    from finishup.service.control_protocol import decode_control_frame
+    from finishup.client.rest_stream import RestControlStream
 
-    salt = base64.b64decode(str(lab.record.claim_salt))
-    held: list[str] = []
+    bound: list[Callable[[], str | None]] = []
+    original_bind = RestControlStream.bind
 
-    def held_now(_root: Path, _target: str) -> tuple[str, ...]:
-        return tuple(held)
+    def bind(self: RestControlStream, refusal: Callable[[], str | None]) -> None:
+        bound.append(refusal)
+        original_bind(self, refusal)
 
-    monkeypatch.setattr(repository_hold, "held_worktrees", held_now)
-    hello: dict[str, object] = dict(
-        decode_control_frame(hello_frame(agent=True, server_profile=TEST_REVISION))
-    )
-    claim = dict(cast(Mapping[str, object], hello["workspace_claim"]))
-    claim["worktree"] = worktree_digest("/work/held", salt)
-    hello["workspace_claim"] = claim
+    monkeypatch.setattr(RestControlStream, "bind", bind)
     helper = Helper(lab.root, lab.record, refresher=_no_refresh)
     client, local = _pair()
     relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
     try:
         async with asyncio.timeout(10):
-            await client.send_all(encode_control_frame(hello))
+            await client.send_all(relay_binding_frame())
+            await client.send_all(_relay_hello())
             assert await client.receive(65_536)  # admitted: session and agent registered
-            held.append("/work/held")
+            assert [check() for check in bound] == [None]
+            _held_by_key(RELAY_KEY)
+            # The stream's own retries and polls ask this before they leave.
+            assert [check() for check in bound] == ["repository_egress_held"]
             await client.send_all(_call_frame())
             answered = await client.receive(65_536)
-        # The stream ends (its agent's next poll is withheld too) or answers the call as never
-        # sent; either way nothing more of that repository reached the server.
-        assert answered == b"" or b'"code":"service_unavailable"' in answered
+        assert answered == b""
         assert lab.backend.calls == []
         assert len(lab.backend.agents) == 1
+        # Only this relay ended: the helper's own admission still admits.
+        assert helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
     finally:
         await client.aclose()
         await asyncio.wait_for(relay, timeout=10)
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_held_repository_is_refused_by_its_key_whatever_worktrees_its_record_lists(
+    lab: _Lab,
+) -> None:
+    """B3: past the record's eight worktrees per repository, the oldest are dropped; the relay's
+    check asks the repository's own key, so a relayed worktree the record no longer lists is held
+    with it, and another repository's relay is not."""
+
+    from finishup.client.everyday_policy import (
+        MAX_WORKTREES_PER_REPORT,
+        record_repository_report,
+    )
+
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh)
+    admission = helper._admitted()  # pyright: ignore[reportPrivateUsage]
+    assert admission is not None
+    relayed = admission.for_repository(RELAY_KEY)
+    other = admission.for_repository("sha256:" + "0f" * 32)
+    refusal = helper._relay_refusal  # pyright: ignore[reportPrivateUsage]
+    assert refusal(admission, relayed) is None
+    for index in range(MAX_WORKTREES_PER_REPORT + 2):
+        assert record_repository_report(RELAY_KEY, f"/work/linked-{index}", no_network=True)
+    assert refusal(admission, relayed) == "repository_egress_held"
+    assert refusal(admission, other) is None
+    assert refusal(admission, None) is None
+
+
+async def test_a_relayed_hello_that_claims_a_workspace_without_its_repository_is_never_sent(
+    lab: _Lab,
+) -> None:
+    """B3: a relay cannot be bound to a repository its client did not name: its hello is never
+    forwarded, and nothing reaches the server."""
+
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh)
+    client, local = _pair()
+    relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+    try:
+        async with asyncio.timeout(10):
+            await client.send_all(_relay_hello())
+            assert await client.receive(65_536) == b""
+            await relay
+        assert lab.backend.sessions == []
+        assert lab.backend.agents == []
+    finally:
+        await client.aclose()
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_malformed_relay_binding_is_never_read_as_a_hello(lab: _Lab) -> None:
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh)
+    client, local = _pair()
+    relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+    try:
+        async with asyncio.timeout(10):
+            damaged = relay_binding_frame().replace(b"sha256:", b"sha512:")
+            await client.send_all(damaged + _relay_hello())
+            await relay
+            try:
+                answered = await client.receive(65_536)
+            except LocalControlTransportError:
+                answered = b""  # closed with the hello still unread: a reset, not an answer
+            assert answered == b""
+        assert lab.backend.sessions == []
+    finally:
+        await client.aclose()
         await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
 
 

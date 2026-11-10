@@ -19,11 +19,13 @@ from pathlib import Path
 import pytest
 
 from builders.control_relay import (
+    RELAY_KEY,
     MemoryStream,
     ScriptedDaemon,
     call_request,
     hello_frame,
     memory_pair,
+    relay_binding_frame,
     run_scripted_session,
 )
 from builders.server_profiles import TEST_REVISION
@@ -123,6 +125,42 @@ def _helper(record: ServerTarget, root: Path, upstream: FakeUpstream, **options:
     return Helper(root, record, **arguments)  # type: ignore[arg-type]
 
 
+def test_a_relayed_frame_is_never_forwarded_once_the_relays_repository_is_held(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """B3: every frame a relay forwards is checked against the repository its client named, by
+    that repository's key: once it is held (whatever worktrees the record lists) the relay ends
+    before the frame leaves; the helper's admission is untouched."""
+
+    from finishup.client.everyday_policy import record_repository_report
+
+    record, root = ssh_target
+
+    async def relayed() -> tuple[ScriptedDaemon, bytes, bool]:
+        daemon = ScriptedDaemon()
+        upstream = FakeUpstream(daemon)
+        helper = _helper(record, root, upstream)
+        client, local = _pair()
+        relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        try:
+            async with asyncio.timeout(10):
+                await client.send_all(relay_binding_frame())
+                await client.send_all(hello_frame(agent=True, server_profile=TEST_REVISION))
+                assert await client.receive(65_536)  # the hello-result
+                assert record_repository_report(RELAY_KEY, "/work/elsewhere", no_network=True)
+                await client.send_all(encode_control_frame(call_request(1, ControlMethod.START)))
+                await relay
+                ended = await client.receive(65_536)
+            return daemon, ended, helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
+        finally:
+            await client.aclose()
+
+    daemon, ended, admitted = asyncio.run(relayed())
+    assert ended == b""
+    assert len(daemon.received(0)) == 1  # the hello only: the call never left
+    assert admitted
+
+
 def test_a_relayed_session_reaches_the_server_byte_for_byte(
     ssh_target: tuple[ServerTarget, Path],
 ) -> None:
@@ -144,7 +182,7 @@ def test_a_relayed_session_reaches_the_server_byte_for_byte(
         client, local = _pair()
         relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
         async with asyncio.timeout(10):
-            received = await run_scripted_session(client, server_profile=TEST_REVISION)
+            received = await run_scripted_session(client, server_profile=TEST_REVISION, relay=True)
             await client.shutdown_write()
             await relay
         await client.aclose()

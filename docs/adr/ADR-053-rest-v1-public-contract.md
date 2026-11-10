@@ -404,9 +404,16 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   connection's repository-bound admission) and every check `bind` added before each request, the
   agent's registration, every retry and every poll included; once one refuses, nothing more is
   sent. The helper binds each relayed stream to the admission it was opened under and to the
-  repository its hello claims (the claim's worktree digest against the worktrees held or kept from
-  that target now, the fence its own agents use), so the stream's own retries and polls stop on a
-  lapse or a hold without waiting for the client's next frame or watch.
+  repository its client named for it: a client that claims a workspace through the helper first
+  writes, on that local connection only, the repository key its own admission is bound to (the
+  relay binding: `0xFF`, `yoetz-relay/1`, the key; never forwarded, and a claim without it is never
+  relayed), and the relay asks that admission bound to that key (`for_repository`) before every
+  frame and every request its stream makes on its own. A hold is decided by the repository's key,
+  never by the worktrees the everyday record still lists (it keeps eight per repository), so the
+  stream's own retries and polls stop on a lapse or a hold without waiting for the client's next
+  frame or watch (layer-5 review, second round). A stream a `ServiceClient` dials itself (the
+  direct style, the helper's direct-style agents) is bound the same way to its connection's own
+  repository-bound authorization.
 - **Close (A-STOP-DELETE).** Courtesy `DELETE`s for the agent and for calls still running, bounded
   at one second in all, and never sent once nothing may be sent (this computer is zero-network, or
   the admission lapsed); the server ends an agent whose polls stop and forgets answers on its own.

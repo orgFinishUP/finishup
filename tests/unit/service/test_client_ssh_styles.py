@@ -399,3 +399,116 @@ def test_why_a_direct_stream_ended_is_asked_only_within_the_connections_deadline
     )
     assert stream.asked_why == 1 and stream.closed
     assert took < 5.0
+
+
+def _claim_binding(repository_key: str | None) -> service_client.ClientWorkspaceBinding:
+    from builders.control_relay import CLAIM_DIGEST, WORKTREE_DIGEST
+    from finishup.ports.control import WorkspaceClaim
+
+    claim = WorkspaceClaim(
+        identity_kind="git_common_root", digest=CLAIM_DIGEST, worktree=WORKTREE_DIGEST
+    )
+    return service_client.ClientWorkspaceBinding(claim, repository_key=repository_key)
+
+
+def test_a_relayed_claim_names_its_repository_to_the_helper_and_to_nothing_else() -> None:
+    """B3: through the target's helper (``connector``), a connection that claims a workspace
+    writes the repository key its admission is bound to before its hello; over any other
+    transport, or without a key, nothing but the hello is written."""
+
+    from builders.control_relay import RELAY_KEY
+
+    async def connect(transport: str, key: str | None, *, relay: bool) -> ScriptedDaemon:
+        daemon = ScriptedDaemon()
+        daemon.profile_revision = None  # no consent here: a claim is admitted as in layer 1
+
+        async def dial() -> ControlStream:
+            client_end, server_end = memory_pair()
+            daemon.serving.append(asyncio.create_task(daemon.serve(server_end, relay=relay)))
+            return client_end
+
+        client = await service_client.connect_service_via(
+            dial,
+            ControlClientKind.CLI,
+            workspace_binding=_claim_binding(key),
+            authorization=None,
+            transport=transport,  # type: ignore[arg-type]
+        )
+        await client.close()
+        await asyncio.gather(*daemon.serving)
+        return daemon
+
+    async def run() -> None:
+        relayed = await connect("connector", RELAY_KEY, relay=True)
+        assert relayed.relay_keys == [RELAY_KEY]
+        assert b'"workspace_claim"' in relayed.received(0)[0]  # the hello, after the binding
+        for transport in ("ssh", "https", "unix"):
+            direct = await connect(transport, RELAY_KEY, relay=False)
+            # The service read the claim's hello first: nothing else was written before it.
+            assert b'"workspace_claim"' in direct.received(0)[0]
+            assert RELAY_KEY.encode() not in bytes(direct.inbound[0])
+        unnamed = await connect("connector", None, relay=True)
+        assert unnamed.relay_keys == []
+
+    asyncio.run(run())
+
+
+def test_a_stream_that_sends_on_its_own_is_bound_to_its_connections_authorization() -> None:
+    """B3: a REST stream (here a stand-in with ``bind``) asks the connection's own authorization,
+    its repository's hold included, before each request it makes on its own; a refusal names
+    ``server_authorization_changed``."""
+
+    class _Bindable:
+        def __init__(self, inner: ControlStream) -> None:
+            self.inner = inner
+            self.checks: list[object] = []
+
+        @property
+        def peer_identity(self) -> object:
+            return self.inner.peer_identity
+
+        def bind(self, refusal: object) -> None:
+            self.checks.append(refusal)
+
+        async def receive(self, max_bytes: int) -> bytes:
+            return await self.inner.receive(max_bytes)
+
+        async def send_all(self, data: Buffer) -> None:
+            await self.inner.send_all(data)
+
+        async def aclose(self) -> None:
+            await self.inner.aclose()
+
+    class _Check:
+        phase: str | None = None
+
+        def refusal(self) -> str | None:
+            return self.phase
+
+    async def run() -> None:
+        daemon = ScriptedDaemon()
+        streams: list[_Bindable] = []
+
+        async def dial() -> ControlStream:
+            client_end, server_end = memory_pair()
+            daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
+            streams.append(_Bindable(client_end))
+            return streams[-1]
+
+        check = _Check()
+        client = await service_client.connect_service_via(
+            dial,
+            ControlClientKind.CLI,
+            workspace_binding=None,
+            authorization=check,
+            transport="ssh",
+        )
+        try:
+            (bound,) = streams[0].checks
+            assert callable(bound) and bound() is None
+            check.phase = "repository_egress_held"
+            assert bound() == "server_authorization_changed"
+        finally:
+            await client.close()
+
+    asyncio.run(run())

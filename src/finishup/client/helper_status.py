@@ -26,6 +26,17 @@ integers and timestamps only (no host, name, path or remote text):
   holds the lock (a stop came while it was starting) exits without serving anything, and a
   running helper stops on its next tick when the token moves.
 
+**The relay's repository binding** (``RELAY_BINDING``). A client that names a workspace through the
+helper's relay (its claim) first writes, on that local connection only, the repository key its own
+admission is bound to (``client.repository_hold.repository_key``): ``0xFF``, ``yoetz-relay/1``, a
+space, the key, a newline (``relay_binding``). The byte ``0xFF`` can never begin a control frame
+(their length prefix is far below 2**24), so a helper reads it apart from the hello that follows,
+and the helper never forwards it: it binds that relay, its every frame and its REST stream's own
+retries and polls, to the hold of exactly that repository (``ConnectionAuthorization.for_repository``),
+whatever worktrees the everyday record still lists. A relayed hello that claims a workspace without
+it is never forwarded. Nothing else reads it; anything but a helper (a service, an older helper)
+refuses it as an oversized frame before anything is relayed.
+
 Ownership and reaping never depend on the process that started a helper: the lock and its stamp
 in the target root are the ownership, and the spawner reaps its own child (exactly that pid) on a
 daemon thread while it lives; a spawner that exits first leaves the helper to the system, which
@@ -70,6 +81,7 @@ __all__ = [
     "HELPER_STATUS_NAME",
     "HELPER_STATUS_SCHEMA",
     "PROFILE_REFRESH_MARKER",
+    "RELAY_BINDING_BYTES",
     "ConnectionStyle",
     "HelperLock",
     "HelperLockBusy",
@@ -83,9 +95,12 @@ __all__ = [
     "read_connection_style",
     "read_helper_epoch",
     "read_helper_status",
+    "read_relay_binding",
+    "relay_binding",
     "request_profile_refresh",
     "spawn_helper",
     "start_fenced",
+    "starts_relay_binding",
     "stop_helper",
     "take_profile_refresh_request",
     "write_connection_style",
@@ -106,6 +121,12 @@ _NO_EPOCH: Final = "none"
 HELPER_IDLE_SECONDS: Final = 900.0
 HELPER_PHASES: Final = frozenset({"starting", "ready", "unavailable", "stopped"})
 CONNECTION_STYLES: Final = ("relay", "direct")
+
+# The relay's repository binding (see the module text): its first byte, never a frame's.
+_RELAY_BINDING_MARK: Final = b"\xff"
+_RELAY_BINDING_LEAD: Final = _RELAY_BINDING_MARK + b"yoetz-relay/1 "
+_REPOSITORY_KEY: Final = re.compile(rb"^sha256:[0-9a-f]{64}$")
+RELAY_BINDING_BYTES: Final = len(_RELAY_BINDING_LEAD) + len(b"sha256:") + 64 + 1
 
 type HelperPhase = Literal["starting", "ready", "unavailable", "stopped"]
 type ConnectionStyle = Literal["relay", "direct"]
@@ -366,6 +387,37 @@ def request_profile_refresh(root: Path) -> None:
         os.close(descriptor)
     except (OSError, PathSafetyError):
         return
+
+
+def relay_binding(repository_key: str) -> bytes:
+    """What a client writes first on a relayed connection that claims a workspace (see the module
+    text). Raises ``ValueError`` for anything but a repository key."""
+
+    encoded = repository_key.encode("ascii", "strict") if type(repository_key) is str else b""
+    if not _REPOSITORY_KEY.match(encoded):
+        raise ValueError("repository_key_invalid")
+    return _RELAY_BINDING_LEAD + encoded + b"\n"
+
+
+def read_relay_binding(data: bytes) -> str | None:
+    """The repository key of exactly one relay binding (``RELAY_BINDING_BYTES`` long); ``None`` for
+    anything else."""
+
+    if (
+        type(data) is not bytes
+        or len(data) != RELAY_BINDING_BYTES
+        or not data.startswith(_RELAY_BINDING_LEAD)
+        or not data.endswith(b"\n")
+    ):
+        return None
+    key = data[len(_RELAY_BINDING_LEAD) : -1]
+    return key.decode("ascii") if _REPOSITORY_KEY.match(key) else None
+
+
+def starts_relay_binding(first: bytes) -> bool:
+    """Whether a relayed connection's first byte begins a relay binding (never a frame)."""
+
+    return first == _RELAY_BINDING_MARK
 
 
 _EPOCH_TOKEN: Final = re.compile(r"^[0-9a-f]{32}$")

@@ -94,8 +94,11 @@ async def remote_workspace_binding(
     if authorization is not None:
         check = authorization if hold is None else authorization.for_repository(hold.key)
     claim = workspace_claim_for_root(root, claim_salt, worktree)
+    key = None if hold is None else hold.key
     if not serve_workspace:
-        return ClientWorkspaceBinding(claim, authorization=check, worktree=worktree)
+        return ClientWorkspaceBinding(
+            claim, authorization=check, worktree=worktree, repository_key=key
+        )
     from finishup.client.repository_hold import held_worktrees
     from finishup.client.server_folders import outside_reads_reader
     from finishup.client.targets import target_root
@@ -130,6 +133,7 @@ async def remote_workspace_binding(
         ),
         authorization=check,
         worktree=worktree,
+        repository_key=key,
     )
 
 
