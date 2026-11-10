@@ -472,6 +472,13 @@ the read's snapshot is known: the sync that precedes it (task base or check) ret
   git read with the client's agent (client-attested), so commit identities never mix. A capture
   from the copy diffs against the pinned snapshot's own sanitized base when it has the same
   original base as the task base, so a file held out later never reads as changed or deleted.
+- **A task-start base under a call deadline (design v2 §8.9).** A SessionStart hook's
+  auto-attach gives its `start` five seconds. The base's sync then runs as background work,
+  outside the call, and is waited for only until 1.5 s before the call's deadline; one not
+  finished by then (`code_sync_background`) never holds the hook: the client's agent reads the
+  base at once (the baseline taken now, never an older snapshot), so that task keeps its git reads
+  with the client (one source), and the sync finishes in the background, keeping the copy current
+  and pinning the task to it. Without a call deadline the base waits for its sync as before.
 - **Served from the copy:** the task base, the capture and its metadata, the probe of requested
   paths, change line counts, the classification of undeclared references, the reviewer's list,
   read and declared-test reads beneath the root, task inputs inside the root, and an observation

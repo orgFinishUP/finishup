@@ -50,6 +50,7 @@ key of a copy is the vault's installation MAC over the copy id under its own dom
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
@@ -122,6 +123,11 @@ OFFLINE_REASONS: Final = frozenset(
 )
 # Buffered evidence counts are written to the copy's record past this many (and at each sync).
 _FLUSH_EVERY: Final = 32
+# What a task-start base read under a call deadline keeps for the client's own read when the
+# sync cannot finish in time (``git_view``): the sync goes on in the background.
+_BASE_CLIENT_MARGIN_SECONDS: Final = 1.5
+# The sync of a task-start base read went on in the background: the client's agent answers.
+_SYNC_BACKGROUND: Final = "code_sync_background"
 
 
 class VaultCopyKeyring:
@@ -508,7 +514,12 @@ class CodeCopies:
                 except CodeStoreError:
                     copy_base = None
             original = base.commit if copy_base is None else _original(copy_base)
-        outcome = self.sync_blocking(handle, purpose=purpose, base_commit=original, task_id=task_id)
+        if purpose == "base":
+            outcome = self._sync_within_deadline(handle, base_commit=original, task_id=task_id)
+        else:
+            outcome = self.sync_blocking(
+                handle, purpose=purpose, base_commit=original, task_id=task_id
+            )
         if base is not None and copy_base is None:
             # The task's base came from the client: its git reads stay there (one source).
             self._unserve(commitment, task_id)
@@ -529,6 +540,56 @@ class CodeCopies:
             # This job's later reads (its review's included) read this snapshot (§8.6).
             _bind(commitment, task_id, view)
         return view, effective
+
+    def _sync_within_deadline(
+        self, handle: str, *, base_commit: str | None, task_id: str | None
+    ) -> SyncOutcome:
+        """A task-start base sync, waited for only within what the caller's deadline leaves.
+
+        Without a call deadline it is ``sync_blocking``. Under one (a SessionStart hook's
+        auto-attach gives its start five seconds, design v2 §8.9) the sync runs as background
+        work, outside the call, and is waited for only until ``_BASE_CLIENT_MARGIN_SECONDS``
+        before that deadline: when it has not finished by then the caller never awaits the rest
+        of the scan, bundle and transfer. The outcome is then ``code_sync_background``: the
+        client's agent reads the base at once (the task's baseline is taken now, never from an
+        older snapshot), the task's git reads stay with the client (one source), and the sync
+        finishes in the background, keeping the copy current and the task pinned to it.
+        """
+
+        from finishup.service.workspace_hub import call_deadline_remaining
+
+        remaining = call_deadline_remaining()
+        if remaining is None:
+            return self.sync_blocking(
+                handle, purpose="base", base_commit=base_commit, task_id=task_id
+            )
+        finished = threading.Event()
+        outcomes: list[SyncOutcome] = []
+
+        def run() -> None:
+            try:
+                outcomes.append(
+                    self.sync_blocking(
+                        handle, purpose="base", base_commit=base_commit, task_id=task_id
+                    )
+                )
+            finally:
+                finished.set()
+
+        # A fresh context: the sync is background work, never bounded or cancelled by the call.
+        threading.Thread(
+            target=contextvars.Context().run,
+            args=(run,),
+            name="finishup-code-copy-base-sync",
+            daemon=True,
+        ).start()
+        budget = remaining - _BASE_CLIENT_MARGIN_SECONDS
+        if budget > 0 and finished.wait(budget) and outcomes:
+            return outcomes[0]
+        record_bounded_event_without_raising(
+            component=_COMPONENT, operation="code_copy_sync_background", reason=_SYNC_BACKGROUND
+        )
+        return SyncOutcome("unavailable", _SYNC_BACKGROUND)
 
     def _view_for(
         self, commitment: str, outcome: SyncOutcome, task_id: str | None

@@ -69,6 +69,7 @@ __all__ = [
     "WorkspaceAgentChannel",
     "WorkspaceAgentHub",
     "WorkspaceCallWriter",
+    "call_deadline_remaining",
     "in_live_call",
     "live_call_scope",
     "workspace_call_deadline",
@@ -248,6 +249,17 @@ def live_call_scope(channel: WorkspaceAgentChannel | None = None) -> Generator[N
 def in_live_call() -> bool:
     scope = _SCOPE.get()
     return scope is not None and scope.live
+
+
+def call_deadline_remaining() -> float | None:
+    """Seconds left before the deadline of the control call the work below serves (never
+    negative), or None: no call deadline bounds it (background work, a call without one)."""
+
+    scope = _SCOPE.get()
+    deadline = None if scope is None else scope.deadline_now()
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
 
 
 @contextlib.contextmanager

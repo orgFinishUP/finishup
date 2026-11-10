@@ -310,6 +310,70 @@ def test_a_pull_under_way_answers_only_the_same_worktree_and_base(
     assert outcomes["second"] is not outcomes["first"]
 
 
+def _base_view_under_deadline(copies: CodeCopies, seconds: float, task_id: str) -> object:
+    """``git_view`` for a task-start base inside a control call with ``seconds`` left."""
+
+    import asyncio
+
+    from finishup.service.workspace_hub import workspace_call_deadline
+
+    async def call() -> object:
+        with workspace_call_deadline(asyncio.get_running_loop().time() + seconds):
+            return await asyncio.to_thread(
+                copies.git_view, HANDLE, purpose="base", base=None, task_id=task_id
+            )
+
+    return asyncio.run(call())
+
+
+def _wait_for(condition: object, seconds: float = 10.0) -> bool:
+    finished = threading.Event()
+    deadline = threading.Event()
+    timer = threading.Timer(seconds, deadline.set)
+    timer.start()
+    try:
+        while not deadline.is_set():
+            if condition():  # type: ignore[operator]
+                finished.set()
+                break
+            deadline.wait(0.02)
+    finally:
+        timer.cancel()
+    return finished.is_set()
+
+
+@pytest.mark.parametrize("seconds", [3.0, 1.0])
+def test_a_task_start_base_never_awaits_a_sync_past_its_call_s_deadline(
+    tmp_path: Path, seconds: float
+) -> None:
+    """C4 (design v2 §8.9): a SessionStart hook gives its start five seconds; a sync that cannot
+    finish within them goes on in the background and the client's agent reads the base."""
+
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    hub.gate = threading.Event()  # the helper is still scanning and bundling
+    view = _base_view_under_deadline(copies, seconds, "tsk_hooked")
+    # Returned while the sync was still under way: never a stale or older snapshot either.
+    assert view == (None, None)
+    assert not hub.gate.is_set() and store.copies("claim") == ()
+    hub.gate.set()
+    # The sync finished in the background: the copy is current and the task is pinned to it,
+    # its reads staying with the client (the base was read there).
+    assert _wait_for(lambda: store.pin_entry("claim", COMMITMENT, "tsk_hooked") is not None)
+    entry = store.pin_entry("claim", COMMITMENT, "tsk_hooked")
+    assert entry is not None and entry.snapshot == hub.prepared.manifest.snapshot
+    assert not entry.served
+
+
+def test_a_task_start_base_sync_that_finishes_in_time_is_read_from_the_copy(
+    tmp_path: Path,
+) -> None:
+    copies, _hub, _store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    view, _effective = _base_view_under_deadline(copies, 30.0, "tsk_in_time")  # type: ignore[misc]
+    assert view is not None and not view.stale  # type: ignore[union-attr]
+
+
 def test_an_unchanged_snapshot_must_already_be_held(tmp_path: Path) -> None:
     copies, _hub, _store = _copies(tmp_path, unchanged=True)
     copies.remember(HANDLE, COMMITMENT, WORKTREE)
