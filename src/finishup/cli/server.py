@@ -2829,6 +2829,9 @@ def server_set(
     from finishup.client.helper_status import CONNECTION_STYLES, write_connection_style
     from finishup.client.server_profile import styles_offered
 
+    # Like every command that changes a target: never from a process an isolation variable or a
+    # pinned launcher points elsewhere (it would stop and restyle the ambient registry's target).
+    _require_no_explicit_source()
     if style not in CONNECTION_STYLES:
         raise ServerCommandRefused("style_invalid")
     record = _target_or_fail(name)

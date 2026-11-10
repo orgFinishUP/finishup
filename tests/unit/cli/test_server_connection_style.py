@@ -73,6 +73,24 @@ def test_the_style_changes_only_to_one_the_profile_offers_and_back(
     del record
 
 
+def test_an_isolation_root_refuses_the_style_change_before_anything_is_stopped(
+    lab: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: a pinned or isolated process never stops and restyles the ambient registry's target."""
+
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+    _record, root = lab
+    runtime = remote_runtime(monkeypatch)
+    explicit = root.parents[3] / "explicit"
+    explicit.mkdir(mode=0o700)
+    monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(explicit))
+    result = _invoke("set", "lab", "--style", "direct")
+    assert result.exit_code != 0
+    assert result.stderr.startswith("selection_overridden:")
+    assert read_connection_style(root) == "relay" and runtime.calls == []
+
+
 @pytest.mark.parametrize(
     ("arguments", "reason"),
     [
