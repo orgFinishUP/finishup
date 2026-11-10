@@ -2348,14 +2348,14 @@ async def _connect_service_attempt(
             error = ControlError("service_unavailable", retryable=True)
         raise error from exc
     except LocalControlTransportError as exc:
-        named = await _remote_end_phase(stream)
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
         if named is not None:
             raise ControlError("service_unavailable", retryable=True, phase=named) from exc
         raise _transport_error(exc) from exc
     except ControlProtocolError as exc:
-        named = await _remote_end_phase(stream)
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
         if guarded is not None and guarded.refused is not None:
@@ -2396,16 +2396,27 @@ async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlS
         ) from None
 
 
-async def _remote_end_phase(stream: ControlStream | None) -> str | None:
-    """The closed remote phase a direct stream names for its own end, if it can name one."""
+async def _remote_end_phase(stream: ControlStream | None, deadline: float) -> str | None:
+    """The closed remote phase a direct stream names for its own end, if it can name one.
+
+    Asked only within the connection's own ``deadline`` (a monotonic time): a transport that
+    takes longer to say why (``ssh`` still running, its diagnostics still open) names nothing,
+    and nothing is waited for once the deadline passed (a hook's budget is never overspent).
+    """
 
     failure_phase = cast(
         Callable[[], Awaitable[str | None]] | None, getattr(stream, "failure_phase", None)
     )
     if failure_phase is None:
         return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
     try:
-        phase = await failure_phase()
+        async with asyncio.timeout(remaining):
+            phase = await failure_phase()
+    except TimeoutError:
+        return None
     except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
         return None
     return phase if phase in REMOTE_CONNECTION_PHASES else None
