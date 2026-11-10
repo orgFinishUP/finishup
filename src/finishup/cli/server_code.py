@@ -93,7 +93,34 @@ def _selected() -> ServerTarget:
     return _repository_target(None)
 
 
-async def _ask_server(worktree: str, action: str) -> dict[str, object]:
+_AUTHORIZATION_CHANGED: Final = (
+    "the server's record changed after this command read it (it was replaced, removed, "
+    "authorized again or its consent changed), so nothing was asked of it; run the command again"
+)
+
+
+def _require_captured(record: ServerTarget, authorization: object) -> None:
+    """Refuse a connection admitted for anything but ``record`` exactly as this command read it.
+
+    The connection is built for ``record``'s own root (``_server_answer``), and its admission
+    reads that root's record again: a target replaced, removed, re-authorized or consented to
+    anew in between is ``server_authorization_changed``, before anything is asked of it, so the
+    command never reports for one server, or under one consent, what another was asked.
+    """
+
+    from finishup.client.authorization import consent_digest, identity_digest
+
+    grant = getattr(authorization, "grant", None)
+    if (
+        grant is None
+        or getattr(grant, "target_id", None) != record.target_id
+        or getattr(grant, "identity_digest", None) != identity_digest(record)
+        or getattr(grant, "consent_digest", None) != consent_digest(record)
+    ):
+        raise ServerCommandRefused("server_authorization_changed", message=_AUTHORIZATION_CHANGED)
+
+
+async def _ask_server(record: ServerTarget, worktree: str, action: str) -> dict[str, object]:
     from finishup.cli.app import build_service_client
     from finishup.ports.control import ControlClientKind, WorkspaceLocator
 
@@ -101,17 +128,28 @@ async def _ask_server(worktree: str, action: str) -> dict[str, object]:
         ControlClientKind.CLI, workspace_locator=WorkspaceLocator(worktree)
     )
     try:
+        _require_captured(record, client.authorization)
         return await client.code_copy("forget" if action == "forget" else "status")
     finally:
         await client.close()
 
 
-def _server_answer(worktree: str, action: str) -> dict[str, object]:
+def _server_answer(record: ServerTarget, worktree: str, action: str) -> dict[str, object]:
+    """Ask ``record``'s server, the target this command read, and no other.
+
+    The connection resolves its root as ``record``'s own (``selection_override``), whatever the
+    selection names by then, and is refused unless its admission is ``record``'s as read
+    (``_require_captured``).
+    """
+
     from finishup.cli.app import run_async
+    from finishup.client.targets import target_root
+    from finishup.config.paths import selection_override
     from finishup.ports.control import ControlError
 
     try:
-        return run_async(lambda: _ask_server(worktree, action))
+        with selection_override(target_root(record.target_id)):
+            return run_async(lambda: _ask_server(record, worktree, action))
     except ControlError as error:
         if error.reason == "method_forbidden":
             raise ServerCommandRefused(
@@ -130,7 +168,7 @@ def server_code_list(
 
     record = _selected()
     here = repository_here(repository)
-    answer = _server_answer(here.worktree, "status")
+    answer = _server_answer(record, here.worktree, "status")
     if json_output:
         import json
 
@@ -223,7 +261,7 @@ def server_code_forget(
         _forget_all(record, json_output=json_output)
         return
     here = repository_here(repository)
-    answer = _server_answer(here.worktree, "forget")
+    answer = _server_answer(record, here.worktree, "forget")
     forgot = _field(answer, "forgot")
     if _field(forgot, "complete") is not True:
         # Never a success while something of the copy is left there: say what was deleted,
@@ -297,15 +335,15 @@ class ForgetOutcome:
         }
 
 
-def forget_every_copy(record: ServerTarget, *, named: bool = False) -> tuple[ForgetOutcome, ...]:
+def forget_every_copy(record: ServerTarget) -> tuple[ForgetOutcome, ...]:
     """Forget on ``record``'s server every repository this computer's export records name.
 
     The server's ``code_copy`` acts on the claimed repository only (ADR-054 decision 5), so each
     record's folder is claimed in turn and forgotten as ``server code forget`` does, its export
     folder here going too. A record that cannot be read, names no folder, or whose folder is gone,
     holds no repository or another one, or that the server did not forget, is returned with its
-    closed reason: never skipped. ``named`` asks ``record``'s own root (``selection_override``,
-    for ``server remove`` of a target that may not be selected); otherwise the selected server.
+    closed reason: never skipped. Each is asked of ``record``'s own root (``_server_answer``),
+    whether or not it is selected (``server remove`` of a target that is not).
     """
 
     from finishup.client.code_export import ExportRefused, export_records
@@ -316,16 +354,13 @@ def forget_every_copy(record: ServerTarget, *, named: bool = False) -> tuple[For
     except ExportRefused as error:
         raise ServerCommandRefused(error.reason) from None
     return tuple(
-        _forget_one(record, position, item, named=named)
-        for position, item in enumerate(records, start=1)
+        _forget_one(record, position, item) for position, item in enumerate(records, start=1)
     )
 
 
-def _forget_one(
-    record: ServerTarget, position: int, item: ExportRecord, *, named: bool
-) -> ForgetOutcome:
+def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> ForgetOutcome:
     from finishup.client.code_sync import export_folder
-    from finishup.client.targets import TargetError, registry_lock, target_root
+    from finishup.client.targets import TargetError, registry_lock
 
     def refused(reason: str) -> ForgetOutcome:
         return ForgetOutcome(position, item.short_id, item.root, reason)
@@ -343,13 +378,8 @@ def _forget_one(
     if export_folder(record.target_id, here.key) != item.folder:
         return refused("repository_changed")
     try:
-        if named:
-            from finishup.config.paths import selection_override
-
-            with selection_override(target_root(record.target_id)):
-                answer = _server_answer(here.worktree, "forget")
-        else:
-            answer = _server_answer(here.worktree, "forget")
+        # Through ``record``'s own root, whether or not it is the selected one.
+        answer = _server_answer(record, here.worktree, "forget")
     except ServerCommandRefused as error:
         return refused(error.reason)
     except TargetError as error:

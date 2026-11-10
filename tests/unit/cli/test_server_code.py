@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -430,7 +430,8 @@ def _second_repository(tmp_path: Path, name: str = "other") -> Path:
 
 
 class _Server:
-    """Stands in for the selected server's ``code_copy`` forget; records each claimed folder."""
+    """Stands in for a target's ``code_copy`` forget; records each claimed folder and the root of
+    the target it was asked of."""
 
     def __init__(
         self, refuse: dict[str, str] | None = None, unfinished: frozenset[str] = frozenset()
@@ -439,10 +440,10 @@ class _Server:
         self.refuse = refuse or {}
         self.unfinished = unfinished
 
-    def __call__(self, worktree: str, action: str) -> dict[str, object]:
-        from finishup.config.paths import active_root
-
-        self.asked.append((worktree, action, active_root()))
+    def __call__(
+        self, record: targets.ServerTarget, worktree: str, action: str
+    ) -> dict[str, object]:
+        self.asked.append((worktree, action, targets.target_root(record.target_id)))
         reason = self.refuse.get(worktree)
         if reason is not None:
             raise ServerCommandRefused(reason)
@@ -762,3 +763,126 @@ def test_remove_flags_are_shown_refused_together_and_need_copies_to_ask(
     assert result.exit_code == 0, result.output
     assert "no record of a copy of code it sent to far; nothing was forgotten" in result.stdout
     assert console.opened == 0 and server.asked == [] and "far" not in _names()
+
+
+# --- the connection is bound to the target the command read (E4) ------------------------------------
+
+
+class _Connection:
+    """Stands in for ``build_service_client``: admitted for the record at the root this process
+    resolves now (as the real admission reads it), recording which root was asked what."""
+
+    asked: list[tuple[Path | None, str]] = []
+
+    def __init__(self) -> None:
+        from finishup.client.authorization import Grant, consent_digest, identity_digest
+        from finishup.config.paths import active_root
+
+        self.root = active_root()
+        record = targets.active_target_record()
+        assert record is not None
+        self.authorization = type("Admitted", (), {})()
+        self.authorization.grant = Grant(  # type: ignore[attr-defined]
+            target_id=record.target_id,
+            kind=record.kind,
+            identity_digest=identity_digest(record),
+            consent_digest=consent_digest(record),
+            repository_key=None,
+            selection_bound=False,
+        )
+
+    async def code_copy(self, action: str) -> dict[str, object]:
+        _Connection.asked.append((self.root, action))
+        return {"action": action, "copy": None, "forgot": dict(_FORGOT)}
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.fixture
+def connection(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path | None, str]]:
+    async def build(*_arguments: object, **_options: object) -> _Connection:
+        return _Connection()
+
+    _Connection.asked = []
+    monkeypatch.setattr("finishup.cli.app.build_service_client", build)
+    return _Connection.asked
+
+
+def _meanwhile(monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]) -> None:
+    """Run ``change`` once, after the command read its target and before it connects."""
+
+    real = server_code.repository_here
+    done: list[bool] = []
+
+    def here(folder: str | None = None) -> object:
+        if not done:
+            done.append(True)
+            change()
+        return real(folder)
+
+    monkeypatch.setattr(server_code, "repository_here", here)
+
+
+@pytest.fixture
+def other(remote: targets.ServerTarget) -> targets.ServerTarget:
+    del remote
+    with targets.registry_lock():
+        record, _root = targets.new_remote_target(
+            "other", "https", base_url="https://other.example"
+        )
+    return record
+
+
+@pytest.mark.parametrize("arguments", [("forget",), ("forget", "--all"), ("list",)], ids=" ".join)
+def test_a_selection_changed_before_the_connection_still_asks_the_target_read(
+    remote: targets.ServerTarget,
+    other: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+) -> None:
+    mine = _sent_from(remote, repository)
+    theirs = _sent_from(other, repository)
+
+    def select_other() -> None:
+        with targets.registry_lock():
+            targets.write_selection(other)
+
+    _meanwhile(monkeypatch, select_other)
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code == 0, result.output
+    action = "status" if arguments[0] == "list" else "forget"
+    # Asked of lab, the target the command read and names, never of the newly selected one.
+    assert connection == [(targets.target_root(remote.target_id), action)]
+    assert "lab" in result.stdout and "other" not in result.stdout
+    assert theirs.exists()
+    assert mine.exists() == (action == "status")
+
+
+@pytest.mark.parametrize("arguments", [("forget",), ("forget", "--all"), ("list",)], ids=" ".join)
+def test_a_target_authorized_again_before_the_connection_is_refused_and_nothing_is_forgotten(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+) -> None:
+    folder = _sent_from(remote, repository)
+
+    def authorize_again() -> None:
+        root = targets.target_root(remote.target_id)
+        with targets.registry_lock():
+            current = targets.read_target(root)
+            assert current is not None
+            targets.write_target(
+                root, targets.reauthorized(current, now="2031-01-01T00:00:00.000Z")
+            )
+
+    _meanwhile(monkeypatch, authorize_again)
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code != 0, result.output
+    assert "server_authorization_changed" in result.output
+    assert connection == [] and folder.exists()
+    assert "deleted" not in result.stdout.replace("not forgotten", "")

@@ -2972,7 +2972,7 @@ def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) ->
     if choice:
         from finishup.cli.server_code import forget_every_copy, forget_lines
 
-        outcomes = forget_every_copy(record, named=True)
+        outcomes = forget_every_copy(record)
         for line in forget_lines(record, outcomes):
             typer.echo(line)
         if not all(outcome.forgotten for outcome in outcomes):
