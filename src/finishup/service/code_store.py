@@ -401,6 +401,12 @@ class CodeStore:
 
     # --- uploads ------------------------------------------------------------------------------
 
+    def epoch(self, principal: str, repository: str) -> int:
+        """The copy's forget epoch now (it advances with every forget of the copy)."""
+
+        with self._lock:
+            return self._epoch(self.copy_key(principal, repository))
+
     def have(self, principal: str, repository: str) -> tuple[str, ...]:
         """The newest snapshot commits this copy holds (the have-set a sync is made against)."""
 
@@ -420,8 +426,14 @@ class CodeStore:
         size: int,
         sha256: str,
         retention: tuple[RetentionKind, int | None],
+        epoch: int | None = None,
     ) -> str:
-        """Start receiving a bundle of ``size`` bytes; its id. The forget epoch is recorded now."""
+        """Start receiving a bundle of ``size`` bytes; its id.
+
+        ``epoch`` is the copy's forget epoch when the sync began (``epoch``, read before the
+        client was asked to prepare): a forget since then refuses the upload now
+        (``code_copy_forgotten``). Without one, the epoch is recorded now.
+        """
 
         if type(size) is not int or not 0 < size <= self._limits.max_bundle_bytes:
             raise CodeStoreError("code_copy_too_large")
@@ -435,6 +447,9 @@ class CodeStore:
         copy_key = self.copy_key(principal, repository)
         with self._lock:
             self._expire_uploads()
+            current = self._epoch(copy_key)
+            if epoch is not None and epoch != current:
+                raise CodeStoreError("code_copy_forgotten")
             if len(self._uploads) >= _MAX_UPLOADS:
                 raise CodeStoreError("code_upload_busy")
             upload_id = secrets.token_hex(16)
@@ -442,7 +457,7 @@ class CodeStore:
                 copy_key=copy_key,
                 principal=principal,
                 repository=repository,
-                epoch=self._epoch(copy_key),
+                epoch=current,
                 size=size,
                 sha256=sha256,
                 manifest=manifest,

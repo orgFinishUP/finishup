@@ -292,3 +292,23 @@ def test_code_copy_status_and_forget_say_exactly_what_is_kept_and_deleted(tmp_pa
                 "body": body,
             },
         )
+
+
+def test_a_forget_while_the_helper_prepares_fences_that_sync(tmp_path: Path) -> None:
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    original = hub.call_blocking
+
+    def forget_meanwhile(
+        handle: str, operation: WorkspaceOperation, arguments: object, *, timeout_seconds: float
+    ) -> object:
+        answer = original(handle, operation, arguments, timeout_seconds=timeout_seconds)
+        if operation is WorkspaceOperation.CODE_SYNC_PREPARE:
+            # The owner forgets while the helper was building the snapshot.
+            store.forget("claim", COMMITMENT)
+        return answer
+
+    hub.call_blocking = forget_meanwhile  # type: ignore[method-assign]
+    outcome = copies.sync_blocking(HANDLE, purpose="check")
+    assert (outcome.outcome, outcome.reason) == ("refused", "code_copy_forgotten")
+    assert store.copies("claim") == ()

@@ -209,6 +209,8 @@ class CodeCopies:
         revision = self._revision()
         if revision is None:
             return SyncOutcome("refused", "server_profile_changed")
+        # Read before the client is asked: a forget from now on fences this sync (§8.7).
+        epoch = self._store.epoch(COPY_PRINCIPAL, claim.commitment)
         have = tuple(sorted(self._store.have(COPY_PRINCIPAL, claim.commitment)))
         arguments = CodeSyncPrepareArguments(
             workspace=handle,
@@ -248,6 +250,7 @@ class CodeCopies:
                 size=prepared.size,
                 sha256=prepared.sha256,
                 retention=(prepared.retention_kind, prepared.retention_days),
+                epoch=epoch,
             )
             offset = 0
             while offset < prepared.size:
