@@ -8,8 +8,9 @@ builds the server profile, its revision, the consent binding and the helper's wo
 registration API (decisions 9 to 12); layer 4 builds the unified helper, the SSH transport in its
 relay and direct styles, SSH discovery, and opens the `ssh` kind (decisions 13 to 19); layer 5
 carries this authorization over REST and opens `https` and `local_port` (decisions 20 to 23; the
-REST contract itself is [ADR-053](ADR-053-rest-v1-public-contract.md)); the level-L2 sections are
-recorded as **not built** and are filled in by the layers that build them.
+REST contract itself is [ADR-053](ADR-053-rest-v1-public-contract.md)); layer 6 builds level L2's
+server copy, unreleased, in its own record ([ADR-054](ADR-054-level-l2-the-server-copy.md)), and
+what L2 still needs is recorded as **not built** in decision 8.
 Design gates: privacy/egress (what may reach a server elsewhere, and when it stops; in layer 4 the
 first network edge, in layer 5 the second) and storage (three new owner-only client records; in
 layer 4 the helper's records). Maintainer acknowledgement: the
@@ -290,13 +291,19 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
   register its workspace with the helper (its own connection answers its live calls) and adds
   only a server on this computer (an SSH or HTTPS server is added in a terminal, where OpenSSH can
   ask or the API key is typed).
-- **Level L2 (layer 6):** no sync while the gate refuses (the hold is checked before a bundle is
-  built), and stopping future egress, cancelling server work and forgetting retained copies kept
-  apart (design v2 section 8.10; FR-7); the receipt count of fenced reads (O7); code sync in the
-  helper (design v2 section 4.2). From layer 3: a `[server]` configuration table offering L2 with
-  its code sync, retention options and exclusions; consent at L2 (a retention chosen among those
-  offered); the per-repository L1/L2 consents in the per-target repository map; the revision on
-  every sync upload; the receipt line for a narrowing that reduced coverage.
+- **Level L2 (layer 6; [ADR-054](ADR-054-level-l2-the-server-copy.md)), built and unreleased**
+  (`protocol.server_copy.L2_RELEASED` is `False`): code sync in the helper only (design v2 section
+  4.2), with no sync while the gate refuses (the gate runs again and the hold is checked before
+  anything is read for a bundle); stopping future sends and forgetting retained copies kept apart
+  (design v2 section 8.10; FR-7), forget being the only way to remove what was sent; consent at L2
+  with a retention chosen among those offered; the revision on every sync (named by the server,
+  checked by the helper and at the server's commit); and the owner's per-repository choices, in a
+  record of their own rather than the per-target repository map (ADR-054, *Owner questions*).
+  **Still open:** the `[server]` configuration table offering L2 (it needs config 1.4.0); reads
+  from the copy; task pins and the `task_close` expiry; per-evidence provenance on receipts with
+  the receipt count of fenced reads (O7) and the receipt line for a narrowing that reduced
+  coverage; and deleting the excerpts derived from a forgotten copy (a storage design gate). L2
+  stays unreleased until they exist.
 - **Lifecycle (layer 7):** upgrade over running bridges, helpers and REST gateways, the WAN timing
   gate, and the host × surface × operating system acceptance rows for the hold, the generation and
   the helper (FR-6), and for a service restarted under a new profile revision. macOS (the helper's

@@ -208,7 +208,7 @@ daemon's client-kind gate stays as a second layer.
 
 | Scope | Methods |
 |---|---|
-| `agent` | `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, `service_status`, and `observation_ingest` on a request with a claim |
+| `agent` | `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, `service_status`, and `observation_ingest` and (layer 6) `code_copy` on a request with a claim |
 | `operator` | `agent` plus `project`, `review`, `import_codex_jsonl`, `observation_status`, `privacy_get_setup`, `privacy_get_effective`, `privacy_pending_list`, `privacy_receipts_list`, `privacy_receipts_get`, `privacy_propose_policy`, `privacy_tighten_policy` and `service_lock` |
 | never over the network | `service_stop`; `backup_*`, `restore_*`, `migrate_*` and `integration_*`; `observation_pause`, `observation_resume`, `observation_revoke`; `server_profile` (it is `GET /v1/server`); the human-control and secret channels |
 
@@ -219,6 +219,13 @@ same repository reach different task namespaces on the same server, and two keys
 principals never claim each other's workspaces. A rotated key keeps its predecessor's principal.
 This is groundwork for multi-owner hosting (design v2 question Q7), not that hosting itself (see
 *Honest limits*).
+
+**Amended in layer 6** ([ADR-054](ADR-054-level-l2-the-server-copy.md) decision 5): the REST
+contract 1.0.0, still unreleased, gains the claim-bound `code_copy` method (a repository's server
+copy, `status` or `forget`) in the `agent` scope and so in `operator`, since making a server keep
+less is never an operator privilege. Because the contract is unreleased, its entry in
+`fixtures/service/rest-api-manifests.case.json` was amended in place rather than added as a new
+version (decision 5). Level L2 itself stays unreleased, so no server answers it yet.
 
 ### 7. API keys
 
@@ -542,9 +549,10 @@ advertises.
    follow-up.
 8. A receipt's frozen version slice holds 64 entries: the next layer that adds operation schemas
    needs a receipt-document version bump.
-9. Not built: the server copy and code sync over REST (layer 6); the WAN timing gate and an upgrade
-   over running gateways and helpers (layer 7); adding an HTTPS server from the terminal interface;
-   OAuth credential sources; an official service (another repository).
+9. Not released: the server copy and its code sync over REST (built in layer 6 and kept
+   unreleased, ADR-054). Not built: the WAN timing gate and an upgrade over running gateways and
+   helpers (layer 7); adding an HTTPS server from the terminal interface; OAuth credential
+   sources; an official service (another repository).
 
 ## Reverse states
 

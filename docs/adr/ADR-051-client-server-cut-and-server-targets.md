@@ -16,7 +16,9 @@ connection styles, SSH discovery and the host key OpenSSH verified as the endpoi
 (*Built in layer 4* below; ADR-052 decisions 13 to 19); `https` and `local_port` stay closed until
 layer 5. **Layer 5** opens them over REST v1, the public network contract recorded in
 [ADR-053](ADR-053-rest-v1-public-contract.md), with the gateway and native server edges, API keys
-and the compatibility window (*Built in layer 5* below; ADR-052 decisions 20 to 23). Design
+and the compatibility window (*Built in layer 5* below; ADR-052 decisions 20 to 23). **Layer 6**
+builds level L2's server copy, unreleased in this build, recorded in
+[ADR-054](ADR-054-level-l2-the-server-copy.md) (*Built in layer 6* below). Design
 gates: protocol (control
 envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
 layout (target roots and the selection file), release/packaging (client and server-edge
@@ -40,8 +42,8 @@ crossing ledger and the AST boundary test), `src/finishup/cli/command_scope.py`,
 `src/finishup/service/control_protocol.py` and `src/finishup/service/daemon.py`, the
 control-envelope 2.10.0 schemas and fixtures, and the closed tokens in
 `src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Later layers add the
-modules their own amendments of this ADR name; those of layers 2 to 4 are listed in ADR-052, and
-layer 5's in ADR-053.
+modules their own amendments of this ADR name; those of layers 2 to 4 are listed in ADR-052,
+layer 5's in ADR-053, and layer 6's in ADR-054.
 **Amends:** ADR-001, ADR-008, ADR-009, ADR-018, ADR-026, ADR-028 and ADR-031; each carries a dated
 amendment note pointing here, limited to what layer 1 does. **Relates to:** ADR-002 (idempotency
 scope), ADR-010 (Cursor roots), ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz`
@@ -330,6 +332,27 @@ a terminal); fencing a task read by id per key principal (principals namespace c
 groundwork for multi-owner hosting); a PR CI job for the REST conformance kit; and an official
 FinishUP service, built in another repository. Real HTTPS ran on Linux only (the conformance kit
 against both edges over real TLS, and an end-to-end run of the CLI).
+
+### Built in layer 6, and not yet built
+
+The record is [ADR-054](ADR-054-level-l2-the-server-copy.md). **Level L2 stays unreleased**
+(`protocol.server_copy.L2_RELEASED` is `False`; an architecture test pins it): no server profile
+offers L2, `--level L2` is refused `server_level_unavailable`, the level options and `finishup
+server code` are hidden from help, no helper declares the sync operations and no service keeps
+copies. Every surface behaves as in layer 5.
+
+**Built, exercised in process and in a real-network harness that turns L2 on in its own process
+only:** the `git-bundle-1` wire format and its one verifier; the sanitized exporter with its
+always-excluded names and content scan; the pull sync, two workspace operations in a new `copy`
+family (decision 5's catalogue grows from eighteen operations to twenty) answered only by the
+target's helper after the gate runs again; the server's encrypted copy store with its quotas,
+forget and expiry; the claim-bound `code_copy` method; consent at L2 with a retention; and the
+owner's per-repository choices.
+
+**Not yet built:** reads from the copy (every read still goes to the client's workspace agent, as
+at L1), task pins and the `task_close` expiry, per-evidence provenance on receipts, deleting the
+excerpts derived from a forgotten copy, the `[server]` configuration table that would make an
+offer, and any macOS or WSL 2 run (ADR-054, *Not built*); then layer 7's lifecycle validation.
 
 ## Decisions
 
@@ -1799,7 +1822,8 @@ client's wait.
   `state/helper-status.json`, `config/connection-style.json`, `state/helper-epoch`,
   `state/ssh-master.json` and its lock, `state/profile-refresh-requested` and `log/helper.stderr`
   (INTERFACES, *SSH servers and the helper*). Socket paths may hold spaces (the default root on
-  macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. There is no code sync in the helper yet (layer 6).
+  macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. From
+  layer 6 the helper also answers level L2's code-sync calls, which stay unreleased (ADR-054).
 - **SSH edge.** `sshd` on the server must allow stream-local forwarding; it connects to the
   server's owner-only control socket as the login user, so the service's peer-UID check passes
   unchanged and the SSH login is the service owner (ADR-008 amendment, layer 4).

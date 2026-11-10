@@ -144,9 +144,10 @@ check-time change, requested-output facts, task inputs, declared tests, reviewer
 observation verification and approved checks. A server on another machine cannot. For a remote
 target the client sends a keyed workspace *claim* instead of a path, and a client-side workspace
 agent (`client/workspace_agent.py`, eighteen bounded operations cataloged in
-`ports/workspace_agent.py`) answers the server's `workspace_call`s with the same adapters and
-fences the local service uses. On the server, `service/workspace_hub.py` keeps the live agent
-channels keyed by workspace handle and correlates each call with its reply, and
+`ports/workspace_agent.py`, twenty with level L2's two sync operations from layer 6) answers the
+server's `workspace_call`s with the same adapters and fences the local service uses. On the
+server, `service/workspace_hub.py` keeps the live agent channels keyed by workspace handle and
+correlates each call with its reply, and
 `service/workspace_routing.py` wraps every workspace port the service composes: an absolute path
 goes to the local adapter unchanged, a `client:` handle goes to the hub, and no local adapter is
 ever handed a handle. Evidence obtained that way is labelled `client_attested`, and every
@@ -248,6 +249,30 @@ Layer 5 opens `https` and `local_port` over REST v1, the one public network cont
   and only it reads the API key in the relay style. `server login` and `server logout` stop it so
   nothing goes on under the old key.
 
+**Level L2, the server copy (layer 6, [ADR-054](adr/ADR-054-level-l2-the-server-copy.md)).**
+Built and **unreleased**: while `L2_RELEASED` is false no server offers L2, nothing is exported and
+no service keeps copies. The server pulls; only the target's helper answers, and reads still go to
+the client's workspace agent as at L1.
+
+- `protocol/server_copy.py` (SHARED, pure): the `git-bundle-1` wire format, its one verifier for the
+  client's audit and the server's admission, the snapshot manifest, the provenance tokens and the
+  release switch.
+- `domain/code_exclusions.py` (SHARED): the names always left out of a copy and how a pattern
+  matches.
+- `client/code_secrets.py` (CLIENT): the content scan for known secret formats before a file enters
+  a copy.
+- `client/code_copy_settings.py` (CLIENT): the owner's per-repository choices
+  (`config/code-copy.json`: level L1, exclusions, allowed contents).
+- `client/code_export.py` (CLIENT, helper only): the sanitized exporter and its FinishUP-owned
+  export object database.
+- `client/code_sync.py` (CLIENT, helper only): answers the server's two code-sync operations after
+  the gate and the consent are checked again.
+- `service/code_store.py` (SERVER): the encrypted copy store (keys under the vault's authority,
+  admission, quotas, forget with its tombstone, expiry).
+- `service/code_copy.py` (SERVER): the puller that syncs before the task-base and check reads, and
+  the vault-derived copy keys.
+- `cli/server_code.py` (CLIENT): `finishup server code`, hidden while L2 is unreleased.
+
 ### Topology by target
 
 ```
@@ -281,7 +306,8 @@ local_port in layer 5
 
 None of the remote path existed in layer 1. Layer 4 builds the SSH part (the helper, both
 connection styles and the SSH edge); layer 5 builds the REST part (REST v1, the gateway and native
-edges, the one REST client and its mapping, the helper's REST upstream). The remote path follows
+edges, the one REST client and its mapping, the helper's REST upstream); layer 6 builds level L2's
+server copy, unreleased. The remote path follows
 ADR-051's unified model, delivered in later layers: a *level* says where
 the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
 review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of

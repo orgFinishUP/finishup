@@ -240,6 +240,23 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   signing in with anything but an API key, an official FinishUP service. HTTPS servers were tested
   on Linux; macOS and Windows through WSL 2 are not tested yet.
 
+### A copy of your code on a server, not yet available (#1308)
+
+- **Groundwork for servers that keep a copy of your code (level L2), not available in this
+  release.** Nothing you see changes: no server offers it, FinishUP never sends a copy of your code,
+  and `finishup server add` and `server use` work as before. Part of what a later release needs is
+  in place: a sanitized copy of a project's git-visible files (never its history) that leaves out
+  credential file names, the server's exclusions and your own list, sends only the names of what it
+  leaves out, and holds back files whose contents match known secret formats; a server that would
+  get it only from this computer's FinishUP helper, after your agreement and the project's hold are
+  checked again, and keep it encrypted under its vault; and forgetting a copy, which deletes it
+  there and says exactly what was deleted. Holding a project or stopping only stops future sends;
+  only forgetting removes what was sent. Reading evidence from such a copy is not built yet. Control
+  envelopes 2.10.0 and the REST contract 1.0.0, both unreleased, are amended in place (two workspace
+  operations and the `code_copy` method). See
+  [FinishUP servers](docs/usage/servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2) and
+  [ADR-054](docs/adr/ADR-054-level-l2-the-server-copy.md).
+
 ### Added
 
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy

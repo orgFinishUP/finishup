@@ -5833,7 +5833,7 @@ in layer 3; the background helper (one per server, for the relay and direct conn
 SSH targets in layer 4 (built: *SSH servers and the helper*); REST, its gateway and native server
 edges, API key scopes (`agent`, `operator`; ADR-051 decision 9), discovery with the official
 origin preset and the conformance kit in layer 5 (built: *HTTPS servers and REST v1*); the L2
-server copy in layer 6.
+server copy in layer 6 (built and unreleased: *Level L2: the server copy*).
 
 ### Several-agent setup batches (issue #1119)
 
@@ -14948,7 +14948,8 @@ and its frozen request and response vectors (a test pins this release's entry).
 
 **Scopes** (`rest.contract.AGENT_SCOPE_METHODS`, `OPERATOR_SCOPE_METHODS`, `method_allowed`;
 ADR-051 decision 9): `agent` = `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
-`service_status`, `observation_ingest` (with a claim, `CLAIM_BOUND_ONLY_METHODS`); `operator` adds
+`service_status`, `observation_ingest` and, from layer 6, `code_copy` (each with a claim,
+`CLAIM_BOUND_ONLY_METHODS`; *Level L2: the server copy*); `operator` adds
 `project`, `review`, `import_codex_jsonl`, `observation_status`, `privacy_get_setup`,
 `privacy_get_effective`, `privacy_pending_list`, `privacy_receipts_list`, `privacy_receipts_get`,
 `privacy_propose_policy`, `privacy_tighten_policy` and `service_lock`. No other method is reachable
@@ -15065,6 +15066,95 @@ targets (`not_applicable` for others), shown as "API key: …".
 (`operator`), `FINISHUP_REST_AGENT_KEY` (optional `agent`), `FINISHUP_REST_CA_FILE` or
 `FINISHUP_REST_TLS_PIN`; without a URL it provisions its own server root and runs both edges over
 real TLS (see the [test-instances runbook](runbooks/test-instances.md)).
+
+## Level L2: the server copy (ADR-054)
+
+[ADR-054](adr/ADR-054-level-l2-the-server-copy.md) owns these names; ADR-052 owns the gate every
+sync runs again, and ADR-053 the REST scopes. **Level L2 is unreleased in this build**: while
+`protocol.server_copy.L2_RELEASED` is false nothing here offers, sends or keeps a copy of code, and
+every surface behaves as in layer 5.
+
+**Release switch.** `protocol.server_copy.L2_RELEASED` (`False`; pinned by
+`tests/unit/architecture/test_level_l2_unreleased.py`), `l2_released()` and
+`enable_unreleased_l2(enabled=True)`, called only by tests and the layer-6 real-network harness, in
+their own process; no flag, variable or file a user can set reaches it. While it is false: no
+server profile offers L2, `--level L2` is refused `server_level_unavailable`, `--level`,
+`--retention` and `finishup server code` are hidden from help, no helper declares the sync
+operations, and no service keeps copies (`code_copy` is refused `method_forbidden`).
+
+**Modules.** `protocol.server_copy` (SHARED, pure: `CODE_SYNC_METHOD`, `verify_snapshot_bundle`,
+the manifest, `EVIDENCE_PROVENANCE`), `domain.code_exclusions` (`ALWAYS_EXCLUDED`),
+`client.code_secrets`, `client.code_copy_settings`, `client.code_export` (`export_snapshot`,
+`ExportDatabase`), `client.code_sync` (`CodeSyncResponder`, `export_folder`), the helper's
+`remote_workspace_binding(..., code_sync=True)`, `service.server_profile.CodeCopyOffer`,
+`service.code_store` (`CodeStore`), `service.code_copy` (`CodeCopies`, `VaultCopyKeyring`) and
+`cli.server_code`.
+
+**Wire** (control 2.10.0, amended in place, unreleased):
+
+- Sync method `git-bundle-1`: a git bundle v2 with one ref, `refs/finishup/snap/<n>`, and a v2 pack
+  of whole blob, tree and commit objects (sha1, hashed by the client); two synthetic commit shapes
+  (base: no parent; snapshot: one parent, the base), author and committer `FinishUP export
+  <export@finishup.invalid> 0 +0000`, message `finishup snapshot`.
+- Workspace operations, family `copy` (the catalogue grows from 18 to 20): `code_sync_prepare`
+  `{purpose: base|check, have (at most 16), base_commit, issuer, revision, profile_digest}` →
+  `{unchanged, sync_id, manifest, size, sha256, retention}`; `code_sync_read` `{sync_id, offset,
+  length (at most 3 MiB)}` → a base64 chunk. Declared only by the helper's background agent of a
+  target consented at L2; never by the MCP bridge, a CLI command or a hook. The hub never replays
+  either to another connection.
+- Reply reasons: refused `code_copy_not_consented`, `repository_egress_held`,
+  `repository_egress_kept`, `server_authorization_changed`, `server_profile_changed`,
+  `zero_network_remote_selected`; unavailable `code_copy_too_large`, `code_export_failed`,
+  `code_sync_unknown`.
+- Control method `code_copy`: body `{action: status|forget}` → `{action, copy, forgot}`; `copy` is
+  `{snapshots, stored_bytes, created_at, last_sync_at, retention: {kind:
+  days|task_close|until_forgotten, days}}` or `null`; `forgot` is `{copies, snapshots, objects,
+  bytes, backups: not_managed}` or `null`. Claim-bound only, structural (answered while locked and
+  under another revision), never to the MCP bridge; in the full method list only (#436). Over REST:
+  `AGENT_SCOPE_METHODS` (and so `operator`) and `CLAIM_BOUND_ONLY_METHODS`; the REST contract 1.0.0
+  entry of `fixtures/service/rest-api-manifests.case.json` is amended in place.
+- Server events (bounded, closed tokens): `code_copy_sync_<outcome>` and `code_copy_expiry`; store
+  refusal `code_copy_forgotten` (an upload begun before a forget).
+
+**Snapshot manifest** `yoetz.code-snapshot/1` (canonical JSON, beside the bundle): `schema`,
+`snapshot`, `base`, `tree`, `base_tree`, `original_base` (`{object_format, commit}`, provenance
+only), `export_id`, `worktree`, `policy` (the exclusion policy's digest), `completeness` (lists
+`excluded`, `held_for_content`, `too_large`, `lfs_content`, `case_collision`,
+`nested_repository`, each `{paths (at most 256), more}`; counts `links`, `gitlinks`,
+`lfs_pointers`, `special`, `unrepresentable`), `subject_state` (`null` for now), `revision`
+(`{issuer, revision, profile_digest}`), `purpose`, `synced_at`, `files`, `bytes`. Paths only,
+never contents.
+
+**Records.**
+
+| Record | Location | Fields |
+|---|---|---|
+| `yoetz.server-code-copy/1` | `<target root>/config/code-copy.json` (client, remote targets) | `schema`, `target_id` and `repositories`: per repository `repository` (the hold's repository key), `level` (`L1` or `null`; never more than the consent), `exclude` (patterns) and `allow` (`[path, sha256:<hex>]` of exact bytes); at most 256 repositories and 256 entries each, 1 MiB. Owner-only canonical JSON, read fail-closed (a bad record refuses every export); written under the registry lock by `server code exclude`, `allow` and `level`; never sent to a server. |
+| `yoetz.code-export/1` | `<target root>/state/code-export/<digest of the repository key>/export.json` (client) | `schema`, `export_id`, `next_ref`, `sent` (the snapshots sent); beside FinishUP-owned git loose objects, never the repository's own `.git`. Removed by `server code forget`. |
+| `yoetz.code-copy/1` | `<state>/code-copies/copies/<copy key>/copy.json` (server) | `schema`, `copy_key`, `copy_id`, `principal` and `repository` (digests only), `created_at`, `last_sync_at`, `retention` (`{kind, days}`), `snapshots` (at most 64), `pins`, `stored_bytes`, `objects` and `wrap`; beside it `objects/`, `snapshots/<snapshot>.enc` and `index.enc`, each an AES-256-GCM frame. Written last at every commit. |
+| `yoetz.code-copy-wrap/1` | the `wrap` member of `copy.json` (server) | `schema`, `algorithm` (`aes-256-kw-rfc3394`), `key_slot`, `wrapped`: the copy's data key wrapped under a key-encryption key the vault's installation MAC derives per copy (domain `yoetz/code-copy-kek/v1`), never stored; a locked vault reads and admits nothing. |
+| `yoetz.code-copy-tombstones/1` | `<state>/code-copies/tombstones.json` (server) | `schema`, `epochs`: per copy `epoch`, `forgotten_at`, `reason`; advanced before a forget deletes the folder, so an upload begun under an older epoch is refused. |
+
+Staged uploads (`<state>/code-copies/uploads/`) are encrypted under a key held only in memory and
+removed at service start, with any copy folder that has no record.
+
+**Server profile.** `CodeCopyOffer` (`max_repo_bytes`, `max_file_bytes`, retention options and
+default, exclusions); a profile offers `levels {offered: [L1, L2], required_min: L1}` with
+`code_sync`, `retention` and `exclusions` only with an offer and L2 released, and
+`exclusions.always` is the offer's patterns with `ALWAYS_EXCLUDED`. No `[server]` configuration
+table exists (config 1.3.0 is released and frozen), so no production service has an offer.
+
+**CLI** (`client_only`; hidden while L2 is unreleased): `finishup server add|use … --level L1|L2
+--retention task_close|until_forgotten|days:N`; `finishup server code list|forget [--repository
+FOLDER] [--json]`, `exclude add|remove|list PATTERN`, `allow FILE`, `level L1|default`.
+`exclude add` and `level L1` ask nothing; `exclude remove`, `level default` and `allow` are
+confirmed on the trusted console. A command that reaches a server that keeps no copies is refused
+`server_level_unavailable`. The L2 disclosure is this release's own text; the L1 text and
+`DISCLOSURE_VERSION` (3) are unchanged.
+
+**Provenance tokens** (`protocol.server_copy.EVIDENCE_PROVENANCE`, `yoetz.evidence-provenance/1`):
+`server_copy_read`, `client_attested_read`, `client_check`, `client_observation`, `outside_read`,
+`stale_copy_read`. Defined, not yet rendered on any receipt.
 
 ## Lossless result delivery (issue #1139)
 

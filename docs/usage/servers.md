@@ -331,6 +331,39 @@ port of this computer.
   reads and its hooks capture. A project inside another project follows the outer project's
   policy.
 
+## Keeping a copy of your code on a server (level L2)
+
+**Not available in this release.** No FinishUP server keeps a copy of your code yet, and FinishUP
+never sends one: a server elsewhere reads your project only through FinishUP on this computer, while
+it works. This section says what keeping a copy will mean once a later release offers it.
+
+When a server offers it, FinishUP will show what it means and ask you to agree on your own
+terminal. Then:
+
+- **What is sent.** A copy of each project you use with that server: the files git can see
+  (tracked, and untracked but not ignored), never the project's history. Files with names that are
+  always left out (environment files such as `.env`, SSH keys such as `id_rsa`, `.netrc`, `.npmrc`,
+  `*.pem` and `*.key` files, cloud and Kubernetes credentials, Terraform state and similar), the
+  server's own exclusions and the list you keep for the project are not sent. The **names** of the
+  files left out are sent, never their contents.
+- **What is scanned.** Before a file is sent, FinishUP checks its contents for known secret
+  formats (private keys, access tokens of common services, passwords written into URLs). A file
+  that matches is held back until you allow that exact content. Names and scans reduce what is sent;
+  they are not a guarantee that no secret is.
+- **What is kept, and for how long.** The server keeps the copy encrypted, readable only while its
+  vault is unlocked, for as long as you chose among the options it offers (for example a number of
+  days after the last update, or until you forget it). The server's owner controls that server:
+  locking its vault does not take back anything already read out of it, and FinishUP does not
+  manage backups of it.
+- **How forget works.** In a later release, `finishup server code forget` asks the server to
+  delete its copy of the project you are in and says exactly what it deleted. Each project's copy
+  is forgotten on its own. Evidence already recorded in your tasks there, such as captured changes
+  and review excerpts, is not part of the copy.
+- **Stopping is not forgetting.** Holding a project, keeping one project's code on this computer
+  while the server keeps its tasks (as today, level L1), choosing another server or removing the
+  server only stops future sends; what was already sent stays on the server until you forget it or
+  its time runs out.
+
 ## Serve this computer over HTTPS
 
 To let your other computers use the FinishUP on this one over HTTPS, give each of them an API key
@@ -398,8 +431,9 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 
 ## Not supported yet
 
-- Keeping a copy of your code on the server; a server elsewhere reads your code only through
-  FinishUP on this computer.
+- Keeping a copy of your code on the server (see
+  [Keeping a copy of your code on a server](#keeping-a-copy-of-your-code-on-a-server-level-l2)); a
+  server elsewhere reads your code only through FinishUP on this computer.
 - Adding an SSH or HTTPS server from the terminal interface (use your shell).
 - Signing in to an HTTPS server with anything other than an API key (for example OAuth).
 - An official FinishUP service: this release names none.
