@@ -248,7 +248,8 @@ def test_an_endpoint_with_spaces_is_recorded_as_reported(
 ) -> None:
     """B2: a server whose FinishUP lives under "Application Support" (macOS) is added."""
 
-    endpoint = "/Users/me/Library/Application Support/finishup/run/control.sock"
+    # As under a macOS home's "Library/Application Support" (no account's path is named here).
+    endpoint = "/srv/Library/Application Support/finishup/run/control.sock"
     script = server.directory / "ssh"
     script.write_text(script.read_text().replace('"/srv/fu/run/control.sock"', f'"{endpoint}"'))
     _console(monkeypatch, b"listed", b"lab")

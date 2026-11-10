@@ -191,8 +191,9 @@ def test_socket_paths_with_spaces_are_handed_to_openssh_as_written(
     from finishup.client.ssh_transport import ssh_paths_usable
 
     record, _root = ssh_target
-    root = Path("/Users/me/Library/Application Support/finishup/servers/t_0000000a")
-    endpoint = "/Users/me/Library/Application Support/finishup/run/control.sock"
+    # As under a macOS home's "Library/Application Support" (no account's path is named here).
+    root = Path("/srv/Library/Application Support/finishup/servers/t_0000000a")
+    endpoint = "/srv/Library/Application Support/finishup/run/control.sock"
     spaced = replace(record, remote_endpoint=endpoint)
     assert ssh_paths_usable(root, endpoint)
     master = master_argv("ssh", root, spaced)
@@ -200,7 +201,7 @@ def test_socket_paths_with_spaces_are_handed_to_openssh_as_written(
     assert master[master.index("-L") + 1] == f"{root}/run/upstream.sock:{endpoint}"
     direct = direct_argv("ssh", root, spaced)
     assert direct[direct.index("-W") + 1] == endpoint
-    for unusable in (Path("/home/a%h/servers/t_0000000a"), Path("/home/a:b/servers/t_0000000a")):
+    for unusable in (Path("/srv/a%h/servers/t_0000000a"), Path("/srv/a:b/servers/t_0000000a")):
         assert not ssh_paths_usable(unusable)
         with pytest.raises(UpstreamUnavailable, match="remote_unreachable"):
             master_argv("ssh", unusable, record)
