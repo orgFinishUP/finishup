@@ -98,6 +98,13 @@ _REPLAYABLE_OPERATIONS: Final = frozenset(
         WorkspaceOperation.CODE_SYNC_READ,
     }
 )
+# Operations only the target's helper answers, through its background agent (ADR-054): the
+# connection's own agent never declares them. A client whose connection is up may still be
+# bringing its helper's background agent up, so a call waits (within its bound) for one rather
+# than being refused at once (design v2 section 4.2: a check waits, bounded, for its snapshot).
+_HELPER_OPERATIONS: Final = frozenset(
+    {WorkspaceOperation.CODE_SYNC_PREPARE, WorkspaceOperation.CODE_SYNC_READ}
+)
 _COMPONENT: Final = "service.workspace_hub"
 _WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 
@@ -575,7 +582,11 @@ class WorkspaceAgentHub:
             # Every channel under a handle serves its one worktree; the newest connection is the
             # agent most likely still in front of it.
             return declaring[-1]
-        if live:
+        if live and (
+            operation not in _HELPER_OPERATIONS
+            or any(channel.declaration.role == "background" for channel in live)
+        ):
+            # A helper's background agent that does not declare it never will (a client at L1).
             raise WorkspaceAgentUnavailable("operation_not_declared")
         return None
 
@@ -608,6 +619,9 @@ class WorkspaceAgentHub:
                             return channel
                         await condition.wait()
         except TimeoutError:
+            if any(not channel.closed for channel in self._channels.get(handle, ())):
+                # The client is there, but no helper agent of it came to answer: not offline.
+                raise WorkspaceAgentUnavailable("operation_not_declared") from None
             raise WorkspaceAgentUnavailable("no_agent") from None
 
     async def call(
