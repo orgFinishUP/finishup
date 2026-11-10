@@ -256,7 +256,9 @@ refuses that chunk; the puller records it as a refused sync and admits nothing. 
 On the server, `service.code_copy.CodeCopies` pulls in the worker thread of the read it precedes:
 the task base (`read_task_base`) and a check (`capture`, `capture_metadata`, and an approved check
 of a task the copy serves, decision 13). One sync per repository runs at a time (a caller that
-finds one running waits for its outcome); each outcome is a closed bounded event
+finds one running waits for it, and takes its outcome only when it pulled the same worktree against
+the same base: linked worktrees share the commitment, so another worktree, or another base, then
+makes its own pull); each outcome is a closed bounded event
 (`code_copy_sync_<outcome>`), and a sync never fails the read. The puller names the original base
 commit to the client. Which reads the copy then serves is decision 12.
 

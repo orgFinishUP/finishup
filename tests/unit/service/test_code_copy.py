@@ -60,6 +60,10 @@ class FakeHub:
         self.chunk_refusal: WorkspaceAgentUnavailable | None = None
         self.gate: threading.Event | None = None
         self.code_copies: object = None
+        self.handles = {HANDLE}
+        self.prepares: list[tuple[str, str | None]] = []
+        self.entered = threading.Event()
+        self.worktrees: dict[str, str] = {}
 
     def call_blocking(
         self,
@@ -69,15 +73,20 @@ class FakeHub:
         *,
         timeout_seconds: float,
     ) -> object:
-        assert handle == HANDLE and timeout_seconds > 0
+        assert handle in self.handles and timeout_seconds > 0
         self.calls.append(operation.value)
         if operation is WorkspaceOperation.CODE_SYNC_PREPARE:
             assert isinstance(arguments, CodeSyncPrepareArguments)
             self.named = (arguments.issuer, arguments.revision)
+            self.prepares.append((handle, arguments.base_commit))
+            self.entered.set()
             if self.gate is not None:
                 self.gate.wait(10)
             if self.refusal is not None:
                 raise self.refusal
+            if handle in self.worktrees:
+                manifest = replace(self.prepared.manifest, worktree=self.worktrees[handle])
+                return replace(self.prepared, manifest=manifest)
             return self.prepared
         if operation is WorkspaceOperation.CODE_SYNC_READ:
             assert isinstance(arguments, CodeSyncReadArguments)
@@ -255,6 +264,50 @@ def test_concurrent_syncs_of_one_repository_are_one_pull(tmp_path: Path) -> None
     second.join(10)
     assert hub.calls.count("code_sync_prepare") == 1
     assert [getattr(item, "outcome") for item in outcomes] == ["synced", "synced"]
+
+
+@pytest.mark.parametrize("differs", ["worktree", "base"])
+def test_a_pull_under_way_answers_only_the_same_worktree_and_base(
+    tmp_path: Path, differs: str
+) -> None:
+    """C3: linked worktrees share the repository's commitment; one waits, then pulls its own."""
+
+    other_handle = "client:fedcba9876543210"
+    other_worktree = "sha256:" + "d" * 64 if differs == "worktree" else WORKTREE
+    other_base = "e" * 40 if differs == "base" else None
+    copies, hub, _store = _copies(tmp_path)
+    hub.handles.add(other_handle)
+    hub.worktrees[other_handle] = other_worktree
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    copies.remember(other_handle, COMMITMENT, other_worktree)
+    hub.gate = threading.Event()
+    outcomes: dict[str, object] = {}
+    first = threading.Thread(
+        target=lambda: outcomes.setdefault(
+            "first", copies.sync_blocking(HANDLE, purpose="check", task_id="tsk_first")
+        )
+    )
+    first.start()
+    assert hub.entered.wait(10)
+    second = threading.Thread(
+        target=lambda: outcomes.setdefault(
+            "second",
+            copies.sync_blocking(
+                other_handle, purpose="check", base_commit=other_base, task_id="tsk_second"
+            ),
+        )
+    )
+    second.start()
+    hub.gate.set()
+    first.join(10)
+    second.join(10)
+    # One at a time, and the second made its own pull from its own worktree's agent.
+    assert hub.prepares == [(HANDLE, None), (other_handle, other_base)]
+    assert [getattr(outcomes[name], "outcome") for name in ("first", "second")] == [
+        "synced",
+        "synced",
+    ]
+    assert outcomes["second"] is not outcomes["first"]
 
 
 def test_an_unchanged_snapshot_must_already_be_held(tmp_path: Path) -> None:

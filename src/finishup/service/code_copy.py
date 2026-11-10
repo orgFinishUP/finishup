@@ -7,8 +7,9 @@ runs in the worker thread of the read it precedes:
 
 1. it knows the workspace handle's repository commitment only from a claim this service keyed
    (``remember``); a handle it never keyed is not synced;
-2. one sync per repository at a time: a caller that finds one running waits for its outcome
-   (coalesced), within its own bound;
+2. one sync per repository at a time: a caller that finds one running waits for it, within its
+   own bound, and takes its outcome only when it pulled the same worktree against the same base
+   (linked worktrees share a commitment); otherwise it then makes its own pull;
 3. it asks the handle's agent ``code_sync_prepare`` with the copy's have-set and the revision it
    issues now (the hub asks only an agent that declares it: the helper's background agent), then
    reads the bundle in chunks into the store's encrypted staging, and commits it, which verifies it
@@ -50,6 +51,7 @@ key of a copy is the vault's installation MAC over the copy id under its own dom
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -192,11 +194,20 @@ class _Claim:
 
 
 class _Flight:
-    __slots__ = ("done", "outcome")
+    """One repository's pull under way, for one worktree and base (``sync_blocking``)."""
 
-    def __init__(self) -> None:
+    __slots__ = ("base_commit", "done", "outcome", "worktree")
+
+    def __init__(self, worktree: str | None, base_commit: str | None) -> None:
+        self.worktree = worktree
+        self.base_commit = base_commit
         self.done = threading.Event()
         self.outcome: SyncOutcome | None = None
+
+    def serves(self, worktree: str | None, base_commit: str | None) -> bool:
+        """Whether its outcome answers a pull of ``worktree`` against ``base_commit`` too."""
+
+        return (self.worktree, self.base_commit) == (worktree, base_commit)
 
 
 class CodeCopies:
@@ -294,25 +305,36 @@ class CodeCopies:
         base_commit: str | None = None,
         task_id: str | None = None,
     ) -> SyncOutcome:
-        """Sync ``handle``'s repository now, from a worker thread (coalesced, bounded)."""
+        """Sync ``handle``'s repository now, from a worker thread (coalesced, bounded).
+
+        One pull per repository runs at a time. A caller that finds one running waits for it;
+        its outcome answers the caller only when it was a pull of the same worktree against the
+        same base (linked worktrees share the repository's commitment, not their files): else the
+        caller then makes its own pull, still one at a time, within the same bound.
+        """
 
         if not self._serving:
             return SyncOutcome("refused", "server_level_unavailable")
-        with self._lock:
-            claim = self._claims.get(handle)
-            if claim is None:
-                return SyncOutcome("unavailable", "workspace_not_keyed")
-            flight = self._flights.get(claim.commitment)
-            owner = flight is None
-            if flight is None:
-                flight = _Flight()
-                self._flights[claim.commitment] = flight
-        if not owner:
-            flight.done.wait(_PREPARE_SECONDS + 4 * _READ_SECONDS)
-            outcome = flight.outcome or SyncOutcome("unavailable", "code_sync_busy")
-            if outcome.snapshot is not None and outcome.outcome in {"synced", "unchanged"}:
-                self._pin(claim, task_id, outcome.snapshot)
-            return outcome
+        deadline = time.monotonic() + _PREPARE_SECONDS + 4 * _READ_SECONDS
+        while True:
+            with self._lock:
+                claim = self._claims.get(handle)
+                if claim is None:
+                    return SyncOutcome("unavailable", "workspace_not_keyed")
+                flight = self._flights.get(claim.commitment)
+                if flight is None:
+                    flight = _Flight(claim.worktree, base_commit)
+                    self._flights[claim.commitment] = flight
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not flight.done.wait(remaining):
+                return SyncOutcome("unavailable", "code_sync_busy")
+            if flight.serves(claim.worktree, base_commit):
+                outcome = flight.outcome or SyncOutcome("unavailable", "code_sync_busy")
+                if outcome.snapshot is not None and outcome.outcome in {"synced", "unchanged"}:
+                    self._pin(claim, task_id, outcome.snapshot)
+                return outcome
+            # Another worktree's or another base's pull: this one makes its own, after it.
         try:
             outcome = self._sync(handle, claim, purpose, base_commit, task_id)
         except Exception:  # noqa: BLE001 - a sync never fails the read it precedes
