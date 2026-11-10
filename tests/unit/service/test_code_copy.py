@@ -184,7 +184,7 @@ def test_an_unchanged_snapshot_must_already_be_held(tmp_path: Path) -> None:
     assert copies.sync_blocking(HANDLE, purpose="check").reason == "code_snapshot_unknown"
 
 
-def test_a_routed_task_base_syncs_the_copy_first_and_still_reads_from_the_agent(
+def test_a_routed_task_base_syncs_first_and_without_a_checkout_reads_from_the_agent(
     tmp_path: Path,
 ) -> None:
     copies, hub, store = _copies(tmp_path)

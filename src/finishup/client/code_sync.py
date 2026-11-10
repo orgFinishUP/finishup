@@ -52,7 +52,7 @@ from finishup.ports.workspace_agent import (
 )
 from finishup.protocol.server_copy import l2_released
 
-__all__ = ["CodeSyncRefused", "CodeSyncResponder", "export_folder"]
+__all__ = ["CodeSyncRefused", "CodeSyncResponder", "export_folder", "subject_state_digest"]
 
 _PREPARED_SECONDS: Final = 120.0
 _NOT_CONSENTED: Final = "code_copy_not_consented"
@@ -224,6 +224,7 @@ class CodeSyncResponder:
                         revision=arguments.revision,
                         profile_digest=arguments.profile_digest,
                         worktree=self._worktree,
+                        subject_state=subject_state_digest(self._root),
                         base_commit=arguments.base_commit,
                     ),
                     policy,
@@ -269,6 +270,32 @@ class CodeSyncResponder:
                 export_folder(self._target_id, self._repository_key)
             )
             database.remove()
+
+
+def subject_state_digest(root: Path) -> str | None:
+    """The worktree's subject-state commitment, as the server's approved-check flow digests the
+    subject state this computer's agent captures for it (``GIT_STRUCTURAL_V1``: its tree and diff
+    digests), so a check run here can be compared with the snapshot the server read (design v2
+    §8.6); None when it cannot be captured. Runs only after every check of ``prepare``."""
+
+    from finishup.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
+    from finishup.domain.values import JsonObject
+    from finishup.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
+    from finishup.protocol.canonical import canonical_digest
+
+    try:
+        handle = open_local_workspace(root, admitted_home_project=True)
+        result = GitSubjectStateAdapter().capture(
+            SubjectStateCaptureCommand(handle, SubjectStateFormat.GIT_STRUCTURAL_V1)
+        )
+    except Exception:  # noqa: BLE001 - an uncapturable subject state is no commitment
+        return None
+    state = result.subject_state
+    if state is None:
+        return None
+    return canonical_digest(
+        JsonObject({"tree_digest": state.tree_digest, "diff_digest": state.diff_digest})
+    )
 
 
 def _already_admitted() -> None:

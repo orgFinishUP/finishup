@@ -56,6 +56,12 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from finishup.config.installation import format_rfc3339_ms, parse_rfc3339_ms
+from finishup.domain.evidence_provenance import (
+    EVIDENCE_PROVENANCE_TOKENS,
+    EvidenceProvenance,
+    EvidenceToken,
+    evidence_provenance_from_json,
+)
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.server_copy import (
     BundleLimits,
@@ -77,6 +83,9 @@ __all__ = [
     "CopyKeyring",
     "CopySummary",
     "ForgetReport",
+    "ForgottenTask",
+    "PendingErasure",
+    "PinEntry",
     "StoreLimits",
     "UploadReceipt",
     "WrappedKey",
@@ -85,6 +94,7 @@ __all__ = [
 COPY_SCHEMA: Final = "yoetz.code-copy/1"
 WRAP_SCHEMA: Final = "yoetz.code-copy-wrap/1"
 _TOMBSTONE_SCHEMA: Final = "yoetz.code-copy-tombstones/1"
+_ERASURE_SCHEMA: Final = "yoetz.code-copy-erasures/1"
 _PRINCIPAL_DOMAIN: Final = b"yoetz/code-copy-principal/v1\x00"
 _REPOSITORY_DOMAIN: Final = b"yoetz/code-copy-repository/v1\x00"
 _COPY_DOMAIN: Final = b"yoetz/code-copy-key/v1\x00"
@@ -96,6 +106,9 @@ _FRAME_MAGIC: Final = b"FUC1"
 _MAX_SNAPSHOTS: Final = 64
 _MAX_HAVE: Final = 16
 _MAX_PINS: Final = 1_024
+# Forgotten tasks whose derived excerpts are still to be erased (bounded; see ``PendingErasure``).
+_MAX_PENDING_ERASURES: Final = 4_096
+_MAX_READ_COUNT: Final = 1_000_000_000
 _MAX_UPLOADS: Final = 8
 _UPLOAD_SECONDS: Final = 600.0
 _TOMBSTONE_DAYS: Final = 2
@@ -181,8 +194,51 @@ class CopySummary:
 
 
 @dataclass(frozen=True, slots=True)
+class PinEntry:
+    """One task's pin in a copy (design v2 §8.6): the snapshot its later reads read, when the
+    server last synced it for the task, whether the task's evidence is read from the copy
+    (``served``), and how many of the task's evidence reads each source answered."""
+
+    snapshot: str
+    synced_at: str | None = None
+    served: bool = False
+    reads: Mapping[EvidenceToken, int] = field(default_factory=lambda: {})
+    fenced: int = 0
+
+    def account(self) -> EvidenceProvenance:
+        """The task's evidence account as this pin records it (no snapshot, no marker)."""
+
+        return EvidenceProvenance(self.reads, self.fenced)
+
+
+@dataclass(frozen=True, slots=True)
+class ForgottenTask:
+    """A task pinned to a copy that was forgotten, and its evidence account at that moment."""
+
+    task_id: str
+    account: EvidenceProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class PendingErasure:
+    """A forgotten task whose derived excerpts are still to be erased from its records (U20).
+
+    Written, owner-only, before the copy is deleted; cleared once the task's records say the
+    content was forgotten (``CodeStore.complete_erasure``), so a crash in between is retried."""
+
+    forget_id: str
+    reason: str
+    task_id: str
+    account: EvidenceProvenance
+    forgotten_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class ForgetReport:
-    """Exactly what one ``forget`` deleted (U20); ``backups`` is always ``not_managed``."""
+    """Exactly what one ``forget`` deleted (U20); ``backups`` is always ``not_managed``.
+
+    ``tasks`` names the tasks pinned to the copies deleted, for the erasure of what their records
+    derived from them; it never crosses the wire (``to_json``)."""
 
     copies: int = 0
     snapshots: int = 0
@@ -190,6 +246,7 @@ class ForgetReport:
     bytes: int = 0
     reason: str = "owner"
     backups: str = "not_managed"
+    tasks: tuple[ForgottenTask, ...] = ()
 
     def plus(self, other: ForgetReport) -> ForgetReport:
         return ForgetReport(
@@ -198,6 +255,7 @@ class ForgetReport:
             self.objects + other.objects,
             self.bytes + other.bytes,
             self.reason,
+            tasks=(*self.tasks, *other.tasks),
         )
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -283,6 +341,11 @@ class CodeStore:
 
     def _copy_folder(self, copy_key: str) -> Path:
         return self._root / "copies" / copy_key[:32]
+
+    def holds(self, copy_key: str) -> bool:
+        """Whether the copy ``copy_key`` names exists (its record was written)."""
+
+        return (self._copy_folder(copy_key) / "copy.json").is_file()
 
     @staticmethod
     def repository_id(repository: str) -> str:
@@ -740,8 +803,40 @@ class CodeStore:
     def snapshot(self, principal: str, repository: str, snapshot: str) -> SnapshotManifest:
         """The manifest of one snapshot this copy holds."""
 
+        return self._snapshot(self.copy_key(principal, repository), snapshot)
+
+    def snapshot_by_key(self, copy_key: str, snapshot: str) -> SnapshotManifest | None:
+        """``snapshot`` of the copy ``copy_key`` names, or None when it is not held (any more)."""
+
+        try:
+            return self._snapshot(copy_key, snapshot)
+        except CodeStoreError:
+            return None
+
+    def task_entry(self, principal: str, task_id: str) -> tuple[str, PinEntry] | None:
+        """The copy ``task_id`` is pinned to (its key) and its pin, or None: the copy kept for
+        ``principal`` whose pin of the task names the newest sync."""
+
+        principal_id = _digest(_PRINCIPAL_DOMAIN, principal)
+        found: tuple[str, PinEntry] | None = None
         with self._lock:
-            copy_key = self.copy_key(principal, repository)
+            for copy_key, record in self._records():
+                if record.get("principal") != principal_id:
+                    continue
+                pins = record.get("pins")
+                entry = (
+                    _pin_entry(cast(dict[str, JsonValue], pins).get(task_id))
+                    if type(pins) is dict
+                    else None
+                )
+                if entry is None:
+                    continue
+                if found is None or (entry.synced_at or "") > (found[1].synced_at or ""):
+                    found = (copy_key, entry)
+        return found
+
+    def _snapshot(self, copy_key: str, snapshot: str) -> SnapshotManifest:
+        with self._lock:
             record = self._read_record(copy_key)
             if record is None or snapshot not in cast(list[str], record["snapshots"]):
                 raise CodeStoreError("code_snapshot_unknown")
@@ -782,8 +877,17 @@ class CodeStore:
             raise CodeStoreError("code_copy_corrupt")
         return item
 
-    def pin(self, principal: str, repository: str, task_id: str, snapshot: str) -> None:
-        """Pin ``task_id``'s later reads to ``snapshot`` (design v2 §8.6)."""
+    def pin(
+        self,
+        principal: str,
+        repository: str,
+        task_id: str,
+        snapshot: str,
+        *,
+        synced_at: str | None = None,
+        served: bool | None = None,
+    ) -> None:
+        """Pin ``task_id``'s later reads to ``snapshot`` (design v2 §8.6); its counts stay."""
 
         if not _TASK_ID.match(task_id):
             raise CodeStoreError("code_pin_invalid")
@@ -795,15 +899,108 @@ class CodeStore:
             pins = cast(dict[str, JsonValue], record["pins"])
             if task_id not in pins and len(pins) >= _MAX_PINS:
                 raise CodeStoreError("code_pin_invalid")
-            pins[task_id] = snapshot
+            entry = _pin_entry(pins.get(task_id)) or PinEntry(snapshot)
+            pins[task_id] = _pin_json(
+                PinEntry(
+                    snapshot,
+                    synced_at if synced_at is not None else entry.synced_at,
+                    entry.served if served is None else served,
+                    entry.reads,
+                    entry.fenced,
+                )
+            )
             self._write_record(copy_key, record)
 
     def pinned(self, principal: str, repository: str, task_id: str) -> str | None:
+        entry = self.pin_entry(principal, repository, task_id)
+        return None if entry is None else entry.snapshot
+
+    def pin_entry(self, principal: str, repository: str, task_id: str) -> PinEntry | None:
+        """``task_id``'s pin in this copy, or None (no copy, or the task never synced to it)."""
+
         with self._lock:
             record = self._read_record(self.copy_key(principal, repository))
             if record is None:
                 return None
-            return cast(str | None, cast(dict[str, JsonValue], record["pins"]).get(task_id))
+            return _pin_entry(cast(dict[str, JsonValue], record["pins"]).get(task_id))
+
+    def task_ids(self, principal: str, repository: str) -> tuple[str, ...]:
+        """The tasks pinned to this copy, in id order."""
+
+        with self._lock:
+            record = self._read_record(self.copy_key(principal, repository))
+            if record is None:
+                return ()
+            return tuple(sorted(cast(dict[str, JsonValue], record["pins"])))
+
+    def add_reads(
+        self,
+        principal: str,
+        repository: str,
+        deltas: Mapping[str, tuple[Mapping[EvidenceToken, int], int]],
+    ) -> None:
+        """Add evidence reads to pinned tasks' counts: ``{task: ({token: n}, fenced)}``.
+
+        A task not pinned to the copy, or a copy that is gone, takes nothing (its reads were not
+        evidence from this copy's repository at level L2); counts are capped, never wrapped.
+        """
+
+        with self._lock:
+            copy_key = self.copy_key(principal, repository)
+            record = self._read_record(copy_key)
+            if record is None:
+                return
+            pins = cast(dict[str, JsonValue], record["pins"])
+            changed = False
+            for task_id, (reads, fenced) in deltas.items():
+                entry = _pin_entry(pins.get(task_id))
+                if entry is None:
+                    continue
+                merged: dict[EvidenceToken, int] = {
+                    token: min(_MAX_READ_COUNT, entry.reads.get(token, 0) + reads.get(token, 0))
+                    for token in EVIDENCE_PROVENANCE_TOKENS
+                }
+                pins[task_id] = _pin_json(
+                    PinEntry(
+                        entry.snapshot,
+                        entry.synced_at,
+                        entry.served,
+                        merged,
+                        min(_MAX_READ_COUNT, entry.fenced + fenced),
+                    )
+                )
+                changed = True
+            if changed:
+                self._write_record(copy_key, record)
+
+    def latest(self, principal: str, repository: str) -> SnapshotManifest | None:
+        """The manifest of the newest snapshot this copy holds, or None."""
+
+        with self._lock:
+            record = self._read_record(self.copy_key(principal, repository))
+            if record is None or not record["snapshots"]:
+                return None
+            newest = cast(list[str], record["snapshots"])[-1]
+        return self.snapshot(principal, repository, newest)
+
+    def manifest_with_base(
+        self, principal: str, repository: str, base: str
+    ) -> SnapshotManifest | None:
+        """The newest snapshot whose synthetic base commit is ``base``, or None: how a task whose
+        base was read from the copy names its original base commit to the client."""
+
+        if not _HEX40.match(base):
+            return None
+        with self._lock:
+            record = self._read_record(self.copy_key(principal, repository))
+            if record is None:
+                return None
+            snapshots = list(reversed(cast(list[str], record["snapshots"])))
+        for snapshot in snapshots:
+            manifest = self.snapshot(principal, repository, snapshot)
+            if manifest.base == base:
+                return manifest
+        return None
 
     def copies(self, principal: str) -> tuple[CopySummary, ...]:
         """Every copy kept for ``principal``, without a path or name."""
@@ -874,10 +1071,104 @@ class CodeStore:
         )
         snapshots = 0 if record is None else len(cast(list[str], record["snapshots"]))
         stored = 0 if record is None else cast(int, record["stored_bytes"])
+        tasks: list[ForgottenTask] = []
+        if record is not None:
+            for task_id, value in sorted(cast(dict[str, JsonValue], record["pins"]).items()):
+                entry = _pin_entry(value)
+                if entry is not None and _TASK_ID.match(task_id):
+                    tasks.append(ForgottenTask(task_id, entry.account()))
+        if tasks:
+            # Before anything is deleted: the tasks whose records still hold excerpts derived
+            # from this copy, so their erasure is retried after a crash (U20).
+            self._remember_erasures(secrets.token_hex(16), reason, tasks)
         shutil.rmtree(folder, ignore_errors=False)
         if record is not None:
             self._keyring.discard(cast(str, record["copy_id"]))
-        return ForgetReport(1, snapshots, objects, stored, reason)
+        return ForgetReport(1, snapshots, objects, stored, reason, tasks=tuple(tasks))
+
+    # --- the erasure of what task records derived from a forgotten copy (U20) -----------------
+
+    def _erasures(self) -> list[dict[str, JsonValue]]:
+        data = _read_private(self._root / "erasures.json", 16_777_216)
+        if data is None:
+            return []
+        try:
+            value = cast(dict[str, JsonValue], strict_json_parse(data))
+            if value.get("schema") != _ERASURE_SCHEMA:
+                raise ValueError("schema")
+            return list(cast(list[dict[str, JsonValue]], value["pending"]))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise CodeStoreError("code_copy_record_invalid") from None
+
+    def _write_erasures(self, pending: list[dict[str, JsonValue]]) -> None:
+        document: dict[str, JsonValue] = {
+            "schema": _ERASURE_SCHEMA,
+            "pending": cast(JsonValue, pending),
+        }
+        _write_private(self._root / "erasures.json", canonical_encode(document))
+
+    def _remember_erasures(self, forget_id: str, reason: str, tasks: list[ForgottenTask]) -> None:
+        try:
+            pending = self._erasures()
+        except CodeStoreError:
+            pending = []  # an unreadable record is replaced; its tasks were erased or lost
+        now = format_rfc3339_ms(self._clock())
+        for task in tasks:
+            if len(pending) >= _MAX_PENDING_ERASURES:
+                break
+            pending.append(
+                {
+                    "forget_id": forget_id,
+                    "reason": reason,
+                    "task_id": task.task_id,
+                    "account": cast(JsonValue, task.account.to_json()),
+                    "forgotten_at": now,
+                }
+            )
+        self._write_erasures(pending)
+
+    def pending_erasures(self) -> tuple[PendingErasure, ...]:
+        """Forgotten tasks whose records are still to say their content was forgotten."""
+
+        with self._lock:
+            try:
+                rows = self._erasures()
+            except CodeStoreError:
+                return ()
+        found: list[PendingErasure] = []
+        for row in rows:
+            try:
+                task_id = cast(str, row["task_id"])
+                if not _TASK_ID.match(task_id):
+                    continue
+                found.append(
+                    PendingErasure(
+                        cast(str, row["forget_id"]),
+                        cast(str, row["reason"]),
+                        task_id,
+                        evidence_provenance_from_json(row["account"]),
+                        cast(str, row["forgotten_at"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return tuple(found)
+
+    def complete_erasure(self, forget_id: str, task_id: str) -> None:
+        """The task's records now say its content was forgotten: drop it from the pending list."""
+
+        with self._lock:
+            try:
+                rows = self._erasures()
+            except CodeStoreError:
+                return
+            kept = [
+                row
+                for row in rows
+                if not (row.get("forget_id") == forget_id and row.get("task_id") == task_id)
+            ]
+            if len(kept) != len(rows):
+                self._write_erasures(kept)
 
     def expire(self, *, task_closed: Callable[[str], bool]) -> ForgetReport:
         """Forget every copy whose retention ran out (``days:N``; ``task_close``)."""
@@ -902,6 +1193,51 @@ class CodeStore:
                 if due:
                     report = report.plus(self._forget_one(copy_key, "expired"))
         return report
+
+
+# --- pins ------------------------------------------------------------------------------------------
+
+
+def _pin_entry(value: object) -> PinEntry | None:
+    """A pin as recorded: a snapshot id alone (as first written) or the full entry."""
+
+    if type(value) is str:
+        return PinEntry(value) if _HEX40.match(value) else None
+    if type(value) is not dict:
+        return None
+    fields = cast(dict[str, JsonValue], value)
+    snapshot = fields.get("snapshot")
+    synced_at = fields.get("synced_at")
+    served = fields.get("served", False)
+    reads = fields.get("reads", {})
+    fenced = fields.get("fenced", 0)
+    if (
+        type(snapshot) is not str
+        or not _HEX40.match(snapshot)
+        or (synced_at is not None and type(synced_at) is not str)
+        or type(served) is not bool
+        or type(reads) is not dict
+        or type(fenced) is not int
+        or not 0 <= fenced <= _MAX_READ_COUNT
+    ):
+        return None
+    counts: dict[EvidenceToken, int] = {}
+    for token in EVIDENCE_PROVENANCE_TOKENS:
+        count = cast(dict[str, JsonValue], reads).get(token, 0)
+        if type(count) is not int or not 0 <= count <= _MAX_READ_COUNT:
+            return None
+        counts[token] = count
+    return PinEntry(snapshot, synced_at, served, counts, fenced)
+
+
+def _pin_json(entry: PinEntry) -> dict[str, JsonValue]:
+    return {
+        "snapshot": entry.snapshot,
+        "synced_at": entry.synced_at,
+        "served": entry.served,
+        "reads": {token: entry.reads.get(token, 0) for token in EVIDENCE_PROVENANCE_TOKENS},
+        "fenced": entry.fenced,
+    }
 
 
 # --- files ------------------------------------------------------------------------------------------

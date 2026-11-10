@@ -16,6 +16,18 @@ and a claim-bound task's human receipts say so in a fixed line.
 Failures keep their meaning. An agent answer that is one of change capture's own closed reasons
 raises the same ``ChangeCaptureUnavailable`` a local read would; an agent that does not answer
 raises ``WorkspaceAgentUnavailable``, which every caller records as a gap, never as a pass.
+
+**Level L2 (ADR-054, design v2 §4.1).** When this service keeps a copy of a claim-bound task's
+repository, the reads inside the repository root are served from the copy instead, through the
+same local adapters run against a materialized checkout of the snapshot the task is pinned to
+(``service.code_copy.CodeCopies``, ``service.code_checkout``): the task base, change capture and
+its metadata, the requested-path, line-count and undeclared-reference probes, the reviewer's
+listings, file reads and declared tests beneath the root, and an opened workspace's changed paths
+and inspection. Reads outside the root, the check policy, the subject state and approved checks
+stay with the client's agent (approved checks run on the user's computer, U7). A git read at an
+evidence boundary syncs first; a client that is offline then reads the copy as last synced
+(``stale_copy_read``), and a refused sync never falls back to the copy. Every read of a task
+pinned to a copy is counted for the task by where it was answered (``evidence_task_scope``).
 """
 
 from __future__ import annotations
@@ -23,10 +35,17 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, cast
 
-from finishup.adapters.approved_checks import ApprovedCheckCommand, ApprovedCheckRunner
+from finishup.adapters.approved_checks import (
+    ApprovedCheckCommand,
+    ApprovedCheckOutcome,
+    ApprovedCheckRunner,
+    ApprovedCheckStatus,
+)
 from finishup.adapters.task_input_read import ReadDeadline
+from finishup.adapters.task_input_read import list_beneath as _local_list_beneath
+from finishup.adapters.task_input_read import read_text_beneath as _local_read_text_beneath
 from finishup.application.observation_check_policy import (
     CHECK_POLICY_PATH,
     LEGACY_CHECK_POLICY_PATH,
@@ -54,6 +73,7 @@ from finishup.ports.change_capture import (
     RequestedPathProbe,
     TaskChangeBase,
     TaskInputFile,
+    current_evidence_task,
 )
 from finishup.ports.subject_state import (
     LocalWorkspaceHandle,
@@ -87,6 +107,7 @@ from finishup.ports.workspace_agent import (
     WorkspaceAgentUnavailable,
     WorkspaceOnlyArguments,
     WorkspaceOperation,
+    resolve_client_location,
     workspace_handle_valid,
 )
 from finishup.ports.workspace_inspect import (
@@ -96,6 +117,10 @@ from finishup.ports.workspace_inspect import (
 )
 from finishup.protocol.errors import ProtocolValueError
 from finishup.service.workspace_hub import WorkspaceAgentHub
+
+if TYPE_CHECKING:
+    from finishup.domain.evidence_provenance import EvidenceToken
+    from finishup.service.code_copy import CodeCopies, CopyView
 
 __all__ = [
     "CLIENT_ATTESTED",
@@ -158,6 +183,21 @@ def _never() -> bool:
     return False
 
 
+def _fenced(read: object) -> int:
+    """The outside reads the client's agent fenced from a held repository (ADR-052 O7)."""
+
+    count = getattr(read, "fenced", 0)
+    return count if type(count) is int and count > 0 else 0
+
+
+def _record_copy(operation: str) -> None:
+    from finishup.observability.logging import record_bounded_event_without_raising
+
+    record_bounded_event_without_raising(
+        component="service.code_copy", operation=operation, reason=operation
+    )
+
+
 def client_bound(workspace: object) -> bool:
     """Whether ``workspace`` names a claim-bound task's workspace (its ``client:`` handle)."""
 
@@ -213,30 +253,89 @@ class RoutedChangeCapture:
     def __repr__(self) -> str:
         return "RoutedChangeCapture(<redacted>)"
 
-    def _sync_copy(
-        self, workspace: str, purpose: Literal["base", "check"], base: TaskChangeBase | None
-    ) -> None:
-        """Level L2 (ADR-054): before an evidence-consuming read of a claim-bound workspace,
-        bring the server's copy up to date when this service keeps copies. Never fails the read:
-        the read itself still goes to the client's agent (the copy is not read yet)."""
-
+    def _copies(self) -> CodeCopies | None:
         # A hub without the attribute (a stand-in) keeps no copies.
-        copies = getattr(self._hub, "code_copies", None)
+        return cast("CodeCopies | None", getattr(self._hub, "code_copies", None))
+
+    def _from_copy(
+        self,
+        workspace: str,
+        purpose: Literal["base", "check"],
+        base: TaskChangeBase | None,
+        read: Callable[[str, TaskChangeBase | None], Any],
+    ) -> tuple[bool, Any]:
+        """Level L2 (ADR-054): sync before an evidence-consuming git read, then serve it from
+        the copy when the copy serves this task (``CodeCopies.git_view``); ``(False, None)``
+        sends it to the client's agent. A checkout that cannot be made also does."""
+
+        copies = self._copies()
         if copies is None:
-            return
-        commit = None if base is None else base.commit
-        copies.sync_blocking(workspace, purpose=purpose, base_commit=commit)
+            return False, None
+        task = current_evidence_task()
+        view, effective = copies.git_view(workspace, purpose=purpose, base=base, task_id=task)
+        if view is None:
+            return False, None
+        commits = (
+            ()
+            if effective is None or effective.commit == view.manifest.base
+            else (effective.commit,)
+        )
+        try:
+            with copies.checkout(view, commits=commits) as folder:
+                result = read(os.fspath(folder), effective)
+        except ChangeCaptureUnavailable:
+            copies.count(workspace, task, view.token)
+            raise
+        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
+            _record_copy("code_copy_read_failed")
+            return False, None
+        copies.count(workspace, task, view.token)
+        return True, result
+
+    def _client_count(self, workspace: str) -> None:
+        copies = self._copies()
+        if copies is not None:
+            copies.count(workspace, current_evidence_task(), "client_attested_read")
+
+    def _pinned(self, workspace: str, read: Callable[[str], Any]) -> tuple[bool, Any]:
+        """A probe that follows a capture: served from the snapshot the task is pinned to when
+        the copy serves the task (no sync), else ``(False, None)``."""
+
+        copies = self._copies()
+        if copies is None:
+            return False, None
+        task = current_evidence_task()
+        view = copies.reader_view(workspace, task)
+        if view is None:
+            return False, None
+        try:
+            with copies.checkout(view) as folder:
+                result = read(os.fspath(folder))
+        except ChangeCaptureUnavailable:
+            copies.count(workspace, task, view.token)
+            raise
+        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
+            _record_copy("code_copy_read_failed")
+            return False, None
+        copies.count(workspace, task, view.token)
+        return True, result
 
     def read_task_base(self, workspace: str) -> TaskChangeBase:
         if not client_bound(workspace):
             return self._local.read_task_base(workspace)
-        self._sync_copy(workspace, "base", None)
-        return _capture_call(
+        served, result = self._from_copy(
+            workspace, "base", None, lambda folder, _base: self._local.read_task_base(folder)
+        )
+        if served:
+            return cast(TaskChangeBase, result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.READ_TASK_BASE,
             WorkspaceOnlyArguments(workspace),
         )
+        self._client_count(workspace)
+        return cast(TaskChangeBase, found)
 
     def capture(
         self,
@@ -247,58 +346,90 @@ class RoutedChangeCapture:
         input_paths: tuple[str, ...] = (),
         space_cut_paths: frozenset[str] = frozenset(),
     ) -> CheckChangeCapture:
+        # The exact call shape the caller made: a port without these options keeps working.
+        options: dict[str, object] = {}
+        if priority_paths:
+            options["priority_paths"] = priority_paths
+        if input_paths:
+            options["input_paths"] = input_paths
+        if space_cut_paths:
+            options["space_cut_paths"] = space_cut_paths
         if not client_bound(workspace):
-            # The exact call shape the caller made: a port without these options keeps working.
-            options: dict[str, object] = {}
-            if priority_paths:
-                options["priority_paths"] = priority_paths
-            if input_paths:
-                options["input_paths"] = input_paths
-            if space_cut_paths:
-                options["space_cut_paths"] = space_cut_paths
             return self._local.capture(workspace, base, **options)  # pyright: ignore[reportArgumentType]
-        self._sync_copy(workspace, "check", base)
-        return _capture_call(
+        served, result = self._from_copy(
+            workspace,
+            "check",
+            base,
+            lambda folder, effective: self._local.capture(folder, effective, **options),  # pyright: ignore[reportArgumentType]
+        )
+        if served:
+            return cast(CheckChangeCapture, result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.CAPTURE,
             CaptureArguments(workspace, base, priority_paths, input_paths, space_cut_paths),
         )
+        self._client_count(workspace)
+        return cast(CheckChangeCapture, found)
 
     def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
         if not client_bound(workspace):
             return self._local.capture_metadata(workspace, base)
-        self._sync_copy(workspace, "check", base)
-        return _capture_call(
+        served, result = self._from_copy(
+            workspace,
+            "check",
+            base,
+            lambda folder, effective: self._local.capture_metadata(folder, effective),
+        )
+        if served:
+            return cast(CheckChangeMetadata, result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.CAPTURE_METADATA,
             CaptureMetadataArguments(workspace, base),
         )
+        self._client_count(workspace)
+        return cast(CheckChangeMetadata, found)
 
     def probe_requested_paths(
         self, workspace: str, values: tuple[str, ...]
     ) -> tuple[RequestedPathProbe, ...]:
         if not client_bound(workspace):
             return self._local_extension("probe_requested_paths")(workspace, values)
-        return _capture_call(
+        local = self._local_extension("probe_requested_paths")
+        served, result = self._pinned(workspace, lambda folder: local(folder, values))
+        if served:
+            return cast(tuple[RequestedPathProbe, ...], result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.PROBE_REQUESTED_PATHS,
             ProbeRequestedPathsArguments(workspace, tuple(values)),
         )
+        self._client_count(workspace)
+        return cast(tuple[RequestedPathProbe, ...], found)
 
     def count_change_lines(
         self, workspace: str, base_commit: str, base_paths: tuple[str, ...]
     ) -> ChangeLineCounts:
         if not client_bound(workspace):
             return self._local_extension("count_change_lines")(workspace, base_commit, base_paths)
-        return _capture_call(
+        local = self._local_extension("count_change_lines")
+        served, result = self._pinned(
+            workspace, lambda folder: local(folder, base_commit, base_paths)
+        )
+        if served:
+            return cast(ChangeLineCounts, result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.COUNT_CHANGE_LINES,
             CountChangeLinesArguments(workspace, base_commit, tuple(base_paths)),
         )
+        self._client_count(workspace)
+        return cast(ChangeLineCounts, found)
 
     def classify_undeclared_references(
         self,
@@ -311,7 +442,13 @@ class RoutedChangeCapture:
             return self._local_extension("classify_undeclared_references")(
                 workspace, deliverables, candidates, declared
             )
-        return _capture_call(
+        local = self._local_extension("classify_undeclared_references")
+        served, result = self._pinned(
+            workspace, lambda folder: local(folder, deliverables, candidates, declared)
+        )
+        if served:
+            return cast(tuple[tuple[int, int, str], ...], result)
+        found = _capture_call(
             self._hub,
             workspace,
             WorkspaceOperation.CLASSIFY_UNDECLARED_REFERENCES,
@@ -319,6 +456,8 @@ class RoutedChangeCapture:
                 workspace, tuple(deliverables), tuple(candidates), tuple(declared)
             ),
         )
+        self._client_count(workspace)
+        return cast(tuple[tuple[int, int, str], ...], found)
 
     def lstat_probe(self, workspace: str) -> Callable[[str], os.stat_result | None] | None:
         """The candidate ``lstat`` for a claim-bound workspace; None keeps the local one."""
@@ -419,6 +558,67 @@ class ClientWorkspaceReads:
     def __repr__(self) -> str:
         return "ClientWorkspaceReads(<redacted>)"
 
+    # --- level L2: reads beneath the root from the copy (ADR-054) ----------------------------
+
+    def _copies(self) -> CodeCopies | None:
+        return cast("CodeCopies | None", getattr(self._hub, "code_copies", None))
+
+    def _inside(self, value: str) -> bool:
+        """Whether ``value`` names the claimed root or a location beneath it (by its handle)."""
+
+        return value == self._handle or value.startswith(self._handle + "/")
+
+    def _count(self, token: EvidenceToken, *, fenced: int = 0) -> None:
+        copies = self._copies()
+        if copies is not None:
+            copies.count(self._handle, current_evidence_task(), token, fenced=fenced)
+
+    def _copy_view(self, value: str) -> tuple[CodeCopies, CopyView] | None:
+        """The copy and the task's pinned snapshot a read beneath the root is served from."""
+
+        copies = self._copies()
+        if copies is None or not self._inside(value):
+            return None
+        view = copies.reader_view(self._handle, current_evidence_task())
+        return None if view is None else (copies, view)
+
+    def _copy_excluded(self, excluded: Sequence[str], folder: str) -> tuple[str, ...]:
+        """The read's exclusions in the checkout: this root's locations resolved there; an
+        absolute one that holds the checkout (this service's own directories) is dropped, since
+        the checkout is the root the read is confined to."""
+
+        kept: list[str] = []
+        for value in excluded:
+            if value.startswith("/"):
+                if not (folder + "/").startswith(value.rstrip("/") + "/"):
+                    kept.append(value)
+                continue
+            if self._inside(value):
+                resolved = resolve_client_location(value, self._handle, folder)
+                if resolved is not None:
+                    kept.append(resolved)
+        return tuple(kept)
+
+    def _from_copy(self, value: str, read: Callable[[str], Any]) -> tuple[bool, Any]:
+        found = self._copy_view(value)
+        if found is None:
+            return False, None
+        copies, view = found
+        try:
+            with copies.checkout(view) as folder:
+                result = read(os.fspath(folder))
+        except ReadDeadline:
+            copies.count(self._handle, current_evidence_task(), view.token)
+            raise
+        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
+            _record_copy("code_copy_read_failed")
+            return False, None
+        copies.count(self._handle, current_evidence_task(), view.token)
+        return True, result
+
+    def _client_token(self, value: str) -> EvidenceToken:
+        return "client_attested_read" if self._inside(value) else "outside_read"
+
     def _read(
         self, operation: WorkspaceOperation, arguments: object, seconds: float = _READ_SECONDS
     ) -> Any:  # noqa: ANN401
@@ -448,6 +648,10 @@ class ClientWorkspaceReads:
         """
 
         wanted = tuple(dict.fromkeys(path for path in paths if path))
+        if self._copy_view(self._handle) is not None:
+            # Level L2: every file of the copy is one Git showed the client (ignored files were
+            # never sent), so nothing it holds is refused; what it lacks reads as nothing.
+            return frozenset()
         refused: set[str] = set()
         for start in range(0, len(wanted), _PROBE_BATCH):
             batch = wanted[start : start + _PROBE_BATCH]
@@ -491,26 +695,70 @@ class ClientWorkspaceReads:
         expired: Callable[[], bool],
         inspect: int = 128,
     ) -> tuple[tuple[tuple[str, bool], ...], bool] | None:
-        return cast(
-            tuple[tuple[tuple[str, bool], ...], bool] | None,
-            self._read(
+        served, result = self._from_copy(
+            root,
+            lambda folder: _local_list_beneath(
+                cast(str, resolve_client_location(root, self._handle, folder)),
+                relative,
+                excluded=self._copy_excluded(excluded, folder),
+                expired=expired,
+                inspect=inspect,
+            ),
+        )
+        if not served:
+            result = self._read(
                 WorkspaceOperation.LIST_BENEATH,
                 ListBeneathArguments(root, relative, tuple(excluded), inspect),
                 _until_stop(expired, _REVIEWER_READ_SECONDS),
-            ),
-        )
+            )
+            self._count(self._client_token(root))
+        return cast(tuple[tuple[tuple[str, bool], ...], bool] | None, result)
 
     def read_text_beneath(
         self, root: str, relative: str, *, excluded: tuple[str, ...], expired: Callable[[], bool]
     ) -> tuple[bytes, int] | None:
-        return cast(
-            tuple[bytes, int] | None,
-            self._read(
+        served, result = self._from_copy(
+            root,
+            lambda folder: _local_read_text_beneath(
+                cast(str, resolve_client_location(root, self._handle, folder)),
+                relative,
+                excluded=self._copy_excluded(excluded, folder),
+                expired=expired,
+            ),
+        )
+        if not served:
+            result = self._read(
                 WorkspaceOperation.READ_TEXT_BENEATH,
                 ReadTextBeneathArguments(root, relative, tuple(excluded)),
                 _until_stop(expired, _REVIEWER_READ_SECONDS),
-            ),
-        )
+            )
+            self._count(self._client_token(root))
+        return cast(tuple[bytes, int] | None, result)
+
+    def _copy_declared_test(self, location: str, excluded: tuple[str, ...]) -> tuple[bool, Any]:
+        """A declared test beneath the root, read from the copy as the local read returns it:
+        UTF-8 text of at most 1 MiB with no NUL byte, else nothing."""
+
+        def read(folder: str) -> bytes | None:
+            resolved = resolve_client_location(location, self._handle, folder)
+            if resolved is None or resolved == folder:
+                return None
+            relative = resolved[len(folder) + 1 :]
+            found = _local_read_text_beneath(
+                folder, relative, excluded=self._copy_excluded(excluded, folder), expired=_never
+            )
+            if found is None:
+                return None
+            data, size = found
+            if not data or size != len(data) or b"\0" in data:
+                return None
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            return data
+
+        return self._from_copy(location, read)
 
     def read_declared_test(
         self,
@@ -519,8 +767,11 @@ class ClientWorkspaceReads:
         excluded: tuple[str, ...],
         expired: Callable[[], bool] = _never,
     ) -> bytes | None:
+        served, result = self._copy_declared_test(location, excluded)
+        if served:
+            return cast(bytes | None, result)
         try:
-            return cast(
+            found = cast(
                 bytes | None,
                 self._read(
                     WorkspaceOperation.READ_DECLARED_TEST,
@@ -531,6 +782,8 @@ class ClientWorkspaceReads:
         except ReadDeadline:
             # As the local read: a declared test not read within its stop is not visible.
             return None
+        self._count(self._client_token(location))
+        return found
 
     def declared_test(self, location: str, *, excluded: tuple[str, ...]) -> bytes | None:
         """``read_declared_test`` that lets the agent's refusal through.
@@ -540,7 +793,10 @@ class ClientWorkspaceReads:
         (``root_not_admitted``, ADR-051 decision 5) from one that could not be read.
         """
 
-        return cast(
+        served, result = self._copy_declared_test(location, excluded)
+        if served:
+            return cast(bytes | None, result)
+        found = cast(
             bytes | None,
             _call(
                 self._hub,
@@ -550,6 +806,8 @@ class ClientWorkspaceReads:
                 _READ_SECONDS,
             ),
         )
+        self._count(self._client_token(location))
+        return found
 
     def outside_inputs(
         self,
@@ -563,7 +821,7 @@ class ClientWorkspaceReads:
         """The agent's whole answer: the inputs it read, and the indices of ``values`` it left
         unread because its owner did not list them for this server (ADR-051 decision 5)."""
 
-        return cast(
+        found = cast(
             OutsideInputsRead,
             _call(
                 self._hub,
@@ -575,6 +833,10 @@ class ClientWorkspaceReads:
                 _READ_SECONDS,
             ),
         )
+        # Outside the root: the client's agent answers, under its outside-read policy, and says
+        # how many it fenced from a held repository (ADR-052 O7).
+        self._count("outside_read", fenced=_fenced(found))
+        return found
 
     def read_outside_inputs(
         self,
@@ -602,7 +864,7 @@ class ClientWorkspaceReads:
         """The agent's whole snapshot answer, ``unlisted`` included (``outside_inputs``)."""
 
         budget_ms = max(0, int(seconds * 1000))
-        return cast(
+        found = cast(
             OutsideSnapshotsRead,
             _call(
                 self._hub,
@@ -614,6 +876,8 @@ class ClientWorkspaceReads:
                 seconds + _SNAPSHOT_GRACE_SECONDS,
             ),
         )
+        self._count("outside_read", fenced=_fenced(found))
+        return found
 
     def snapshot_outside_inputs(
         self,
@@ -750,6 +1014,35 @@ def _opened_call(
     )
 
 
+def _opened_from_copy(
+    hub: WorkspaceAgentHub | None, client: _ClientOpenedWorkspace, read: Callable[[str], Any]
+) -> tuple[bool, Any]:
+    """Level L2: an opened workspace's changed paths and inspection, from the snapshot the task
+    is pinned to when the copy serves the task; ``(False, None)`` asks the client's agent."""
+
+    copies = cast("CodeCopies | None", getattr(hub, "code_copies", None))
+    if copies is None:
+        return False, None
+    task = current_evidence_task()
+    view = copies.reader_view(client.workspace, task)
+    if view is None:
+        return False, None
+    try:
+        with copies.checkout(view) as folder:
+            result = read(os.fspath(folder))
+    except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
+        _record_copy("code_copy_read_failed")
+        return False, None
+    copies.count(client.workspace, task, view.token)
+    return True, result
+
+
+def _count_client(hub: WorkspaceAgentHub | None, workspace: str) -> None:
+    copies = cast("CodeCopies | None", getattr(hub, "code_copies", None))
+    if copies is not None:
+        copies.count(workspace, current_evidence_task(), "client_attested_read")
+
+
 class _RoutedSubjectState:
     """``SubjectStateCapturePort``: a client-opened workspace is hashed by its agent."""
 
@@ -787,7 +1080,17 @@ class _RoutedInspect:
         client = _client_opened(command.workspace)
         if client is None:
             return self._local.inspect(command)
-        return cast(
+        local = self._local
+        served, result = _opened_from_copy(
+            self._hub,
+            client,
+            lambda folder: local.inspect(
+                replace(command, workspace=LocalObservationWorkspace().open(folder))
+            ),
+        )
+        if served:
+            return cast(WorkspaceInspectResult, result)
+        found = cast(
             WorkspaceInspectResult,
             _opened_call(
                 self._hub,
@@ -796,6 +1099,8 @@ class _RoutedInspect:
                 lambda opened: InspectArguments(opened, command.relative_paths),
             ),
         )
+        _count_client(self._hub, client.workspace)
+        return found
 
 
 class RoutedApprovedCheckRunner(ApprovedCheckRunner):
@@ -805,6 +1110,13 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
     sent: an approval this policy does not hold, a stale subject state or a network request is
     refused here. The agent then runs the argv only when its own copy of the owner-approved
     policy holds the same approval; its redacted output reaches this runner's output sink.
+
+    Level L2 (ADR-054, design v2 §8.6): a check of a task whose evidence the server reads from
+    its copy is pinned to the copy too. The copy is synced first, so the task's pin names the
+    snapshot of the tree the check runs on; a check whose subject state differs from that
+    snapshot's subject-state commitment ran against another subject than the server read, and
+    its result is ``stale`` / ``subject_state_mismatch`` (recorded as ``code_snapshot_mismatch``),
+    never a pass. A client that is offline cannot run it: ``workspace_agent_unavailable``.
     """
 
     def __init__(
@@ -812,6 +1124,50 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
     ) -> None:
         super().__init__(approvals)
         self._hub = hub
+        self._task: str | None = None
+
+    def bind_evidence_task(self, task_id: str | None) -> None:
+        """The task whose evidence this runner's checks are (``evidence_task_scope`` otherwise)."""
+
+        self._task = task_id
+
+    def _copy_pin(self, workspace: str) -> tuple[CodeCopies, str] | None:
+        """Sync a copy task's copy before its check; the copies and the task, or None."""
+
+        copies = cast("CodeCopies | None", getattr(self._hub, "code_copies", None))
+        task = current_evidence_task() or self._task
+        if copies is None or task is None:
+            return None
+        pinned = copies.pinned_manifest(workspace, task)
+        if pinned is None:
+            return None
+        original = None if set(pinned.original_base) == {"0"} else pinned.original_base
+        copies.sync_blocking(workspace, purpose="check", base_commit=original, task_id=task)
+        return copies, task
+
+    def _against_copy(
+        self, workspace: str, pin: tuple[CodeCopies, str] | None, result: ApprovedCheckResult
+    ) -> ApprovedCheckResult:
+        if pin is None:
+            return result
+        copies, task = pin
+        copies.count(workspace, task, "client_check")
+        if result.status in {ApprovedCheckStatus.REJECTED, ApprovedCheckStatus.STALE}:
+            return result
+        manifest = copies.pinned_manifest(workspace, task)
+        if manifest is not None and manifest.subject_state == result.subject_state_digest:
+            return result
+        _record_copy("code_snapshot_mismatch")
+        return self._result(
+            ApprovedCheckStatus.STALE,
+            ApprovedCheckOutcome.SUBJECT_STATE_MISMATCH,
+            None,
+            None,
+            0,
+            result.subject_state_digest,
+            result.approval_commitment,
+            result.duration_ms,
+        )
 
     def run(self, command: ApprovedCheckCommand) -> ApprovedCheckResult:
         if type(command) is not ApprovedCheckCommand:
@@ -831,6 +1187,7 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
         ):
             # Every one of these is decided before a workspace is touched.
             return super().run(command)
+        pin = self._copy_pin(client.workspace)
         run = cast(
             ApprovedCheckRun,
             _opened_call(
@@ -849,7 +1206,7 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
         sink = self._output_sink
         if run.output is not None and sink is not None:
             sink(run.output, run.output_redacted)
-        return run.result
+        return self._against_copy(client.workspace, pin, run.result)
 
 
 class RoutedObservationWorkspace:
@@ -913,7 +1270,13 @@ class RoutedObservationWorkspace:
         client = _client_opened(workspace)
         if client is None:
             return self._local.list_changed(workspace)
-        return cast(
+        local = self._local
+        served, result = _opened_from_copy(
+            self._hub, client, lambda folder: local.list_changed(local.open(folder))
+        )
+        if served:
+            return cast(tuple[str, ...], result)
+        found = cast(
             tuple[str, ...],
             _opened_call(
                 self._hub,
@@ -922,6 +1285,8 @@ class RoutedObservationWorkspace:
                 ListChangedPathsArguments,
             ),
         )
+        _count_client(self._hub, client.workspace)
+        return found
 
     def inspect_port(self) -> WorkspaceInspectPort:
         return _RoutedInspect(self._hub, self._local.inspect_port())

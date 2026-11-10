@@ -14,7 +14,7 @@ import signal
 import stat
 import struct
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -2856,6 +2856,13 @@ class ServiceDaemon:
             Callable[[], Awaitable[object]] | None,
             getattr(application, "recover_lineage", None),
         )
+        copies = self._composition.workspace_hub.code_copies
+        lineage = getattr(application, "lineage", None)
+        if copies is not None and lineage is not None:
+            # Level L2 (ADR-054): a ``task_close`` copy expires once no task pinned to it is open.
+            copies.attach_task_closed(
+                _lineage_task_closed(getattr(lineage, "store", None), asyncio.get_running_loop())
+            )
         if (
             not callable(recommendation_refresh)
             and not callable(observation_sweep)
@@ -5613,11 +5620,13 @@ def _attach_code_copies(
 ) -> None:
     """Give the hub the copy puller of a service whose profile offers level L2 (ADR-054): the
     encrypted store under the state directory, its keys derived by the vault, opened now
-    (removing what a crash left) and its expiry run now and every ten minutes."""
+    (removing what a crash left), the checkouts reads are served from (every one left by a
+    previous run removed now), and its expiry run now and every ten minutes."""
 
     offer = source.code_copy
     if not source.keeps_copies or offer is None or vault is None:
         return
+    from finishup.service.code_checkout import CopyCheckouts
     from finishup.service.code_copy import CodeCopies, VaultCopyKeyring
     from finishup.service.code_store import CodeStore, StoreLimits
 
@@ -5630,9 +5639,42 @@ def _attach_code_copies(
         StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes),
     )
     store.open()
-    copies = CodeCopies(store, hub, lambda: source.revision)
+    checkouts = CopyCheckouts(state / "code-copies" / "checkouts", store)
+    checkouts.sweep()
+    copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts)
     copies.start_expiry()
     hub.attach_code_copies(copies)
+
+
+def _lineage_task_closed(store: object, loop: asyncio.AbstractEventLoop) -> Callable[[str], bool]:
+    """Whether a task's work is no longer open, from the lineage catalog (``task_close``
+    retention, ADR-054): asked from the copy expiry's thread on the service loop; anything it
+    cannot say (no such task, a read that fails or is slow, a call from the loop itself) is open,
+    so the copy stays."""
+
+    from finishup.domain.coordination import WorkState
+
+    get_task = getattr(store, "get_task", None)
+
+    def closed(task_id: str) -> bool:
+        if not callable(get_task) or loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                cast(Callable[[str], Coroutine[object, object, object]], get_task)(task_id), loop
+            )
+            snapshot = future.result(timeout=10.0)
+        except Exception:  # noqa: BLE001 - unknown is open
+            return False
+        state = getattr(snapshot, "work_state", None)
+        return state is not None and state is not WorkState.OPEN
+
+    return closed
 
 
 async def _production_composition(
