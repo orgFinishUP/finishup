@@ -417,6 +417,11 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "and each stays there until it expires or is forgotten",
         _UNAVAILABLE,
     ),
+    "code_copy_deletion_unfinished": (
+        "that server could not finish deleting its copy yet; what it deleted is named above, the "
+        "rest stays fenced there and its deletion is retried; run the same command again later",
+        _UNAVAILABLE,
+    ),
     "code_export_unsafe": (
         "this computer's record of the copies it sent that server is not owner-only or is a "
         "link, so which repositories they came from is not known; fix its permissions, or run "

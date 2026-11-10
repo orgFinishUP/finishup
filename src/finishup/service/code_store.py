@@ -243,8 +243,14 @@ class PendingErasure:
 class ForgetReport:
     """Exactly what one ``forget`` deleted (U20); ``backups`` is always ``not_managed``.
 
+    ``left`` counts what this forget could not finish yet: a copy kept because the erasure of
+    its tasks' excerpts could not be recorded first (``code_copy_erasure_backlog``), or a deletion
+    that failed. Such a forget is never complete (``complete``, on the wire): the copy stays
+    fenced and is forgotten again by the next forget, and nothing it left reads as deleted.
+
     ``tasks`` names the tasks pinned to the copies deleted, for the erasure of what their records
-    derived from them; it never crosses the wire (``to_json``)."""
+    derived from them; it never crosses the wire (``to_json``), nor does ``keys``, the copies
+    deleted (their checkouts go too)."""
 
     copies: int = 0
     snapshots: int = 0
@@ -253,6 +259,12 @@ class ForgetReport:
     reason: str = "owner"
     backups: str = "not_managed"
     tasks: tuple[ForgottenTask, ...] = ()
+    left: int = 0
+    keys: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return self.left == 0
 
     def plus(self, other: ForgetReport) -> ForgetReport:
         return ForgetReport(
@@ -262,6 +274,8 @@ class ForgetReport:
             self.bytes + other.bytes,
             self.reason,
             tasks=(*self.tasks, *other.tasks),
+            left=self.left + other.left,
+            keys=(*self.keys, *other.keys),
         )
 
     def to_json(self) -> dict[str, JsonValue]:
@@ -272,6 +286,7 @@ class ForgetReport:
             "bytes": self.bytes,
             "reason": self.reason,
             "backups": self.backups,
+            "complete": self.complete,
         }
 
 
@@ -1091,12 +1106,19 @@ class CodeStore:
                     tasks.append(ForgottenTask(task_id, entry.account()))
         if tasks:
             # Before anything is deleted: the tasks whose records still hold excerpts derived
-            # from this copy, so their erasure is retried after a crash (U20).
-            self._remember_erasures(secrets.token_hex(16), reason, tasks)
+            # from this copy, so their erasure is retried after a crash (U20). Every one of them
+            # or none: when they cannot all be recorded, the copy stays (fenced) and the forget
+            # says it is not complete; it never deletes what it could not account for.
+            try:
+                self._remember_erasures(secrets.token_hex(16), reason, tasks)
+            except CodeStoreError:
+                return ForgetReport(reason=reason, left=1)
         shutil.rmtree(folder, ignore_errors=False)
         if record is not None:
             self._keyring.discard(cast(str, record["copy_id"]))
-        return ForgetReport(1, snapshots, objects, stored, reason, tasks=tuple(tasks))
+        return ForgetReport(
+            1, snapshots, objects, stored, reason, tasks=tuple(tasks), keys=(copy_key,)
+        )
 
     # --- the erasure of what task records derived from a forgotten copy (U20) -----------------
 
@@ -1120,14 +1142,18 @@ class CodeStore:
         _write_private(self._root / "erasures.json", canonical_encode(document))
 
     def _remember_erasures(self, forget_id: str, reason: str, tasks: list[ForgottenTask]) -> None:
+        """Record every one of ``tasks`` as pending erasure, or none of them: past the bound
+        (``_MAX_PENDING_ERASURES``, e.g. while a locked vault keeps erasures from completing)
+        this raises ``code_copy_erasure_backlog`` and writes nothing."""
+
         try:
             pending = self._erasures()
         except CodeStoreError:
             pending = []  # an unreadable record is replaced; its tasks were erased or lost
+        if len(pending) + len(tasks) > _MAX_PENDING_ERASURES:
+            raise CodeStoreError("code_copy_erasure_backlog")
         now = format_rfc3339_ms(self._clock())
         for task in tasks:
-            if len(pending) >= _MAX_PENDING_ERASURES:
-                break
             pending.append(
                 {
                     "forget_id": forget_id,

@@ -293,6 +293,7 @@ def test_code_copy_status_and_forget_say_exactly_what_is_kept_and_deleted(tmp_pa
     assert status["copy"]["retention"] == {"kind": "days", "days": 7}  # type: ignore[index]
     forgot = _code_copy(copies, "forget")
     assert forgot["forgot"]["copies"] == 1 and forgot["forgot"]["backups"] == "not_managed"  # type: ignore[index]
+    assert forgot["forgot"]["complete"] is True  # type: ignore[index]
     assert forgot["forgot"]["objects"] > 0 and forgot["forgot"]["bytes"] > 0  # type: ignore[index]
     again = _code_copy(copies, "forget")
     assert again["forgot"] == {  # type: ignore[index]
@@ -301,6 +302,7 @@ def test_code_copy_status_and_forget_say_exactly_what_is_kept_and_deleted(tmp_pa
         "objects": 0,
         "bytes": 0,
         "backups": "not_managed",
+        "complete": True,
     }
     assert _code_copy(copies, "status")["copy"] is None  # type: ignore[index]
     for body in (status, forgot):

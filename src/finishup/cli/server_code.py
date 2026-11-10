@@ -152,6 +152,10 @@ FORGET_TRAILER: Final = (
 )
 # Why ``forget --all`` could not forget one repository's copy, and what the owner can do.
 _NOT_FORGOTTEN: Final[dict[str, str]] = {
+    "code_copy_deletion_unfinished": (
+        "that server could not finish deleting it yet (what is left stays fenced there and its "
+        "deletion is retried); run this command again later"
+    ),
     "export_record_unreadable": (
         "this computer's record of it cannot be read, so the repository it came from is not "
         "known; run 'finishup server code forget' in that repository"
@@ -210,6 +214,23 @@ def server_code_forget(
         return
     here = repository_here(repository)
     answer = _server_answer(here.worktree, "forget")
+    forgot = _field(answer, "forgot")
+    if _field(forgot, "complete") is not True:
+        # Never a success while something of the copy is left there: say what was deleted,
+        # keep this computer's export record (so the command can be run again), and refuse.
+        if json_output:
+            import json
+
+            typer.echo(json.dumps(answer, sort_keys=True))
+        else:
+            typer.echo(
+                f"{record.name} could not finish deleting its copy of this repository: "
+                f"{_field(forgot, 'snapshots') or 0} snapshot(s), "
+                f"{_field(forgot, 'objects') or 0} stored objects, "
+                f"{_field(forgot, 'bytes') or 0} bytes deleted so far; the rest stays fenced "
+                "there and its deletion is retried. Run this command again later."
+            )
+        raise ServerCommandRefused("code_copy_deletion_unfinished")
     with registry_lock():
         # This computer's export folder for the repository goes too: what it sent is gone there.
         folder = export_folder(record.target_id, here.key)
@@ -222,7 +243,6 @@ def server_code_forget(
 
         typer.echo(json.dumps(answer, sort_keys=True))
         return
-    forgot = _field(answer, "forgot")
     if not _field(forgot, "copies"):
         typer.echo(f"{record.name} kept no copy of this repository; nothing was deleted.")
     else:
@@ -324,6 +344,11 @@ def _forget_one(
         return refused(error.reason)
     except TargetError as error:
         return refused(error.reason)
+    if _field(_field(answer, "forgot"), "complete") is not True:
+        # Not finished there: the export record stays, so this command can name it again.
+        return ForgetOutcome(
+            position, item.short_id, item.root, "code_copy_deletion_unfinished", answer
+        )
     with registry_lock():
         # As ``server code forget``: what it sent is gone there, so its export folder goes here.
         if item.folder.exists():

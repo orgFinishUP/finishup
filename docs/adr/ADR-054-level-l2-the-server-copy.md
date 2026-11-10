@@ -260,7 +260,8 @@ upload that does not complete is never committed (decision 6).
 
 Control method `code_copy`: body `{action: status | forget}`, result `{action, copy, forgot}`.
 `copy` is `{snapshots, stored_bytes, created_at, last_sync_at, retention: {kind, days}}` or `null`;
-`forgot` is what forget deleted (decision 7) or `null`. It is claim-bound only (it names the
+`forgot` is what forget deleted (decision 7), with `complete` (false while anything of the copy
+is left there), or `null`. It is claim-bound only (it names the
 claimed repository and no other), structural (answered while the vault is locked and under another
 revision) and never answered to the MCP bridge; a service that keeps no copies refuses it
 `method_forbidden`, which the CLI names `server_level_unavailable`. Over REST it is in the `agent`
@@ -298,12 +299,14 @@ without a record.
 Forget advances the copy's epoch in the tombstone record (`yoetz.code-copy-tombstones/1`)
 **first**; then, when tasks are pinned to the copy, it writes the owner-only pending-erasure record
 (`<state>/code-copies/erasures.json`, `yoetz.code-copy-erasures/1`: per task the forget's id, its
-reason, the task id and its evidence account, at most 4,096 pending tasks); then it deletes the
+reason, the task id and its evidence account, at most 4,096 pending tasks: every task of the copy
+or none, so when they do not all fit, e.g. while a locked vault keeps erasures from completing, the
+copy stays, fenced, and the forget is not `complete`); then it deletes the
 copy's folder and its checkout (decision 12); then each pinned task's ledger erasure runs
 (decision 15), and its entry leaves the pending record only once that task's erasure says it is
 done. A pending erasure is retried at the next forget, expiry or service start. Forget is
 idempotent and reports exactly what it deleted (copies, snapshots, objects, bytes) with `backups:
-not_managed`. A sync is fenced from the moment the server asked for it: the puller reads the epoch
+not_managed` and `complete`; one that is not complete is never shown as done. A sync is fenced from the moment the server asked for it: the puller reads the epoch
 before `code_sync_prepare`, and an upload begun under an older epoch is refused
 (`code_copy_forgotten`). Forget acts on the repository the claim names; another repository's copy
 needs its own.
@@ -312,6 +315,9 @@ needs its own.
 backups of the server's folder are not managed and that the tasks that read the copy lose the
 captured changes and review excerpts they kept from it and say their content was forgotten, while
 their findings and checks stay; it removes this computer's export folder for that repository.
+When the server says the forget is not `complete`, it says what was deleted so far, keeps the export
+folder and exits 20 (`code_copy_deletion_unfinished`); `--all` names that repository with the same
+reason.
 
 `finishup server code forget --all [--json]` forgets every repository this computer's export
 records name for the selected server: since `code_copy` acts on the claimed repository only, each

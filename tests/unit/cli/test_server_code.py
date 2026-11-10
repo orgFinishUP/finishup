@@ -341,7 +341,14 @@ def test_allow_remove_sends_less_with_no_question_and_is_idempotent(
 
 # --- forget --all ---------------------------------------------------------------------------------
 
-_FORGOT = {"copies": 1, "snapshots": 2, "objects": 10, "bytes": 732, "backups": "not_managed"}
+_FORGOT = {
+    "copies": 1,
+    "snapshots": 2,
+    "objects": 10,
+    "bytes": 732,
+    "backups": "not_managed",
+    "complete": True,
+}
 
 
 def _sent_from(record: targets.ServerTarget, folder: Path) -> Path:
@@ -369,9 +376,12 @@ def _second_repository(tmp_path: Path, name: str = "other") -> Path:
 class _Server:
     """Stands in for the selected server's ``code_copy`` forget; records each claimed folder."""
 
-    def __init__(self, refuse: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, refuse: dict[str, str] | None = None, unfinished: frozenset[str] = frozenset()
+    ) -> None:
         self.asked: list[tuple[str, str, Path | None]] = []
         self.refuse = refuse or {}
+        self.unfinished = unfinished
 
     def __call__(self, worktree: str, action: str) -> dict[str, object]:
         from finishup.config.paths import active_root
@@ -380,7 +390,10 @@ class _Server:
         reason = self.refuse.get(worktree)
         if reason is not None:
             raise ServerCommandRefused(reason)
-        return {"action": action, "copy": None, "forgot": dict(_FORGOT)}
+        forgot: dict[str, object] = dict(_FORGOT)
+        if worktree in self.unfinished:
+            forgot.update(copies=0, snapshots=0, objects=0, bytes=0, complete=False)
+        return {"action": action, "copy": None, "forgot": forgot}
 
 
 def _server(monkeypatch: pytest.MonkeyPatch, server: _Server) -> _Server:
@@ -512,6 +525,42 @@ def test_forget_all_names_every_copy_it_could_not_forget_and_keeps_its_record(
     assert "a folder this computer cannot name (copy eeeeeeee)" in text.stdout
     assert "4 of 4 not forgotten" in text.stdout and "backups" not in text.stdout
     assert repository.exists()
+
+
+def test_a_forget_the_server_could_not_finish_is_never_shown_as_done(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy kept (fenced) because its erasures could not be recorded, or a deletion that
+    failed: the server says it is not complete, so the command refuses and keeps this computer's
+    export record, and ``--all`` names it as not forgotten (ADR-054, never a false success)."""
+
+    exported = _sent_from(remote, repository)
+    top = os.path.realpath(repository)
+    server = _server(monkeypatch, _Server(unfinished=frozenset({top})))
+    one = _RUNNER.invoke(app, ["server", "code", "forget", "--repository", str(repository)])
+    assert one.exit_code == 20, one.output
+    assert "lab could not finish deleting its copy of this repository" in one.stdout
+    assert "Run this command again later." in one.stdout
+    assert "deleted its copy" not in one.stdout and "backups" not in one.stdout
+    assert one.stderr.startswith("code_copy_deletion_unfinished:")
+    assert exported.exists()
+    shown = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert shown.exit_code == 20, shown.output
+    document = json.loads(shown.stdout)
+    assert (document["forgotten"], document["not_forgotten"]) == (0, 1)
+    (entry,) = document["repositories"]
+    assert (entry["outcome"], entry["reason"]) == ("not_forgotten", "code_copy_deletion_unfinished")
+    assert exported.exists()
+    text = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert "not forgotten (code_copy_deletion_unfinished): that server could not finish" in (
+        text.stdout
+    )
+    # Once the server finishes, the same command forgets it and the record goes.
+    server.unfinished = frozenset()
+    done = _RUNNER.invoke(app, ["server", "code", "forget", "--repository", str(repository)])
+    assert done.exit_code == 0, done.output
+    assert "lab deleted its copy of this repository: 2 snapshot(s)" in done.stdout
+    assert not exported.exists()
 
 
 # --- server remove offers to forget first ------------------------------------------------------------

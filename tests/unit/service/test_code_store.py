@@ -682,3 +682,66 @@ def test_a_crash_leaves_the_previous_snapshot_in_force_and_start_removes_the_res
     assert list((tmp_path / "code-copies" / "uploads").iterdir()) == []
     assert not orphan.exists()
     assert restarted.have("alice", "repo-1") == (first.snapshot,)
+
+
+def test_a_forget_never_drops_an_erasure_it_cannot_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the pending-erasure bound (e.g. a locked vault keeps erasures from completing), a
+    forget keeps the copy, fenced, and says it is not complete; it never deletes a copy whose
+    tasks' excerpts it could not record for erasure (U20)."""
+
+    monkeypatch.setattr(code_store, "_MAX_PENDING_ERASURES", 3)
+    clock = Clock()
+    store = _store(tmp_path, clock=clock)
+    snap = snapshot_objects(BASE, CURRENT)
+    for repository in ("repo-1", "repo-2"):
+        _upload(store, snap.bundle(), _manifest(snap, snap.bundle()), repository=repository)
+    store.pin("alice", "repo-1", "task_1", snap.snapshot)
+    store.pin("alice", "repo-1", "task_2", snap.snapshot)
+    store.pin("alice", "repo-2", "task_3", snap.snapshot)
+    store.pin("alice", "repo-2", "task_4", snap.snapshot)
+    first = store.forget("alice", "repo-1")
+    assert first.complete and first.to_json()["complete"] is True and first.copies == 1
+    second = store.forget("alice", "repo-2")
+    assert (second.copies, second.left, second.complete) == (0, 1, False)
+    assert second.to_json()["complete"] is False and second.tasks == ()
+    from finishup.protocol.schemas import validate_schema_instance
+
+    forgot = {key: value for key, value in second.to_json().items() if key != "reason"}
+    validate_schema_instance(
+        "control-result",
+        "2.10.0",
+        {  # pyright: ignore[reportArgumentType]
+            "protocol_version": "1.0",
+            "rpc_id": "rpc_12345678-1234-4123-8123-123456789abc",
+            "service_instance_id": "svc_12345678-1234-4123-8123-123456789abc",
+            "service_generation": "1",
+            "method": "code_copy",
+            "outcome": "ok",
+            "body": {"action": "forget", "copy": None, "forgot": forgot},
+        },
+    )
+    # Nothing of the copy went, and nothing was half-recorded.
+    assert store.have("alice", "repo-2") == (snap.snapshot,)
+    assert store.task_ids("alice", "repo-2") == ("task_3", "task_4")
+    assert {item.task_id for item in store.pending_erasures()} == {"task_1", "task_2"}
+    # An expiry that finds the same backlog keeps the copy too.
+    _upload(
+        store,
+        snap.bundle(),
+        _manifest(snap, snap.bundle()),
+        repository="repo-2",
+        retention=("days", 1),
+    )
+    clock.now += timedelta(days=2)
+    expired = store.expire(task_closed=lambda _task: True)
+    assert (expired.copies, expired.complete) == (0, False)
+    assert store.have("alice", "repo-2") == (snap.snapshot,)
+    # Once the backlog drains, the next forget records every task and deletes the copy.
+    for pending in store.pending_erasures():
+        store.complete_erasure(pending.forget_id, pending.task_id)
+    again = store.forget("alice", "repo-2")
+    assert again.complete and again.copies == 1
+    assert {item.task_id for item in store.pending_erasures()} == {"task_3", "task_4"}
+    assert store.have("alice", "repo-2") == ()
