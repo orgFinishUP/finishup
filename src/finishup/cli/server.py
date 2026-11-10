@@ -2886,7 +2886,7 @@ def server_login(
         ) from None
     root = target_root(record.target_id)
     verdict_phase: str | None = None
-    stored = False
+    invalidated = False
     try:
         with registry_lock():
             # One registry-locked step (SRV-12): the record as stored now, then the key, the
@@ -2898,31 +2898,40 @@ def server_login(
             credential = KeyringOrFileCredential(
                 record.target_id, root, recorded=current.credential
             )
+            # Before the new key can be read by anyone: the cached profile (answered to the
+            # previous key) is forgotten and the credential generation moves, so every connection
+            # made under the old key ends (O8) and nothing is sent under either key until a
+            # profile fetched with the key now stored is compared with the consent. Whatever
+            # fails after this point leaves that pending state, never the new key paired with
+            # the previous consent.
+            from finishup.client.server_profile import forget_cached_profile
+
+            forget_cached_profile(root)
+            invalidated = True
+            if not bump_credential_generation(root):
+                raise ServerCommandRefused("target_root_unsafe")
             location = credential.store(key)
-            stored = True
             current = replace(current, credential=location)
             write_target(root, current)
-            # An owner action on the key: every connection made under the old one ends (O8).
-            bump_credential_generation(root)
             if checked.profile is not None:
                 from finishup.client.server_profile import refresh_profile
 
                 verdict_phase = refresh_profile(current, checked.profile).phase
-            else:
-                # Not verified: the cached profile was answered to the previous key, so nothing
-                # is sent under this one until its own profile is fetched and compared with the
-                # consent (the consent step refuses until then).
-                from finishup.client.server_profile import forget_cached_profile
-
-                forget_cached_profile(root)
     except CredentialError as error:
-        raise ServerCommandRefused(error.reason) from None
+        raise _login_refusal(error.reason, record, pending=invalidated) from None
     except TargetError as error:
-        raise ServerCommandRefused(error.reason) from None
+        raise _login_refusal(error.reason, record, pending=invalidated) from None
+    except ServerCommandRefused as refusal:
+        if not invalidated:
+            raise
+        raise _login_refusal(refusal.reason, record, pending=True) from None
+    except OSError:
+        raise _login_refusal("target_root_unsafe", record, pending=invalidated) from None
     finally:
-        if stored:
+        if invalidated:
             # The helper may hold the earlier key: it stops, so the next client starts one with
-            # the key stored now (A-CRED-STALE), whatever happened after the key was stored.
+            # the key stored now (A-CRED-STALE), whatever happened after the old key's profile
+            # was forgotten.
             _stop_helper_for_key(record, root, which="earlier")
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
     if checked.outcome == "accepted":
@@ -2944,6 +2953,23 @@ def server_login(
             f"'finishup server use {record.name}' here (it checks the key and asks you again), "
             "or log in again."
         )
+
+
+def _login_refusal(reason: str, record: ServerTarget, *, pending: bool) -> ServerCommandRefused:
+    """A login that failed: before anything changed it stored nothing; after the previous key's
+    profile was forgotten, nothing is sent to that server until a key is checked."""
+
+    if not pending:
+        return ServerCommandRefused(reason)
+    return ServerCommandRefused(
+        reason,
+        message=(
+            "the API key could not be stored completely, so FinishUP sends nothing to that "
+            "server until a key is checked: run "
+            f"'finishup server login {record.name}' again, then 'finishup server use "
+            f"{record.name}' here"
+        ),
+    )
 
 
 def _stop_helper_for_key(record: ServerTarget, root: Path, *, which: str) -> None:

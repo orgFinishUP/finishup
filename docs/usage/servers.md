@@ -237,6 +237,9 @@ server about the key before it keeps it:
 - a server that does not answer: the key is stored, "not verified yet", and FinishUP sends nothing
   to that server until the key is checked: once the server is up, run `finishup server use NAME`
   (it checks the key and asks you again), or log in again.
+- if storing the key fails part way (a full disk, say), FinishUP says so and sends nothing to that
+  server until a key is checked: run `finishup server login NAME` again, then `finishup server use
+  NAME`.
 
 Storing a key ends every connection made with the old one, the helper's included. A new key is a
 new identity at the server, so FinishUP then asks you to agree again with `finishup server use

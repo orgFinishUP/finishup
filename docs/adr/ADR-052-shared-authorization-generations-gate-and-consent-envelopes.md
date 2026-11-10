@@ -798,18 +798,22 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   (`remote_identity_changed`) or another contract (`remote_incompatible`) stores nothing, and the
   command says why; the profile is validated before anything changes. A server that does not
   answer keeps the key "not verified yet". Then, in one registry-locked step on the record as
-  stored now (SRV-12, the login half; a target removed meanwhile keeps no key), the key is stored,
-  the record's `credential` written, the credential generation bumped (O8: every connection made
-  under the old key, the helper's relay included, ends with `server_authorization_changed`) and the
-  fetched profile recorded (`refresh_profile`); concurrent logins and logouts are serialized by
-  that lock, so no key is ever paired with another key's profile. A key not verified removes the
-  profile cached for the previous key instead (`forget_cached_profile`): the consent step (gate
-  step 5) then refuses `server_profile_changed` and nothing is sent under the new key until its
-  own profile is fetched and compared with the consent (`finishup server use NAME` once the server
-  is up, or the helper's refresh), so work never flows under the old consent with an unchecked key
-  (layer-5 review). The helper is stopped through its stop epoch whatever happens after the key was
-  stored, so the next client starts one with the key stored now (A-CRED-STALE). A stop that does not
-  finish in time is named, with `finishup server disconnect NAME` as the fix.
+  stored now (SRV-12, the login half; a target removed meanwhile keeps no key), **first** the
+  profile cached for the previous key is removed (`forget_cached_profile`) and the credential
+  generation bumped (O8: every connection made under the old key, the helper's relay included,
+  ends with `server_authorization_changed`), and only **then** the key is stored, the record's
+  `credential` written and, for a verified key, the fetched profile recorded (`refresh_profile`).
+  From the forget on, the consent step (gate step 5) refuses `server_profile_changed` until a
+  profile fetched with the key stored now is compared with the consent, so no process, a direct
+  one included, can pair the new key with the previous consent, even when the record or profile
+  write fails after the key was stored (that failure says so and names `server login` and `server
+  use`; layer-5 review, second round). A key not verified stays in that state: nothing is sent
+  under it until its own profile is fetched and compared (`finishup server use NAME` once the
+  server is up, or the helper's refresh). Concurrent logins and logouts are serialized by that
+  lock, so no key is ever paired with another key's profile. The helper is stopped through its stop
+  epoch whatever happens after the previous key's profile was forgotten, so the next client starts
+  one with the key stored now (A-CRED-STALE). A stop that does not finish in time is named, with
+  `finishup server disconnect NAME` as the fix.
 - **A new key is a new identity.** The consent envelope's principal is the key's id and principal
   (decision 6), so a key the server answers under another id, a rotated one included (rotation
   keeps the principal and so the tasks), is not the identity the owner agreed to: `login` says to

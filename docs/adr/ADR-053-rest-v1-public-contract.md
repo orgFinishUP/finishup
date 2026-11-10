@@ -447,13 +447,17 @@ address that names none of the open kinds (`http://`, another scheme).
   server before it is kept: a refused key, an identity that does not match the recorded trust or
   another contract stores nothing and says why; a server that does not answer keeps the key "not
   verified yet". The profile is validated before anything changes (a document this release cannot
-  use stores nothing). Then, in one registry-locked step on the record as stored now (SRV-12), the
-  key is stored, the record's `credential` written, the credential generation bumped (every
-  connection under the old key ends, O8) and the fetched profile recorded; a key that was not
-  verified instead removes the profile cached for the previous key, so the consent step refuses
-  (`server_profile_changed`) and nothing is sent until this key's own profile is fetched and
-  compared with the consent (`finishup server use NAME` once the server is up, or the helper's
-  refresh). The helper is stopped whatever happens after the key was stored (A-CRED-STALE). The consent is bound to the key's
+  use stores nothing). Then, in one registry-locked step on the record as stored now (SRV-12),
+  first the profile cached for the previous key is removed and the credential generation bumped
+  (every connection under the old key ends, O8), and only then the key is stored, the record's
+  `credential` written and a verified key's fetched profile recorded. Until a profile fetched with
+  the key stored now is compared with the consent, the consent step refuses
+  (`server_profile_changed`) and nothing is sent, so a record or profile write that fails after the
+  key was stored never leaves it paired with the previous consent (that failure names `server
+  login` and `server use`); a key that was not verified stays so until its own profile is fetched
+  and compared (`finishup server use NAME` once the server is up, or the helper's refresh). The
+  helper is stopped whatever happens once the previous key's profile was forgotten
+  (A-CRED-STALE). The consent is bound to the key's
   id and principal, so a new key (a rotation included, though it keeps the principal) says to
   agree again with `finishup server use NAME` (ADR-052 decision 23).
 - **`finishup server logout NAME`**: offline; under the registry lock, deletes the key the record

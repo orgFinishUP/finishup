@@ -490,3 +490,119 @@ def test_a_profile_this_release_cannot_use_stores_nothing_and_stops_nothing(
     assert credential_generation_path(root).read_bytes() == generation
     assert read_cached_profile(root) == cached
     assert runtime.stops == []
+
+
+# --- layer-5 review fixes, second round ----------------------------------------------------------
+
+
+def test_a_new_key_is_stored_only_after_the_previous_keys_profile_and_generation_are_gone(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: when the key store runs, the profile answered to the previous key is already forgotten
+    and the credential generation already moved: no reader can pair the new key with the
+    previous consent, even for an instant."""
+
+    from finishup.client.server_profile import consent_verdict
+
+    remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    generation = credential_generation_path(root).read_bytes()
+    seen: list[tuple[bool, bool, str | None]] = []
+    original_store = KeyringOrFileCredential.store
+
+    def store(self: KeyringOrFileCredential, key: str) -> Any:
+        stored = targets.read_target(root)
+        assert stored is not None
+        seen.append(
+            (
+                read_cached_profile(root) is None,
+                credential_generation_path(root).read_bytes() != generation,
+                consent_verdict(stored).phase,
+            )
+        )
+        return original_store(self, key)
+
+    monkeypatch.setattr(KeyringOrFileCredential, "store", store)
+    _rotated, newer = server.keys.create("laptop-2", "agent")
+    accepted = _invoke("login", "web", "--key-file", str(server.key_file(newer, "new.key")))
+    assert accepted.exit_code == 0, accepted.output
+    assert seen == [(True, True, "server_profile_changed")]
+    del record
+
+
+@pytest.mark.parametrize("failing", ["write_target", "refresh_profile"])
+def test_a_login_that_fails_after_its_key_is_stored_leaves_nothing_sendable(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """C1: the record write (or the profile's) failing once the new key is stored never leaves
+    that key with the previous consent: the profile stays forgotten, the generation moved, the
+    helper stopped, and the gate every connection passes first refuses until a key is checked."""
+
+    from finishup.client import authorization, server_profile
+    from finishup.client.targets import TargetError
+
+    runtime: StandInRuntime = remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    generation = credential_generation_path(root).read_bytes()
+    authorization.gate(record)  # admitted under the consent before the login
+
+    def fail(*_args: object, **_kwargs: object) -> Any:
+        raise TargetError("target_root_unsafe")
+
+    module = server_cli if failing == "write_target" else server_profile
+    monkeypatch.setattr(module, failing, fail)
+    _rotated, newer = server.keys.create("laptop-2", "agent")
+    failed = _invoke("login", "web", "--key-file", str(server.key_file(newer, "new.key")))
+    assert failed.exit_code != 0
+    assert failed.stderr.startswith("target_root_unsafe:")
+    assert "sends nothing to that server until a key is checked" in failed.stderr
+    assert KeyringOrFileCredential(record.target_id, root, recorded="file").read() == newer
+    assert read_cached_profile(root) is None
+    assert credential_generation_path(root).read_bytes() != generation
+    assert runtime.stops == [root]
+    stored = targets.read_target(root)
+    assert stored is not None
+    with pytest.raises(TargetError) as refused:
+        authorization.gate(stored)
+    assert refused.value.reason == "server_profile_changed"
+
+
+def test_a_login_refused_before_anything_changed_still_says_nothing_was_stored(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: a refusal before the previous key's profile was forgotten changes nothing."""
+
+    runtime: StandInRuntime = remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    cached = read_cached_profile(root)
+    generation = credential_generation_path(root).read_bytes()
+
+    def fail(_root: Path) -> None:
+        raise server_cli.TargetError("target_root_unsafe")
+
+    from finishup.client import server_profile
+
+    monkeypatch.setattr(server_profile, "forget_cached_profile", fail)
+    _rotated, newer = server.keys.create("laptop-2", "agent")
+    failed = _invoke("login", "web", "--key-file", str(server.key_file(newer, "new.key")))
+    assert failed.exit_code != 0
+    assert "sends nothing" not in failed.stderr
+    assert KeyringOrFileCredential(record.target_id, root, recorded="file").read() == server.key
+    assert read_cached_profile(root) == cached
+    assert credential_generation_path(root).read_bytes() == generation
+    assert runtime.stops == []
