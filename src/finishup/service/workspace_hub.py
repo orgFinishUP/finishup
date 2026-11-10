@@ -410,7 +410,15 @@ class WorkspaceAgentChannel:
 class WorkspaceAgentHub:
     """Live agent channels keyed by workspace handle, and the one way to call them."""
 
-    __slots__ = ("_background_wait", "_changed", "_channels", "_inline_wait", "_loop", "_lock")
+    __slots__ = (
+        "_background_wait",
+        "_changed",
+        "_channels",
+        "_code_copies",
+        "_inline_wait",
+        "_loop",
+        "_lock",
+    )
 
     def __init__(
         self,
@@ -427,11 +435,24 @@ class WorkspaceAgentHub:
         self._changed: asyncio.Condition | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        # Level L2 (ADR-054): the service's copy puller, when it keeps copies; None otherwise.
+        self._code_copies: Any = None
 
     def __repr__(self) -> str:
         return "WorkspaceAgentHub(<redacted>)"
 
     # --- registration (event loop) -----------------------------------------------------------
+
+    @property
+    def code_copies(self) -> Any:  # noqa: ANN401 - ``service.code_copy.CodeCopies`` or None
+        """The service's copy puller (level L2), when this service keeps copies; else None."""
+
+        return self._code_copies
+
+    def attach_code_copies(self, copies: object) -> None:
+        """Attach the copy puller once, at composition (``service.code_copy.CodeCopies``)."""
+
+        self._code_copies = copies
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         """Bind the event loop blocking callers reach the hub through; the first binding wins."""

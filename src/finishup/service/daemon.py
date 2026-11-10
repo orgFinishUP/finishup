@@ -2316,7 +2316,12 @@ class ServiceDaemon:
         if not vault.ready:
             return None
         key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
-        return claim_repository_privacy_context(claim, key)
+        context = claim_repository_privacy_context(claim, key)
+        copies = self._composition.workspace_hub.code_copies
+        if copies is not None:
+            # Level L2 (ADR-054): the copy of a claimed workspace is keyed by its commitment.
+            copies.remember(context.workspace_handle, context.commitment, claim.worktree)
+        return context
 
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
@@ -5541,6 +5546,33 @@ def _refuse_remote_target_root(root: Path | None) -> None:
         raise LifecycleError("target_root_is_remote")
 
 
+def _attach_code_copies(
+    hub: WorkspaceAgentHub, source: ServerProfileSource, state: Path, vault: object
+) -> None:
+    """Give the hub the copy puller of a service whose profile offers level L2 (ADR-054): the
+    encrypted store under the state directory, its keys derived by the vault, opened now
+    (removing what a crash left) and its expiry run now and every ten minutes."""
+
+    offer = source.code_copy
+    if not source.keeps_copies or offer is None or vault is None:
+        return
+    from finishup.service.code_copy import CodeCopies, VaultCopyKeyring
+    from finishup.service.code_store import CodeStore, StoreLimits
+
+    keyring = VaultCopyKeyring(
+        lambda: cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+    )
+    store = CodeStore(
+        state / "code-copies",
+        keyring,
+        StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes),
+    )
+    store.open()
+    copies = CodeCopies(store, hub, lambda: source.revision)
+    copies.start_expiry()
+    hub.attach_code_copies(copies)
+
+
 async def _production_composition(
     *,
     _config: FinishUpConfig | None = None,
@@ -5731,6 +5763,9 @@ async def _production_composition(
         observation_gate = asyncio.Lock()
         # One hub: the daemon registers agent connections, the ready application calls them.
         workspace_hub = WorkspaceAgentHub()
+        profile_source = ServerProfileSource.load(config, paths.state)
+        # Level L2 (ADR-054): a service whose profile offers L2 keeps copies; none otherwise.
+        _attach_code_copies(workspace_hub, profile_source, paths.state, vault)
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -5811,7 +5846,7 @@ async def _production_composition(
             owner_view_grants=owner_view_grants,
             workspace_hub=workspace_hub,
             # What this server offers a client elsewhere, and its revision (ADR-052).
-            server_profile=ServerProfileSource.load(config, paths.state),
+            server_profile=profile_source,
             rest_edge=rest_edge,
         )
     except BaseException:

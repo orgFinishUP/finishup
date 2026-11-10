@@ -23,6 +23,7 @@ from finishup.protocol.server_copy import (
     MODE_TREE,
     GitObject,
     Held,
+    SnapshotManifest,
     TreeEntry,
     encode_commit,
     encode_tree,
@@ -30,7 +31,15 @@ from finishup.protocol.server_copy import (
     write_pack,
 )
 
-__all__ = ["Snapshot", "git", "git_bytes", "held_lookup", "release_l2", "snapshot_objects"]
+__all__ = [
+    "Snapshot",
+    "git",
+    "git_bytes",
+    "held_lookup",
+    "manifest_for",
+    "release_l2",
+    "snapshot_objects",
+]
 
 
 def git_bytes(repository: Path, *arguments: str, stdin: bytes | None = None) -> bytes:
@@ -167,3 +176,46 @@ def release_l2() -> Iterator[None]:
         yield
     finally:
         enable_unreleased_l2(False)
+
+
+def manifest_for(
+    snapshot: Snapshot,
+    *,
+    revision: tuple[str, int, str],
+    worktree: str,
+    purpose: str = "check",
+) -> SnapshotManifest:
+    """The manifest a client would send with ``snapshot`` (sizes from the verifier)."""
+
+    from finishup.protocol.server_copy import (
+        COMPLETENESS_COUNTS,
+        COMPLETENESS_LISTS,
+        BundleLimits,
+        verify_snapshot_bundle,
+    )
+
+    verified = verify_snapshot_bundle(
+        snapshot.bundle(), have=lambda _oid: None, limits=BundleLimits(max_file_bytes=1 << 24)
+    )
+    return SnapshotManifest(
+        snapshot=snapshot.snapshot,
+        base=snapshot.base,
+        tree=snapshot.tree,
+        base_tree=snapshot.base_tree,
+        original_base_format="sha1",
+        original_base="d" * 40,
+        export_id="e" * 32,
+        worktree=worktree,
+        policy="sha256:" + "f" * 64,
+        lists={name: () for name in COMPLETENESS_LISTS},
+        more=dict.fromkeys(COMPLETENESS_LISTS, 0),
+        counts=dict.fromkeys(COMPLETENESS_COUNTS, 0),
+        subject_state=None,
+        issuer=revision[0],
+        revision=revision[1],
+        profile_digest=revision[2],
+        purpose=purpose,  # type: ignore[arg-type]
+        synced_at="2026-11-10T08:00:00.000Z",
+        files=verified.tree_files,
+        bytes=verified.tree_bytes,
+    )

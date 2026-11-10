@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from finishup.adapters.approved_checks import ApprovedCheckCommand, ApprovedCheckRunner
 from finishup.adapters.task_input_read import ReadDeadline
@@ -213,9 +213,24 @@ class RoutedChangeCapture:
     def __repr__(self) -> str:
         return "RoutedChangeCapture(<redacted>)"
 
+    def _sync_copy(
+        self, workspace: str, purpose: Literal["base", "check"], base: TaskChangeBase | None
+    ) -> None:
+        """Level L2 (ADR-054): before an evidence-consuming read of a claim-bound workspace,
+        bring the server's copy up to date when this service keeps copies. Never fails the read:
+        the read itself still goes to the client's agent (the copy is not read yet)."""
+
+        # A hub without the attribute (a stand-in) keeps no copies.
+        copies = getattr(self._hub, "code_copies", None)
+        if copies is None:
+            return
+        commit = None if base is None else base.commit
+        copies.sync_blocking(workspace, purpose=purpose, base_commit=commit)
+
     def read_task_base(self, workspace: str) -> TaskChangeBase:
         if not client_bound(workspace):
             return self._local.read_task_base(workspace)
+        self._sync_copy(workspace, "base", None)
         return _capture_call(
             self._hub,
             workspace,
@@ -242,6 +257,7 @@ class RoutedChangeCapture:
             if space_cut_paths:
                 options["space_cut_paths"] = space_cut_paths
             return self._local.capture(workspace, base, **options)  # pyright: ignore[reportArgumentType]
+        self._sync_copy(workspace, "check", base)
         return _capture_call(
             self._hub,
             workspace,
@@ -252,6 +268,7 @@ class RoutedChangeCapture:
     def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
         if not client_bound(workspace):
             return self._local.capture_metadata(workspace, base)
+        self._sync_copy(workspace, "check", base)
         return _capture_call(
             self._hub,
             workspace,
