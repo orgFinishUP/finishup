@@ -296,6 +296,10 @@ def test_allow_list_shows_paths_and_short_digests_never_contents(
     (repository / "folder").mkdir()
     refused = _RUNNER.invoke(app, ["server", "code", "allow", "add", "folder"])
     assert refused.exit_code != 0 and "FILE must be a regular file" in refused.output
+    # A named pipe is refused at once, never waited on for a writer.
+    os.mkfifo(repository / "pipe")
+    piped = _RUNNER.invoke(app, ["server", "code", "allow", "add", "pipe"])
+    assert piped.exit_code != 0 and "FILE must be a regular file" in piped.output
     assert console.opened == 1
 
 
@@ -431,7 +435,7 @@ def test_forget_all_forgets_each_folder_and_names_the_one_whose_folder_is_gone(
     assert server.asked == [(top, "forget", targets.target_root(remote.target_id))]
     assert not kept.exists() and lost.exists()
     lines = result.stdout.splitlines()
-    assert lines[0] == "Every copy of code this computer sent to lab (2):"
+    assert lines[0] == "Copies of code this computer sent to lab (2 repositories):"
     forgotten = next(line for line in lines if top in line)
     assert forgotten.endswith(
         f"(copy {kept.name[:8]}): forgotten; lab deleted 2 snapshot(s), 10 stored objects, "

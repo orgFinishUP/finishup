@@ -344,7 +344,8 @@ def forget_lines(record: ServerTarget, outcomes: tuple[ForgetOutcome, ...]) -> t
             f"This computer has no record of a copy of code it sent to {record.name}; nothing "
             "was forgotten.",
         )
-    lines = [f"Every copy of code this computer sent to {record.name} ({len(outcomes)}):"]
+    count = f"{len(outcomes)} {'repository' if len(outcomes) == 1 else 'repositories'}"
+    lines = [f"Copies of code this computer sent to {record.name} ({count}):"]
     for outcome in outcomes:
         folder = "a folder this computer cannot name" if outcome.folder is None else outcome.folder
         named = f"  {outcome.position}. {folder} (copy {outcome.copy}): "
@@ -528,7 +529,10 @@ def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> N
     here = repository_here(repository)
     path, relative = _inside(here, file, "FILE")
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        # Non-blocking, so a named pipe is refused below rather than waited on.
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+        )
     except OSError:
         raise ServerCommandRefused("usage", message="FILE cannot be read") from None
     try:
