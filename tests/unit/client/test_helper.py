@@ -984,3 +984,68 @@ def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_
     assert (code, stopped) == (0, True)
     status = read_helper_status(root)
     assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
+
+
+def test_one_background_agent_serves_a_workspace_however_many_processes_registered_it(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every command registers the worktree it ran in under its own registrant, so a busy
+    worktree has many registrations; the helper opens one agent per workspace (a REST key may
+    hold sixteen agents, and the client's own connections need room too), served under the
+    registration that holds it longest."""
+
+    from types import SimpleNamespace
+
+    from finishup.client import helper_registrations
+
+    record, root = ssh_target
+
+    def item(claim: str, worktree: str, registrant: str, expires: str) -> object:
+        return SimpleNamespace(
+            registration=SimpleNamespace(
+                claim=claim, worktree=worktree, registrant=registrant, expires_at=expires
+            )
+        )
+
+    rows = [
+        item("claim-a", "/w/one", f"r{index}", f"2026-11-10T14:{index:02d}:00.000Z")
+        for index in range(20)
+    ] + [item("claim-a", "/w/two", "r99", "2026-11-10T14:30:00.000Z")]
+    served_now: list[list[object]] = [rows]
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return tuple(served_now[0])
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+    opened: list[object] = []
+    closed: list[object] = []
+
+    class Agent:
+        alive = True
+
+        def __init__(self, registration: object) -> None:
+            self.registration = registration
+
+        async def aclose(self) -> None:
+            closed.append(self.registration)
+
+    async def opener(*arguments: object) -> Agent:
+        opened.append(arguments[2])
+        return Agent(arguments[2])
+
+    async def run() -> None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
+        assert [(row.worktree, row.registrant) for row in opened] == [  # pyright: ignore[reportAttributeAccessIssue]
+            ("/w/one", "r19"),
+            ("/w/two", "r99"),
+        ]
+        # More registrations of the same worktree open nothing more; a worktree no longer
+        # served loses its agent.
+        served_now[0] = rows[1:20]
+        await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
+        assert len(opened) == 2
+        assert [row.worktree for row in closed] == ["/w/two"]  # pyright: ignore[reportAttributeAccessIssue]
+
+    asyncio.run(run())

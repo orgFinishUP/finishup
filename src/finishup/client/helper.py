@@ -1180,7 +1180,15 @@ class Helper:
         self._refresh.requested = True
 
     async def _sync_agents(self) -> None:
-        """Open an agent for each registration served now; close every other one."""
+        """Open one agent for each workspace a registration serves now; close every other one.
+
+        Every client process registers the workspace it worked in (each command its own
+        registrant, with a lease), so a busy worktree has many registrations at once. They
+        all name the same claim and worktree and are served under the same admission, so the
+        helper keeps one background agent per workspace, not one per registration: a server
+        bounds the agents one key may hold, and a client's own connections need room too.
+        The registration that holds the workspace longest is the one served.
+        """
 
         from finishup.client.helper_registrations import served_workspaces
 
@@ -1193,14 +1201,12 @@ class Helper:
             except Exception:  # noqa: BLE001 - a read that fails serves nothing this round
                 served = ()
         self._served_count = len(served)
-        wanted = {
-            (
-                item.registration.claim,
-                item.registration.worktree,
-                item.registration.registrant,
-            ): item.registration
-            for item in served
-        }
+        wanted: dict[tuple[object, str], Registration] = {}
+        for item in served:
+            key = (item.registration.claim, item.registration.worktree)
+            held = wanted.get(key)
+            if held is None or item.registration.expires_at > held.expires_at:
+                wanted[key] = item.registration
         for key in tuple(self._agents):
             agent = self._agents[key]
             if key not in wanted or not agent.alive:
