@@ -365,6 +365,62 @@ def test_a_direct_stream_that_does_not_answer_within_the_deadline_names_remote_u
     assert error.phase == "remote_unreachable"
 
 
+@pytest.mark.parametrize("started", ["before", "after"])
+def test_a_helper_of_another_build_of_this_release_is_replaced_only_when_it_predates_this_process(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, started: str
+) -> None:
+    """Two builds of one version (a test instance, a dogfood build) cannot be ordered by version.
+    The one started later is the newer installation: an older process (a bridge kept from before
+    an in-place upgrade, on its retained runtime) never replaces it, so the two never flap; a
+    process started after a helper replaces it as an older release's."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from finishup import __version__
+    from finishup.config.installation import format_rfc3339_ms
+
+    record, root = ssh_selected
+    helper = _HelperStandIn(monkeypatch)
+    helper.started = False  # the running helper does not answer this client's hello
+    # Long before this test process started, or after it (whenever the session began).
+    moment = (
+        datetime(2020, 1, 1, tzinfo=UTC)
+        if started == "before"
+        else datetime.now(UTC) + timedelta(minutes=10)
+    )
+    write_helper_status(root, new_status(None, "ready", None, started_at=format_rfc3339_ms(moment)))
+    stamp = helper_status.HelperStamp(os.getpid(), __version__, "sha256:" + "e" * 64)
+    holders = [stamp]
+    monkeypatch.setattr(
+        helper_status, "helper_holder", lambda _root: holders[0] if holders else None
+    )
+    stops: list[Path] = []
+
+    def stop(path: Path, *, timeout_seconds: float = 5.0) -> bool:
+        del timeout_seconds
+        stops.append(path)
+        holders.clear()
+        return True
+
+    monkeypatch.setattr(helper_status, "stop_helper", stop)
+
+    async def run() -> ControlError | None:
+        try:
+            client = await connect_service_on_demand(ControlClientKind.CLI, timeout_seconds=2.0)
+        except ControlError as error:
+            return error
+        await client.close()
+        return None
+
+    error = asyncio.run(run())
+    if started == "before":
+        assert error is None
+        assert stops == [root] and helper.spawns == [record.target_id]
+    else:
+        assert error is not None and error.reason == "service_incompatible"
+        assert stops == [] and helper.spawns == []
+
+
 def test_the_holder_of_a_remote_root_is_its_helper_and_moves_with_its_status(
     ssh_selected: tuple[targets.ServerTarget, Path],
 ) -> None:

@@ -185,6 +185,7 @@ from finishup.service.client import (
     connect_service_on_demand,
     handshake_failure,
     holder_version_order,
+    newer_helper_build_holds_selection,
     path_refusal_reason,
     service_holder_identity,
     start_timed_out,
@@ -2768,7 +2769,10 @@ def _holder_is_newer_than_bridge() -> bool:
         holder = service_holder_identity()
     except Exception:
         return False
-    return holder is not None and holder_version_order(holder.service_version) == "newer"
+    if holder is not None and holder_version_order(holder.service_version) == "newer":
+        return True
+    # A server elsewhere: its helper of another build of this release, started after this bridge.
+    return newer_helper_build_holds_selection()
 
 
 def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:

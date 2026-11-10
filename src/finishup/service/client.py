@@ -166,6 +166,7 @@ __all__ = [
     "connect_service_on_demand",
     "connect_service_via",
     "holder_version_order",
+    "newer_helper_build_holds_selection",
     "path_refusal_reason",
     "prepare_project_request",
     "service_holder_identity",
@@ -211,6 +212,11 @@ _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
 _CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
+# When this process started (this module is imported as it starts). A helper of this release but
+# another build that started after it belongs to a newer installation of the same version: this
+# process is the older one (an MCP bridge kept from before an in-place upgrade runs its retained
+# runtime), so it never replaces that helper (no flapping between two builds of one version).
+_PROCESS_STARTED_AT: Final = time.time()
 # A listening service shown to be a different FinishUP installation (or generation) sharing the one
 # per-user endpoint: it answered with another manifest or protocol, or closed on this client's
 # hello while its singleton stamp names another identity (``_unanswered_hello``). Both reasons
@@ -2739,6 +2745,44 @@ async def _reach_remote(
         raise
 
 
+def _helper_is_newer_build(root: Path, pid: int, version: str) -> bool:
+    """Whether the live helper ``pid`` (stamped ``version``) holding ``root`` is of this release
+    but started after this process did, so it is the newer build (``_PROCESS_STARTED_AT``).
+    Reads only; ``False`` when its status cannot tell."""
+
+    from finishup.client.helper_status import read_helper_status
+    from finishup.config.installation import parse_rfc3339_ms
+
+    if version != __version__:
+        return False
+    status = read_helper_status(root)
+    if status is None or status.pid != pid:
+        return False
+    try:
+        started = parse_rfc3339_ms(status.started_at).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return started > _PROCESS_STARTED_AT
+
+
+def newer_helper_build_holds_selection() -> bool:
+    """Whether the selected server elsewhere's helper is a newer build of this release than this
+    process (this process predates an in-place upgrade). For the MCP bridge's remedy text."""
+
+    from finishup.client.helper_status import helper_holder
+
+    root = _remote_target_root()
+    if root is None:
+        return False
+    try:
+        holder = helper_holder(root)
+        if holder is None or holder.schema_manifest_digest == _manifest_digest_for_client():
+            return False
+        return _helper_is_newer_build(root, holder.pid, holder.version)
+    except Exception:  # noqa: BLE001 - a helper that cannot be read is not newer
+        return False
+
+
 def _start_helper_to_refresh(root: Path, target_id: str) -> None:
     """Start the target's helper so it fetches the server's profile again (never on this path).
 
@@ -3021,6 +3065,11 @@ async def _connect_through_helper(
         )
         and holder_version_order(holder.version) != "newer"
     ):
+        if _helper_is_newer_build(root, holder.pid, holder.version):
+            # Another build of this same release, started after this process: this process
+            # predates an in-place upgrade (a retained runtime). It never replaces the newer
+            # helper; its owner reopens the session (the bridge names that).
+            raise ControlError("service_incompatible", retryable=True)
         # A helper left by an older release of this client (an in-place upgrade) is client-owned:
         # stop it (its stop epoch moves; no pid is signalled), then start this release's. One a
         # newer release started is never replaced from here.
