@@ -401,3 +401,60 @@ async def test_a_request_given_seconds_ends_within_them_whatever_each_read_takes
     assert ended.value.reason == "remote_unreachable"
     assert loop.time() - started < 10
     assert trickle.pieces > 0  # the answer was arriving all along
+
+
+async def test_at_most_one_key_read_is_ever_outstanding_however_many_callers_time_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4: a blocked store read (a locked keyring's prompt) is the only read in flight: callers
+    that time out meanwhile start no thread of their own, callers that wait get their own fresh
+    read once it ends, and never two reads run at once."""
+
+    release = threading.Event()
+    guard = threading.Lock()
+    reads = {"entered": 0, "active": 0, "peak": 0}
+
+    def blocked(_target_id: str) -> str:
+        with guard:
+            reads["entered"] += 1
+            reads["active"] += 1
+            reads["peak"] = max(reads["peak"], reads["active"])
+        try:
+            release.wait(30)
+            return "the key"
+        finally:
+            with guard:
+                reads["active"] -= 1
+
+    def readers() -> list[threading.Thread]:
+        return [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == "finishup-key-read" and thread.is_alive()
+        ]
+
+    monkeypatch.setattr(rest_client, "_read_key", blocked)
+    before = len(readers())
+    loop = asyncio.get_running_loop()
+    try:
+        for _ in range(5):
+            with pytest.raises(RestUnavailable) as failed:
+                await load_key("t_00000000", seconds=0.1)
+            assert failed.value.reason == "remote_auth_failed"
+        assert reads["entered"] == 1
+        assert len(readers()) == before + 1
+        waiting = [asyncio.create_task(load_key("t_00000000", seconds=20)) for _ in range(3)]
+        deadline = loop.time() + 10
+        while True:
+            outstanding = rest_client._reading  # pyright: ignore[reportPrivateUsage]
+            if outstanding is not None and len(outstanding.waiters) >= 3:
+                break
+            assert loop.time() < deadline
+            await asyncio.sleep(0)
+        assert reads["entered"] == 1 and len(readers()) == before + 1
+        release.set()
+        assert await asyncio.wait_for(asyncio.gather(*waiting), timeout=20) == ["the key"] * 3
+        assert reads["entered"] == 4
+        assert reads["peak"] == 1
+    finally:
+        release.set()

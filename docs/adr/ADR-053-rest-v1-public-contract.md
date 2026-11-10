@@ -336,7 +336,11 @@ fetches.
 - **The key** is read off the event loop, one read at a time (A-KEYRING-LOOP), on a daemon thread
   of its own (never the loop's default executor, so a blocked read holds neither the loop's
   shutdown nor the process's exit), from where the record says it lives now (A-CRED-STALE); a store
-  that does not answer within the caller's budget is `remote_auth_failed` for that attempt. A target with no key is `remote_auth_failed` before any
+  that does not answer within the caller's budget is `remote_auth_failed` for that attempt. At most
+  one read is outstanding in a process: a caller that comes while one runs (a locked keyring's
+  prompt, say) waits for it to end within its own budget and then reads afresh, or fails
+  `remote_auth_failed`; it never starts a thread of its own, so abandoned reads never accumulate
+  (layer-5 review, second round). A target with no key is `remote_auth_failed` before any
   byte is sent: that is ADR-052's gate step 6, made where the key is read (ADR-052 decision 20).
 - **Closed failures**, never naming a host, URL or body: the TLS identity refused
   (`remote_identity_changed`), no connection or a timeout (`remote_unreachable`), the key refused

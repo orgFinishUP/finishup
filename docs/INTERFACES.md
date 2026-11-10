@@ -15033,8 +15033,9 @@ check) compares that identity with `server_profile.consented_endpoint_identity(r
 byte and refuses `remote_identity_changed`. `request(..., seconds=…)` bounds one request as a
 whole (connect, TLS, body and every piece of the answer) by a caller's remaining deadline, and one
 given no `seconds` by its connect and read bounds plus 30 s; past it, `remote_unreachable`. `load_key(target_id, *, seconds=10)` reads the key on a daemon thread
-of its own (abandoned, never joined, when its budget ends); no key, or no answer in time, is
-`remote_auth_failed`. `RestControlStream.bind(refusal)` adds a check asked before every request
+of its own (abandoned, never joined, when its budget ends), at most one outstanding per process (a
+caller that comes meanwhile waits for it within its own budget, then reads afresh); no key, or no
+answer in time, is `remote_auth_failed`. `RestControlStream.bind(refusal)` adds a check asked before every request
 the stream makes (the helper binds a relayed stream's admission and claimed repository);
 `server_profile.forget_cached_profile(root)` removes the cache (an unverified login).
 Failure phases (`RestUnavailable.reason`): `remote_identity_changed`, `remote_unreachable`,

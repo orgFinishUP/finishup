@@ -94,7 +94,20 @@ _REASONS: Final = frozenset(
         "remote_unreachable",
     }
 )
-_KEY_LOCK: Final = threading.Lock()
+# The one key read in flight in this process (``load_key``), guarded by its lock.
+_READ_LOCK: Final = threading.Lock()
+
+
+class _KeyRead:
+    """The one outstanding key read: callers that came while it runs wait for it to end."""
+
+    __slots__ = ("waiters",)
+
+    def __init__(self) -> None:
+        self.waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
+
+
+_reading: _KeyRead | None = None
 
 
 class RestUnavailable(Exception):
@@ -311,19 +324,62 @@ def _read_key(target_id: str) -> str:
     from finishup.client.credentials import CredentialError, KeyringOrFileCredential
     from finishup.client.targets import TargetError, read_target, target_root
 
-    with _KEY_LOCK:
-        try:
-            root = target_root(target_id)
-            # The record is read again each time, so the key is looked for where it lives now
-            # (A-CRED-STALE): a login after this process started, or one that moved it.
-            record = read_target(root)
-        except TargetError:
-            raise RestUnavailable("remote_auth_failed") from None
-        if record is None or record.credential is None:
+    try:
+        root = target_root(target_id)
+        # The record is read again each time, so the key is looked for where it lives now
+        # (A-CRED-STALE): a login after this process started, or one that moved it.
+        record = read_target(root)
+    except TargetError:
+        raise RestUnavailable("remote_auth_failed") from None
+    if record is None or record.credential is None:
+        raise RestUnavailable("remote_auth_failed")
+    try:
+        return KeyringOrFileCredential(target_id, root, recorded=record.credential).read()
+    except CredentialError:
+        raise RestUnavailable("remote_auth_failed") from None
+
+
+def _wake(waiter: asyncio.Future[None]) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
+
+
+def _end_read(read: _KeyRead) -> None:
+    """The outstanding read ended (whatever it returned): the slot is free; wake its waiters."""
+
+    global _reading
+    with _READ_LOCK:
+        if _reading is read:
+            _reading = None
+        waiters, read.waiters = read.waiters, []
+    for loop, waiter in waiters:
+        with contextlib.suppress(RuntimeError):  # that loop closed: nobody waits there any more
+            loop.call_soon_threadsafe(_wake, waiter)
+
+
+async def _take_read_slot(loop: asyncio.AbstractEventLoop, deadline: float) -> _KeyRead:
+    """The read slot, once no other read is outstanding; ``remote_auth_failed`` at ``deadline``.
+
+    While another read runs (a locked keyring's prompt, say), this caller waits for it to end
+    within its own deadline and starts no thread of its own: at most one read is ever under way
+    in this process, however many callers time out meanwhile.
+    """
+
+    global _reading
+    while True:
+        with _READ_LOCK:
+            if _reading is None:
+                _reading = _KeyRead()
+                return _reading
+            waiter: asyncio.Future[None] = loop.create_future()
+            _reading.waiters.append((loop, waiter))
+        left = deadline - loop.time()
+        if left <= 0:
             raise RestUnavailable("remote_auth_failed")
         try:
-            return KeyringOrFileCredential(target_id, root, recorded=record.credential).read()
-        except CredentialError:
+            async with asyncio.timeout(left):
+                await waiter
+        except TimeoutError:
             raise RestUnavailable("remote_auth_failed") from None
 
 
@@ -335,9 +391,14 @@ async def load_key(target_id: str, *, seconds: float = 10.0) -> str:
     daemon thread of its own, never the loop's default executor: a read still blocked when the
     caller gives up is abandoned, so it can hold neither the loop's shutdown (``asyncio.run``
     joins its default executor) nor the interpreter's exit, and a hook ends within its budget.
+    At most one read is outstanding in this process: a caller that comes while one runs waits for
+    it to end within its own ``seconds`` (then reads afresh) and otherwise fails, so abandoned
+    reads never accumulate threads.
     """
 
     loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    slot = await _take_read_slot(loop, deadline)
     answer: asyncio.Future[str] = loop.create_future()
 
     def settle(value: str | None, failure: BaseException | None) -> None:
@@ -356,12 +417,18 @@ async def load_key(target_id: str, *, seconds: float = 10.0) -> str:
             value = None
         else:
             failure = None
+        finally:
+            _end_read(slot)
         with contextlib.suppress(RuntimeError):  # the loop closed: nobody waits any more
             loop.call_soon_threadsafe(settle, value, failure)
 
-    threading.Thread(target=read, name="finishup-key-read", daemon=True).start()
     try:
-        async with asyncio.timeout(seconds):
+        threading.Thread(target=read, name="finishup-key-read", daemon=True).start()
+    except BaseException:
+        _end_read(slot)
+        raise
+    try:
+        async with asyncio.timeout(max(0.0, deadline - loop.time())):
             return await answer
     except TimeoutError:
         raise RestUnavailable("remote_auth_failed") from None
