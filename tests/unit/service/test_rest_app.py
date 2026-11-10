@@ -507,3 +507,142 @@ async def test_routes_and_methods_are_closed(edge: _Edge) -> None:
     assert wrong.status_code == 405 and _reason(wrong) == "method_not_allowed"
     nowhere = await edge.client.get("/elsewhere", headers=edge.headers())
     assert nowhere.status_code == 404 and _reason(nowhere) == "route_unknown"
+
+
+async def test_a_stale_revision_is_refused_before_a_body_is_read_or_a_call_admitted(
+    edge: _Edge,
+) -> None:
+    """A1-1: the backend's revision check runs before the body is read, so a stale call never
+    gets a ``202`` (or a 6 MiB read) and is never dispatched."""
+
+    stale_call = await edge.client.post(
+        "/v1/service_status",
+        params={"wait_ms": "0"},
+        headers=edge.call_headers(revision=_STALE),
+        content=b"{}",
+    )
+    assert stale_call.status_code == 409 and _reason(stale_call) == "server_profile_changed"
+    oversized = await edge.client.post(
+        "/v1/service_status",
+        headers=edge.call_headers(revision=_STALE),
+        content=b" " * (6_291_456 + 1),
+    )
+    assert oversized.status_code == 409 and _reason(oversized) == "server_profile_changed"
+    stale_agent = await edge.client.post(
+        "/v1/agents",
+        headers=edge.headers(revision=_STALE, claim=_CLAIM),
+        content=b" " * (65_536 + 1),
+    )
+    assert stale_agent.status_code == 409 and _reason(stale_agent) == "server_profile_changed"
+    assert edge.backend.calls == [] and edge.backend.agents == []
+    assert edge.backend.admissions == []
+    current = await edge.client.post(
+        "/v1/service_status", headers=edge.call_headers(), content=b"{}"
+    )
+    assert current.status_code == 200
+    assert edge.backend.admissions == [TEST_REVISION]
+
+
+async def test_concurrent_registrations_of_one_key_never_pass_the_agent_cap(
+    edge: _Edge,
+) -> None:
+    """A1-2: a registration holds its slot while it waits for the backend; a failed one gives
+    it back."""
+
+    edge.backend.register_gate = asyncio.Event()
+    body = agent_declaration_document(AGENT_DECLARATION)
+    tasks = [
+        asyncio.create_task(
+            edge.client.post("/v1/agents", headers=edge.headers(claim=_CLAIM), content=body)
+        )
+        for _ in range(17)
+    ]
+    await _until(lambda: any(task.done() for task in tasks))
+    (refused,) = [task.result() for task in tasks if task.done()]
+    assert refused.status_code == 429 and _reason(refused) == "agent_limit"
+    edge.backend.register_gate.set()
+    answers = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+    assert sorted(answer.status_code for answer in answers) == [201] * 16 + [429]
+    assert len(edge.backend.agents) == 16
+    for answer in answers:
+        if answer.status_code == 201:
+            agent_id = parse_agent_registration(answer.content).agent_id
+            ended = await edge.client.delete(f"/v1/agents/{agent_id}", headers=edge.headers())
+            assert ended.status_code == 204
+    edge.backend.unkeyed = True
+    failed = await edge.client.post("/v1/agents", headers=edge.headers(claim=_CLAIM), content=body)
+    assert failed.status_code == 503
+    edge.backend.unkeyed = False
+    again = await edge.client.post("/v1/agents", headers=edge.headers(claim=_CLAIM), content=body)
+    assert again.status_code == 201
+
+
+async def test_every_unauthenticated_refusal_draws_from_the_budget_whatever_its_reason(
+    edge: _Edge,
+) -> None:
+    """A1-3: duplicate ``authorization`` headers (``header_invalid``) and a discovery request of
+    another method (``method_not_allowed``) are charged like a wrong key."""
+
+    duplicated = [
+        await edge.client.get(
+            "/v1/server", headers=[("authorization", "Bearer a"), ("authorization", "Bearer b")]
+        )
+        for _ in range(25)
+    ]
+    assert [answer.status_code for answer in duplicated[:20]] == [400] * 20
+    assert {answer.status_code for answer in duplicated[20:]} == {429}
+    edge.clock.now += 61.0
+    posted = [await edge.client.post("/.well-known/finishup") for _ in range(25)]
+    assert [answer.status_code for answer in posted[:20]] == [405] * 20
+    assert {answer.status_code for answer in posted[20:]} == {429}
+    assert _reason(posted[-1]) == "rate_limited"
+
+
+async def test_a_call_naming_its_connections_agent_is_sent_to_that_agent(edge: _Edge) -> None:
+    """A1-4: the call carries its own agent's registration to the backend; another key's, a
+    gone one or one of another claim is ``agent_unknown``."""
+
+    created = await edge.client.post(
+        "/v1/agents",
+        headers=edge.headers(claim=_CLAIM),
+        content=agent_declaration_document(AGENT_DECLARATION),
+    )
+    registration = parse_agent_registration(created.content)
+    (recorded,) = edge.backend.agents
+    named = await edge.client.post(
+        "/v1/service_status",
+        headers=edge.call_headers(claim=_CLAIM, **{"finishup-agent": registration.agent_id}),
+        content=b"{}",
+    )
+    assert named.status_code == 200
+    plain = await edge.client.post(
+        "/v1/service_status", headers=edge.call_headers(claim=_CLAIM), content=b"{}"
+    )
+    assert plain.status_code == 200
+    assert edge.backend.call_agents == [recorded.handle, None]
+    other_claim = WorkspaceClaim(
+        identity_kind="git_common_root", digest="sha256:" + "e" * 64, worktree=_CLAIM.worktree
+    )
+    for headers in (
+        edge.call_headers(
+            key=edge.agent, claim=_CLAIM, **{"finishup-agent": registration.agent_id}
+        ),
+        edge.call_headers(claim=other_claim, **{"finishup-agent": registration.agent_id}),
+        edge.call_headers(claim=_CLAIM, **{"finishup-agent": "agt_" + "0" * 32}),
+    ):
+        refused = await edge.client.post("/v1/service_status", headers=headers, content=b"{}")
+        assert refused.status_code == 404 and _reason(refused) == "agent_unknown"
+    malformed = await edge.client.post(
+        "/v1/service_status",
+        headers=edge.call_headers(claim=_CLAIM, **{"finishup-agent": "agent-1"}),
+        content=b"{}",
+    )
+    assert malformed.status_code == 400 and _reason(malformed) == "header_invalid"
+    await edge.client.delete(f"/v1/agents/{registration.agent_id}", headers=edge.headers())
+    gone = await edge.client.post(
+        "/v1/service_status",
+        headers=edge.call_headers(claim=_CLAIM, **{"finishup-agent": registration.agent_id}),
+        content=b"{}",
+    )
+    assert gone.status_code == 404 and _reason(gone) == "agent_unknown"
+    assert len(edge.backend.call_agents) == 2

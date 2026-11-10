@@ -229,3 +229,31 @@ def test_the_api_manifest_is_the_closure_and_changes_with_any_member() -> None:
             read,
             roots,
         )
+
+
+def test_an_agents_work_admits_exactly_the_control_wires_workspace_call_frames() -> None:
+    """C5: each call is the ``workspace_call`` frame ``control-result`` 2.10.0 defines (every
+    member bound as there), in the schema and in the parser; ``{}`` is refused by both."""
+
+    work = json.loads(
+        (_REPO / "schemas" / "service" / "rest-agent-work-1.0.0.schema.json").read_text()
+    )
+    result = json.loads(
+        (_REPO / "schemas" / "service" / "control-result-2.10.0.schema.json").read_text()
+    )
+    (frame,) = [
+        branch
+        for branch in result["oneOf"]
+        if branch.get("properties", {}).get("kind") == {"const": "workspace_call"}
+    ]
+    items = dict(work["$defs"]["WorkspaceCallRef"])
+    assert items.pop("description") == "One control workspace_call frame."
+    # The generator orders ``required``; the members are the same.
+    assert sorted(items.pop("required")) == sorted(frame["required"])
+    assert items == {key: value for key, value in frame.items() if key != "required"}
+    with pytest.raises(RestDocumentError):
+        contract.parse_agent_work(b'{"calls":[{}],"schema_version":"1.0.0"}', max_bytes=1 << 20)
+    assert any(
+        vector["schema"] == "rest-agent-work" and vector["document"]["calls"]
+        for vector in _CASE["valid"]
+    )

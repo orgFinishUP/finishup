@@ -916,7 +916,8 @@ class NativeRestBindings:
     """What this daemon gives its native REST backend (ADR-053, ``service.rest_native``).
 
     ``dispatch`` serves one call as the control socket does (presentation facts never come from
-    the network: the fail-safe machine-readable projection), bound to the consented revision;
+    the network: the fail-safe machine-readable projection), bound to the consented revision, with
+    the calling connection's own registered agent channel, if any, preferred for its handle;
     ``resolve_claim`` keys a claim with the installation MAC exactly as a claim-bound hello is
     keyed (never a path); ``hub`` is the same agent hub claim-bound connections register with;
     ``activity`` holds idle relock for one request or one registered agent, as an open control
@@ -933,6 +934,7 @@ class NativeRestBindings:
             RepositoryPrivacyContext | None,
             bool,
             ServerProfileRevision,
+            object,
         ],
         Awaitable[ControlResult],
     ]
@@ -1321,8 +1323,11 @@ class ServiceDaemon:
             context: RepositoryPrivacyContext | None,
             claim_unkeyed: bool,
             revision: ServerProfileRevision,
+            channel: object = None,
         ) -> ControlResult:
-            with live_call_scope():
+            # A call naming its connection's registered agent prefers that agent, as a call on
+            # the agent's own control connection does (``live_call_scope``, design v2 §8.5).
+            with live_call_scope(cast(WorkspaceAgentChannel | None, channel)):
                 return await self.dispatch(
                     client_kind,
                     request,

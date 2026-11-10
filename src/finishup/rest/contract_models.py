@@ -7,7 +7,9 @@ both agreeing on the golden vectors (``fixtures/service/rest.case.json``). What 
 enforces.
 """
 
-from typing import Annotated, Any, Literal
+import json
+from importlib import resources
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
@@ -34,10 +36,23 @@ type ServiceStatusRef = Annotated[
         {"$ref": "https://schemas.yoetz.dev/0.1/service/service-status-1.0.0.schema.json"}
     ),
 ]
-type WorkspaceCallRef = Annotated[
-    dict[str, Any],
-    WithJsonSchema({"type": "object", "description": "One control workspace_call frame."}),
-]
+
+
+def _workspace_call_frame() -> dict[str, Any]:
+    """The control wire's own ``workspace_call`` frame (``control-result`` 2.10.0, packaged),
+    so a REST agent's work admits exactly the frames the control socket admits, every member
+    bound as there (a schema that admitted ``{}`` would leave a server's call undefined)."""
+
+    path = resources.files("finishup").joinpath(
+        "resources", "schemas", "service", "control-result-2.10.0.schema.json"
+    )
+    for branch in cast(list[dict[str, Any]], json.loads(path.read_bytes())["oneOf"]):
+        if branch.get("properties", {}).get("kind") == {"const": "workspace_call"}:
+            return {**branch, "description": "One control workspace_call frame."}
+    raise RuntimeError("workspace_call_frame_schema_missing")
+
+
+type WorkspaceCallRef = Annotated[dict[str, Any], WithJsonSchema(_workspace_call_frame())]
 
 
 class RestErrorContract(BaseModel):

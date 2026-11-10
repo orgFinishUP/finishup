@@ -14,7 +14,9 @@ The process that holds the vault is then on the network; its security review is 
   as a claim-bound hello is, never resolved to a path; a claim the service cannot key now (a
   locked vault) makes its calls answer ``vault_locked``, never served unbound;
 * an agent registers an in-process channel with the same hub claim-bound control connections use,
-  holding idle relock like an open connection while it is registered;
+  holding idle relock like an open connection while it is registered; a call naming it is
+  dispatched with that channel as its connection's own agent (``live_call_scope``), as a call on
+  the agent's control connection is; its handle is let go once it is ended;
 * a call holds idle relock while it runs; cancelling it cancels the dispatch, which answers
   ``request_cancelled``.
 """
@@ -24,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from finishup.ports.control import (
     ControlCallRequest,
@@ -58,7 +60,8 @@ class NativeBackend:
 
     def __init__(self, bindings: NativeRestBindings) -> None:
         self._bindings = bindings
-        self._handles: list[AgentHandle] = []
+        # Only live registrations: a handle leaves this set when its agent is ended.
+        self._handles: set[AgentHandle] = set()
 
     def __repr__(self) -> str:
         return "NativeBackend(<redacted>)"
@@ -71,6 +74,16 @@ class NativeBackend:
         if revision != self._bindings.current_revision():
             # Before the claim is keyed or anything dispatched (ADR-052).
             raise BackendRefusal("server_profile_changed")
+
+    async def admit(
+        self,
+        *,
+        client_kind: ControlClientKind,
+        revision: ServerProfileRevision,
+        start_service: bool,
+    ) -> None:
+        del client_kind, start_service
+        self._admit(revision)
 
     async def profile(self) -> ServerProfile:
         try:
@@ -114,14 +127,20 @@ class NativeBackend:
         claim: WorkspaceClaim | None,
         revision: ServerProfileRevision,
         start_service: bool,
+        agent: AgentHandle | None = None,
     ) -> ControlResult:
         del start_service  # this service is running: it answers the request itself
         self._admit(revision)
         context = await self._context(claim)
         unkeyed = claim is not None and context is None
+        channel = None if agent is None or agent not in self._handles else agent.binding
+        if agent is not None and channel is None:
+            raise BackendRefusal("agent_unknown")
         try:
             async with self._bindings.activity():
-                return await self._bindings.dispatch(client_kind, call, context, unkeyed, revision)
+                return await self._bindings.dispatch(
+                    client_kind, call, context, unkeyed, revision, channel
+                )
         except asyncio.CancelledError:
             return _error(call, ControlError("request_cancelled", retryable=True))
 
@@ -158,6 +177,7 @@ class NativeBackend:
             await stack.aclose()
             raise BackendRefusal("workspace_agent_unavailable") from None
         closed = False
+        handle: AgentHandle | None = None
 
         async def deliver(reply: WorkspaceReply) -> None:
             hub.deliver(channel, reply)
@@ -167,17 +187,18 @@ class NativeBackend:
             if closed:
                 return
             closed = True
+            self._handles.discard(cast(AgentHandle, handle))
             try:
                 await hub.unregister(channel)
             finally:
                 await stack.aclose()
 
-        handle = AgentHandle(context.workspace_handle, deliver, close)
-        self._handles.append(handle)
+        handle = AgentHandle(context.workspace_handle, deliver, close, binding=channel)
+        self._handles.add(handle)
         return handle
 
     async def aclose(self) -> None:
-        handles, self._handles = self._handles, []
+        handles, self._handles = tuple(self._handles), set()
         for handle in handles:
             with contextlib.suppress(Exception):
                 await handle.close()

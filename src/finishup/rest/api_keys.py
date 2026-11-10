@@ -28,14 +28,19 @@ import re
 import secrets
 import stat
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, cast
 
 from finishup.config.installation import format_rfc3339_ms, parse_rfc3339_ms
-from finishup.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
+from finishup.config.paths import (
+    PathSafetyError,
+    ensure_owner_only_dir,
+    existing_owner_only_dir,
+    state_dir,
+)
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.rest.contract import (
     API_SCOPES,
@@ -99,15 +104,25 @@ _REASONS: Final = frozenset(
 
 
 class ApiKeyError(Exception):
-    """A bounded API-key failure; ``reason`` is a closed token and never holds a key."""
+    """A bounded API-key failure; ``reason`` is a closed token and never holds a key.
+
+    ``active_key_id`` names a key ``create`` stored and could not revoke after a later step
+    failed: nobody received it, so its caller revokes it (or names it to the owner).
+    """
 
     reason: str
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, active_key_id: str | None = None) -> None:
         if reason not in _REASONS:
             raise ValueError("api_key_reason_invalid")
         self.reason = reason
+        self.active_key_id = active_key_id
         super().__init__(reason)
+
+
+class _Unsynced(Exception):
+    """The new file is in place (it is what every reader sees now), but its folder could not be
+    flushed: the change is made, not yet durable."""
 
 
 def validate_label(label: str) -> str:
@@ -242,7 +257,7 @@ def _encode(records: tuple[ApiKeyRecord, ...]) -> bytes:
     return canonical_encode(document) + b"\n"
 
 
-type _Signature = tuple[int, int, int, int]
+type _Signature = tuple[int, int, int, int, int]
 
 
 class ApiKeyStore:
@@ -267,43 +282,64 @@ class ApiKeyStore:
     def path(self) -> Path:
         return self._path
 
-    def _facts(self) -> os.stat_result | None:
-        try:
-            facts = self._path.lstat()
-        except FileNotFoundError:
-            return None
-        except OSError:
-            raise ApiKeyError("api_keys_unsafe") from None
-        if (
-            not stat.S_ISREG(facts.st_mode)
-            or facts.st_uid != os.geteuid()
-            or stat.S_IMODE(facts.st_mode) & 0o077
-            or facts.st_size > _MAX_FILE_BYTES
-        ):
-            raise ApiKeyError("api_keys_unsafe")
-        return facts
+    def _forget(self) -> tuple[ApiKeyRecord, ...]:
+        self._signature = None
+        self._cached = ()
+        return ()
 
     def _read(self) -> tuple[ApiKeyRecord, ...]:
-        facts = self._facts()
-        if facts is None:
-            self._signature = None
-            self._cached = ()
-            return ()
-        signature: _Signature = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
-        if signature == self._signature:
-            return self._cached
+        """The stored keys, read again only when the file changed.
+
+        The folder must be owner-only (``0700``, this user's, no symlink on its path), so no
+        other user can swap the file between a check and its use; the file is opened without
+        following a link and judged by the descriptor actually opened (``fstat``: a regular,
+        owner-only file of this user within the bound) before a byte is decoded or cached.
+        """
+
         try:
-            descriptor = os.open(self._path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            if not existing_owner_only_dir(self._directory):
+                return self._forget()
+        except PathSafetyError:
+            raise ApiKeyError("api_keys_unsafe") from None
+        try:
+            descriptor = os.open(
+                self._path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            )
         except FileNotFoundError:
-            self._signature = None
-            self._cached = ()
-            return ()
+            return self._forget()
         except OSError:
             raise ApiKeyError("api_keys_unsafe") from None
         try:
-            data = os.read(descriptor, _MAX_FILE_BYTES + 1)
+            facts = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(facts.st_mode)
+                or facts.st_uid != os.geteuid()
+                or stat.S_IMODE(facts.st_mode) & 0o077
+                or facts.st_size > _MAX_FILE_BYTES
+            ):
+                raise ApiKeyError("api_keys_unsafe")
+            signature: _Signature = (
+                facts.st_dev,
+                facts.st_ino,
+                facts.st_size,
+                facts.st_mtime_ns,
+                facts.st_ctime_ns,
+            )
+            if signature == self._signature:
+                return self._cached
+            chunks: list[bytes] = []
+            remaining = _MAX_FILE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except OSError:
+            raise ApiKeyError("api_keys_unsafe") from None
         finally:
             os.close(descriptor)
+        data = b"".join(chunks)
         if len(data) > _MAX_FILE_BYTES:
             raise ApiKeyError("api_keys_unsafe")
         records = _decode(data)
@@ -398,12 +434,15 @@ class ApiKeyStore:
         except OSError:
             temporary.unlink(missing_ok=True)
             raise ApiKeyError("api_keys_unsafe") from None
-        directory = os.open(self._directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
         self._signature = None
+        try:
+            directory = os.open(self._directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            raise _Unsynced from None
 
     def create(
         self,
@@ -455,7 +494,19 @@ class ApiKeyStore:
                 salt=base64.b64encode(salt).decode("ascii"),
                 hash=_digest(salt, token.secret),
             )
-            self._write((*records, record))
+            try:
+                self._write((*records, record))
+            except _Unsynced:
+                # The key is stored and active, but this fails before its text is handed back:
+                # nobody would hold it, so it is revoked here, under the same lock.
+                revoked = replace(record, revoked_at=format_rfc3339_ms(stamp))
+                try:
+                    self._write((*records, revoked))
+                except _Unsynced:
+                    pass  # the revoked record is in place: no active key is left behind
+                except ApiKeyError:
+                    raise ApiKeyError("api_keys_unsafe", active_key_id=record.key_id) from None
+                raise ApiKeyError("api_keys_unsafe") from None
         return record, text
 
     def revoke(self, key_id: str, *, now: datetime | None = None) -> bool:
@@ -473,7 +524,8 @@ class ApiKeyStore:
                 replace(item, revoked_at=stamp) if item.key_id == key_id else item
                 for item in records
             )
-            self._write(updated)
+            with suppress(_Unsynced):  # in place: the key fails its next request
+                self._write(updated)
         return True
 
 

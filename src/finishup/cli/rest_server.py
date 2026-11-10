@@ -213,6 +213,9 @@ def api_key_create(
         if descriptor is not None:
             os.close(descriptor)
             cast(Path, output_file).unlink(missing_ok=True)
+        if error.active_key_id is not None:
+            # Stored, then a later step failed and its own revocation too: nobody holds it.
+            raise _revoke_undelivered(error.active_key_id, error.reason) from None
         raise _fail(error.reason) from None
     if descriptor is not None:
         try:

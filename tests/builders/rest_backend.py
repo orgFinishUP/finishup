@@ -95,14 +95,18 @@ class RecordedAgent:
 
 @dataclass(slots=True)
 class ScriptedRestBackend:
-    """See the module text. ``gate``, when set, holds every call until it is set."""
+    """See the module text. ``gate``, when set, holds every call until it is set;
+    ``register_gate`` holds every agent registration the same way."""
 
     edge: Edge = "native"
     revision: ServerProfileRevision = TEST_REVISION
     profile_document: dict[str, Any] = field(default_factory=profile_document)
     unkeyed: bool = False
     gate: asyncio.Event | None = None
+    register_gate: asyncio.Event | None = None
     refuse_dispatch: str | None = None
+    admissions: list[ServerProfileRevision] = field(default_factory=list[ServerProfileRevision])
+    call_agents: list[AgentHandle | None] = field(default_factory=list[AgentHandle | None])
     sessions: list[tuple[ControlClientKind, WorkspaceClaim | None]] = field(
         default_factory=list[tuple[ControlClientKind, WorkspaceClaim | None]]
     )
@@ -116,6 +120,17 @@ class ScriptedRestBackend:
     def _admit(self, revision: ServerProfileRevision) -> None:
         if revision != self.revision:
             raise BackendRefusal("server_profile_changed")
+
+    async def admit(
+        self,
+        *,
+        client_kind: ControlClientKind,
+        revision: ServerProfileRevision,
+        start_service: bool,
+    ) -> None:
+        del client_kind, start_service
+        self._admit(revision)
+        self.admissions.append(revision)
 
     async def profile(self) -> ServerProfile:
         return profile_from_json(json.dumps(self.profile_document).encode())
@@ -142,12 +157,14 @@ class ScriptedRestBackend:
         claim: WorkspaceClaim | None,
         revision: ServerProfileRevision,
         start_service: bool,
+        agent: AgentHandle | None = None,
     ) -> ControlResult:
         del client_kind
         self._admit(revision)
         if self.refuse_dispatch is not None:
             raise BackendRefusal(self.refuse_dispatch)
         self.calls.append((call, claim, start_service))
+        self.call_agents.append(agent)
         if self.gate is not None:
             try:
                 await self.gate.wait()
@@ -169,6 +186,8 @@ class ScriptedRestBackend:
     ) -> AgentHandle:
         del client_kind
         self._admit(revision)
+        if self.register_gate is not None:
+            await self.register_gate.wait()
         if self.unkeyed:
             raise BackendRefusal("workspace_agent_unavailable")
         recorded: RecordedAgent | None = None

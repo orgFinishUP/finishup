@@ -14,7 +14,13 @@ table (idempotent operation ids, long-polls, cancellation, retained answers) and
 Every backend method takes the claim **already namespaced** by the caller's principal
 (``rest.contract.claim_for_principal``) and the consented revision; a revision that is not the
 server's current one is refused ``server_profile_changed`` before anything is keyed, registered or
-dispatched (ADR-052). Failures are ``BackendRefusal`` with a closed ``rest-error`` reason.
+dispatched (ADR-052). ``admit`` makes that check on its own, so the routes refuse a stale request
+before they read its body; the work itself checks again. Failures are ``BackendRefusal`` with a
+closed ``rest-error`` reason.
+
+A call may name the agent its own connection registered (``agent``): the backend sends it the way
+a control connection's call reaches the agent its hello declared, so that agent answers the call's
+workspace operations ahead of any other (the helper's background agent included).
 """
 
 from __future__ import annotations
@@ -56,7 +62,7 @@ class BackendRefusal(Exception):
         super().__init__(reason)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class AgentHandle:
     """One registered workspace agent as its backend keeps it.
 
@@ -70,6 +76,8 @@ class AgentHandle:
     deliver: Callable[[WorkspaceReply], Awaitable[None]]
     close: Callable[[], Awaitable[None]]
     ended: asyncio.Event = field(default_factory=asyncio.Event)
+    # What the backend that made this handle needs to send a call to this agent (opaque here).
+    binding: object = None
 
 
 class RestBackend(Protocol):
@@ -80,6 +88,20 @@ class RestBackend(Protocol):
 
     async def profile(self) -> ServerProfile:
         """The service's own profile (owner view); the routes put the caller's key in it."""
+        ...
+
+    async def admit(
+        self,
+        *,
+        client_kind: ControlClientKind,
+        revision: ServerProfileRevision,
+        start_service: bool,
+    ) -> None:
+        """Refuse ``server_profile_changed`` unless ``revision`` is the server's current one.
+
+        Asked before a request's body is read; the session, the call and the registration
+        check again where the work is done.
+        """
         ...
 
     async def session(
@@ -100,13 +122,16 @@ class RestBackend(Protocol):
         claim: WorkspaceClaim | None,
         revision: ServerProfileRevision,
         start_service: bool,
+        agent: AgentHandle | None = None,
     ) -> ControlResult:
         """Run one call and return its result.
 
         Cancelling the task asks the service to cancel the call, after the call itself reached
         it (never before: cancellation order), and still returns the call's own result
-        (``request_cancelled`` when it stopped). ``start_service`` is false for a background
-        agent's client, which never starts a service its owner stopped.
+        (``request_cancelled`` when it stopped); a result that cannot be learned once the call
+        reached the service is ``request_timeout`` (outcome unknown). ``start_service`` is false
+        for a background agent's client, which never starts a service its owner stopped.
+        ``agent`` is the calling connection's own registered agent (this backend's handle).
         """
         ...
 

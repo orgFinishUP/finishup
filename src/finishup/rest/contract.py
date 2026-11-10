@@ -37,7 +37,7 @@ import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from finishup.ports.control import (
     ControlClientKind,
@@ -61,6 +61,7 @@ __all__ = [
     "API_SCOPES",
     "CLAIM_BOUND_ONLY_METHODS",
     "DEFAULT_WAIT_MS",
+    "HEADER_AGENT",
     "HEADER_API_MANIFEST",
     "HEADER_CLAIM",
     "HEADER_CLIENT_KIND",
@@ -152,6 +153,9 @@ HEADER_OPERATION_ID: Final = "finishup-operation-id"
 HEADER_DEADLINE_MS: Final = "finishup-deadline-ms"
 HEADER_ROUTE_PROFILE: Final = "finishup-route-profile"
 HEADER_HOST_PROFILE: Final = "finishup-host-profile"
+# The workspace agent the calling connection registered (``POST /v1/agents``): its calls go to
+# that agent first, as a control connection's calls go to the agent its own hello declared.
+HEADER_AGENT: Final = "finishup-agent"
 # The server-profile revision the client consented to (ADR-052): on every ``/v1`` request but the
 # profile route and the two reverse ``DELETE`` routes.
 HEADER_SERVER_PROFILE: Final = "finishup-server-profile"
@@ -751,6 +755,12 @@ def agent_work_document(calls: Sequence[Mapping[str, JsonValue]]) -> bytes:
 
 
 def parse_agent_work(body: object, *, max_bytes: int) -> AgentWork:
+    """The agent's pending calls, each one a complete ``workspace_call`` frame as the control
+    wire defines it (``control-result`` 2.10.0); anything else refuses the whole document."""
+
+    from finishup.domain.values import freeze_json
+    from finishup.service.control_protocol import ControlProtocolError, parse_workspace_call
+
     document = _decode(body, frozenset({"calls", "schema_version"}), limit=max_bytes)
     calls = document["calls"]
     if not isinstance(calls, (list, tuple)) or len(calls) > _MAX_CALLS_PER_WORK:
@@ -758,6 +768,11 @@ def parse_agent_work(body: object, *, max_bytes: int) -> AgentWork:
     items = tuple(calls)
     if any(not isinstance(call, Mapping) for call in items):
         raise RestDocumentError
+    for call in items:
+        try:
+            parse_workspace_call(cast(Any, freeze_json(call)))
+        except (ControlProtocolError, TypeError, ValueError):
+            raise RestDocumentError from None
     return AgentWork(tuple(cast(Mapping[str, JsonValue], call) for call in items))
 
 

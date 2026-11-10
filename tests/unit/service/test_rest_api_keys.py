@@ -14,6 +14,7 @@ import stat
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -119,3 +120,76 @@ def test_an_unsafe_or_damaged_file_fails_closed(store: ApiKeyStore) -> None:
     store.path.write_bytes(b'{"keys":[],"schema":"other"}\n')
     with pytest.raises(ApiKeyError, match="api_keys_damaged"):
         ApiKeyStore(store.path.parent).records()
+
+
+def test_keys_in_a_folder_others_could_change_are_never_trusted(store: ApiKeyStore) -> None:
+    """A2-1: the folder is owner-only and link-free, or no key authenticates."""
+
+    _record, token = store.create("laptop", "agent", now=_NOW)
+    folder = store.path.parent
+    folder.chmod(0o770)
+    try:
+        with pytest.raises(ApiKeyError) as widened:
+            store.authenticate(token, now=_NOW)
+        assert widened.value.reason == "api_keys_unsafe"
+    finally:
+        folder.chmod(0o700)
+    assert store.authenticate(token, now=_NOW).key_id == _record.key_id
+    link = folder.parent / "linked"
+    link.symlink_to(folder.parent, target_is_directory=True)
+    with pytest.raises(ApiKeyError) as linked:
+        ApiKeyStore(link / "rest").authenticate(token, now=_NOW)
+    assert linked.value.reason == "api_keys_unsafe"
+
+
+def test_a_key_file_swapped_after_its_check_is_judged_by_what_was_opened(
+    store: ApiKeyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2-1: what is decoded is what the opened descriptor is (``fstat``), so a file swapped in
+    between a path check and the open (here: another store's database, readable by others) is
+    refused rather than trusted."""
+
+    _record, _token = store.create("laptop", "agent", now=_NOW)
+    other = ApiKeyStore(store.path.parent.parent / "other")
+    _intruder, intruder_key = other.create("intruder", "operator", now=_NOW)
+    planted = other.path.read_bytes()
+    real_open = os.open
+
+    def swapping_open(path: object, flags: int, *rest: int, **options: object) -> int:
+        if os.fspath(cast(str, path)) == os.fspath(store.path):
+            swap = store.path.with_name("swap")
+            swap.write_bytes(planted)
+            swap.chmod(0o644)
+            os.replace(swap, store.path)
+        return real_open(path, flags, *rest, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    try:
+        with pytest.raises(ApiKeyError) as refused:
+            store.authenticate(intruder_key, now=_NOW)
+    finally:
+        monkeypatch.undo()
+    assert refused.value.reason == "api_keys_unsafe"
+
+
+def test_a_key_stored_but_not_flushed_is_revoked_before_create_fails(
+    store: ApiKeyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2-4: the new key is in place when its folder cannot be flushed; ``create`` fails, so
+    nobody receives it, and it is revoked first (no active key is left that nobody holds)."""
+
+    store.create("first", "agent", now=_NOW)
+    real_fsync = os.fsync
+
+    def failing_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("folder_sync_failed")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    with pytest.raises(ApiKeyError) as failed:
+        store.create("second", "agent", now=_NOW)
+    assert failed.value.reason == "api_keys_unsafe"
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    second = [record for record in store.records() if record.label == "second"]
+    assert len(second) == 1 and second[0].revoked_at is not None

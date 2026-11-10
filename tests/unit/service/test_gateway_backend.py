@@ -32,6 +32,7 @@ from finishup.domain.values import JsonObject
 from finishup.gateway.backend import ControlSocketBackend
 from finishup.ports.control import (
     ControlClientKind,
+    ControlError,
     ControlMethod,
     WorkspaceAgentDeclaration,
     WorkspaceCall,
@@ -40,7 +41,7 @@ from finishup.ports.control import (
 )
 from finishup.protocol.ids import IdKind, new_id
 from finishup.protocol.server_profile import ServerProfileRevision
-from finishup.rest.backend import BackendRefusal
+from finishup.rest.backend import AgentHandle, BackendRefusal
 from finishup.service.control_protocol import (
     ControlStream,
     read_control_frame,
@@ -333,3 +334,130 @@ def test_the_gateway_imports_no_vault_storage_or_daemon_module() -> None:
                 names = [node.module]
             for name in names:
                 assert not name.startswith(forbidden), (path.name, name)
+
+
+async def test_the_admission_is_a_hello_that_names_only_the_revision() -> None:
+    """A1-1: the routes ask before they read a body; the service refuses a stale revision."""
+
+    daemon = ScriptedDaemon()
+    backend = ControlSocketBackend(connect=_served(daemon))
+    await backend.admit(
+        client_kind=ControlClientKind.CLI, revision=TEST_REVISION, start_service=True
+    )
+    assert daemon.connections == 1 and len(daemon.received(-1)) == 1
+    with pytest.raises(BackendRefusal) as refused:
+        await backend.admit(client_kind=ControlClientKind.CLI, revision=_STALE, start_service=True)
+    assert refused.value.reason == "server_profile_changed"
+    assert daemon.claims == []
+
+
+async def test_a_call_cancelled_whose_result_never_comes_has_an_unknown_outcome() -> None:
+    """A2-2: once the call frame was written, a cancel answered by no result (here the service
+    ends the connection) is ``request_timeout``, never a definite ``request_cancelled``."""
+
+    daemon = ScriptedDaemon()
+    daemon.hold_calls = True
+    backend = ControlSocketBackend(connect=_served(daemon))
+    call = call_request(0x2A, ControlMethod.RECEIPT)
+    task = asyncio.create_task(
+        backend.dispatch(
+            client_kind=ControlClientKind.CLI,
+            call=call,
+            claim=None,
+            revision=TEST_REVISION,
+            start_service=True,
+        )
+    )
+    await asyncio.wait_for(daemon.held.wait(), timeout=10)
+    task.cancel()
+    result = await asyncio.wait_for(task, timeout=10)
+    assert result.outcome == "error" and result.rpc_id == call.rpc_id
+    assert isinstance(result.body, ControlError) and result.body.reason == "request_timeout"
+
+
+async def _registered(
+    daemon: ScriptedDaemon, received: list[WorkspaceCall]
+) -> tuple[ControlSocketBackend, AgentHandle]:
+    daemon.claim_handle = _HANDLE
+    backend = ControlSocketBackend(connect=_served(daemon))
+    handle = await backend.register_agent(
+        client_kind=ControlClientKind.CLI,
+        claim=_CLAIM,
+        declaration=AGENT_DECLARATION,
+        revision=TEST_REVISION,
+        writer=_sink(received),
+    )
+    return backend, handle
+
+
+async def test_a_call_naming_the_agent_runs_on_that_agents_own_connection() -> None:
+    """A1-4: the service sees the call on the connection whose hello declared the agent, so it
+    offers that agent the call's workspace operations first (``live_call_scope``)."""
+
+    daemon = ScriptedDaemon()
+    received: list[WorkspaceCall] = []
+    backend, handle = await _registered(daemon, received)
+    call = call_request(0x0A, ControlMethod.SERVICE_STATUS)
+    result = await backend.dispatch(
+        client_kind=ControlClientKind.CLI,
+        call=call,
+        claim=_CLAIM,
+        revision=TEST_REVISION,
+        start_service=True,
+        agent=handle,
+    )
+    assert result.outcome == "ok" and result.rpc_id == call.rpc_id
+    assert daemon.connections == 1
+    frames = daemon.received(0)
+    assert len(frames) == 2 and b'"kind":"call"' in frames[1]
+    # The service's workspace call on that connection still reaches the agent's queue.
+    await _until(lambda: received)
+    await handle.close()
+    with pytest.raises(BackendRefusal) as refused:
+        await backend.dispatch(
+            client_kind=ControlClientKind.CLI,
+            call=call_request(0x0B, ControlMethod.SERVICE_STATUS),
+            claim=_CLAIM,
+            revision=TEST_REVISION,
+            start_service=True,
+            agent=handle,
+        )
+    assert refused.value.reason == "agent_unknown"
+    await asyncio.gather(*daemon.serving, return_exceptions=True)
+
+
+async def test_a_call_on_an_agents_connection_that_ends_has_an_unknown_outcome() -> None:
+    """A1-4 with A2-2: written on the agent's connection, then the connection ended without
+    its result: ``request_timeout``."""
+
+    daemon = ScriptedDaemon()
+    daemon.hold_calls = True
+    backend, handle = await _registered(daemon, [])
+    call = call_request(0x0C, ControlMethod.RECEIPT)
+    task = asyncio.create_task(
+        backend.dispatch(
+            client_kind=ControlClientKind.CLI,
+            call=call,
+            claim=_CLAIM,
+            revision=TEST_REVISION,
+            start_service=True,
+            agent=handle,
+        )
+    )
+    await asyncio.wait_for(daemon.held.wait(), timeout=10)
+    task.cancel()
+    result = await asyncio.wait_for(task, timeout=10)
+    assert isinstance(result.body, ControlError) and result.body.reason == "request_timeout"
+    await handle.close()
+    await asyncio.gather(*daemon.serving, return_exceptions=True)
+
+
+async def test_an_ended_agents_handle_is_let_go() -> None:
+    """A2-3: a deleted or expired registration leaves nothing behind in the backend."""
+
+    daemon = ScriptedDaemon()
+    backend, handle = await _registered(daemon, [])
+    assert len(backend._handles) == 1  # pyright: ignore[reportPrivateUsage]
+    await handle.close()
+    assert len(backend._handles) == 0  # pyright: ignore[reportPrivateUsage]
+    await asyncio.gather(*daemon.serving, return_exceptions=True)

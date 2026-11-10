@@ -19,15 +19,21 @@ redirect):
   delivers one ``workspace_reply``; ``DELETE /v1/agents/{id}`` ends it.
 
 **Order of checks on every request**, first refusal wins: an ``Origin`` header
-(``origin_forbidden``: browsers and DNS rebinding); the unauthenticated budget for discovery and
-for every request no key authenticated (``rate_limited``); the bearer key
-(``api_key_invalid|revoked|expired``, ``server_keys_unusable``); the client's REST API manifest
-(``header_invalid`` when absent, ``api_manifest_unsupported`` when this server does not serve it,
-U18); the consented profile revision (``header_invalid`` when absent, ``server_profile_changed``
-when it is not the server's current one, before any work, ADR-052); the key's scope as a method
+(``origin_forbidden``: browsers and DNS rebinding); the unauthenticated budget for discovery
+(whatever its method) and for every refusal of a request no key authenticated, whatever its reason
+(``rate_limited``); the bearer key (``api_key_invalid|revoked|expired``, ``server_keys_unusable``);
+the client's REST API manifest (``header_invalid`` when absent, ``api_manifest_unsupported`` when
+this server does not serve it, U18); the consented profile revision (``header_invalid`` when
+absent, ``server_profile_changed`` when it is not the server's current one, asked of the backend
+before any body is read and again where the work is done, ADR-052); the key's scope as a method
 allow-list (an out-of-scope call is answered with the control protocol's own ``method_forbidden``
 result, never dispatched); the claim, namespaced by the key's principal before the backend sees it
-(``rest.contract.claim_for_principal``); the per-key caps (``operation_limit``, ``agent_limit``).
+(``rest.contract.claim_for_principal``); the per-key caps (``operation_limit``, ``agent_limit``,
+whose slot a registration holds from before it reaches the backend).
+
+A call naming its connection's registered agent (``finishup-agent``) is sent to that agent first,
+as a control connection's call is; the agent must be the caller's own, live, and registered for the
+same claim and revision (``agent_unknown`` otherwise).
 
 A start, or any call naming a ``workspace_ref``, never names a path over the network: a start
 needs a claim (``workspace_claim_required``) and a ``workspace_ref`` must be a ``client:`` handle.
@@ -74,6 +80,7 @@ from finishup.rest.audit import AuditSink, RestAudit
 from finishup.rest.backend import AgentHandle, BackendRefusal, RestBackend
 from finishup.rest.contract import (
     AGENT_LEASE_MS,
+    HEADER_AGENT,
     HEADER_API_MANIFEST,
     HEADER_CLAIM,
     HEADER_CLIENT_KIND,
@@ -87,12 +94,12 @@ from finishup.rest.contract import (
     HEADER_SERVICE_INSTANCE,
     REST_ERROR_STATUS,
     REST_MAJOR,
-    UNAUTHENTICATED_REASONS,
     WELL_KNOWN_PATH,
     AgentRegistration,
     ApiScope,
     Discovery,
     RestDocumentError,
+    agent_id_valid,
     agent_registration_document,
     agent_work_document,
     claim_for_principal,
@@ -213,6 +220,8 @@ class _Admission:
 class _Agent:
     agent_id: str
     key_id: str
+    client_kind: ControlClientKind
+    claim: WorkspaceClaim
     revision: ServerProfileRevision
     max_reply_bytes: int
     handle: AgentHandle
@@ -354,6 +363,8 @@ class RestApp:
         self._admitting: dict[str, _Admission] = {}
         self._spent: dict[str, tuple[str, float]] = {}
         self._agents: dict[str, _Agent] = {}
+        # Registrations on their way to the backend, per key: each holds an agent slot.
+        self._registering: dict[str, int] = {}
         self._closing = asyncio.Event()
         self._sweeper: asyncio.Task[None] | None = None
         self._discovery = discovery_document(
@@ -391,9 +402,10 @@ class RestApp:
         return application
 
     def _unauthenticated(self, scope: Scope, reason: str) -> _Refusal:
-        """The refusal of a request no key authenticated, drawn from the budget."""
+        """The refusal of a request no key authenticated, drawn from the budget whatever its
+        reason (a malformed header is as cheap to send as a wrong key)."""
 
-        if reason in UNAUTHENTICATED_REASONS and not self._budget.take(_peer(scope)):
+        if not self._budget.take(_peer(scope)):
             return _Refusal("rate_limited")
         return _Refusal(reason)
 
@@ -402,10 +414,11 @@ class RestApp:
             raise self._unauthenticated(scope, "origin_forbidden")
         path = cast(str, scope.get("path", ""))
         if path == WELL_KNOWN_PATH:
-            if request.method != "GET":
-                raise _Refusal("method_not_allowed")
+            # Charged before its method is looked at: every request here is unauthenticated.
             if not self._budget.take(_peer(scope)):
                 raise _Refusal("rate_limited")
+            if request.method != "GET":
+                raise _Refusal("method_not_allowed")
             self._audit.request("discovery", 200, None)
             return "discovery", Response(self._discovery, media_type=_JSON, headers=dict(_NO_STORE))
         try:
@@ -491,6 +504,44 @@ class RestApp:
             return parse_revision_header(raw)
         except ValueError:
             raise _Refusal("header_invalid") from None
+
+    async def _admit_revision(
+        self, client_kind: ControlClientKind, revision: ServerProfileRevision, *, start: bool
+    ) -> None:
+        """The backend's own revision check, before a body is read (the work checks again)."""
+
+        try:
+            await self._backend.admit(
+                client_kind=client_kind, revision=revision, start_service=start
+            )
+        except BackendRefusal as refusal:
+            raise _Refusal(refusal.reason) from None
+
+    def _calling_agent(
+        self,
+        request: Request,
+        caller: _Caller,
+        claim: WorkspaceClaim | None,
+        revision: ServerProfileRevision,
+    ) -> _Agent | None:
+        """The registered agent a call names as its own connection's (``finishup-agent``)."""
+
+        raw = _single_header(request, HEADER_AGENT)
+        if raw is None:
+            return None
+        if not agent_id_valid(raw):
+            raise _Refusal("header_invalid")
+        agent = self._agents.get(raw)
+        if (
+            agent is None
+            or agent.key_id != caller.key_id
+            or agent.handle.ended.is_set()
+            or agent.claim != claim
+        ):
+            raise _Refusal("agent_unknown")
+        if agent.revision != revision:
+            raise _Refusal("server_profile_changed")
+        return agent
 
     @staticmethod
     def _client_kind(request: Request) -> ControlClientKind:
@@ -682,6 +733,7 @@ class RestApp:
 
         claim = self._claim(request, caller)
         addressed = self._addressed(request)
+        agent = self._calling_agent(request, caller, claim, revision)
         rpc_id = operation_id or new_id(IdKind.CONTROL_RPC)
         if not method_allowed(caller.scope, method, claim_bound=claim is not None):
             # The key's scope, not the client's own word, bounds its methods: the control
@@ -693,6 +745,8 @@ class RestApp:
                 rpc_id, addressed, method, ControlError("method_forbidden")
             )
             return self._result_response(forbidden, operation_id=rpc_id)
+        # A stale revision is refused before up to a frame's worth of body is read or admitted.
+        await self._admit_revision(client_kind, revision, start=True)
         body = _json_object(await _read_body(request, _MAX_CALL_BODY_BYTES))
         self._require_portable(method, body, claim)
         call = self._call_request(request, method, body, rpc_id, addressed)
@@ -704,7 +758,7 @@ class RestApp:
         )
         if pending >= MAX_PENDING_OPERATIONS_PER_KEY:
             raise _Refusal("operation_limit")
-        task = asyncio.create_task(self._dispatch(client_kind, call, claim, revision))
+        task = asyncio.create_task(self._dispatch(client_kind, call, claim, revision, agent))
         operation = _Operation(call.rpc_id, caller.key_id, revision, task, call)
         task.add_done_callback(lambda _task: self._finished(operation))
         self._operations[call.rpc_id] = operation
@@ -730,15 +784,20 @@ class RestApp:
         call: ControlCallRequest,
         claim: WorkspaceClaim | None,
         revision: ServerProfileRevision,
+        agent: _Agent | None,
     ) -> ControlResult:
         started = time.monotonic()
         try:
+            if agent is not None and agent.agent_id not in self._agents:
+                # Its agent ended while the call was admitted: the connection is gone.
+                raise BackendRefusal("agent_unknown")
             result = await self._backend.dispatch(
                 client_kind=client_kind,
                 call=call,
                 claim=claim,
                 revision=revision,
                 start_service=True,
+                agent=None if agent is None else agent.handle,
             )
         except asyncio.CancelledError:
             result = self._call_error(call, ControlError("request_cancelled", retryable=True))
@@ -941,14 +1000,13 @@ class RestApp:
         claim = self._claim(request, caller)
         if claim is None:
             raise _Refusal("workspace_claim_required")
+        await self._admit_revision(client_kind, revision, start=True)
         try:
             declaration = parse_agent_declaration(await _read_body(request, _MAX_SMALL_BODY_BYTES))
         except RestDocumentError:
             raise _Refusal("frame_invalid") from None
-        if (
-            sum(1 for agent in self._agents.values() if agent.key_id == caller.key_id)
-            >= MAX_AGENTS_PER_KEY
-        ):
+        live = sum(1 for agent in self._agents.values() if agent.key_id == caller.key_id)
+        if live + self._registering.get(caller.key_id, 0) >= MAX_AGENTS_PER_KEY:
             raise _Refusal("agent_limit")
         calls: asyncio.Queue[WorkspaceCall] = asyncio.Queue(maxsize=_AGENT_QUEUE_CAPACITY)
 
@@ -956,6 +1014,9 @@ class RestApp:
             # The service bounds calls in flight per agent well below this capacity.
             calls.put_nowait(call)
 
+        # The slot is held from here: concurrent registrations of one key never pass the cap
+        # while they wait for the backend, and a failed or cancelled one gives it back.
+        self._registering[caller.key_id] = self._registering.get(caller.key_id, 0) + 1
         try:
             handle = await self._backend.register_agent(
                 client_kind=client_kind,
@@ -966,9 +1027,17 @@ class RestApp:
             )
         except BackendRefusal as refusal:
             raise _Refusal(refusal.reason) from None
+        finally:
+            remaining = self._registering[caller.key_id] - 1
+            if remaining:
+                self._registering[caller.key_id] = remaining
+            else:
+                del self._registering[caller.key_id]
         agent = _Agent(
             agent_id=new_agent_id(),
             key_id=caller.key_id,
+            client_kind=client_kind,
+            claim=claim,
             revision=revision,
             max_reply_bytes=declaration.max_reply_bytes,
             handle=handle,
@@ -1044,6 +1113,7 @@ class RestApp:
         agent = await self._owned_agent(request, caller)
         if agent.revision != revision:
             raise _Refusal("server_profile_changed")
+        await self._admit_revision(agent.client_kind, revision, start=False)
         body = await _read_body(request, agent.max_reply_bytes)
         try:
             frozen = freeze_json(_json_object(body))
