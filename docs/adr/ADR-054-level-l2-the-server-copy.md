@@ -301,12 +301,17 @@ Forget advances the copy's epoch in the tombstone record (`yoetz.code-copy-tombs
 (`<state>/code-copies/erasures.json`, `yoetz.code-copy-erasures/1`: per task the forget's id, its
 reason, the task id and its evidence account, at most 4,096 pending tasks: every task of the copy
 or none, so when they do not all fit, e.g. while a locked vault keeps erasures from completing, the
-copy stays, fenced, and the forget is not `complete`); then it deletes the
-copy's folder and its checkout (decision 12); then each pinned task's ledger erasure runs
+copy stays, fenced, and the forget is not `complete`); then it deletes the copy's folder durably
+(the record with the wrapped key first, fsynced, then the rest, then the `copies` folder fsynced)
+and its checkout (decision 12); then each pinned task's ledger erasure runs
 (decision 15), and its entry leaves the pending record only once that task's erasure says it is
 done. A pending erasure is retried at the next forget, expiry or service start. Forget is
 idempotent and reports exactly what it deleted (copies, snapshots, objects, bytes) with `backups:
-not_managed` and `complete`; one that is not complete is never shown as done. A sync is fenced from the moment the server asked for it: the puller reads the epoch
+not_managed` and `complete`; one that is not complete is never shown as done. Each copy record
+carries the epoch it was written under: a record older than its tombstone (a forget interrupted by
+a power loss or a failed deletion, or kept by the erasure bound) is read, synced and pinned by
+nothing, no new copy is made over it, and the service start and every expiry run finish it (its
+erasures recorded again under the same forget id, which is the copy's and the epoch's). A sync is fenced from the moment the server asked for it: the puller reads the epoch
 before `code_sync_prepare`, and an upload begun under an older epoch is refused
 (`code_copy_forgotten`). Forget acts on the repository the claim names; another repository's copy
 needs its own.

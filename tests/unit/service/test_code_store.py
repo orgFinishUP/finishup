@@ -722,26 +722,152 @@ def test_a_forget_never_drops_an_erasure_it_cannot_record(
             "body": {"action": "forget", "copy": None, "forgot": forgot},
         },
     )
-    # Nothing of the copy went, and nothing was half-recorded.
-    assert store.have("alice", "repo-2") == (snap.snapshot,)
-    assert store.task_ids("alice", "repo-2") == ("task_3", "task_4")
+    # Nothing of the copy went and nothing was half-recorded; fenced, it serves nothing more.
+    assert [item.snapshots for item in store.copies("alice")] == [1]
     assert {item.task_id for item in store.pending_erasures()} == {"task_1", "task_2"}
-    # An expiry that finds the same backlog keeps the copy too.
-    _upload(
-        store,
-        snap.bundle(),
-        _manifest(snap, snap.bundle()),
-        repository="repo-2",
-        retention=("days", 1),
-    )
+    assert store.have("alice", "repo-2") == () and store.pinned("alice", "repo-2", "task_3") is None
+    # No new copy is made over it, and an expiry run that finds the same backlog keeps it too.
+    with pytest.raises(CodeStoreError, match="code_copy_erasure_backlog"):
+        _upload(store, snap.bundle(), _manifest(snap, snap.bundle()), repository="repo-2")
     clock.now += timedelta(days=2)
     expired = store.expire(task_closed=lambda _task: True)
     assert (expired.copies, expired.complete) == (0, False)
-    assert store.have("alice", "repo-2") == (snap.snapshot,)
-    # Once the backlog drains, the next forget records every task and deletes the copy.
+    assert [item.snapshots for item in store.copies("alice")] == [1]
+    # Once the backlog drains, the next expiry run finishes it: every task recorded, then gone.
     for pending in store.pending_erasures():
         store.complete_erasure(pending.forget_id, pending.task_id)
-    again = store.forget("alice", "repo-2")
-    assert again.complete and again.copies == 1
+    finished = store.expire(task_closed=lambda _task: True)
+    assert finished.complete and finished.copies == 1
     assert {item.task_id for item in store.pending_erasures()} == {"task_3", "task_4"}
-    assert store.have("alice", "repo-2") == ()
+    assert store.copies("alice") == () and store.forget("alice", "repo-2").complete
+
+
+def _copy_folder(tmp_path: Path) -> Path:
+    (folder,) = list((tmp_path / "code-copies" / "copies").iterdir())
+    return folder
+
+
+def test_a_forgotten_copy_that_reappears_is_never_read_and_goes_at_start(
+    tmp_path: Path,
+) -> None:
+    """A power loss can bring back directory entries a forget removed: a copy whose record is
+    older than its tombstone's epoch is rejected by every read and removed at start, and its
+    tasks' erasures are recorded once, under the same forget (§8.7)."""
+
+    import shutil
+
+    keyring = MemoryKeyring()
+    store = _store(tmp_path, keyring)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    store.pin("alice", "repo-1", "task_1", snap.snapshot)
+    original = _copy_folder(tmp_path)
+    saved = tmp_path / "saved"
+    shutil.copytree(original, saved)
+    key_id = next(iter(keyring.keys))
+    key = keyring.keys[key_id]
+    assert store.forget("alice", "repo-1").complete
+    (pending,) = store.pending_erasures()
+    # The deletion did not reach the disk: the folder (and the wrapped key) are back.
+    shutil.copytree(saved, original)
+    keyring.keys[key_id] = key
+    assert store.have("alice", "repo-1") == ()
+    assert store.latest("alice", "repo-1") is None and store.copies("alice") != ()
+    with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
+        store.snapshot("alice", "repo-1", snap.snapshot)
+    with pytest.raises(CodeStoreError, match="code_copy_unknown"):
+        store.read_object("alice", "repo-1", snap.tree)
+    assert store.task_entry("alice", "task_1") is None
+    with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
+        store.pin("alice", "repo-1", "task_2", snap.snapshot)
+    restarted = _store(tmp_path, keyring)
+    assert list((tmp_path / "code-copies" / "copies").iterdir()) == []
+    assert restarted.copies("alice") == ()
+    assert restarted.pending_erasures() == (pending,)
+    # A new copy after that is a copy again (its record carries the new epoch).
+    _upload(restarted, snap.bundle(), _manifest(snap, snap.bundle()))
+    assert restarted.have("alice", "repo-1") == (snap.snapshot,)
+    assert _store(tmp_path, keyring).have("alice", "repo-1") == (snap.snapshot,)
+
+
+def test_a_forget_is_durable_before_it_is_acknowledged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record (with the wrapped key) goes first and that is fsynced, then the rest, then the
+    ``copies`` folder is fsynced; the tombstone was written (fsynced) before any of it."""
+
+    store = _store(tmp_path)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    folder = _copy_folder(tmp_path)
+    events: list[str] = []
+    real_fsync = code_store._fsync_directory  # pyright: ignore[reportPrivateUsage]
+    real_unlink = os.unlink
+
+    def fsync(path: Path) -> None:
+        events.append("fsync " + ("copy" if path == folder else path.name))
+        real_fsync(path)
+
+    def unlink(path: object, *args: object, **kwargs: object) -> None:
+        if os.fspath(path) == os.fspath(folder / "copy.json"):  # type: ignore[arg-type]
+            events.append("unlink record")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(code_store, "_fsync_directory", fsync)
+    monkeypatch.setattr(code_store.os, "unlink", unlink)
+    assert store.forget("alice", "repo-1").complete
+    assert events == ["unlink record", "fsync copy", "fsync copies"]
+    assert not folder.exists()
+
+
+def test_a_deletion_that_fails_is_fenced_not_complete_and_finished_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    store.pin("alice", "repo-1", "task_1", snap.snapshot)
+    folder = _copy_folder(tmp_path)
+    real_rmtree = code_store.shutil.rmtree
+
+    def rmtree(path: object, *args: object, **kwargs: object) -> None:
+        del path, args, kwargs  # nothing is removed
+
+    monkeypatch.setattr(code_store.shutil, "rmtree", rmtree)
+    report = store.forget("alice", "repo-1")
+    assert (report.copies, report.complete) == (0, False)
+    assert [task.task_id for task in report.tasks] == ["task_1"]
+    # The record and its wrapped key went first; the ciphertext left is read by nothing.
+    assert folder.exists() and not (folder / "copy.json").exists()
+    assert store.have("alice", "repo-1") == () and store.copies("alice") == ()
+    again = store.forget("alice", "repo-1")
+    assert not again.complete
+    monkeypatch.setattr(code_store.shutil, "rmtree", real_rmtree)
+    assert store.forget("alice", "repo-1").complete and not folder.exists()
+    assert [item.task_id for item in store.pending_erasures()] == ["task_1"]
+
+
+def test_a_record_written_before_epochs_is_forgotten_by_a_newer_tombstone(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    clock = Clock()
+    store = _store(tmp_path, clock=clock)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    record_path = _copy_folder(tmp_path) / "copy.json"
+    record = json.loads(record_path.read_bytes())
+    assert record["epoch"] == 0
+    del record["epoch"]
+    record_path.write_bytes(canonical_encode(record))
+    assert _store(tmp_path, clock=clock).have("alice", "repo-1") == (snap.snapshot,)
+    tombstones = tmp_path / "code-copies" / "tombstones.json"
+    later = (clock.now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    document = {
+        "schema": "yoetz.code-copy-tombstones/1",
+        "epochs": {record["copy_key"]: {"epoch": 1, "forgotten_at": later, "reason": "owner"}},
+    }
+    tombstones.write_bytes(canonical_encode(document))
+    os.chmod(tombstones, 0o600)
+    assert _store(tmp_path, clock=clock).copies("alice") == ()

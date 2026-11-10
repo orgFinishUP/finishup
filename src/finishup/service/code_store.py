@@ -28,11 +28,16 @@ then the index, and the copy record last (each to a temporary file, fsynced, ren
 before the last rename leaves the previous snapshot in force.
 
 **Forget (§4.3, U20, §8.7).** ``forget`` first advances the copy's **epoch** in the tombstone record
-(fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), then
-deletes the copy's folder (objects, manifests, index, pins, wrapped key) and asks the keyring to
-discard the copy's key. It is idempotent and its report says exactly what it deleted; copies of the
-server's folder in backups its owner made are not managed here (``backups: not_managed``). Derived
-excerpts kept in task records (captured diffs, review excerpts) are not in this store.
+(fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), records
+the pinned tasks' erasures (every one or none), then deletes the copy's folder durably: the record
+with the wrapped key first (fsynced), then objects, manifests and index, then the ``copies`` folder
+is fsynced, before the forget is acknowledged. Each record carries the epoch it was written under, so
+a copy whose record is older than its tombstone (a forget a power loss or a failed deletion
+interrupted, or one the erasure bound kept) is read by nothing and finished at start and at every
+expiry run; no new copy is made over it. It is idempotent and its report says exactly what it
+deleted and whether anything is left (``complete``); copies of the server's folder in backups its
+owner made are not managed here (``backups: not_managed``). Derived excerpts kept in task records
+(captured diffs, review excerpts) are not in this store.
 
 **Expiry (§4.3, U11).** ``expire`` forgets copies whose retention ran out: ``days:N`` after N days
 without a sync; ``task_close`` once every task pinned to the copy closed; ``until_forgotten`` never.
@@ -48,7 +53,7 @@ import shutil
 import stat
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -318,7 +323,7 @@ def _now() -> datetime:
 class CodeStore:
     """The copies a server keeps (see the module text). Thread-safe; every method is blocking."""
 
-    __slots__ = ("_clock", "_keyring", "_limits", "_lock", "_root", "_uploads")
+    __slots__ = ("_clock", "_keyring", "_limits", "_lock", "_root", "_tombstone_cache", "_uploads")
 
     def __init__(
         self,
@@ -334,6 +339,8 @@ class CodeStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._uploads: dict[str, _Upload] = {}
+        # The tombstone record as last read or written by this store (its only writer).
+        self._tombstone_cache: dict[str, dict[str, JsonValue]] | None = None
 
     # --- layout -------------------------------------------------------------------------------
 
@@ -346,19 +353,53 @@ class CodeStore:
                 _private_directory(folder)
             for leftover in (self._root / "uploads").iterdir():
                 _remove_file(leftover)
+            self._tombstone_cache = None
             for copy in (self._root / "copies").iterdir():
                 if not copy.is_dir() or copy.is_symlink():
                     continue
-                if not (copy / "copy.json").is_file():
-                    # A first admission that stopped before its record: never a copy.
-                    shutil.rmtree(copy, ignore_errors=True)
-                    continue
                 for path in copy.rglob(".*.tmp"):
                     _remove_file(path)
+            # A first admission that stopped before its record (never a copy), a deletion that
+            # stopped part way, and a copy a forget already fenced (its epoch is older than its
+            # tombstone's: a forget interrupted before its deletion was durable) all go now.
+            self._reconcile()
             if "*" in self._tombstones():
                 # Uploads live in memory only, so none is in flight at start: start again.
                 document: dict[str, JsonValue] = {"schema": _TOMBSTONE_SCHEMA, "epochs": {}}
-                _write_private(self._root / "tombstones.json", canonical_encode(document))
+                self._write_tombstones(document)
+
+    def _reconcile(self) -> ForgetReport:
+        """Finish every forget a crash, a failed deletion or the erasure bound interrupted (see
+        ``open``); also run by every expiry run. Called with the lock held."""
+
+        report = ForgetReport(reason="reconciled")
+        folder = self._root / "copies"
+        if not folder.is_dir():
+            return report
+        for copy in sorted(folder.iterdir()):
+            if not copy.is_dir() or copy.is_symlink() or not _HEX64.match(copy.name * 2):
+                continue
+            if not (copy / "copy.json").is_file():
+                if _delete_folder(copy, folder):
+                    report = report.plus(ForgetReport(reason="reconciled"))
+                else:
+                    report = report.plus(ForgetReport(reason="reconciled", left=1))
+                continue
+            data = _read_private(copy / "copy.json", 1_048_576)
+            try:
+                value = strict_json_parse(data or b"")
+            except ValueError:
+                continue
+            if type(value) is not dict:
+                continue
+            record = cast(dict[str, JsonValue], value)
+            copy_key = record.get("copy_key")
+            if type(copy_key) is not str or not _HEX64.match(copy_key):
+                continue
+            if copy_key[:32] == copy.name and self._forgotten(copy_key, record):
+                found = self._forget_one(copy_key, "reconciled", advance=False)
+                report = report.plus(replace(found, reason="reconciled"))
+        return report
 
     def _copy_folder(self, copy_key: str) -> Path:
         return self._root / "copies" / copy_key[:32]
@@ -394,7 +435,12 @@ class CodeStore:
 
     # --- records ------------------------------------------------------------------------------
 
-    def _read_record(self, copy_key: str) -> dict[str, JsonValue] | None:
+    def _read_record(
+        self, copy_key: str, *, forgotten: bool = False
+    ) -> dict[str, JsonValue] | None:
+        """The copy's record, or None: no copy, or (unless ``forgotten``) a copy a forget
+        already fenced whose deletion is not finished (reads, syncs and pins reject it)."""
+
         path = self._copy_folder(copy_key) / "copy.json"
         data = _read_private(path, 1_048_576)
         if data is None:
@@ -408,23 +454,57 @@ class CodeStore:
         record = cast(dict[str, JsonValue], value)
         if record.get("schema") != COPY_SCHEMA or record.get("copy_key") != copy_key:
             raise CodeStoreError("code_copy_record_invalid")
+        if not forgotten and self._forgotten(copy_key, record):
+            return None
         return record
 
     def _write_record(self, copy_key: str, record: dict[str, JsonValue]) -> None:
         _write_private(self._copy_folder(copy_key) / "copy.json", canonical_encode(record))
 
     def _tombstones(self) -> dict[str, dict[str, JsonValue]]:
+        if self._tombstone_cache is not None:
+            return self._tombstone_cache
         data = _read_private(self._root / "tombstones.json", 4_194_304)
         if data is None:
-            return {}
+            self._tombstone_cache = {}
+            return self._tombstone_cache
         try:
             value = cast(dict[str, JsonValue], strict_json_parse(data))
             if value.get("schema") != _TOMBSTONE_SCHEMA:
                 raise ValueError("schema")
-            return cast(dict[str, dict[str, JsonValue]], value["epochs"])
+            epochs = cast(dict[str, dict[str, JsonValue]], value["epochs"])
+            if type(epochs) is not dict:
+                raise TypeError("epochs")
         except (ValueError, KeyError, TypeError, AttributeError):
             # A record that cannot be read fences every upload in flight: their epochs are lost.
             return {"*": {"epoch": secrets.randbelow(1 << 30) + 1}}
+        self._tombstone_cache = epochs
+        return epochs
+
+    def _write_tombstones(self, document: dict[str, JsonValue]) -> None:
+        self._tombstone_cache = None
+        _write_private(self._root / "tombstones.json", canonical_encode(document))
+        self._tombstone_cache = cast(dict[str, dict[str, JsonValue]], document["epochs"])
+
+    def _forgotten(self, copy_key: str, record: Mapping[str, JsonValue]) -> bool:
+        """Whether a forget fenced this copy after its record was written: its tombstone's epoch
+        is newer than the record's (a record written before epochs were recorded: forgotten
+        after its last sync). An unreadable tombstone record forgets nothing here."""
+
+        epochs = self._tombstones()
+        if "*" in epochs:
+            return False
+        tombstone = epochs.get(copy_key)
+        if type(tombstone) is not dict:
+            return False
+        epoch = tombstone.get("epoch")
+        if type(epoch) is not int:
+            return False
+        if "epoch" in record:
+            return epoch > _record_epoch(record)
+        stamp = record.get("last_sync_at") or record.get("created_at")
+        forgotten_at = tombstone.get("forgotten_at")
+        return type(stamp) is str and type(forgotten_at) is str and forgotten_at > stamp
 
     def _epoch(self, copy_key: str) -> int:
         epochs = self._tombstones()
@@ -432,7 +512,10 @@ class CodeStore:
             return cast(int, epochs["*"]["epoch"])
         return cast(int, epochs.get(copy_key, {}).get("epoch", 0))
 
-    def _advance_epoch(self, copy_key: str, reason: str) -> None:
+    def _advance_epoch(self, copy_key: str, reason: str, *, floor: int = 0) -> int:
+        """The copy's next epoch, recorded (fsynced) before anything of it is deleted; never
+        below ``floor`` (the record's own epoch, so a pruned tombstone never lowers it)."""
+
         epochs = {key: value for key, value in self._tombstones().items() if key != "*"}
         now = self._clock()
         cutoff = now - timedelta(days=_TOMBSTONE_DAYS)
@@ -445,13 +528,15 @@ class CodeStore:
             if stamp >= cutoff or key == copy_key:
                 kept[key] = value
         previous = cast(dict[str, JsonValue], kept.get(copy_key, {}))
+        epoch = max(cast(int, previous.get("epoch", 0)), floor) + 1
         kept[copy_key] = {
-            "epoch": cast(int, previous.get("epoch", 0)) + 1,
+            "epoch": epoch,
             "forgotten_at": format_rfc3339_ms(now),
             "reason": reason,
         }
         document: dict[str, JsonValue] = {"schema": _TOMBSTONE_SCHEMA, "epochs": kept}
-        _write_private(self._root / "tombstones.json", canonical_encode(document))
+        self._write_tombstones(document)
+        return epoch
 
     # --- keys and frames ----------------------------------------------------------------------
 
@@ -653,6 +738,11 @@ class CodeStore:
         if self._epoch(upload.copy_key) != upload.epoch:
             raise CodeStoreError("code_copy_forgotten")
         record = self._read_record(upload.copy_key)
+        if record is None and os.path.lexists(self._copy_folder(upload.copy_key)):
+            # What a forget fenced (or a deletion left) goes before a new copy is made there.
+            left = self._forget_one(upload.copy_key, "reconciled", advance=False).left
+            if left or os.path.lexists(self._copy_folder(upload.copy_key)):
+                raise CodeStoreError("code_copy_erasure_backlog")
         if record is not None:
             key = self._data_key(upload.copy_key, record)
             return self._admit(
@@ -756,6 +846,7 @@ class CodeStore:
                 "objects": len(index),
                 "last_sync_at": format_rfc3339_ms(self._clock()),
                 "retention": {"kind": kind, "days": days},
+                "epoch": max(_record_epoch(record), upload.epoch),
             }
         )
         self._write_record(upload.copy_key, record)
@@ -804,7 +895,9 @@ class CodeStore:
         }
         return record, key
 
-    def _records(self) -> list[tuple[str, dict[str, JsonValue]]]:
+    def _records(self, *, forgotten: bool = False) -> list[tuple[str, dict[str, JsonValue]]]:
+        """Every copy's record (with ``forgotten``, also those a forget fenced)."""
+
         found: list[tuple[str, dict[str, JsonValue]]] = []
         folder = self._root / "copies"
         if not folder.is_dir():
@@ -819,14 +912,15 @@ class CodeStore:
                 continue
             copy_key = record.get("copy_key")
             if type(copy_key) is str and _HEX64.match(copy_key) and copy.name == copy_key[:32]:
-                found.append((copy_key, record))
+                if forgotten or not self._forgotten(copy_key, record):
+                    found.append((copy_key, record))
         return found
 
     def _principal_bytes(self, principal: str) -> int:
         principal_id = _digest(_PRINCIPAL_DOMAIN, principal)
         return sum(
             cast(int, record["stored_bytes"])
-            for _key, record in self._records()
+            for _key, record in self._records(forgotten=True)
             if record.get("principal") == principal_id
         )
 
@@ -1038,12 +1132,13 @@ class CodeStore:
         return None
 
     def copies(self, principal: str) -> tuple[CopySummary, ...]:
-        """Every copy kept for ``principal``, without a path or name."""
+        """Every copy kept for ``principal``, without a path or name (one a forget fenced but
+        could not finish deleting yet too: it is still there)."""
 
         principal_id = _digest(_PRINCIPAL_DOMAIN, principal)
         with self._lock:
             summaries: list[CopySummary] = []
-            for _key, record in self._records():
+            for _key, record in self._records(forgotten=True):
                 if record.get("principal") != principal_id:
                     continue
                 retention = cast(dict[str, JsonValue], record["retention"])
@@ -1075,7 +1170,7 @@ class CodeStore:
                 principal_id = _digest(_PRINCIPAL_DOMAIN, principal)
                 keys = [
                     key
-                    for key, record in self._records()
+                    for key, record in self._records(forgotten=True)
                     if record.get("principal") == principal_id
                 ]
             # An upload in flight for a copy that does not exist yet is fenced as well.
@@ -1092,14 +1187,20 @@ class CodeStore:
                     self._drop_upload(upload_id)
             return report
 
-    def _forget_one(self, copy_key: str, reason: str) -> ForgetReport:
-        self._advance_epoch(copy_key, reason)
+    def _forget_one(self, copy_key: str, reason: str, *, advance: bool = True) -> ForgetReport:
+        """Tombstone (unless ``advance`` is False: finishing a forget already fenced), record the
+        pinned tasks' erasures, then delete durably (see ``_delete_folder``)."""
+
         folder = self._copy_folder(copy_key)
         try:
-            record = self._read_record(copy_key)
+            record = self._read_record(copy_key, forgotten=True)
         except CodeStoreError:
             record = None
-        if not folder.exists():
+        if advance:
+            epoch = self._advance_epoch(copy_key, reason, floor=_record_epoch(record))
+        else:
+            epoch = self._epoch(copy_key)
+        if not os.path.lexists(folder):
             return ForgetReport(reason=reason)
         objects = (
             sum(1 for _ in (folder / "objects").iterdir()) if (folder / "objects").is_dir() else 0
@@ -1117,13 +1218,18 @@ class CodeStore:
             # from this copy, so their erasure is retried after a crash (U20). Every one of them
             # or none: when they cannot all be recorded, the copy stays (fenced) and the forget
             # says it is not complete; it never deletes what it could not account for.
+            # The forget's id is the copy's and its epoch's, so finishing it after a crash
+            # records the same erasures again (idempotent), never a second forget's.
             try:
-                self._remember_erasures(secrets.token_hex(16), reason, tasks)
+                self._remember_erasures(_forget_id(record, epoch), reason, tasks)
             except CodeStoreError:
                 return ForgetReport(reason=reason, left=1)
-        shutil.rmtree(folder, ignore_errors=False)
         if record is not None:
             self._keyring.discard(cast(str, record["copy_id"]))
+        if not _delete_folder(folder, self._root / "copies"):
+            # Fenced, its record (and wrapped key) gone first if that much went: what is left
+            # is retried by the next forget, expiry run or start; nothing reads as deleted.
+            return ForgetReport(reason=reason, tasks=tuple(tasks), left=1, keys=(copy_key,))
         return ForgetReport(
             1, snapshots, objects, stored, reason, tasks=tuple(tasks), keys=(copy_key,)
         )
@@ -1158,6 +1264,10 @@ class CodeStore:
             pending = self._erasures()
         except CodeStoreError:
             pending = []  # an unreadable record is replaced; its tasks were erased or lost
+        recorded = {(row.get("forget_id"), row.get("task_id")) for row in pending}
+        tasks = [task for task in tasks if (forget_id, task.task_id) not in recorded]
+        if not tasks:
+            return
         if len(pending) + len(tasks) > _MAX_PENDING_ERASURES:
             raise CodeStoreError("code_copy_erasure_backlog")
         now = format_rfc3339_ms(self._clock())
@@ -1230,6 +1340,8 @@ class CodeStore:
         report = ForgetReport(reason="expired")
         candidates: list[tuple[str, frozenset[str]]] = []
         with self._lock:
+            # A forget left unfinished (the erasure bound, a failed deletion) is tried again.
+            report = report.plus(self._reconcile())
             for copy_key, record in self._records():
                 retention = cast(dict[str, JsonValue], record["retention"])
                 kind = retention.get("kind")
@@ -1258,6 +1370,55 @@ class CodeStore:
                     continue  # a task read the copy meanwhile: asked again at the next run
                 report = report.plus(self._forget_one(copy_key, "expired"))
         return report
+
+
+def _record_epoch(record: Mapping[str, JsonValue] | None) -> int:
+    """The forget epoch a copy's record was written under (0 before epochs were recorded)."""
+
+    epoch = None if record is None else record.get("epoch")
+    return epoch if type(epoch) is int and epoch >= 0 else 0
+
+
+def _forget_id(record: Mapping[str, JsonValue] | None, epoch: int) -> str:
+    """One forget of one copy: its random copy id and the epoch the forget fenced it at."""
+
+    copy_id = "" if record is None else str(record.get("copy_id", ""))
+    return hashlib.sha256(
+        f"yoetz/code-copy-forget/v1\x00{copy_id}\x00{epoch}".encode()
+    ).hexdigest()[:32]
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _delete_folder(folder: Path, parent: Path) -> bool:
+    """Delete a copy's folder durably; True once it is gone and that is on disk.
+
+    The record goes first, with the wrapped data key in it, and that removal is fsynced, so
+    what may be left is ciphertext no key opens; then the rest, then the parent folder is
+    fsynced, so a power loss never brings back a copy whose forget was acknowledged."""
+
+    try:
+        os.unlink(folder / "copy.json")
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        if os.path.lexists(folder):
+            _fsync_directory(folder)
+        shutil.rmtree(folder, ignore_errors=True)
+        if os.path.lexists(folder):
+            return False
+        _fsync_directory(parent)
+    except OSError:
+        return False
+    return True
 
 
 # --- pins ------------------------------------------------------------------------------------------
