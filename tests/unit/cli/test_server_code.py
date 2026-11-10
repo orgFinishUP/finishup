@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
@@ -16,7 +17,7 @@ from tests.builders.server_targets import ambient_home
 from typer.testing import CliRunner
 
 from finishup.cli import server as server_cli
-from finishup.cli import trusted_console
+from finishup.cli import server_code, trusted_console
 from finishup.cli import zero_network_selection as zero_network
 from finishup.cli.app import app
 from finishup.cli.server import LevelChoice, ServerCommandRefused
@@ -327,3 +328,178 @@ def test_allow_remove_sends_less_with_no_question_and_is_idempotent(
     outside = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "../aws.ini"])
     assert outside.exit_code != 0 and "PATH must be inside the repository" in outside.output
     assert [path for path, _digest in _allowed(remote)] == ["other.ini"]
+
+
+# --- forget --all ---------------------------------------------------------------------------------
+
+_FORGOT = {"copies": 1, "snapshots": 2, "objects": 10, "bytes": 732, "backups": "not_managed"}
+
+
+def _sent_from(record: targets.ServerTarget, folder: Path) -> Path:
+    """An export folder as a sync from ``folder`` leaves it: its record names that folder."""
+
+    from finishup.cli.server import repository_here
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import export_folder
+
+    path = export_folder(record.target_id, repository_here(str(folder)).key)
+    ExportDatabase(path).remember_root(Path(os.path.realpath(folder)))
+    return path
+
+
+def _second_repository(tmp_path: Path, name: str = "other") -> Path:
+    root = tmp_path / name
+    root.mkdir()
+    git(root, "init", "-q")
+    (root / "b.py").write_bytes(b"b\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "m")
+    return root
+
+
+class _Server:
+    """Stands in for the selected server's ``code_copy`` forget; records each claimed folder."""
+
+    def __init__(self, refuse: dict[str, str] | None = None) -> None:
+        self.asked: list[tuple[str, str, Path | None]] = []
+        self.refuse = refuse or {}
+
+    def __call__(self, worktree: str, action: str) -> dict[str, object]:
+        from finishup.config.paths import active_root
+
+        self.asked.append((worktree, action, active_root()))
+        reason = self.refuse.get(worktree)
+        if reason is not None:
+            raise ServerCommandRefused(reason)
+        return {"action": action, "copy": None, "forgot": dict(_FORGOT)}
+
+
+def _server(monkeypatch: pytest.MonkeyPatch, server: _Server) -> _Server:
+    monkeypatch.setattr(server_code, "_server_answer", server)
+    return server
+
+
+def test_forget_all_with_no_record_asks_nothing_and_says_so(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del remote, repository
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "no record of a copy of code it sent to lab; nothing was forgotten" in result.output
+    shown = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert shown.exit_code == 0, shown.output
+    assert json.loads(shown.output) == {
+        "action": "forget_all",
+        "forgotten": 0,
+        "not_forgotten": 0,
+        "repositories": [],
+    }
+    assert server.asked == []
+
+
+def test_forget_all_and_repository_are_refused_together(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sent_from(remote, repository)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(
+        app, ["server", "code", "forget", "--all", "--repository", str(repository)]
+    )
+    assert result.exit_code == 2
+    assert "usage: give --all or --repository FOLDER, not both" in result.output
+    assert server.asked == []
+
+
+def test_forget_all_forgets_each_folder_and_names_the_one_whose_folder_is_gone(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gone = _second_repository(tmp_path, "gone")
+    kept = _sent_from(remote, repository)
+    lost = _sent_from(remote, gone)
+    import shutil
+
+    shutil.rmtree(gone)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 20, result.output
+    top = os.path.realpath(repository)
+    # Only the folder still there was claimed (its own worktree), and its export folder went.
+    assert server.asked == [(top, "forget", targets.target_root(remote.target_id))]
+    assert not kept.exists() and lost.exists()
+    lines = result.stdout.splitlines()
+    assert lines[0] == "Every copy of code this computer sent to lab (2):"
+    forgotten = next(line for line in lines if top in line)
+    assert forgotten.endswith(
+        f"(copy {kept.name[:8]}): forgotten; lab deleted 2 snapshot(s), 10 stored objects, "
+        "732 bytes."
+    )
+    missing = next(line for line in lines if os.path.realpath(gone) in line)
+    assert f"(copy {lost.name[:8]}): not forgotten (repository_folder_missing): " in missing
+    assert "that folder is no longer there" in missing
+    assert "1 of 2 not forgotten: each stays on lab until it expires or is forgotten." in lines
+    assert "backups" in result.stdout
+    assert result.stderr.startswith("code_copy_forget_incomplete:")
+    # Once the folder is back as that repository, the same command forgets it (and only it).
+    _second_repository(tmp_path, "gone")
+    again = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert again.exit_code == 0, again.output
+    document = json.loads(again.stdout)
+    assert document["forgotten"] == 1 and document["not_forgotten"] == 0
+    (entry,) = document["repositories"]
+    assert entry["outcome"] == "forgotten" and entry["reason"] is None
+    assert entry["folder"] == os.path.realpath(gone) and entry["answer"]["forgot"] == _FORGOT
+    assert not lost.exists()
+
+
+def test_forget_all_names_every_copy_it_could_not_forget_and_keeps_its_record(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import exports_folder
+
+    refused = _second_repository(tmp_path, "refused")
+    outer = _second_repository(tmp_path, "outer")
+    inner = _second_repository(outer, "inner")
+    first = _sent_from(remote, refused)
+    moved = _sent_from(remote, inner)
+    import shutil
+
+    # That folder is no longer a repository of its own but a folder of another one: its key no
+    # longer names that export folder.
+    shutil.rmtree(inner / ".git")
+    unknown = exports_folder(remote.target_id) / ("e" * 32)
+    ExportDatabase(unknown)
+    damaged = exports_folder(remote.target_id) / ("f" * 32)
+    ExportDatabase(damaged)
+    (damaged / "export.json").write_bytes(b"{}\n")
+    server = _server(monkeypatch, _Server(refuse={os.path.realpath(refused): "remote_unreachable"}))
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert result.exit_code == 20, result.output
+    document = json.loads(result.stdout)
+    reasons = {entry["copy"]: entry["reason"] for entry in document["repositories"]}
+    assert reasons == {
+        first.name[:8]: "remote_unreachable",
+        moved.name[:8]: "repository_changed",
+        "e" * 8: "repository_folder_unknown",
+        "f" * 8: "export_record_unreadable",
+    }
+    assert [entry["position"] for entry in document["repositories"]] == [1, 2, 3, 4]
+    assert document["forgotten"] == 0 and document["not_forgotten"] == 4
+    assert [asked[0] for asked in server.asked] == [os.path.realpath(refused)]
+    # Nothing was forgotten, so every export folder stays for the next attempt.
+    assert all(path.exists() for path in (first, moved, unknown, damaged))
+    text = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert text.exit_code == 20
+    assert "not forgotten (remote_unreachable): the server could not be reached" in text.stdout
+    assert "then run this command again" in text.stdout
+    assert "that folder now holds another repository" in text.stdout
+    assert "a folder this computer cannot name (copy eeeeeeee)" in text.stdout
+    assert "4 of 4 not forgotten" in text.stdout and "backups" not in text.stdout
+    assert repository.exists()

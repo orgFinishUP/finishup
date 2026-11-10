@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,6 +19,7 @@ from finishup.client.code_export import (
     ExportRefused,
     ExportRequest,
     PreparedExport,
+    export_records,
     export_snapshot,
 )
 from finishup.client.code_secrets import ALWAYS_EXCLUDED, excluded_by, holds_known_secret
@@ -427,3 +429,98 @@ def test_the_export_database_is_owner_only_and_never_the_repository_s_own(tmp_pa
         assert path.stat().st_mode & 0o077 == 0, path
     database.remove()
     assert not (tmp_path / "export").exists()
+
+
+# --- the export record names the repository's folder (server code forget --all) -----------------
+
+
+def _record(folder: Path) -> dict[str, object]:
+    return json.loads((folder / "export.json").read_bytes())
+
+
+def test_a_sync_records_the_repository_folder_it_read_and_a_refused_one_records_none(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, {"a.py": b"1\n"})
+    (root / "sub").mkdir()
+    folder = tmp_path / "export"
+    database = ExportDatabase(folder)
+    assert database.root is None and _record(folder)["root"] is None
+
+    def held() -> None:
+        raise ExportRefused("repository_egress_held")
+
+    with pytest.raises(ExportRefused):
+        export_snapshot(_request(root), POLICY, database, gate=held)
+    assert _record(folder)["root"] is None
+    # A sync from a folder inside the worktree records the worktree's top.
+    export_snapshot(_request(root / "sub"), POLICY, database, gate=_open)
+    top = os.path.realpath(root)
+    assert database.root == top and _record(folder)["root"] == top
+    again = ExportDatabase(folder)
+    assert again.root == top and again.export_id == database.export_id
+
+
+def test_a_folder_that_cannot_be_shown_is_recorded_as_none(tmp_path: Path) -> None:
+    database = ExportDatabase(tmp_path / "export")
+    database.remember_root(Path("/srv/app"))
+    assert database.root == "/srv/app"
+    for unshowable in ("/srv/new\nline", "/srv/\x1b[2Japp", "/" + "a" * 4_100):
+        database.remember_root(Path(unshowable))
+        assert database.root is None, unshowable
+        assert _record(tmp_path / "export")["root"] is None
+
+
+@pytest.mark.parametrize("root", ["relative/app", "/srv/../app", "/srv/new\nline", 7, ["/srv/app"]])
+def test_a_record_naming_a_folder_out_of_shape_is_not_trusted(tmp_path: Path, root: object) -> None:
+    folder = tmp_path / "code-export" / ("a" * 32)
+    database = ExportDatabase(folder)
+    database.remember_root(Path("/srv/app"))
+    first = database.export_id
+    document = _record(folder)
+    document["root"] = root
+    (folder / "export.json").write_bytes(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    (listed,) = export_records(tmp_path / "code-export")
+    assert listed.readable is False and listed.root is None and listed.short_id == "a" * 8
+    # The exporter starts a new export from it: nothing the record named is trusted.
+    fresh = ExportDatabase(folder)
+    assert fresh.export_id != first and fresh.root is None and fresh.sent == ()
+
+
+def test_export_records_lists_every_entry_in_order_and_never_creates_or_follows(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "code-export"
+    assert export_records(directory) == ()
+    assert not directory.exists()
+    good = ExportDatabase(directory / ("b" * 32))
+    good.remember_root(Path("/srv/app"))
+    ExportDatabase(directory / ("a" * 32))
+    damaged = directory / ("c" * 32)
+    damaged.mkdir(mode=0o700)
+    (damaged / "export.json").write_bytes(b"{not json\n")
+    (damaged / "export.json").chmod(0o600)
+    loose = directory / ("d" * 32)
+    loose.mkdir(mode=0o700)
+    (loose / "export.json").write_bytes((directory / ("b" * 32) / "export.json").read_bytes())
+    (loose / "export.json").chmod(0o644)
+    (directory / "stray name").write_bytes(b"")
+    listed = export_records(directory)
+    assert [(r.short_id, r.root, r.readable) for r in listed[:4]] == [
+        ("a" * 8, None, True),
+        ("b" * 8, "/srv/app", True),
+        ("c" * 8, None, False),
+        ("d" * 8, None, False),
+    ]
+    stray = listed[4]
+    assert stray.readable is False and stray.root is None and "stray" not in stray.short_id
+    assert len(stray.short_id) == 8 and len(listed) == 5
+    linked = tmp_path / "linked"
+    linked.symlink_to(directory)
+    with pytest.raises(ExportRefused, match="code_export_unsafe"):
+        export_records(linked)
+    (tmp_path / "file").write_bytes(b"")
+    with pytest.raises(ExportRefused, match="code_export_unsafe"):
+        export_records(tmp_path / "file")

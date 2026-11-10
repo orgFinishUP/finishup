@@ -86,9 +86,11 @@ __all__ = [
     "EXPORT_SCHEMA",
     "ExportDatabase",
     "ExportPolicy",
+    "ExportRecord",
     "ExportRefused",
     "ExportRequest",
     "PreparedExport",
+    "export_records",
     "export_snapshot",
 ]
 
@@ -103,6 +105,10 @@ _MAX_GIT_OUTPUT: Final = 512 * 1024 * 1024
 _GIT_SECONDS: Final = 120.0
 _HEX: Final = re.compile(rb"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _EXPORT_ID: Final = re.compile(r"^[0-9a-f]{32}$")
+# An export folder's name: the first 32 hex digits of the repository key's digest (``code_sync``).
+_FOLDER_NAME: Final = re.compile(r"^[0-9a-f]{32}$")
+_MAX_ROOT_BYTES: Final = 4_096
+_MAX_RECORD_BYTES: Final = 65_536
 _LFS_POINTER: Final = re.compile(
     rb"^version https://git-lfs\.github\.com/spec/v1\n(?:[a-z0-9.-]+ [^\n]*\n)*$"
 )
@@ -138,16 +144,85 @@ class ExportRefused(Exception):
 # --- the export object database --------------------------------------------------------------------
 
 
+def _recordable_root(value: object) -> bool:
+    """Whether ``value`` can be kept as the repository's folder: absolute, normal, printable."""
+
+    if type(value) is not str or not value.startswith("/") or os.path.normpath(value) != value:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= _MAX_ROOT_BYTES and value.isprintable()
+
+
+type _Record = tuple[str, int, tuple[str, ...], str | None]
+
+
+def _read_export_record(path: Path) -> _Record | None:
+    """``(export id, next ref, sent, root)`` from ``export.json``; None when there is none.
+
+    Raises ``ExportRefused("code_export_unsafe")`` for a record that is not an owner-only regular
+    file; a record that cannot be parsed or names a value out of shape is None too: nothing it
+    named is trusted (fail closed).
+    """
+
+    try:
+        descriptor = os.open(path, _OPEN_FILE)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        raise ExportRefused("code_export_unsafe") from None
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+        ):
+            raise ExportRefused("code_export_unsafe")
+        encoded = os.read(descriptor, _MAX_RECORD_BYTES + 1)
+    except OSError:
+        raise ExportRefused("code_export_unsafe") from None
+    finally:
+        os.close(descriptor)
+    if len(encoded) > _MAX_RECORD_BYTES:
+        return None
+    try:
+        value = strict_json_parse(encoded.rstrip(b"\n"))
+        source = cast(dict[str, JsonValue], value)
+        if set(source) != {"schema", "export_id", "next_ref", "sent", "root"}:
+            raise ValueError("members")
+        if source["schema"] != EXPORT_SCHEMA:
+            raise ValueError("schema")
+        export_id = cast(str, source["export_id"])
+        next_ref = cast(int, source["next_ref"])
+        sent = tuple(cast(list[str], source["sent"]))
+        root = source["root"]
+        if not _EXPORT_ID.match(export_id) or type(next_ref) is not int or next_ref < 1:
+            raise ValueError("values")
+        if any(not _HEX.match(item.encode()) for item in sent):
+            raise ValueError("sent")
+        if root is not None and not _recordable_root(root):
+            raise ValueError("root")
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return export_id, next_ref, sent, cast(str | None, root)
+
+
 class ExportDatabase:
     """A FinishUP-owned store of git loose objects for one repository's copy on one target.
 
     ``<target root>/state/code-export/<repository key digest>/``: ``objects/xx/…`` (git's loose
     format, so ``git cat-file`` reads it in tests), and ``export.json`` with a random export id,
-    the next ref number and the snapshot commits sent (the local mirror of the server's have-set,
-    newest last). Everything owner-only; never the repository's own object store.
+    the next ref number, the snapshot commits sent (the local mirror of the server's have-set,
+    newest last) and ``root``: the repository's folder the latest sync read (its worktree's top,
+    an absolute path; ``null`` before a sync read one, or for a path that cannot be shown), which
+    ``server code forget --all`` claims to forget that repository's copy. Everything owner-only;
+    never the repository's own object store, and this computer's own record: never sent.
     """
 
-    __slots__ = ("_export_id", "_folder", "_next_ref", "_scanned", "_sent")
+    __slots__ = ("_export_id", "_folder", "_next_ref", "_root", "_scanned", "_sent")
 
     def __init__(self, folder: Path) -> None:
         self._folder = folder
@@ -157,14 +232,16 @@ class ExportDatabase:
         except PathSafetyError:
             raise ExportRefused("code_export_unsafe") from None
         self._scanned: dict[str, bool] = {}
-        record = self._read_record()
+        record = _read_export_record(self._record_path())
         if record is None:
+            # A record that cannot be read starts a new export: nothing it named is trusted.
             self._export_id = secrets.token_hex(16)
             self._next_ref = 1
             self._sent: tuple[str, ...] = ()
+            self._root: str | None = None
             self._write_record()
         else:
-            self._export_id, self._next_ref, self._sent = record
+            self._export_id, self._next_ref, self._sent, self._root = record
 
     @property
     def export_id(self) -> str:
@@ -180,41 +257,14 @@ class ExportDatabase:
     def sent(self) -> tuple[str, ...]:
         return self._sent
 
+    @property
+    def root(self) -> str | None:
+        """The repository's folder the latest sync read, or None (see the class text)."""
+
+        return self._root
+
     def _record_path(self) -> Path:
         return self._folder / _EXPORT_NAME
-
-    def _read_record(self) -> tuple[str, int, tuple[str, ...]] | None:
-        try:
-            descriptor = os.open(self._record_path(), _OPEN_FILE)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            raise ExportRefused("code_export_unsafe") from None
-        try:
-            facts = os.fstat(descriptor)
-            if not stat.S_ISREG(facts.st_mode) or stat.S_IMODE(facts.st_mode) & 0o077:
-                raise ExportRefused("code_export_unsafe")
-            encoded = os.read(descriptor, 65_536)
-        finally:
-            os.close(descriptor)
-        try:
-            value = strict_json_parse(encoded.rstrip(b"\n"))
-            source = cast(dict[str, JsonValue], value)
-            if set(source) != {"schema", "export_id", "next_ref", "sent"}:
-                raise ValueError("members")
-            if source["schema"] != EXPORT_SCHEMA:
-                raise ValueError("schema")
-            export_id = cast(str, source["export_id"])
-            next_ref = cast(int, source["next_ref"])
-            sent = tuple(cast(list[str], source["sent"]))
-            if not _EXPORT_ID.match(export_id) or type(next_ref) is not int or next_ref < 1:
-                raise ValueError("values")
-            if any(not _HEX.match(item.encode()) for item in sent):
-                raise ValueError("sent")
-        except (ValueError, TypeError, AttributeError):
-            # A record that cannot be read starts a new export: nothing it named is trusted.
-            return None
-        return export_id, next_ref, sent
 
     def _write_record(self) -> None:
         document: dict[str, JsonValue] = {
@@ -222,8 +272,22 @@ class ExportDatabase:
             "export_id": self._export_id,
             "next_ref": self._next_ref,
             "sent": list(self._sent),
+            "root": self._root,
         }
         self._write_file(self._record_path(), canonical_encode(document) + b"\n")
+
+    def remember_root(self, root: Path) -> None:
+        """Record the repository's folder a sync read (written only when it changes).
+
+        A path that cannot be kept as shown (not absolute and normal, not printable, too long)
+        is recorded as ``null``: ``forget --all`` then says it cannot name that folder.
+        """
+
+        value = os.fspath(root)
+        kept = value if _recordable_root(value) else None
+        if kept != self._root:
+            self._root = kept
+            self._write_record()
 
     @staticmethod
     def _write_file(path: Path, data: bytes) -> None:
@@ -321,6 +385,62 @@ class ExportDatabase:
         """Delete this export database (``server code forget``, L2 → L1, ``server remove``)."""
 
         shutil.rmtree(self._folder, ignore_errors=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ExportRecord:
+    """One export folder of a target, as ``server code forget --all`` reads it.
+
+    ``short_id`` names it on owner displays: the folder name's first 8 hex digits, or for an
+    entry FinishUP did not name, the first 8 of its name's digest (the name itself is never
+    shown). ``root`` is the repository's folder its record names, or None. ``readable`` is False
+    for an entry whose record is missing, unsafe or malformed, or that is not a folder.
+    """
+
+    folder: Path
+    short_id: str
+    root: str | None
+    readable: bool
+
+
+def export_records(directory: Path) -> tuple[ExportRecord, ...]:
+    """Every entry of a target's ``state/code-export`` folder, in name order; none when absent.
+
+    Nothing is created, changed or followed. Raises ``ExportRefused("code_export_unsafe")`` when
+    the folder itself is a link, not a folder, or cannot be listed: then which repositories
+    copies were sent from is not known.
+    """
+
+    try:
+        facts = os.lstat(directory)
+    except (FileNotFoundError, NotADirectoryError):
+        return ()
+    except OSError:
+        raise ExportRefused("code_export_unsafe") from None
+    if not stat.S_ISDIR(facts.st_mode):
+        raise ExportRefused("code_export_unsafe")
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        raise ExportRefused("code_export_unsafe") from None
+    records: list[ExportRecord] = []
+    for name in names:
+        folder = directory / name
+        if not _FOLDER_NAME.match(name):
+            digest = hashlib.sha256(os.fsencode(name)).hexdigest()
+            records.append(ExportRecord(folder, digest[:8], None, False))
+            continue
+        record: _Record | None = None
+        try:
+            if stat.S_ISDIR(os.lstat(folder).st_mode):
+                record = _read_export_record(folder / _EXPORT_NAME)
+        except (OSError, ExportRefused):
+            record = None
+        if record is None:
+            records.append(ExportRecord(folder, name[:8], None, False))
+        else:
+            records.append(ExportRecord(folder, name[:8], record[3], True))
+    return tuple(records)
 
 
 # --- policy and request ---------------------------------------------------------------------------
@@ -976,6 +1096,8 @@ def export_snapshot(
     if not top.startswith(b"/"):
         raise ExportRefused("code_export_root_unavailable")
     root = Path(os.fsdecode(top))
+    # The folder ``server code forget --all`` claims to forget this repository's copy.
+    database.remember_root(root)
     base_commit, object_format = _resolve_base(root, request.base_commit)
     try:
         root_fd = os.open(root, _OPEN_DIRECTORY)

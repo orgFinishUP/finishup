@@ -8,6 +8,11 @@ are refused there, since no server keeps copies yet.
 * ``list`` asks the server what it keeps of this repository; ``forget`` deletes it there (and this
   computer's export folder for it) and prints exactly what the server deleted. Forget is the only
   way to remove what was already sent: stopping, holding or narrowing to L1 stops future sends.
+  ``forget --all`` forgets every repository this computer sent copies from to that server: the
+  server acts on the claimed repository only, so each folder this computer's export records name
+  is claimed and forgotten in turn; one that cannot be is named with its reason, never skipped,
+  and the exit status says whether every one was forgotten. ``server remove`` uses the same to
+  offer forgetting before it removes a target.
 * ``exclude add|remove|list`` keeps patterns out of this repository's copy. Adding only ever
   sends less, so any process may; removing sends more, so the owner confirms it on the trusted
   console.
@@ -24,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Final, cast
 
 import typer
@@ -44,9 +49,10 @@ if TYPE_CHECKING:
 
     from finishup.cli.server import RepositoryHere
     from finishup.client.code_copy_settings import RepositoryCodeSettings
+    from finishup.client.code_export import ExportRecord
     from finishup.client.targets import ServerTarget
 
-__all__ = ["code_app"]
+__all__ = ["FORGET_TRAILER", "ForgetOutcome", "code_app", "forget_every_copy", "forget_lines"]
 
 code_app = typer.Typer(
     help="What a server elsewhere keeps of your code (level L2), and how to make it keep less.",
@@ -139,17 +145,70 @@ def server_code_list(
     )
 
 
+# What forget says after the server answered: what FinishUP does not manage, and what stays.
+FORGET_TRAILER: Final = (
+    "Copies of that server's folder in backups its owner made are not managed by FinishUP "
+    "and stay until they are removed there. Evidence already recorded in your tasks there "
+    "(captured changes, review excerpts) is kept with the task."
+)
+# Why ``forget --all`` could not forget one repository's copy, and what the owner can do.
+_NOT_FORGOTTEN: Final[dict[str, str]] = {
+    "export_record_unreadable": (
+        "this computer's record of it cannot be read, so the repository it came from is not "
+        "known; run 'finishup server code forget' in that repository"
+    ),
+    "repository_folder_unknown": (
+        "this computer has no folder of that repository it can name; run 'finishup server code "
+        "forget --repository FOLDER' with a folder of it"
+    ),
+    "repository_folder_missing": (
+        "that folder is no longer there; run 'finishup server code forget --repository FOLDER' "
+        "with another worktree of that repository, or once it is back in that folder"
+    ),
+    "repository_invalid": (
+        "FinishUP cannot name a repository in that folder now; run 'finishup server code forget "
+        "--repository FOLDER' with a worktree of the repository it came from"
+    ),
+    "repository_changed": (
+        "that folder now holds another repository; run 'finishup server code forget "
+        "--repository FOLDER' with a worktree of the repository it came from"
+    ),
+}
+
+
+def _forgot_line(record: ServerTarget, answer: object) -> str:
+    forgot = _field(answer, "forgot")
+    if not _field(forgot, "copies"):
+        return f"{record.name} kept no copy of it; nothing was deleted there"
+    return (
+        f"{record.name} deleted {_field(forgot, 'snapshots')} snapshot(s), "
+        f"{_field(forgot, 'objects')} stored objects, {_field(forgot, 'bytes')} bytes"
+    )
+
+
 @code_app.command("forget")
 @_cli
 def server_code_forget(
-    repository: _REPOSITORY_OPTION = None, json_output: _JSON_OPTION = False
+    repository: _REPOSITORY_OPTION = None,
+    every: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="Forget every repository this computer sent copies from to that server."
+        ),
+    ] = False,
+    json_output: _JSON_OPTION = False,
 ) -> None:
     """Delete the selected server's copy of this repository, and say exactly what it deleted."""
 
     from finishup.client.code_sync import export_folder
     from finishup.client.targets import registry_lock
 
+    if every and repository is not None:
+        raise ServerCommandRefused("usage", message="give --all or --repository FOLDER, not both")
     record = _selected()
+    if every:
+        _forget_all(record, json_output=json_output)
+        return
     here = repository_here(repository)
     answer = _server_answer(here.worktree, "forget")
     with registry_lock():
@@ -173,11 +232,167 @@ def server_code_forget(
             f"snapshot(s), {_field(forgot, 'objects')} stored objects, {_field(forgot, 'bytes')} "
             "bytes."
         )
-    typer.echo(
-        "Copies of that server's folder in backups its owner made are not managed by FinishUP "
-        "and stay until they are removed there. Evidence already recorded in your tasks there "
-        "(captured changes, review excerpts) is kept with the task."
+    typer.echo(FORGET_TRAILER)
+
+
+# --- forget every repository at once -------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ForgetOutcome:
+    """What ``forget --all`` did for one repository this computer sent copies from.
+
+    ``position`` (from 1) and ``copy`` (the export folder's short id) name it; ``folder`` is the
+    repository's folder this computer recorded, or None; ``reason`` is None once the server
+    forgot it, else the closed reason it was not; ``answer`` is the server's answer, if any.
+    """
+
+    position: int
+    copy: str
+    folder: str | None
+    reason: str | None
+    answer: dict[str, object] | None = None
+
+    @property
+    def forgotten(self) -> bool:
+        return self.reason is None
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "position": self.position,
+            "copy": self.copy,
+            "folder": self.folder,
+            "outcome": "forgotten" if self.forgotten else "not_forgotten",
+            "reason": self.reason,
+            "answer": self.answer,
+        }
+
+
+def forget_every_copy(record: ServerTarget, *, named: bool = False) -> tuple[ForgetOutcome, ...]:
+    """Forget on ``record``'s server every repository this computer's export records name.
+
+    The server's ``code_copy`` acts on the claimed repository only (ADR-054 decision 5), so each
+    record's folder is claimed in turn and forgotten as ``server code forget`` does, its export
+    folder here going too. A record that cannot be read, names no folder, or whose folder is gone,
+    holds no repository or another one, or that the server did not forget, is returned with its
+    closed reason: never skipped. ``named`` asks ``record``'s own root (``selection_override``,
+    for ``server remove`` of a target that may not be selected); otherwise the selected server.
+    """
+
+    from finishup.client.code_export import ExportRefused, export_records
+    from finishup.client.code_sync import exports_folder
+
+    try:
+        records = export_records(exports_folder(record.target_id))
+    except ExportRefused as error:
+        raise ServerCommandRefused(error.reason) from None
+    return tuple(
+        _forget_one(record, position, item, named=named)
+        for position, item in enumerate(records, start=1)
     )
+
+
+def _forget_one(
+    record: ServerTarget, position: int, item: ExportRecord, *, named: bool
+) -> ForgetOutcome:
+    from finishup.client.code_sync import export_folder
+    from finishup.client.targets import TargetError, registry_lock, target_root
+
+    def refused(reason: str) -> ForgetOutcome:
+        return ForgetOutcome(position, item.short_id, item.root, reason)
+
+    if not item.readable:
+        return refused("export_record_unreadable")
+    if item.root is None:
+        return refused("repository_folder_unknown")
+    if not os.path.isdir(item.root):
+        return refused("repository_folder_missing")
+    try:
+        here = repository_here(item.root)
+    except ServerCommandRefused as error:
+        return refused(error.reason)
+    if export_folder(record.target_id, here.key) != item.folder:
+        return refused("repository_changed")
+    try:
+        if named:
+            from finishup.config.paths import selection_override
+
+            with selection_override(target_root(record.target_id)):
+                answer = _server_answer(here.worktree, "forget")
+        else:
+            answer = _server_answer(here.worktree, "forget")
+    except ServerCommandRefused as error:
+        return refused(error.reason)
+    except TargetError as error:
+        return refused(error.reason)
+    with registry_lock():
+        # As ``server code forget``: what it sent is gone there, so its export folder goes here.
+        if item.folder.exists():
+            import shutil
+
+            shutil.rmtree(item.folder, ignore_errors=True)
+    return ForgetOutcome(position, item.short_id, item.root, None, answer)
+
+
+def forget_lines(record: ServerTarget, outcomes: tuple[ForgetOutcome, ...]) -> tuple[str, ...]:
+    """The owner display of ``forget_every_copy``: one line per repository, then what stays."""
+
+    from finishup.cli.server import refusal_message
+
+    if not outcomes:
+        return (
+            f"This computer has no record of a copy of code it sent to {record.name}; nothing "
+            "was forgotten.",
+        )
+    lines = [f"Every copy of code this computer sent to {record.name} ({len(outcomes)}):"]
+    for outcome in outcomes:
+        folder = "a folder this computer cannot name" if outcome.folder is None else outcome.folder
+        named = f"  {outcome.position}. {folder} (copy {outcome.copy}): "
+        if outcome.reason is None:
+            lines.append(named + f"forgotten; {_forgot_line(record, outcome.answer)}.")
+            continue
+        remedy = _NOT_FORGOTTEN.get(outcome.reason)
+        if remedy is None:
+            remedy = (
+                refusal_message(ServerCommandRefused(outcome.reason))
+                + "; then run this command again"
+            )
+        lines.append(named + f"not forgotten ({outcome.reason}): {remedy}.")
+    missed = sum(1 for outcome in outcomes if not outcome.forgotten)
+    if missed:
+        lines.append(
+            f"{missed} of {len(outcomes)} not forgotten: each stays on {record.name} until it "
+            "expires or is forgotten."
+        )
+    else:
+        lines.append(f"Every copy this computer sent to {record.name} is forgotten there.")
+    if missed < len(outcomes):
+        lines.append(FORGET_TRAILER)
+    return tuple(lines)
+
+
+def _forget_all(record: ServerTarget, *, json_output: bool) -> None:
+    outcomes = forget_every_copy(record)
+    missed = sum(1 for outcome in outcomes if not outcome.forgotten)
+    if json_output:
+        import json
+
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "forget_all",
+                    "repositories": [outcome.to_json() for outcome in outcomes],
+                    "forgotten": len(outcomes) - missed,
+                    "not_forgotten": missed,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        for line in forget_lines(record, outcomes):
+            typer.echo(line)
+    if missed:
+        raise ServerCommandRefused("code_copy_forget_incomplete")
 
 
 # --- the owner's per-repository choices (this computer only) ------------------------------------

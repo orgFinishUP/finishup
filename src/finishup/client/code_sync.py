@@ -52,7 +52,13 @@ from finishup.ports.workspace_agent import (
 )
 from finishup.protocol.server_copy import l2_released
 
-__all__ = ["CodeSyncRefused", "CodeSyncResponder", "export_folder", "subject_state_digest"]
+__all__ = [
+    "CodeSyncRefused",
+    "CodeSyncResponder",
+    "export_folder",
+    "exports_folder",
+    "subject_state_digest",
+]
 
 _PREPARED_SECONDS: Final = 120.0
 _NOT_CONSENTED: Final = "code_copy_not_consented"
@@ -72,13 +78,19 @@ class _Check(Protocol):
     def refusal(self) -> str | None: ...
 
 
+def exports_folder(target_id: str) -> Path:
+    """``<target root>/state/code-export``: one export folder per repository copies were sent from."""
+
+    return target_root(target_id) / "state" / "code-export"
+
+
 def export_folder(target_id: str, repository_key: str) -> Path:
     """``<target root>/state/code-export/<digest of the repository key>``."""
 
     digest = hashlib.sha256(
         b"yoetz/code-export-folder/v1\x00" + repository_key.encode()
     ).hexdigest()
-    return target_root(target_id) / "state" / "code-export" / digest[:32]
+    return exports_folder(target_id) / digest[:32]
 
 
 @dataclass(slots=True)

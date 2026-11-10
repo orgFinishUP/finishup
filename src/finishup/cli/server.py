@@ -411,6 +411,18 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "again",
         _UNSAFE,
     ),
+    # 'server code forget --all' and 'server remove' (level L2, ADR-054): fixed text, no path.
+    "code_copy_forget_incomplete": (
+        "not every copy on that server was forgotten; each line above says why and what to do, "
+        "and each stays there until it expires or is forgotten",
+        _UNAVAILABLE,
+    ),
+    "code_export_unsafe": (
+        "this computer's record of the copies it sent that server is not owner-only or is a "
+        "link, so which repositories they came from is not known; fix its permissions, or run "
+        "'finishup server code forget' in each repository",
+        _UNSAFE,
+    ),
 }
 
 DISCLOSURE_LINES: Final = (
