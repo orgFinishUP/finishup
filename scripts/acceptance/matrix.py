@@ -136,6 +136,12 @@ class World:
             self.sshd = Sshd(run)
         self.client = Client(run, launcher, ssh_bin=self.sshd.bin if self.sshd else None)
         self.client.make_repository()
+        # The L0 cells run on a computer of their own: once this computer's everyday
+        # installation has a vault, a server elsewhere needs its live privacy policy (its service
+        # running), which the remote cells' zero-network arming does not model.
+        self.local_client = Client(run, launcher, name="cli-local")
+        self.local_client.make_repository()
+        self.active = self.client  # the computer the task steps run on
         self.client_vault = False
         if needs & {"gateway", "native", "rest"}:
             self.tls = make_tls(run.folder("tls"))
@@ -184,6 +190,7 @@ class World:
         for name in names:
             self.client.fu("server", "disconnect", name)
         self.client.fu("service", "stop", "--json")
+        self.local_client.fu("service", "stop", "--json")
 
     def dials(self, cell: Cell) -> int:
         return self.relays[cell.edge].connections
@@ -208,9 +215,12 @@ def consent_replies(name: str) -> list[Any]:
     ]
 
 
-def start_task(world: World, title: str) -> tuple[Task, subprocess.CompletedProcess[str]]:
-    path = request_file(world.run, "start", start_document(world.client.work, title))
-    result = world.client.fu("start", "--input", str(path), "--json", timeout=240)
+def start_task(
+    world: World, title: str, client: Client | None = None
+) -> tuple[Task, subprocess.CompletedProcess[str]]:
+    client = client or world.active
+    path = request_file(world.run, "start", start_document(client.work, title))
+    result = client.fu("start", "--input", str(path), "--json", timeout=240)
     return Task.from_result(json_of(result.stdout)), result
 
 
@@ -222,7 +232,7 @@ def status_of(world: World, task: Task) -> dict[str, Any]:
         "view": "compact",
     }
     path = request_file(world.run, "status", document)
-    return json_of(world.client.fu("status", "--input", str(path), "--json").stdout)
+    return json_of(world.active.fu("status", "--input", str(path), "--json").stdout)
 
 
 def task_round(world: World, report: Report, cell: Cell, title: str) -> Task | None:
@@ -254,7 +264,7 @@ def task_round(world: World, report: Report, cell: Cell, title: str) -> Task | N
             }
         ],
     }
-    result = world.client.fu(
+    result = world.active.fu(
         "publish-work", "--input", str(request_file(world.run, "publish", publish)), "--json"
     )
     body = json_of(result.stdout)
@@ -264,14 +274,14 @@ def task_round(world: World, report: Report, cell: Cell, title: str) -> Task | N
         f"exit {result.returncode}",
         shown(world, result),
     )
-    (world.client.work / "src" / "app.py").write_text(f"print('changed in {cell.name}')\n")
+    (world.active.work / "src" / "app.py").write_text(f"print('changed in {cell.name}')\n")
     check = {
         **base_request(),
         "session_id": task.session_id,
         "writer_id": task.writer_id,
         "expected_frontier": frontier_of(status_of(world, task)),
     }
-    result = world.client.fu(
+    result = world.active.fu(
         "check", "--input", str(request_file(world.run, "check", check)), "--json", timeout=300
     )
     body = json_of(result.stdout)
@@ -302,7 +312,7 @@ def receipt_json(
         "redaction_profile": "full_local",
     }
     path = request_file(world.run, "receipt", document)
-    result = world.client.fu("receipt", "--input", str(path), "--json", timeout=180)
+    result = world.active.fu("receipt", "--input", str(path), "--json", timeout=180)
     return result, json_of(result.stdout)
 
 
@@ -613,10 +623,10 @@ def remote_cell(world: World, cell: Cell) -> Report:
 def init_vault(world: World) -> tuple[bool, str]:
     """Start the selected local root's service and give it a passphrase vault (a ceremony)."""
 
-    started = world.client.fu("service", "start", "--json", timeout=120)
+    started = world.local_client.fu("service", "start", "--json", timeout=120)
     passphrase = os.urandom(18).hex()
     world.run.secrets.append(passphrase)
-    result = world.client.ceremony(
+    result = world.local_client.ceremony(
         ["service", "initialize-passphrase", "--json"],
         [Reply(r"Passphrase \(", passphrase), Reply(r"Confirm passphrase", passphrase)],
     )
@@ -633,8 +643,16 @@ def client_vault(world: World) -> tuple[bool, str]:
 
 
 def local_cell(world: World, cell: Cell) -> Report:
+    world.active = world.local_client
+    try:
+        return _local_cell(world, cell)
+    finally:
+        world.active = world.client
+
+
+def _local_cell(world: World, cell: Cell) -> Report:
     report = Report(cell.name)
-    client = world.client
+    client = world.local_client
     if cell.kind == "named":
         added = client.ceremony(
             ["server", "add", "lab", "--local"],

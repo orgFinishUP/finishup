@@ -378,15 +378,17 @@ def excerpt(text: str, *, lines: int = 40, width: int = 600) -> str:
 class Client:
     """This computer: an unpinned launcher with its own XDG folders (never the default ones)."""
 
-    def __init__(self, run: Run, launcher: Path, *, ssh_bin: Path | None = None) -> None:
+    def __init__(
+        self, run: Run, launcher: Path, *, ssh_bin: Path | None = None, name: str = "cli"
+    ) -> None:
         self.run = run
         self.launcher = launcher
         self.python = launcher.parent / "python"
-        self.home = run.folder("cli")
+        self.home = run.folder(name)
         for leaf in ("s", "c", "d", "k", "r"):
             (self.home / leaf).mkdir(mode=0o700, exist_ok=True)
         self.ssh_bin = ssh_bin
-        self.work = run.folder("repo")
+        self.work = run.folder("repo" if name == "cli" else f"repo-{name}")
         self.extra_env: dict[str, str] = {}
 
     def env(self) -> dict[str, str]:
