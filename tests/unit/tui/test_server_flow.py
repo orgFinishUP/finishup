@@ -199,7 +199,11 @@ async def test_adding_offers_only_a_server_on_this_computer(
     from finishup.client import server_folders
 
     if official:
-        monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
+        monkeypatch.setattr(
+            server_folders,
+            "OFFICIAL_ENDPOINT_ORIGINS",
+            (server_folders.OfficialOrigin("fu.example"),),
+        )
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["add", "add:local"])
 

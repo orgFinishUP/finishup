@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 __all__ = [
     "KeyCheck",
     "RestProfileSource",
+    "check_discovery",
     "check_key",
     "discover",
     "fetch_profile",
@@ -137,6 +138,19 @@ def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     if failure:
         raise failure[0]
     return outcome[0]
+
+
+def check_discovery(record: ServerTarget) -> Discovery:
+    """``discover`` for a synchronous caller, over ``record``'s trust, with no key at all."""
+
+    async def run() -> Discovery:
+        transport = RestTransport.for_target(record, key=None)
+        try:
+            return await discover(transport)
+        finally:
+            await transport.aclose()
+
+    return _run(run())
 
 
 def fetch_profile(record: ServerTarget, *, key: str | None = None) -> FetchedProfile:

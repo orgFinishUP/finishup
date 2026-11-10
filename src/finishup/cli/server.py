@@ -336,7 +336,15 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     ),
     "style_invalid": ("give --style relay or --style direct", _USAGE),
     "style_not_applicable": (
-        "only an SSH server has a connection style; a server on this computer is reached directly",
+        "only an SSH or HTTPS server has a connection style; a server on this computer is reached "
+        "directly",
+        _USAGE,
+    ),
+    # 'finishup server add official' (ADR-053, design v2 section 2.4): no official FinishUP
+    # service is named by this release yet.
+    "official_endpoint_unavailable": (
+        "this release names no official FinishUP service yet, so nothing was added; add a server "
+        "by its address with 'finishup server add NAME https://HOST'",
         _USAGE,
     ),
     "style_unavailable": (
@@ -980,6 +988,7 @@ def server_add(
     ] = None,
     ca_file: Annotated[Path | None, typer.Option("--ca-file", hidden=True)] = None,
     tls_pin: Annotated[str | None, typer.Option("--tls-pin", hidden=True)] = None,
+    key_file: Annotated[Path | None, typer.Option("--key-file", hidden=True)] = None,
     outside_reads: Annotated[
         str | None,
         typer.Option(
@@ -990,6 +999,14 @@ def server_add(
 ) -> None:
     """Add a server: a named local one on this computer, or an SSH server on another machine."""
 
+    if name == "official" and address is None and port is None and not local:
+        # The preset (design v2 section 2.4): the URL of the official FinishUP service this
+        # release pins, never the server's own claim.
+        from finishup.client.server_folders import official_preset_url
+
+        address = official_preset_url()
+        if address is None:
+            raise ServerCommandRefused("official_endpoint_unavailable")
     if (port is not None or address is not None) and not local:
         from finishup.client import authorization
 
@@ -1006,6 +1023,7 @@ def server_add(
             remote_launcher=remote_launcher,
             ca_file=ca_file,
             tls_pin=tls_pin,
+            key_file=key_file,
             outside_reads=outside_reads,
         )
         return
@@ -1018,7 +1036,7 @@ def server_add(
         raise ServerCommandRefused("usage")
     if any(
         option is not None
-        for option in (remote_root, remote_launcher, ca_file, tls_pin, outside_reads)
+        for option in (remote_root, remote_launcher, ca_file, tls_pin, key_file, outside_reads)
     ):
         raise ServerCommandRefused(
             "usage",
@@ -1107,8 +1125,9 @@ def _add_remote(
     ca_file: Path | None,
     tls_pin: str | None,
     outside_reads: str | None,
+    key_file: Path | None = None,
 ) -> None:
-    """``server add`` for a server elsewhere, once its kind is open (none is in this release).
+    """``server add`` for a server elsewhere, once its kind is open.
 
     In order, before anything is written: the selection in force and the name; the address and
     its options, remote paths absolute (SRV-11); the name not taken; this computer's zero-network
@@ -1136,6 +1155,8 @@ def _add_remote(
         raise ServerCommandRefused("usage")
     if (ca_file is not None or tls_pin is not None) and kind == "ssh":
         raise ServerCommandRefused("target_tls_invalid")
+    if key_file is not None and kind == "ssh":
+        raise ServerCommandRefused("credential_not_applicable")
     if ca_file is not None and tls_pin is not None:
         raise ServerCommandRefused("target_tls_invalid")
     ca_text: str | None = None
@@ -1181,6 +1202,7 @@ def _add_remote(
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     session_bound = False
+    api_key: str | None = None
     if kind == "ssh":
         # SSH discovery (design v2 section 2.1): the endpoint and the profile, from the server's
         # own launcher; an unknown host key is asked about only on this trusted console.
@@ -1195,6 +1217,10 @@ def _add_remote(
         except TargetError as error:
             raise ServerCommandRefused(error.reason) from None
         fetched = found.profile
+    elif kind in _REST_TARGET_KINDS:
+        # HTTPS discovery without a key, then the key on this console, then the profile with it
+        # (design v2 sections 2.1 and 2.2, ADR-053).
+        fetched, api_key = _discover_rest(provisional, key_file)
     else:
         fetched = _fetch_profile(provisional)
     envelope, lines = _consent_offer(provisional, fetched)
@@ -1232,6 +1258,8 @@ def _add_remote(
                 if consented != envelope:
                     raise TargetError("server_profile_changed")
                 record = record_consent(record, fetched, consented)
+                if api_key is not None:
+                    record = _store_added_key(record, _root, api_key)
             except BaseException:
                 remove_target_root(record)
                 raise
@@ -1248,6 +1276,75 @@ def _add_remote(
         )
     _say_repository_hold(record)
     _emit((f"Use it with 'finishup server use {record.name}'.",))
+
+
+_REST_TARGET_KINDS: Final = frozenset({"https", "local_port"})
+_API_KEY_PROMPT: Final = "API key for this server (input hidden): "
+
+
+def _read_api_key(key_file: Path | None) -> str:
+    """The API key: once from an owner-only key file, or typed on this trusted console (hidden).
+
+    Never from an argument, the environment or redirected input; never echoed.
+    """
+
+    from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+    from finishup.client.credentials import CredentialError, read_key_file, validate_secret
+
+    try:
+        if key_file is not None:
+            return read_key_file(key_file)
+        with TrustedForegroundConsole() as console:
+            raw = console.read_secret(_API_KEY_PROMPT, 512)
+        try:
+            return validate_secret(raw.decode("ascii"))
+        except UnicodeDecodeError:
+            raise CredentialError("credential_invalid") from None
+        finally:
+            raw[:] = b"\x00" * len(raw)
+    except TrustedConsoleError:
+        raise ServerCommandRefused("trusted_console_required") from None
+    except CredentialError as error:
+        raise ServerCommandRefused(error.reason) from None
+
+
+def _rest_failure(reason: str) -> NoReturn:
+    _runtime_failure(TargetRuntimeError("service_unavailable", phase=reason))
+
+
+def _discover_rest(provisional: ServerTarget, key_file: Path | None) -> tuple[FetchedProfile, str]:
+    """HTTPS discovery (no key), the key, then the profile with it; nothing is written."""
+
+    from finishup.client.rest_client import RestUnavailable
+    from finishup.client.rest_discovery import check_discovery, fetch_profile
+
+    typer.echo("Asking the server at that address what it is (over HTTPS, without a key).")
+    try:
+        check_discovery(provisional)
+    except RestUnavailable as error:
+        _rest_failure(error.reason)
+    key = _read_api_key(key_file)
+    try:
+        return fetch_profile(provisional, key=key), key
+    except RestUnavailable as error:
+        _rest_failure(error.reason)
+
+
+def _store_added_key(record: ServerTarget, root: Path, key: str) -> ServerTarget:
+    """Keep the key the server accepted for a target just added (under the registry lock)."""
+
+    from finishup.client.authorization import bump_credential_generation
+    from finishup.client.credentials import CredentialError, KeyringOrFileCredential
+
+    try:
+        location = KeyringOrFileCredential(record.target_id, root, recorded=None).store(key)
+    except CredentialError as error:
+        raise ServerCommandRefused(error.reason) from None
+    stored = replace(record, credential=location)
+    write_target(root, stored)
+    # An owner action on the key (ADR-052, O8).
+    bump_credential_generation(root)
+    return stored
 
 
 def _discover_ssh(
@@ -2675,14 +2772,118 @@ def server_login(
         typer.Option("--key-file", help="Read the key once from an owner-only (0600) file."),
     ] = None,
 ) -> None:
-    """Not available in this release: only HTTPS and port servers take an API key.
+    """Store a new API key for an HTTPS server, checked with that server first.
 
-    Refused with ``remote_kind_unavailable`` before anything is read: no target, no key file, no
-    prompt, and nothing is stored or sent. ``server logout`` stays the way to delete a key.
+    The key is typed on your own terminal (hidden) or read once from an owner-only key file. The
+    server is asked about it before it is kept: a key it refuses, a server whose certificate does
+    not match the trust you recorded, or one of another release stores nothing. A server that does
+    not answer keeps the key, not verified yet. Storing it ends every connection made under the
+    old key and stops this computer's helper for that server.
     """
 
-    del name, key_file
-    raise ServerCommandRefused("remote_kind_unavailable", message=_LOGIN_REFUSED)
+    from finishup.client import authorization
+    from finishup.client.credentials import CredentialError, KeyringOrFileCredential
+    from finishup.client.rest_client import RestUnavailable
+    from finishup.client.rest_discovery import check_key
+
+    if not _REST_TARGET_KINDS & authorization.OPEN_REMOTE_KINDS:
+        # No kind that takes a key is open: refused before the target, a key file or a prompt
+        # is read, as in layers 1 to 4.
+        raise ServerCommandRefused("remote_kind_unavailable", message=_LOGIN_REFUSED)
+    _require_selection_in_force()
+    record = _target_or_fail(name)
+    if record.kind not in _REST_TARGET_KINDS:
+        raise ServerCommandRefused("credential_not_applicable")
+    if not _open_kind(record.kind):
+        raise ServerCommandRefused("remote_kind_unavailable", message=_LOGIN_REFUSED)
+    refusal = zero_network_connection_refusal(record)
+    if refusal is not None:
+        # The key is checked with the server before it is kept: a connection, and nothing is
+        # sent to a server elsewhere while this computer is zero-network (ADR-051 decision 8).
+        raise refusal
+    key = _read_api_key(key_file)
+    try:
+        checked = check_key(record, key)
+    except RestUnavailable as error:
+        raise ServerCommandRefused(
+            error.reason, message=_LOGIN_NOT_STORED.get(error.reason)
+        ) from None
+    root = target_root(record.target_id)
+    credential = KeyringOrFileCredential(record.target_id, root, recorded=record.credential)
+    try:
+        location = credential.store(key)
+        with registry_lock():
+            try:
+                # Field by field from the record as stored now (SRV-12): only the credential.
+                current = _stored_record(record)
+            except TargetError:
+                # Removed while the key was asked for: it keeps no key either.
+                with contextlib.suppress(CredentialError):
+                    credential.delete()
+                raise
+            current = replace(current, credential=location)
+            write_target(root, current)
+            # An owner action on the key: every connection made under the old one ends (O8).
+            bump_credential_generation(root)
+            verdict_phase: str | None = None
+            if checked.profile is not None:
+                from finishup.client.server_profile import refresh_profile
+
+                verdict_phase = refresh_profile(current, checked.profile).phase
+    except CredentialError as error:
+        raise ServerCommandRefused(error.reason) from None
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    where = "the platform credential store" if location == "keyring" else "an owner-only file"
+    if checked.outcome == "accepted":
+        typer.echo(
+            f"Stored the API key for {record.name} ({record.target_id}) in {where}; the server "
+            "accepted it."
+        )
+    else:
+        typer.echo(
+            f"Stored the API key for {record.name} ({record.target_id}) in {where}, not verified "
+            f"yet: the server did not answer ({checked.phase}). It is checked on the first "
+            f"connection; run 'finishup server test {record.name}' once the server is up."
+        )
+    _stop_helper_for_key(record, root, which="earlier")
+    if checked.outcome == "accepted":
+        if verdict_phase is not None:
+            typer.echo(
+                "This key is a different identity at that server than the one you agreed to, so "
+                "FinishUP asks you again before it connects: run "
+                f"'finishup server use {record.name}' here."
+            )
+
+
+def _stop_helper_for_key(record: ServerTarget, root: Path, *, which: str) -> None:
+    """Stop the target's helper so the next client starts one with the key stored now
+    (A-CRED-STALE); a stop that does not finish in time is named, with its fix."""
+
+    try:
+        runtime_for(record.kind).stop(root)
+    except TargetRuntimeError:
+        typer.echo(
+            f"The connection this computer keeps for {record.target_id} with the {which} key did "
+            f"not stop in time; run 'finishup server disconnect {record.name}'.",
+            err=True,
+        )
+
+
+_LOGIN_NOT_STORED: Final[dict[str, str]] = {
+    "remote_auth_failed": (
+        "the server refused this key (unknown, revoked or expired), so nothing was stored; ask "
+        "the server's owner for a valid key ('finishup service api-key create' there)"
+    ),
+    "remote_identity_changed": (
+        "the server's certificate did not match the trust recorded for this target, so nothing "
+        "was stored; verify the server another way first"
+    ),
+    "remote_incompatible": (
+        "that address is not a FinishUP server of this release's REST contract, so nothing was "
+        "stored"
+    ),
+}
 
 
 _LOGIN_REFUSED: Final = f"{REMOTE_KIND_UNAVAILABLE}; no key was read or stored"
@@ -2720,6 +2921,9 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
         if removed
         else f"No API key was stored for {record.target_id}."
     )
+    # The helper may hold the deleted key in memory: it stops, so nothing goes on with it
+    # (A-CRED-STALE); every connection made under it already ended with the generation (O8).
+    _stop_helper_for_key(record, root, which="deleted")
 
 
 _KEY_KEPT: Final = (

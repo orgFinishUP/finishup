@@ -131,6 +131,15 @@ def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> _Source:
         )
 
     monkeypatch.setattr(server_cli, "_discover_ssh", discover)
+
+    def discover_rest(record: ServerTarget, key_file: Path | None) -> tuple[FetchedProfile, str]:
+        # HTTPS discovery and the key at 'server add' (layer 5, ``client.rest_discovery``,
+        # tested on its own and against the real routes): the stand-in profile and a key.
+        del key_file
+        return stand_in.fetch(record), "fuk_0123456789ab_" + "A" * 43
+
+    monkeypatch.setattr(server_cli, "_discover_rest", discover_rest)
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     return stand_in
 
 
@@ -220,21 +229,6 @@ def test_a_profile_this_release_cannot_agree_to_is_refused_before_the_console(
     assert console.opened == 0
     assert targets.list_targets() == ()
     assert list(targets.servers_dir().glob("t_*")) == []
-
-
-def test_an_open_kind_with_no_transport_is_still_unavailable(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    del home
-    # HTTPS has no transport in this release (layer 5); opened in process, it is unavailable.
-    open_remote_kinds(monkeypatch, "https", consent=False)
-    monkeypatch.setattr(server_cli, "_zero_network_in_force", lambda: False)
-    console = _console(monkeypatch, b"listed", b"lab")
-
-    result = _invoke("add", "lab", "https://lab.example")
-
-    assert result.stderr.startswith("remote_kind_unavailable:")
-    assert console.opened == 0 and targets.list_targets() == ()
 
 
 @pytest.mark.parametrize("selected", [True, False])

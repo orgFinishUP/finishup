@@ -1117,6 +1117,15 @@ def test_login_is_refused_before_anything_is_read_and_logout_deletes_a_key_offli
     assert stored.read_text(encoding="ascii") == _KEY
     assert targets.find_target("fu").credential == "file"
 
+    # Layer 5: logout stops the target's helper (A-CRED-STALE); a stand-in runtime records it.
+    from builders.server_targets import StandInRuntime
+
+    stand_in = StandInRuntime()
+
+    def runtime_for(_kind: str) -> StandInRuntime:
+        return stand_in
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     logout = _invoke("logout", "fu")
     assert logout.exit_code == 0, logout.output
     assert logout.stdout == f"Deleted the API key for {record.target_id}.\n"
