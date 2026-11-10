@@ -316,7 +316,11 @@ def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_r
         return object()
 
     monkeypatch.setattr(helper_status, "spawn_helper", spawn)
-    monkeypatch.setattr(helper_status, "helper_holder", lambda _root: object() if running else None)
+
+    def holder(_root: Path) -> object | None:
+        return object() if running else None
+
+    monkeypatch.setattr(helper_status, "helper_holder", holder)
 
     async def run() -> ControlError:
         with pytest.raises(ControlError) as raised:
@@ -392,9 +396,11 @@ def test_a_helper_of_another_build_of_this_release_is_replaced_only_when_it_pred
     write_helper_status(root, new_status(None, "ready", None, started_at=format_rfc3339_ms(moment)))
     stamp = helper_status.HelperStamp(os.getpid(), __version__, "sha256:" + "e" * 64)
     holders = [stamp]
-    monkeypatch.setattr(
-        helper_status, "helper_holder", lambda _root: holders[0] if holders else None
-    )
+
+    def holder(_root: Path) -> helper_status.HelperStamp | None:
+        return holders[0] if holders else None
+
+    monkeypatch.setattr(helper_status, "helper_holder", holder)
     stops: list[Path] = []
 
     def stop(path: Path, *, timeout_seconds: float = 5.0) -> bool:
