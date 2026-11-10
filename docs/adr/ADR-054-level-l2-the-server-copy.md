@@ -472,7 +472,9 @@ evaluation and the observation-verification workers.
 
 Every sync for a task pins the task to that snapshot in the copy record (`pins`, plaintext task ids
 with ids and counts only); later reviewer reads of the task read that snapshot, and the
-`task_close` expiry reads the pinned tasks (decision 8). The client fills the manifest's
+`task_close` expiry reads the pinned tasks (decision 8). A copy keeps its 64 newest snapshots and,
+past them, every snapshot a pin still names; one leaves only once no pin names it (its manifest
+goes with it). The client fills the manifest's
 `subject_state` with the same subject-state digest its agent computes for an approved check, or
 `null` when it cannot be captured. An approved check of a task the copy serves syncs first
 (purpose `check`); a run whose subject-state digest differs from the pinned snapshot's is `stale`

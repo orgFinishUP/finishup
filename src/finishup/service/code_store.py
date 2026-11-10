@@ -633,6 +633,7 @@ class CodeStore:
         for path in folder.iterdir():
             if path.name.startswith("index.") and path.name.endswith(".enc") and path.name != keep:
                 _remove_file(path)
+        _drop_manifests(folder, record)
         try:
             for below in (folder / "objects", folder / "snapshots", folder):
                 if below.is_dir():
@@ -929,7 +930,7 @@ class CodeStore:
             kind, days = upload.retention
             record.update(
                 {
-                    "snapshots": cast(JsonValue, snapshots[-_MAX_SNAPSHOTS:]),
+                    "snapshots": cast(JsonValue, _window(snapshots, record)),
                     "stored_bytes": stored + verified.new_bytes,
                     "objects": len(index),
                     "last_sync_at": format_rfc3339_ms(self._clock()),
@@ -1139,7 +1140,12 @@ class CodeStore:
                     entry.stale if stale is None else stale,
                 )
             )
+            # A snapshot past the recent window that no pin names any more leaves now.
+            record["snapshots"] = cast(
+                JsonValue, _window(cast(list[str], record["snapshots"]), record)
+            )
             self._write_record(copy_key, record)
+            _drop_manifests(self._copy_folder(copy_key), record)
 
     def pinned(self, principal: str, repository: str, task_id: str) -> str | None:
         entry = self.pin_entry(principal, repository, task_id)
@@ -1472,6 +1478,36 @@ class CodeStore:
                     continue  # a task read the copy meanwhile: asked again at the next run
                 report = report.plus(self._forget_one(copy_key, "expired"))
         return report
+
+
+def _window(snapshots: list[str], record: Mapping[str, JsonValue]) -> list[str]:
+    """The snapshots a copy keeps, oldest first: the newest ``_MAX_SNAPSHOTS`` and every one a
+    task's pin still names (its reviewer and offline reads read it; design v2 §8.6), whatever
+    its age. A snapshot leaves only once it is past the window and no pin names it."""
+
+    pins = record.get("pins")
+    pinned = {
+        entry.snapshot
+        for value in (cast(dict[str, JsonValue], pins).values() if type(pins) is dict else ())
+        if (entry := _pin_entry(value)) is not None
+    }
+    recent = set(snapshots[-_MAX_SNAPSHOTS:])
+    return [item for item in snapshots if item in recent or item in pinned]
+
+
+def _drop_manifests(folder: Path, record: Mapping[str, JsonValue]) -> None:
+    """Remove the manifests of the snapshots the record no longer names (best effort: they are
+    unread from then on, and the next admission or start tries again)."""
+
+    named = {f"{item}.enc" for item in cast(list[str], record.get("snapshots", []))}
+    below = folder / "snapshots"
+    try:
+        found = [path for path in below.iterdir() if path.name.endswith(".enc")]
+    except OSError:
+        return
+    for path in found:
+        if path.name not in named:
+            _remove_file(path)
 
 
 def _generation(record: Mapping[str, JsonValue] | None) -> int:

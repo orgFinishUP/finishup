@@ -956,3 +956,34 @@ def test_an_admission_that_stops_before_its_record_leaves_nothing_outside_the_qu
     ]
     assert store.have("alice", "repo-1") == (first.snapshot, second.snapshot)
     assert _store(tmp_path, keyring).have("alice", "repo-1") == (first.snapshot, second.snapshot)
+
+
+def test_a_pinned_snapshot_outlives_the_recent_window_until_no_pin_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task's reviewer and offline reads read its pinned snapshot: newer syncs past the recent
+    window never take it away; it leaves once no pin names it (design v2 §8.6)."""
+
+    monkeypatch.setattr(code_store, "_MAX_SNAPSHOTS", 2)
+    store = _store(tmp_path)
+    snaps = [snapshot_objects(BASE, {**CURRENT, "n.py": f"{n}\n".encode()}) for n in range(5)]
+    _upload(store, snaps[0].bundle(), _manifest(snaps[0], snaps[0].bundle()))
+    store.pin("alice", "repo-1", "task_1", snaps[0].snapshot, served=True)
+    for snap in snaps[1:]:
+        _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    folder = _copy_folder(tmp_path)
+    first, gone = snaps[0].snapshot, snaps[1].snapshot
+    assert store.have("alice", "repo-1") == (first, snaps[3].snapshot, snaps[4].snapshot)
+    assert store.snapshot("alice", "repo-1", first).snapshot == first
+    assert store.pin_entry("alice", "repo-1", "task_1") is not None
+    assert store.manifest_with_base("alice", "repo-1", snaps[0].base) is not None
+    store.pin("alice", "repo-1", "task_1", first, stale=True)  # still pinnable
+    with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
+        store.snapshot("alice", "repo-1", gone)
+    assert not (folder / "snapshots" / f"{gone}.enc").exists()
+    # The pin moves to a newer snapshot: the old one is past the window and leaves.
+    store.pin("alice", "repo-1", "task_1", snaps[4].snapshot)
+    assert store.have("alice", "repo-1") == (snaps[3].snapshot, snaps[4].snapshot)
+    with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
+        store.snapshot("alice", "repo-1", first)
+    assert not (folder / "snapshots" / f"{first}.enc").exists()
