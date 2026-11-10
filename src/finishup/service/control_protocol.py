@@ -84,6 +84,7 @@ __all__ = [
     "client_handshake",
     "decode_control_frame",
     "encode_control_frame",
+    "hello_result_for",
     "is_workspace_call_frame",
     "is_workspace_reply_frame",
     "parse_control_request",
@@ -1091,6 +1092,33 @@ def _hello_result_wire(
         # The revision the service issues now (ADR-052), answered to a remote client's hello.
         wire["server_profile"] = revision_to_json(server_profile)
     return wire
+
+
+def hello_result_for(
+    service_status: ServiceStatus,
+    client_kind: ControlClientKind,
+    *,
+    workspace_binding: WorkspaceBinding,
+    workspace_handle: str | None,
+    server_profile: ServerProfileRevision | None,
+) -> dict[str, JsonValue]:
+    """The hello-result this release's service answers ``client_kind`` with (ADR-053).
+
+    The REST mapping (``client.rest_stream``) answers a client's hello with it from the REST
+    session, so a ``ServiceClient`` over REST negotiates exactly as over the control socket. The
+    schema manifest named is this release's own: over REST, compatibility is the REST API manifest
+    the mapping already checked.
+    """
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    return _hello_result_wire(
+        service_status,
+        _allowed_for(client_kind),
+        workspace_binding=workspace_binding,
+        workspace_handle=workspace_handle,
+        server_profile=server_profile,
+    )
 
 
 def _manifest_digest() -> str:
