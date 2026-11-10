@@ -1000,11 +1000,25 @@ class RestApp:
         claim = self._claim(request, caller)
         if claim is None:
             raise _Refusal("workspace_claim_required")
-        await self._admit_revision(client_kind, revision, start=True)
+        # The revision is admitted before the body is read, without starting a stopped service:
+        # only a running one can check it then. A stopped one is started only once the
+        # declaration (a small body) says the agent is not a background agent, whose
+        # registration never starts the service its owner stopped.
+        try:
+            await self._admit_revision(client_kind, revision, start=False)
+            admitted = True
+        except _Refusal as refusal:
+            if refusal.reason != "service_unavailable":
+                raise
+            admitted = False
         try:
             declaration = parse_agent_declaration(await _read_body(request, _MAX_SMALL_BODY_BYTES))
         except RestDocumentError:
             raise _Refusal("frame_invalid") from None
+        if not admitted:
+            if declaration.role == "background":
+                raise _Refusal("service_unavailable")
+            await self._admit_revision(client_kind, revision, start=True)
         live = sum(1 for agent in self._agents.values() if agent.key_id == caller.key_id)
         if live + self._registering.get(caller.key_id, 0) >= MAX_AGENTS_PER_KEY:
             raise _Refusal("agent_limit")

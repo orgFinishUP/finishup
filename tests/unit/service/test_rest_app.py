@@ -15,7 +15,7 @@ import json
 import os
 import shutil
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -646,3 +646,51 @@ async def test_a_call_naming_its_connections_agent_is_sent_to_that_agent(edge: _
     )
     assert gone.status_code == 404 and _reason(gone) == "agent_unknown"
     assert len(edge.backend.call_agents) == 2
+
+
+# --- review fixes, second round -------------------------------------------------------------------
+
+
+async def test_a_background_agents_registration_never_starts_a_stopped_service(
+    keys_dir: Path,
+) -> None:
+    """Item 8: the registration's revision is admitted before its body without starting the
+    service; a stopped one is started only for an agent that is not ``background``, over the
+    gateway's own backend (its service stopped: nothing answers its socket)."""
+
+    from finishup.gateway.backend import ControlSocketBackend
+    from finishup.rest.contract import agent_declaration_document
+
+    started: list[bool] = []
+
+    async def refuse() -> Any:
+        raise OSError("no service answers")
+
+    async def start() -> None:
+        started.append(True)
+        raise OSError("still nothing answers")
+
+    keys = ApiKeyStore(keys_dir / "rest")
+    _record, key = keys.create("helper", "agent")
+    app = RestApp(ControlSocketBackend(connect=refuse, start=start), keys)
+    headers = {
+        "authorization": f"Bearer {key}",
+        "finishup-api-manifest": current_api_manifest(),
+        "finishup-server-profile": encode_revision_header(TEST_REVISION),
+        "finishup-workspace-claim": encode_claim_header(_CLAIM),
+    }
+    background = replace(AGENT_DECLARATION, role="background")
+    try:
+        async with asgi_client(app.asgi()) as client:
+            refused = await client.post(
+                "/v1/agents", headers=headers, content=agent_declaration_document(background)
+            )
+            assert refused.status_code == 503 and _reason(refused) == "service_unavailable"
+            assert started == []
+            foreground = await client.post(
+                "/v1/agents", headers=headers, content=agent_declaration_document(AGENT_DECLARATION)
+            )
+            assert foreground.status_code == 503
+            assert started == [True]  # a client's agent starts it on demand, as before
+    finally:
+        await app.aclose()

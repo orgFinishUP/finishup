@@ -43,6 +43,7 @@ from finishup.rest.app import RestApp
 from finishup.rest.contract import claim_for_principal
 from finishup.service.client import ClientWorkspaceBinding, ServiceClient, connect_service_via
 from finishup.service.control_protocol import (
+    ControlProtocolError,
     client_handshake,
     encode_control_frame,
     read_control_frame,
@@ -702,4 +703,86 @@ async def test_a_request_that_ignores_its_bound_still_ends_at_the_calls_deadline
     assert stalled.is_set()
     assert cast(Mapping[str, Any], result["body"])["code"] == "request_timeout"
     assert len([method for method, _p, _h in transport.sent if method == "POST"]) == 1
+    await stream.aclose()
+
+
+async def test_a_background_agent_registers_before_its_session_and_never_starts_a_service() -> None:
+    """Item 8: a background agent's hello registers it first (the edge never starts a stopped
+    service for that registration) and asks for the session only once the service answered it;
+    a service that is not running ends the stream before any session request (which would start
+    it). A client's own agent still asks for the session first."""
+
+    from finishup.rest.contract import AgentRegistration, Session, agent_registration_document
+    from finishup.rest.contract import session_document as encode_session
+
+    handle = "client:0123456789abcdef"
+    running = {"now": False}
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        del headers
+        if path == "/v1/agents" and method == "POST":
+            if not running["now"]:
+                return _error(503, "service_unavailable")
+            return RestAnswer(
+                201,
+                {},
+                agent_registration_document(AgentRegistration("agt_" + "1" * 32, handle, 60_000)),
+            )
+        if path == "/v1/session":
+            running["now"] = True  # the edge starts a stopped service for a session request
+            return RestAnswer(
+                200, {}, encode_session(Session(STATUS, "client_claim", handle, TEST_REVISION))
+            )
+        await asyncio.Event().wait()  # the work long-poll stays open
+        raise AssertionError("unreachable")
+
+    background = replace(AGENT_DECLARATION, role="background")
+    stopped = _Scripted(script)
+    stream = RestControlStream(stopped)
+    with pytest.raises(ControlProtocolError):  # the hello ends unanswered
+        await client_handshake(
+            stream,
+            ControlClientKind.CLI,
+            "0.3.0",
+            workspace_claim=_CLAIM,
+            workspace_agent=background,
+            server_profile=TEST_REVISION,
+        )
+    assert [(method, path) for method, path, _h in stopped.sent] == [("POST", "/v1/agents")]
+    assert await stream.failure_phase() == "remote_service_not_running"
+    assert not running["now"]
+    await stream.aclose()
+
+    running["now"] = True
+    answered = _Scripted(script)
+    stream = RestControlStream(answered)
+    session = await client_handshake(
+        stream,
+        ControlClientKind.CLI,
+        "0.3.0",
+        workspace_claim=_CLAIM,
+        workspace_agent=background,
+        server_profile=TEST_REVISION,
+    )
+    assert session.workspace_handle == handle
+    assert [(method, path) for method, path, _h in answered.sent][:2] == [
+        ("POST", "/v1/agents"),
+        ("GET", "/v1/session"),
+    ]
+    await stream.aclose()
+
+    client = _Scripted(script)
+    stream = RestControlStream(client)
+    await client_handshake(
+        stream,
+        ControlClientKind.MCP_BRIDGE,
+        "0.3.0",
+        workspace_claim=_CLAIM,
+        workspace_agent=AGENT_DECLARATION,
+        server_profile=TEST_REVISION,
+    )
+    assert [(method, path) for method, path, _h in client.sent][:2] == [
+        ("GET", "/v1/session"),
+        ("POST", "/v1/agents"),
+    ]
     await stream.aclose()

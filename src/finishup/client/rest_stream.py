@@ -18,7 +18,9 @@ per-frame check) holds over REST unchanged. Underneath is the one REST client
   (``failure_phase``): ``server_profile_changed`` (409), ``remote_auth_failed`` (401),
   ``remote_incompatible`` (404, 412, a document this release refuses), ``remote_service_not_running``
   (503), or the transport's phase. A hello declaring an agent whose claim was keyed registers it
-  (``POST /v1/agents``) and starts one work long-poll; every call then names that agent
+  (``POST /v1/agents``) and starts one work long-poll once the hello is answered; a ``background``
+  agent registers before the session request (the edge never starts a stopped service for its
+  registration, and would for a session), so it never starts one; every call then names that agent
   (``finishup-agent``), so the server gives the call's workspace operations to this connection's
   own agent first, as it does on a control connection.
 * **Pushed workspace calls.** Each call a poll returns is written to the client as its
@@ -103,6 +105,7 @@ from finishup.rest.contract import (
     MAX_WAIT_MS,
     SESSION_PATH,
     RestDocumentError,
+    Session,
     agent_declaration_document,
     parse_agent_registration,
     parse_agent_work,
@@ -489,41 +492,33 @@ class RestControlStream:
             # A remote client's hello always names the revision it consented to (ADR-052).
             self._end("server_profile_changed")
             return
-        try:
-            headers = self._transport.headers(
-                revision=self._revision, claim=self._claim, client_kind=self._kind
-            )
-            answer = await self._with_retries(
-                lambda _left: self._transport.request("GET", SESSION_PATH, headers=headers)
-            )
-        except RestUnavailable as error:
-            self._end(error.reason)
-            return
-        except _Withheld as withheld:
-            self._end(withheld.phase)
-            return
-        if answer.status != 200:
-            self._end(_phase_of(answer))
-            return
-        try:
-            session = parse_session(answer.body)
-        except RestDocumentError:
-            self._end("remote_incompatible")
-            return
-        if session.server_profile != self._revision or (
-            session.workspace_binding != ("client_claim" if self._claim is not None else "none")
-        ):
-            self._end("remote_incompatible")
-            return
         raw_agent = frame.get("workspace_agent")
-        if isinstance(raw_agent, Mapping) and session.workspace_handle is not None:
+        declaration: WorkspaceAgentDeclaration | None = None
+        if isinstance(raw_agent, Mapping):
             agent = cast(Mapping[str, JsonValue], raw_agent)
             declaration = WorkspaceAgentDeclaration(
                 operations=tuple(cast(Sequence[str], agent["operations"])),
                 max_reply_bytes=cast(int, agent["max_reply_bytes"]),
                 role=cast(Literal["connection", "background"], agent.get("role", "connection")),
             )
-            if not await self._register(declaration):
+        registered: str | None = None
+        if declaration is not None and declaration.role == "background" and self._claim is not None:
+            # A background agent never starts a server's stopped service (as over SSH): its
+            # registration, which the edge never lets start one, goes first, and the session
+            # request, which would, only once the service answered it.
+            outcome = await self._register(declaration)
+            if outcome is False:
+                return
+            registered = None if outcome is True else outcome
+            declaration = None
+        session = await self._session()
+        if session is None:
+            return
+        if registered is not None and session.workspace_handle != registered:
+            self._end("remote_incompatible")
+            return
+        if declaration is not None and session.workspace_handle is not None:
+            if await self._register(declaration) is False:
                 return
         self._deliver(
             hello_result_for(
@@ -535,8 +530,49 @@ class RestControlStream:
             )
         )
         self._state = "open"
+        if self._agent_id is not None:
+            # Polled only once the hello is answered: a pushed call never reaches the client
+            # before its hello-result.
+            self._spawn(self._poll_work())
 
-    async def _register(self, declaration: WorkspaceAgentDeclaration) -> bool:
+    async def _session(self) -> Session | None:
+        """``GET /v1/session`` for the hello, validated; ``None`` once the stream ended."""
+
+        try:
+            headers = self._transport.headers(
+                revision=self._revision, claim=self._claim, client_kind=self._kind
+            )
+            # Asked again here: a registration may have gone first and taken time.
+            self._require_sendable()
+            answer = await self._with_retries(
+                lambda _left: self._transport.request("GET", SESSION_PATH, headers=headers)
+            )
+        except RestUnavailable as error:
+            self._end(error.reason)
+            return None
+        except _Withheld as withheld:
+            self._end(withheld.phase)
+            return None
+        if answer.status != 200:
+            self._end(_phase_of(answer))
+            return None
+        try:
+            session = parse_session(answer.body)
+        except RestDocumentError:
+            self._end("remote_incompatible")
+            return None
+        if session.server_profile != self._revision or (
+            session.workspace_binding != ("client_claim" if self._claim is not None else "none")
+        ):
+            self._end("remote_incompatible")
+            return None
+        return session
+
+    async def _register(self, declaration: WorkspaceAgentDeclaration) -> bool | str:
+        """``POST /v1/agents``: the workspace handle registered (``str``), ``True`` when the
+        service cannot key the claim now (no agent answers, as over the socket), ``False`` once
+        the stream ended."""
+
         try:
             headers = self._transport.headers(
                 revision=self._revision, claim=self._claim, client_kind=self._kind
@@ -568,8 +604,7 @@ class RestControlStream:
             self._end("remote_incompatible")
             return False
         self._agent_id = registration.agent_id
-        self._spawn(self._poll_work())
-        return True
+        return registration.workspace_handle
 
     # --- agents ---------------------------------------------------------------------------------
 

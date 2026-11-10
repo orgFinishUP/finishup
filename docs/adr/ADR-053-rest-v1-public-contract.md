@@ -270,7 +270,10 @@ and Ctrl-C or SIGTERM stops it. Nothing starts a listener on its own.
   that connection after its call frame, never before; an agent is one long-lived claim-bound
   connection whose hello declares the agent. A dropped connection ends that agent (its next poll is
   `agent_unknown`), so the gateway follows a service restart or a new generation. The service is
-  started on demand for a client's request, never for a `background` agent.
+  started on demand for a client's request, never for a `background` agent: an agent's
+  registration admits its revision before its body is read without starting the service (only a
+  running one can answer then), and a stopped one is started only once the declaration says the
+  agent is not `background` (`service_unavailable` otherwise).
 - **Native** (`--edge native`; `service.rest_native.NativeBackend`). The command runs this root's
   service itself in the foreground with the listener in its event loop: the owner's opt-in. The
   process that holds the vault is then on the network, and its security review is the owner's
@@ -378,8 +381,12 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   the hello result the service would give. A refusal ends the stream unanswered and names its phase:
   `server_profile_changed` (409), `remote_auth_failed` (401), `remote_incompatible` (404, 412, a
   refused document), `remote_service_not_running` (503), or the transport's phase. A hello that
-  declares an agent registers it (`POST /v1/agents`) and starts one work long-poll; every call then
-  names that agent (`finishup-agent`).
+  declares an agent registers it (`POST /v1/agents`) and starts one work long-poll once the hello
+  is answered; every call then names that agent (`finishup-agent`). A `background` agent's hello
+  registers it before the session request: the edge never starts a stopped service for a
+  background registration and would for a session, so a service its owner stopped stays stopped
+  (the stream ends `remote_service_not_running` before any session request; layer-5 review,
+  second round).
 - **Pushed workspace calls.** Each call a poll returns is written to the client as its
   `workspace_call` frame, in order; each `workspace_reply` the client writes is
   `POST /v1/agents/{id}/replies`. `agent_unknown` (its lease ran out, the service restarted, its
