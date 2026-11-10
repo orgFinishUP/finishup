@@ -26,6 +26,7 @@ from finishup.domain.evidence_provenance import (
 from finishup.domain.findings import Finding
 from finishup.domain.values import Frontier, freeze_json
 from finishup.kernel.forgotten_content import (
+    FORGOTTEN_EXCERPT,
     content_forgotten_provenance,
     forgotten_check_payload,
     latest_content_forgotten,
@@ -255,6 +256,7 @@ def test_check_payload_masking_drops_only_the_quoted_text() -> None:
             "requirement_or_claim": "The helper exists",
             "verdict": "supported",
             "cited_refs": (_OBLIGATION,),
+            "snippet": FORGOTTEN_EXCERPT,
         },
         {
             "requirement_or_claim": "No quote here",

@@ -40,6 +40,7 @@ from finishup.kernel.projections import (
 from finishup.protocol.canonical import canonical_digest
 
 __all__ = [
+    "FORGOTTEN_EXCERPT",
     "content_forgotten_marker",
     "content_forgotten_provenance",
     "forgotten_check_payload",
@@ -54,6 +55,12 @@ __all__ = [
 ]
 
 _SNIPPET: Final = "snippet"
+# What a supported or unsupported ``verified`` row quotes once its excerpt is forgotten. Those rows
+# must carry a snippet in every released result contract, so the quote is replaced by this fixed
+# text (never user content) instead of being dropped; every other excerpt field reads as absent.
+FORGOTTEN_EXCERPT: Final = (
+    "[content forgotten: the server's copy of the code it quoted was deleted]"
+)
 
 
 def forgotten_finding(finding: Finding) -> Finding:
@@ -66,17 +73,22 @@ def forgotten_finding(finding: Finding) -> Finding:
 
 
 def forgotten_verified_row(row: JsonObject) -> JsonObject:
-    """One ``verified`` row without its quoted ``snippet``; the row itself when it has none."""
+    """One ``verified`` row whose quoted ``snippet`` reads ``FORGOTTEN_EXCERPT``.
 
-    if _SNIPPET not in row:
+    The row itself when it quotes nothing (a ``not_assessable`` row) or is already masked.
+    """
+
+    if row.get(_SNIPPET, FORGOTTEN_EXCERPT) == FORGOTTEN_EXCERPT:
         return row
-    return cast(JsonObject, freeze_json({key: row[key] for key in row if key != _SNIPPET}))
+    return cast(JsonObject, freeze_json({**row, _SNIPPET: FORGOTTEN_EXCERPT}))
 
 
 def forgotten_check_payload(payload: CheckRecordedPayload) -> CheckRecordedPayload:
-    """``payload`` without its review summary and verified snippets; itself when it has neither."""
+    """``payload`` without its review summary and with no verified quote; itself when unchanged."""
 
-    if payload.review_summary is None and not any(_SNIPPET in row for row in payload.verified):
+    if payload.review_summary is None and all(
+        forgotten_verified_row(row) is row for row in payload.verified
+    ):
         return payload
     return replace(
         payload,
