@@ -85,6 +85,7 @@ from finishup.client.targets import (
 from finishup.config.installation import format_rfc3339_ms
 from finishup.config.paths import PathSafetyError
 from finishup.protocol.canonical import JsonValue, canonical_encode
+from finishup.protocol.server_copy import L2_RELEASED
 
 if TYPE_CHECKING:
     from finishup.cli.trusted_console import TrustedForegroundConsole
@@ -94,7 +95,7 @@ if TYPE_CHECKING:
     from finishup.client.server_profile import FetchedProfile
     from finishup.client.ssh_discovery import HostKeyQuestion, SshDiscovery
     from finishup.client.targets import ServerConsent
-    from finishup.protocol.consent_envelope import ConsentEnvelope
+    from finishup.protocol.consent_envelope import ConsentEnvelope, Retention
 
 __all__ = [
     "DISCLOSURE_LINES",
@@ -764,6 +765,20 @@ _LEVEL_LINES: Final[dict[str, tuple[str, ...]]] = {
         "Level of use: that server keeps your tasks, its ledger and reviews; your code stays on",
         "this computer, and the server reads it only through the FinishUP workspace agent here.",
     ),
+    # Level L2 (design v2 section 4.4, ADR-054): locally owned text only, never server prose.
+    "L2": (
+        "Level of use: that server keeps your tasks, its ledger and reviews, and a copy of each",
+        "repository you use with it: its git-visible files (tracked, and untracked but not",
+        "ignored), never its history, minus the names this release always leaves out, that",
+        "server's own exclusions and your list for the repository. The names of the files left",
+        "out are sent, never their contents. Before a file is sent its content is scanned for",
+        "known secret formats, and a match is held back until you allow it. Names and scans are",
+        "not a guarantee that no secret is sent.",
+    ),
+}
+_RETENTION_LINES: Final[dict[str, str]] = {
+    "task_close": "That server keeps each copy until the tasks that read it are closed.",
+    "until_forgotten": "That server keeps each copy until you forget it.",
 }
 _PROVIDER_NAMES: Final[dict[str, str]] = {
     "anthropic": "Anthropic",
@@ -805,8 +820,23 @@ def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
                 f"({_provider_name(review.fallback_disclosure)}),",
                 "as that server's own privacy policy decides.",
             )
+    copy_lines: tuple[str, ...] = ()
+    if envelope.level == "L2" and envelope.retention is not None:
+        retention = envelope.retention
+        kept = (
+            f"That server keeps each copy for {retention.days} days after its last sync."
+            if retention.kind == "days"
+            else _RETENTION_LINES[retention.kind]
+        )
+        copy_lines = (
+            kept,
+            "'finishup server code forget' deletes a copy there; 'finishup server code level L1'",
+            "keeps one repository at level L1. Stopping or holding a repository later does not",
+            "remove what was already sent; only forget does.",
+        )
     return (
         *_LEVEL_LINES[envelope.level],
+        *copy_lines,
         *review_lines,
         "Checks you approved still run on this computer.",
         "",
@@ -967,19 +997,92 @@ def _fetch_profile(record: ServerTarget) -> FetchedProfile:
         raise ServerCommandRefused(error.reason) from None
 
 
+@dataclass(frozen=True, slots=True)
+class LevelChoice:
+    """The level and retention the owner asked for (``--level``, ``--retention``); ``None``
+    keeps level L1 (or, for ``server use``, the level already consented to)."""
+
+    level: str | None = None
+    retention: str | None = None
+
+
+def _retention_of(value: str) -> Retention:
+    from finishup.protocol.consent_envelope import Retention as _Retention  # noqa: N814
+
+    if value in {"task_close", "until_forgotten"}:
+        return _Retention(value, None)
+    head, _colon, days = value.partition(":")
+    if head == "days" and days.isdigit() and 0 <= int(days) <= 36_500 and days == str(int(days)):
+        return _Retention("days", int(days))
+    raise ServerCommandRefused(
+        "usage", message="--retention is task_close, until_forgotten or days:N"
+    )
+
+
+def _chosen_terms(
+    fetched: FetchedProfile, choice: LevelChoice, stored: ServerTarget | None = None
+) -> tuple[str, Retention | None]:
+    """The level and retention to consent to (design v2 sections 2.3 and 4.3, U11)."""
+
+    from finishup.protocol.server_copy import l2_released
+    from finishup.protocol.server_profile import ProfileError, profile_from_json
+
+    level = choice.level
+    retention_text = choice.retention
+    consent = None if stored is None else stored.consent
+    if level is None and consent is not None and consent.level == "L2" and l2_released():
+        # 'server use' keeps the level and retention already agreed to.
+        level = "L2"
+        if retention_text is None and consent.retention_kind is not None:
+            retention_text = (
+                f"days:{consent.retention_days}"
+                if consent.retention_kind == "days"
+                else consent.retention_kind
+            )
+    if level in {None, "L1"}:
+        if retention_text is not None:
+            raise ServerCommandRefused("usage", message="--retention applies to --level L2 only")
+        return "L1", None
+    if level != "L2":
+        raise ServerCommandRefused("usage", message="--level is L1 or L2")
+    if not l2_released():
+        raise ServerCommandRefused("server_level_unavailable")
+    try:
+        profile = profile_from_json(fetched.document)
+    except ProfileError:
+        raise ServerCommandRefused("server_profile_changed") from None
+    if "L2" not in profile.levels.offered or profile.retention is None:
+        raise ServerCommandRefused("server_level_unavailable")
+    if retention_text is None:
+        return "L2", profile.retention.default
+    retention = _retention_of(retention_text)
+    if retention not in profile.retention.options:
+        raise ServerCommandRefused(
+            "usage",
+            message="that server does not offer this retention; see 'finishup server status'",
+        )
+    return "L2", retention
+
+
 def _consent_offer(
-    record: ServerTarget, fetched: FetchedProfile
+    record: ServerTarget,
+    fetched: FetchedProfile,
+    choice: LevelChoice | None = None,
+    stored: ServerTarget | None = None,
 ) -> tuple[ConsentEnvelope, tuple[str, ...]]:
-    """The envelope the owner is asked to consent to at level L1, and its disclosure lines.
+    """The envelope the owner is asked to consent to (level L1 unless ``choice`` asks for L2),
+    and its disclosure lines.
 
     Refused before any console: a profile this release cannot read or understand
-    (``server_profile_changed``), or one requiring more than level L1 (``server_level_unavailable``).
+    (``server_profile_changed``), one requiring more than the level chosen, or a level or
+    retention it does not offer (``server_level_unavailable``; L2 also while it is unreleased).
     """
 
     from finishup.client.server_profile import consent_envelope_for
 
+    level, retention = _chosen_terms(fetched, choice or LevelChoice(), stored)
     try:
-        envelope, _profile = consent_envelope_for(record, fetched, level="L1", retention=None)
+        envelope, _profile = consent_envelope_for(record, fetched, level=level, retention=retention)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     return envelope, profile_disclosure_lines(envelope)
@@ -994,6 +1097,25 @@ def _warn_open_sessions() -> None:
     from finishup.cli.zero_network_selection import OPEN_SESSIONS_LINE
 
     typer.echo(OPEN_SESSIONS_LINE)
+
+
+# Level L2 (ADR-054): hidden while it is unreleased, so help is as before.
+_LEVEL_OPTION = Annotated[
+    str | None,
+    typer.Option(
+        "--level",
+        help="L1 (the default) or L2: whether the server also keeps a copy of your code.",
+        hidden=not L2_RELEASED,
+    ),
+]
+_RETENTION_OPTION = Annotated[
+    str | None,
+    typer.Option(
+        "--retention",
+        help="L2: how long it keeps a copy (task_close, until_forgotten, days:N) among its options.",
+        hidden=not L2_RELEASED,
+    ),
+]
 
 
 @server_app.command("add")
@@ -1047,6 +1169,8 @@ def server_add(
             help="local or listed: what the server may read outside your projects here.",
         ),
     ] = None,
+    level: _LEVEL_OPTION = None,
+    retention: _RETENTION_OPTION = None,
 ) -> None:
     """Add a server: a named local one on this computer, an SSH server, or an HTTPS server.
 
@@ -1081,8 +1205,13 @@ def server_add(
             tls_pin=tls_pin,
             key_file=key_file,
             outside_reads=outside_reads,
+            choice=LevelChoice(level, retention),
         )
         return
+    if level is not None or retention is not None:
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
     _require_selection_in_force()
     try:
         validate_name(name)
@@ -1182,6 +1311,7 @@ def _add_remote(
     tls_pin: str | None,
     outside_reads: str | None,
     key_file: Path | None = None,
+    choice: LevelChoice | None = None,
 ) -> None:
     """``server add`` for a server elsewhere, once its kind is open.
 
@@ -1283,7 +1413,7 @@ def _add_remote(
         fetched, api_key = _discover_rest(provisional, key_file)
     else:
         fetched = _fetch_profile(provisional)
-    envelope, lines = _consent_offer(provisional, fetched)
+    envelope, lines = _consent_offer(provisional, fetched, choice)
     mode = outside_reads
     official = official_address(kind, base_url, ca_file=ca_text, tls_pin=tls_pin)
     answered = _confirm_on_trusted_console(
@@ -1313,7 +1443,7 @@ def _add_remote(
             try:
                 # The envelope again for the record as written (its own id): the same terms.
                 consented, _profile = consent_envelope_for(
-                    record, fetched, level="L1", retention=None
+                    record, fetched, level=envelope.level, retention=envelope.retention
                 )
                 if consented != envelope:
                     raise TargetError("server_profile_changed")
@@ -1772,7 +1902,10 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
 
 
 def use_target(
-    name: str, *, authorize: Callable[[str, str, tuple[str, ...]], None] | None = None
+    name: str,
+    *,
+    authorize: Callable[[str, str, tuple[str, ...]], None] | None = None,
+    choice: LevelChoice | None = None,
 ) -> TargetSwitch:
     """Select ``name`` (``record`` ``None`` back means this computer's everyday server).
 
@@ -1805,7 +1938,11 @@ def use_target(
     if record.is_remote:
         if not _open_kind(record.kind):
             raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
-        return _use_remote(record, authorize)
+        return _use_remote(record, authorize, choice)
+    if choice is not None and (choice.level is not None or choice.retention is not None):
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
     try:
         with registry_lock():
             # Read again under the lock: a target removed meanwhile stays gone, and one whose
@@ -1822,7 +1959,9 @@ def use_target(
 
 
 def _use_remote(
-    record: ServerTarget, authorize: Callable[[str, str, tuple[str, ...]], None] | None
+    record: ServerTarget,
+    authorize: Callable[[str, str, tuple[str, ...]], None] | None,
+    choice: LevelChoice | None = None,
 ) -> TargetSwitch:
     """``use_target`` for a remote target of an open kind (see there)."""
 
@@ -1841,7 +1980,7 @@ def _use_remote(
             fetched = _fetch_profile(record)
     else:
         fetched = _fetch_profile(record)
-    envelope, lines = _consent_offer(record, fetched)
+    envelope, lines = _consent_offer(record, fetched, choice, stored=record)
     if authorize is None:
         _confirm_on_trusted_console(record.name, record.kind, lines)
     else:
@@ -1853,7 +1992,9 @@ def _use_remote(
             stored = _stored_record(record)
             if not stored.is_remote or stored.kind != record.kind:
                 raise ServerCommandRefused("server_profile_changed")
-            consented, _profile = consent_envelope_for(stored, fetched, level="L1", retention=None)
+            consented, _profile = consent_envelope_for(
+                stored, fetched, level=envelope.level, retention=envelope.retention
+            )
             if consented != envelope:
                 raise ServerCommandRefused("server_profile_changed")
             stored = record_consent(stored, fetched, consented, basis=basis)
@@ -1895,10 +2036,15 @@ def _stored_record(record: ServerTarget) -> ServerTarget:
 @_cli
 def server_use(
     name: Annotated[str, typer.Argument(help="A target name, or 'local' for this computer.")],
+    level: _LEVEL_OPTION = None,
+    retention: _RETENTION_OPTION = None,
 ) -> None:
     """Select the server new client processes use ('local' returns to this computer's)."""
 
-    switch = use_target(name)
+    switch = use_target(
+        name,
+        choice=None if level is None and retention is None else LevelChoice(level, retention),
+    )
     record = switch.record
     if record is None:
         typer.echo("Using this computer's everyday FinishUP server.")
@@ -2648,6 +2794,17 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
+    if (root / "state" / "code-export").is_dir() and any(
+        (root / "state" / "code-export").iterdir()
+    ):
+        # Level L2 (ADR-054): removing the target here leaves what it was sent there. Forget is
+        # offered first; this command never forgets on its own.
+        typer.echo(
+            f"{record.name} may still keep copies of code this computer sent it. Removing it here "
+            "does not delete them there: first run 'finishup server code forget' in each "
+            "repository, while it is still selected.",
+            err=True,
+        )
     key_left = cleared = finished = reports_removed = False
     try:
         with registry_lock():

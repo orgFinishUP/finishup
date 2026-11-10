@@ -19,6 +19,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from finishup import __version__
+from finishup.cli import server_code as _server_code  # noqa: F401 - registers "server code"
 from finishup.cli.agent_start import AGENT_START_HANDOFF
 from finishup.cli.ai import ai_app, register_credential_remove
 from finishup.cli.bootstrap import (

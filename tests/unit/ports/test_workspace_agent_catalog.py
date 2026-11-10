@@ -267,9 +267,7 @@ _ARGUMENTS: dict[WorkspaceOperation, tuple[object, ...]] = {
 
 _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
     WorkspaceOperation.CODE_SYNC_PREPARE: (
-        CodeSyncPrepared(
-            False, "f" * 32, _snapshot_manifest(), 1_234, _SHA_A, "days", 7
-        ),
+        CodeSyncPrepared(False, "f" * 32, _snapshot_manifest(), 1_234, _SHA_A, "days", 7),
         CodeSyncPrepared(True, None, _snapshot_manifest(), 0, None, "until_forgotten", None),
     ),
     WorkspaceOperation.CODE_SYNC_READ: (b"# v2 git bundle\n", bytes(range(256))),

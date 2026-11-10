@@ -132,6 +132,9 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         # Which held repositories a remote target's server receives anyway, or keeps here: this
         # client's own record, never sent to that server (ADR-051 decision 8).
         "server repositories": "client_only",
+        # Level L2 (ADR-054): asks the selected server elsewhere, or edits this computer's own
+        # per-repository choices for it.
+        "server code": "client_only",
         "setup disconnect": "client_only",
     }
 )
