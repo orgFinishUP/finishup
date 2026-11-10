@@ -202,7 +202,7 @@ def _read_export_record(path: Path) -> _Record | None:
     try:
         value = strict_json_parse(encoded.rstrip(b"\n"))
         source = cast(dict[str, JsonValue], value)
-        if set(source) not in (_RECORD_MEMBERS, _RECORD_MEMBERS | {"bases"}):
+        if frozenset(source) not in (_RECORD_MEMBERS, _RECORD_MEMBERS | {"bases"}):
             raise ValueError("members")
         if source["schema"] != EXPORT_SCHEMA:
             raise ValueError("schema")
