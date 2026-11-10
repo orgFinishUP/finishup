@@ -37,6 +37,7 @@ __all__ = [
     "EVIDENCE_PROVENANCE_SCHEMA",
     "EVIDENCE_PROVENANCE_TOKENS",
     "ContentForgotten",
+    "EvidenceAccountIncomplete",
     "CopySnapshotRef",
     "EvidenceProvenance",
     "EvidenceToken",
@@ -72,6 +73,16 @@ _TIME: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 def _invalid() -> ValueError:
     return ValueError("evidence_provenance_invalid")
+
+
+class EvidenceAccountIncomplete(Exception):
+    """A task's account cannot be told: the server's copy served some of its evidence (its
+    durable marker says so), but no read from the copy is counted (buffered counts lost when the
+    service stopped). A receipt then says where the evidence was read is unknown, never that the
+    server did not read the repository itself (design v2 section 8.6)."""
+
+    def __init__(self) -> None:
+        super().__init__("evidence_provenance_counts_incomplete")
 
 
 def _count(value: object) -> int:

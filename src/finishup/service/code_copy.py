@@ -63,6 +63,7 @@ from finishup.config.installation import format_rfc3339_ms
 from finishup.domain.evidence_provenance import (
     EVIDENCE_PROVENANCE_TOKENS,
     CopySnapshotRef,
+    EvidenceAccountIncomplete,
     EvidenceProvenance,
     EvidenceToken,
 )
@@ -636,7 +637,11 @@ class CodeCopies:
                 continue
 
     def provenance(self, task_id: str) -> EvidenceProvenance | None:
-        """``task_id``'s evidence account in the copy it is pinned to, or None (no copy)."""
+        """``task_id``'s evidence account in the copy it is pinned to, or None (no copy).
+
+        Raises ``EvidenceAccountIncomplete`` when the pin's durable marker says the copy served
+        some of the task's evidence but no read from the copy is counted (the counts were lost
+        before they were written): the account then cannot say where the evidence was read."""
 
         self.flush()
         try:
@@ -646,6 +651,8 @@ class CodeCopies:
         if found is None:
             return None
         commitment_key, entry = found
+        if entry.copy_used and not entry.account().read_from_copy:
+            raise EvidenceAccountIncomplete()
         snapshot = None
         if entry.synced_at is not None:
             manifest = self._store.snapshot_by_key(commitment_key, entry.snapshot)

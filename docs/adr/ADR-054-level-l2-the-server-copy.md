@@ -501,7 +501,13 @@ account: `reads` per token (`server_copy_read`, `client_attested_read`, `client_
 tree}` of the copy snapshot last read, or `null`) and `content_forgotten` (`{at, reason: owner |
 expired}`, or `null`). It is counted per task in the copy record's pin entry: buffered, and
 written at each sync, account, forget and expiry and every 32 reads. Client observations are
-counted from the task's own ledger (hook-observed events).
+counted from the task's own ledger (hook-observed events). The pin also keeps a durable marker,
+`copy_used`, written before the first read a snapshot serves for the task and never cleared, so
+the attribution never rests on the counts alone: an account whose marker is set but that counts
+no read from the copy (counts lost when the service stopped before writing them) is
+`EvidenceAccountIncomplete`, and the receipt says where the evidence was read is unknown (the
+evidence-unknown section, bounded event `evidence_provenance_counts_incomplete`), never the
+level-L1 sentence that the server did not read the repository itself.
 
 - **The receipt member.** Receipt-result 1.5.0 (unreleased, amended in place) gains the optional
   `evidence_provenance` member, exactly the account's JSON, present only for a claim-bound task

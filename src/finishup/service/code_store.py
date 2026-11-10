@@ -214,7 +214,11 @@ class PinEntry:
     server last synced it for the task, whether the task's evidence is read from the copy
     (``served``), whether that snapshot was served while the client was offline (``stale``: the
     copy as last synced, so the reads that follow it are stale reads too), and how many of the
-    task's evidence reads each source answered."""
+    task's evidence reads each source answered. ``copy_used`` is the durable marker that the
+    copy served some of the task's evidence: set, before the read, when a snapshot first serves
+    the task and never cleared (``served`` is cleared when the client answers from then on), so
+    a task whose buffered counts were lost (a stop before they were written) is never taken for
+    one the copy never read."""
 
     snapshot: str
     synced_at: str | None = None
@@ -222,6 +226,7 @@ class PinEntry:
     reads: Mapping[EvidenceToken, int] = field(default_factory=lambda: {})
     fenced: int = 0
     stale: bool = False
+    copy_used: bool = False
 
     def account(self) -> EvidenceProvenance:
         """The task's evidence account as this pin records it (no snapshot, no marker)."""
@@ -1157,6 +1162,7 @@ class CodeStore:
                     entry.reads,
                     entry.fenced,
                     entry.stale if stale is None else stale,
+                    entry.copy_used or served is True,
                 )
             )
             # A snapshot past the recent window that no pin names any more leaves now.
@@ -1223,6 +1229,7 @@ class CodeStore:
                         merged,
                         min(_MAX_READ_COUNT, entry.fenced + fenced),
                         entry.stale,
+                        entry.copy_used,
                     )
                 )
                 changed = True
@@ -1614,8 +1621,10 @@ def _pin_entry(value: object) -> PinEntry | None:
     reads = fields.get("reads", {})
     fenced = fields.get("fenced", 0)
     stale = fields.get("stale", False)
+    copy_used = fields.get("copy_used", False)
     if (
-        type(stale) is not bool
+        type(copy_used) is not bool
+        or type(stale) is not bool
         or type(snapshot) is not str
         or not _HEX40.match(snapshot)
         or (synced_at is not None and type(synced_at) is not str)
@@ -1631,7 +1640,7 @@ def _pin_entry(value: object) -> PinEntry | None:
         if type(count) is not int or not 0 <= count <= _MAX_READ_COUNT:
             return None
         counts[token] = count
-    return PinEntry(snapshot, synced_at, served, counts, fenced, stale)
+    return PinEntry(snapshot, synced_at, served, counts, fenced, stale, copy_used)
 
 
 def _pin_json(entry: PinEntry) -> dict[str, JsonValue]:
@@ -1642,6 +1651,7 @@ def _pin_json(entry: PinEntry) -> dict[str, JsonValue]:
         "reads": {token: entry.reads.get(token, 0) for token in EVIDENCE_PROVENANCE_TOKENS},
         "fenced": entry.fenced,
         "stale": entry.stale,
+        "copy_used": entry.copy_used,
     }
 
 

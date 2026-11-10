@@ -29,7 +29,7 @@ from finishup.domain.events import (
     encode_payload,
     media_type_for,
 )
-from finishup.domain.evidence_provenance import EvidenceProvenance
+from finishup.domain.evidence_provenance import EvidenceAccountIncomplete, EvidenceProvenance
 from finishup.domain.receipt_closing import closing_prompt, declined_note_count
 from finishup.domain.receipts import (
     ReceiptDocument,
@@ -768,7 +768,9 @@ async def _evidence_account(
     None. A source that raises, or answers anything but an ``EvidenceProvenance``, and an opening
     event that no longer names the claim's handle, are recorded as one bounded event (operation
     ``receipt_evidence_provenance_read``, a closed reason, nothing user-controlled) and answer
-    ``_EvidenceUnreadable``: never a refusal of the receipt. Cancellation is never caught.
+    ``_EvidenceUnreadable``: never a refusal of the receipt. So does an account whose copy served
+    evidence that no count records (``EvidenceAccountIncomplete``): it is never taken for a task
+    the copy never read. Cancellation is never caught.
     """
 
     if source is None or type(attested_by) is not str:
@@ -779,7 +781,12 @@ async def _evidence_account(
         if handle is None:
             reason = "evidence_provenance_handle_unavailable"
             raise LookupError(reason)
-        answer: object = await source(handle, runtime)
+        try:
+            answer: object = await source(handle, runtime)
+        except EvidenceAccountIncomplete:
+            # The copy served some evidence but its counts were lost: unknown, never level L1.
+            reason = "evidence_provenance_counts_incomplete"
+            raise
     except Exception:  # noqa: BLE001 - a failed account is shown as unknown, never a refusal
         record_bounded_event_without_raising(
             component="application.receipt",

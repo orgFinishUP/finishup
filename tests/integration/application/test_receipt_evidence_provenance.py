@@ -23,6 +23,7 @@ from finishup.application.service import ClientProjectionContext, ProjectionRend
 from finishup.domain.evidence_provenance import (
     ContentForgotten,
     CopySnapshotRef,
+    EvidenceAccountIncomplete,
     EvidenceProvenance,
 )
 from finishup.domain.receipts import (
@@ -184,8 +185,9 @@ async def test_a_replay_asks_again_and_the_stored_receipt_never_changes() -> Non
     [
         (OSError(5, "copy record unreadable at /srv/state"), "evidence_provenance_source_failed"),
         ({"server_copy_read": 1}, "evidence_provenance_source_invalid"),
+        (EvidenceAccountIncomplete(), "evidence_provenance_counts_incomplete"),
     ],
-    ids=["raises", "not_an_account"],
+    ids=["raises", "not_an_account", "counts_incomplete"],
 )
 @pytest.mark.parametrize("receipt_format", ["text", "json"])
 async def test_a_failing_source_never_claims_more_than_the_server_knows(

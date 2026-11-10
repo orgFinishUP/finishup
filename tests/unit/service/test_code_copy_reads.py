@@ -879,3 +879,42 @@ def test_a_staged_edit_that_leaves_the_snapshot_unchanged_is_no_snapshot_mismatc
     with evidence_task_scope(TASK):
         mismatch = runner.run(ApprovedCheckCommand(handle, approval, other))
     assert mismatch.status is ApprovedCheckStatus.STALE
+
+
+def test_a_copy_read_whose_count_was_lost_is_never_taken_for_a_client_only_task(
+    tmp_path: Path,
+) -> None:
+    # Design v2 §8.6: the copy served the task base, then the service stopped before the
+    # buffered count was written. The pin's durable marker says the copy served the task, so its
+    # account is never level L1's (which would say the server did not read the repository).
+    from finishup.domain.evidence_provenance import EvidenceAccountIncomplete
+
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+    restarted = CodeCopies(
+        copies.store, cast(WorkspaceAgentHub, hub), lambda: REVISION, checkouts=copies.checkouts
+    )
+    restarted.remember(HANDLE, COMMITMENT, WORKTREE)
+    hub.code_copies = restarted
+    with pytest.raises(EvidenceAccountIncomplete):
+        restarted.provenance(TASK)
+    # The client answers from now on (a refused sync clears ``served``): the marker stays.
+    hub.refusal = "repository_egress_held"
+    with evidence_task_scope(TASK):
+        routed.capture(HANDLE, base)
+    with pytest.raises(EvidenceAccountIncomplete):
+        restarted.provenance(TASK)
+    hub.refusal = None
+    # A task pinned to the copy that it never served keeps its level-L1 account.
+    client_base = GitChangeCaptureAdapter().read_task_base(os.fspath(root))
+    with evidence_task_scope("task_two"):
+        routed.capture(HANDLE, client_base)
+    account = restarted.provenance("task_two")
+    assert account is not None and not account.level_l2
+    # Once a read from the copy is counted again, the account is level L2's.
+    with evidence_task_scope(TASK):
+        routed.capture(HANDLE, routed.read_task_base(HANDLE))
+    again = restarted.provenance(TASK)
+    assert again is not None and again.level_l2
