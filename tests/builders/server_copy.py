@@ -175,7 +175,8 @@ def held_lookup(
         if item is None:
             return None
         if item.kind == "blob":
-            return Held("blob", len(item.data))
+            safe = len(item.data) <= 4_096 and b"\x00" not in item.data
+            return Held("blob", len(item.data), link_safe=safe)
         if item.kind == "tree":
             size, files = trees[oid]
             entries, names = shape(oid)

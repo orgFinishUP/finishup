@@ -17,6 +17,7 @@ from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
     COMPLETENESS_LISTS,
+    MODE_LINK,
     MODE_REGULAR,
     MODE_TREE,
     BundleLimits,
@@ -411,6 +412,33 @@ def test_a_snapshot_expanding_to_a_billion_files_is_never_admitted(tmp_path: Pat
     with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
         _upload(store, incremental, _unverified_manifest(grown, grown_files * small_files))
     assert store.have("alice", "repo-1") == (small.snapshot,)
+
+
+def test_a_held_file_is_never_admitted_again_as_a_link_it_could_not_be(tmp_path: Path) -> None:
+    # B7: a regular file holding NUL, then an incremental snapshot naming it as a link.
+    store = _store(tmp_path)
+    first = snapshot_objects(BASE, {**CURRENT, "data.bin": b"a\x00b", "note": b"../README.md"})
+    _upload(store, first.bundle(), _manifest(first, first.bundle()))
+    held = held_lookup(first.objects, {})
+    for target, admitted in ((b"a\x00b", False), (b"../README.md", True)):
+        blob = GitObject("blob", target).oid
+        tree = GitObject("tree", encode_tree([TreeEntry(MODE_LINK, b"l", blob)]))
+        base = GitObject("commit", encode_commit(first.base_tree, None))
+        tip = GitObject("commit", encode_commit(tree.oid, base.oid))
+        assert held(blob) is not None and base.oid == first.base
+        objects = {tree.oid: tree, tip.oid: tip}
+        snap = Snapshot(first.base, tip.oid, first.base_tree, tree.oid, objects)
+        bundle = write_bundle((first.snapshot,), tip.oid, 2, write_pack(list(objects.values())))
+        manifest = _unverified_manifest(snap, 1)
+        manifest = canonical_encode(
+            manifest_to_json(replace(manifest_from_json(manifest), bytes=len(target)))
+        )
+        if admitted:
+            _upload(store, bundle, manifest)
+            continue
+        with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+            _upload(store, bundle, manifest)
+        assert store.have("alice", "repo-1") == (first.snapshot,)
 
 
 def test_one_principal_never_reaches_another_s_copy(tmp_path: Path) -> None:

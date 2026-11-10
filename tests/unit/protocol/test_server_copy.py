@@ -529,6 +529,56 @@ def test_a_held_subtree_counts_at_every_place_it_is_referenced_again() -> None:
         verify_snapshot_bundle(bundle, have=unbounded.get, limits=LIMITS)
 
 
+def _reusing(held_blob: str, mode: bytes, *, ref: int = 2) -> bytes:
+    """An incremental bundle whose snapshot tree names ``held_blob`` (not sent) as ``mode``."""
+
+    tree = GitObject("tree", _raw_tree((mode, b"l", held_blob)))
+    empty = GitObject("tree", b"")
+    base = GitObject("commit", encode_commit(empty.oid, None))
+    tip = GitObject("commit", encode_commit(tree.oid, base.oid))
+    return _bundle_of([tip, base, empty, tree], tip.oid, ref=ref)
+
+
+def test_a_held_blob_is_checked_against_the_mode_it_is_reused_as() -> None:
+    # B7: admitted as regular files, then named as links by an incremental tree.
+    nul = GitObject("blob", b"a\x00b")
+    long = GitObject("blob", b"x" * 4_097)
+    fine = GitObject("blob", b"../README.md")
+    files = _raw_tree(
+        *sorted(
+            (
+                (b"100644", name, item.oid)
+                for name, item in ((b"n", nul), (b"o", long), (b"r", fine))
+            ),
+            key=lambda entry: entry[1],
+        )
+    )
+    first = verify_snapshot_bundle(
+        _snapshot_with_tree(files, nul, long, fine), have=_nothing, limits=LIMITS
+    )
+    assert first.held[nul.oid].link_safe is False and first.held[long.oid].link_safe is False
+    assert first.held[fine.oid].link_safe is True
+
+    def have(oid: str) -> Held | None:
+        return first.held.get(oid)
+
+    for item in (nul, long):
+        with pytest.raises(CopyError, match="link_invalid"):
+            verify_snapshot_bundle(_reusing(item.oid, b"120000"), have=have, limits=LIMITS)
+        # As a file it is still the same admitted blob.
+        verify_snapshot_bundle(_reusing(item.oid, b"100644"), have=have, limits=LIMITS)
+    verify_snapshot_bundle(_reusing(fine.oid, b"120000"), have=have, limits=LIMITS)
+    # A held blob whose link check was never kept is not reused as a link.
+    unknown = {oid: replace(item, link_safe=None) for oid, item in first.held.items()}
+    with pytest.raises(CopyError, match="link_invalid"):
+        verify_snapshot_bundle(_reusing(fine.oid, b"120000"), have=unknown.get, limits=LIMITS)
+    # Nor past the file cap the receiver applies now.
+    with pytest.raises(CopyError, match="pack_object_too_large"):
+        verify_snapshot_bundle(
+            _reusing(long.oid, b"100644"), have=have, limits=BundleLimits(max_file_bytes=4_096)
+        )
+
+
 def test_what_a_receiver_keeps_round_trips_and_older_entries_read_as_unknown() -> None:
     snap = snapshot_objects(BASE, CURRENT)
     verified = verify_snapshot_bundle(snap.bundle(), have=_nothing, limits=LIMITS)

@@ -1065,9 +1065,15 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
                 files += 1
             else:
                 blob = held.get(entry.oid)
-                blob_size = blob.bytes if blob is not None else database.blob_size(entry.oid)
-                held[entry.oid] = Held("blob", blob_size)
-                size += blob_size
+                if blob is None:
+                    blob_size = database.blob_size(entry.oid)
+                    # Whether the server may take it as a link's target (it checks that too).
+                    link_safe = blob_size <= _MAX_LINK_BYTES and (
+                        b"\x00" not in database.read(entry.oid, limit=_MAX_LINK_BYTES).data
+                    )
+                    blob = Held("blob", blob_size, link_safe=link_safe)
+                    held[entry.oid] = blob
+                size += blob.bytes
                 files += 1
         shape = Held("tree", size, files, entries=entries, names=names)
         held[oid] = shape

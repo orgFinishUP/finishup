@@ -588,8 +588,10 @@ class Held:
     For a tree also what a checkout of it expands to, relative to the tree, so the tree can be
     checked where it is referenced again: ``entries`` (every path beneath it, directories
     included, a subtree counted at every place it is referenced) and ``names`` (the bytes of
-    those paths, each component with its separator). ``None``: not known (kept before these were
-    recorded); the verifier refuses to reuse a held tree it cannot bound.
+    those paths, each component with its separator). For a blob whether it may be a link's
+    target (``link_safe``: at most 4 KiB, no NUL), so a blob held as a file is never reused as a
+    link it could not be. ``None``: not known (kept before these were recorded); the verifier
+    refuses a reuse it cannot check.
     """
 
     kind: str
@@ -598,12 +600,25 @@ class Held:
     tree: str | None = None
     entries: int | None = None
     names: int | None = None
+    link_safe: bool | None = None
+
+
+# The members after the first four were added later: an older entry reads them as unknown.
+_HELD_MEMBERS: Final = 7
 
 
 def held_to_json(held: Held) -> list[JsonValue]:
     """``held`` as the receiver keeps it in its index (a fixed-position list)."""
 
-    return [held.kind, held.bytes, held.files, held.tree, held.entries, held.names]
+    return [
+        held.kind,
+        held.bytes,
+        held.files,
+        held.tree,
+        held.entries,
+        held.names,
+        held.link_safe,
+    ]
 
 
 def _held_count(value: JsonValue) -> int | None:
@@ -614,19 +629,37 @@ def _held_count(value: JsonValue) -> int | None:
     raise CopyError("held_invalid")
 
 
-def held_from_json(value: JsonValue) -> Held:
-    """An index entry ``held_to_json`` wrote (or the four-member entry written before the
-    expansion bounds were kept: those read as ``None``, unknown)."""
+def _held_flag(value: JsonValue) -> bool | None:
+    if value is None or type(value) is bool:
+        return value
+    raise CopyError("held_invalid")
 
-    if type(value) is not list or not 4 <= len(value) <= 6:
+
+def held_from_json(value: JsonValue) -> Held:
+    """An index entry ``held_to_json`` wrote (or a shorter one written before the later members
+    were kept: those read as ``None``, unknown)."""
+
+    if type(value) is not list or not 4 <= len(value) <= _HELD_MEMBERS:
         raise CopyError("held_invalid")
-    members = [*value, None, None][:6]
-    kind, size, files, tree, entries, names = members
+    members: list[JsonValue] = [*value, *([None] * (_HELD_MEMBERS - len(value)))]
+    kind, size, files, tree, entries, names, link_safe = members
     if kind not in _KINDS or type(size) is not int or type(files) is not int:
         raise CopyError("held_invalid")
     if size < 0 or files < 0 or (tree is not None and type(tree) is not str):
         raise CopyError("held_invalid")
-    return Held(kind, size, files, tree, _held_count(entries), _held_count(names))
+    return Held(
+        kind,
+        size,
+        files,
+        tree,
+        _held_count(entries),
+        _held_count(names),
+        _held_flag(link_safe),
+    )
+
+
+def _link_safe(data: bytes) -> bool:
+    return len(data) <= _MAX_LINK_BYTES and b"\x00" not in data
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,16 +724,23 @@ class _Walk:
         return held
 
     def blob(self, oid: str, mode: bytes) -> int:
+        """A blob entry in its mode here, whether in the pack or held: a held blob is checked
+        against this placement as a blob in the pack is (a link's target, the file cap)."""
+
         item = self.objects.get(oid)
         if item is None:
             held = self._held(oid)
             if held.kind != "blob":
                 raise CopyError("tree_entry_type_mismatch")
+            if held.bytes > self.limits.max_file_bytes:
+                raise CopyError("pack_object_too_large")
+            if mode == MODE_LINK and held.link_safe is not True:
+                raise CopyError("link_invalid")
             return held.bytes
         if item.kind != "blob":
             raise CopyError("tree_entry_type_mismatch")
         self.reached.add(oid)
-        if mode == MODE_LINK and (len(item.data) > _MAX_LINK_BYTES or b"\x00" in item.data):
+        if mode == MODE_LINK and not _link_safe(item.data):
             raise CopyError("link_invalid")
         return len(item.data)
 
@@ -802,7 +842,7 @@ def verify_snapshot_bundle(
     kept: dict[str, Held] = {}
     for oid, item in objects.items():
         if item.kind == "blob":
-            kept[oid] = Held("blob", len(item.data))
+            kept[oid] = Held("blob", len(item.data), link_safe=_link_safe(item.data))
         elif item.kind == "tree":
             below = walk.shapes[oid]
             kept[oid] = Held(

@@ -524,3 +524,30 @@ def test_export_records_lists_every_entry_in_order_and_never_creates_or_follows(
     (tmp_path / "file").write_bytes(b"")
     with pytest.raises(ExportRefused, match="code_export_unsafe"):
         export_records(tmp_path / "file")
+
+
+def test_an_incremental_export_reuses_a_held_link_target_the_server_accepts(
+    tmp_path: Path,
+) -> None:
+    # B7: the closure tells the verifier which held blobs may be link targets.
+    root = _repository(tmp_path, {"README.md": b"readme\n", "note": b"README.md", "bin": b"a\x00b"})
+    (root / "link").symlink_to("README.md")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "m")
+    database = ExportDatabase(tmp_path / "export")
+    first = export_snapshot(_request(root), POLICY, database, gate=_open)
+    database.remember_sent(first.manifest.snapshot, first.ref_number)
+    (root / "README.md").write_bytes(b"changed\n")
+    (root / "other").symlink_to("README.md")
+    second = export_snapshot(
+        _request(root, have=(first.manifest.snapshot,)), POLICY, database, gate=_open
+    )
+    assert not second.unchanged
+    have = code_export._closure(database, (first.manifest.snapshot,), 1 << 20)  # pyright: ignore[reportPrivateUsage]
+    target = have[GitObject("blob", b"README.md").oid]
+    assert target.link_safe is True
+    assert have[GitObject("blob", b"a\x00b").oid].link_safe is False
+    verified = verify_snapshot_bundle(
+        second.bundle, have=have.get, limits=BundleLimits(max_file_bytes=65_536)
+    )
+    assert GitObject("blob", b"README.md").oid not in verified.objects

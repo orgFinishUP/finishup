@@ -135,7 +135,9 @@ or the snapshot tree expands to is bounded before admission (`tree_too_many_entr
 it is referenced) and 128 MiB of path bytes, so a few dozen small trees that reference each other
 twice (a billion empty files) are refused. The verifier also gives the receiver what it keeps of
 each object (`Held`: for a tree, these expansion counts), so a subtree an incremental bundle
-references again is counted from the index; a held tree without them is not reused.
+references again is counted from the index; a held tree without them is not reused. A held blob
+is checked against the mode it is reused as, as a blob in the pack is: never a link unless it was
+kept as a valid link target (at most 4 KiB, no NUL), and never past the file cap applied now.
 
 The snapshot manifest, `yoetz.code-snapshot/1`, travels with the bundle: the snapshot and base
 commits and their trees, the original base commit and object format (provenance), the export id,
