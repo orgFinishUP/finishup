@@ -10341,6 +10341,7 @@ def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             }
         )
     _add_server_profile(entry, document)
+    _add_code_copy(entry, document)
     return document
 
 
@@ -10472,6 +10473,140 @@ def _add_server_profile(entry: _RegistryEntry, document: dict[str, JsonValue]) -
         raise invalid
     codes.append("server_profile_changed")
     codes.sort(key=lambda value: str(value).encode("ascii"))
+
+
+def _add_code_copy(entry: _RegistryEntry, document: dict[str, JsonValue]) -> None:
+    """Level L2's ``code_copy`` method (ADR-054, in place on the unreleased 2.10.0).
+
+    A claim-bound request about the server's copy of the claimed repository: ``status`` answers
+    what the copy holds (or null), ``forget`` deletes it and answers exactly what it deleted. It
+    joins the full method list beside ``server_profile`` (never the released list, #436).
+    """
+
+    invalid = SchemaGenerationError(
+        "control_code_copy_template_invalid", entries=(entry.relative_path,)
+    )
+    if entry.schema_name == "control-hello":
+        return
+    if entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        allowed = cast(dict[str, JsonValue], properties["allowed_methods"])
+        lists = cast(list[JsonValue], allowed["enum"])
+        items = cast(list[JsonValue], cast(dict[str, JsonValue], allowed["items"])["enum"])
+        full = cast(list[JsonValue], lists[-1])
+        if "code_copy" in items or "server_profile" not in full:
+            raise invalid
+        full.append("code_copy")
+        full.sort(key=lambda value: str(value).encode("ascii"))
+        items.append("code_copy")
+        items.sort(key=lambda value: str(value).encode("ascii"))
+        allowed["maxItems"] = len(full)
+        return
+    branches = cast(list[JsonValue], document["oneOf"])
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+
+    def method_of(branch: JsonValue) -> str | None:
+        properties = cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])
+        method = properties.get("method")
+        return cast(str, cast(dict[str, JsonValue], method)["const"]) if method else None
+
+    templates = [branch for branch in branches if method_of(branch) == "server_profile"]
+    if not templates or any(method_of(branch) == "code_copy" for branch in branches):
+        raise invalid
+    count: dict[str, JsonValue] = {"maximum": 2**53 - 1, "minimum": 0, "type": "integer"}
+    stamp: dict[str, JsonValue] = {
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+        "type": "string",
+    }
+    result_body: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "action": {"enum": ["forget", "status"], "type": "string"},
+            "copy": {
+                "anyOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "created_at": dict(stamp),
+                            "last_sync_at": {"anyOf": [dict(stamp), {"type": "null"}]},
+                            "retention": {
+                                "additionalProperties": False,
+                                "properties": {
+                                    "days": {
+                                        "anyOf": [
+                                            {"maximum": 36500, "minimum": 0, "type": "integer"},
+                                            {"type": "null"},
+                                        ]
+                                    },
+                                    "kind": {
+                                        "enum": ["days", "task_close", "until_forgotten"],
+                                        "type": "string",
+                                    },
+                                },
+                                "required": ["kind", "days"],
+                                "type": "object",
+                            },
+                            "snapshots": dict(count),
+                            "stored_bytes": dict(count),
+                        },
+                        "required": [
+                            "snapshots",
+                            "stored_bytes",
+                            "created_at",
+                            "last_sync_at",
+                            "retention",
+                        ],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "forgot": {
+                "anyOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "backups": {"const": "not_managed"},
+                            "bytes": dict(count),
+                            "copies": dict(count),
+                            "objects": dict(count),
+                            "snapshots": dict(count),
+                        },
+                        "required": ["copies", "snapshots", "objects", "bytes", "backups"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+        },
+        "required": ["action", "copy", "forgot"],
+        "type": "object",
+    }
+    added: list[JsonValue] = []
+    for template in templates:
+        branch = copy.deepcopy(cast(dict[str, JsonValue], template))
+        properties = cast(dict[str, JsonValue], branch["properties"])
+        properties["method"] = {"const": "code_copy"}
+        body = cast(dict[str, JsonValue], properties["body"])
+        if body.get("$ref") == "#/$defs/server_profile_body":
+            properties["body"] = {"$ref": "#/$defs/code_copy_body"}
+        elif body.get("$ref") == _SERVER_PROFILE_SCHEMA_ID:
+            properties["body"] = copy.deepcopy(result_body)
+        added.append(branch)
+    position = min(
+        index for index, branch in enumerate(branches) if method_of(branch) == "server_profile"
+    )
+    branches[position:position] = added
+    if entry.schema_name == "control-request":
+        if "code_copy_body" in definitions:
+            raise invalid
+        definitions["code_copy_body"] = {
+            "additionalProperties": False,
+            "properties": {"action": {"enum": ["forget", "status"], "type": "string"}},
+            "required": ["action"],
+            "type": "object",
+        }
+        document["$defs"] = dict(sorted(definitions.items()))
 
 
 def _add_observation_client_attestation(

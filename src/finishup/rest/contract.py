@@ -179,6 +179,8 @@ AGENT_SCOPE_METHODS: Final[frozenset[ControlMethod]] = frozenset(
         ControlMethod.RECEIPT,
         ControlMethod.SERVICE_STATUS,
         ControlMethod.OBSERVATION_INGEST,
+        # Level L2 (ADR-054): reducing what a server keeps is never an operator privilege.
+        ControlMethod.CODE_COPY,
     }
 )
 OPERATOR_SCOPE_METHODS: Final[frozenset[ControlMethod]] = AGENT_SCOPE_METHODS | frozenset(
@@ -200,7 +202,7 @@ OPERATOR_SCOPE_METHODS: Final[frozenset[ControlMethod]] = AGENT_SCOPE_METHODS | 
 # Allowed only on a request whose claim the service keyed (the workspace it names is the client's
 # own, read by the client's workspace agent).
 CLAIM_BOUND_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
-    {ControlMethod.OBSERVATION_INGEST}
+    {ControlMethod.OBSERVATION_INGEST, ControlMethod.CODE_COPY}
 )
 
 # Transport and authentication refusals. A dispatched call's own outcome (a workflow error,

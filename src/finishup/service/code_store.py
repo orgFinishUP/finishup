@@ -285,6 +285,12 @@ class CodeStore:
         return self._root / "copies" / copy_key[:32]
 
     @staticmethod
+    def repository_id(repository: str) -> str:
+        """The digest a copy's record names ``repository`` by."""
+
+        return _digest(_REPOSITORY_DOMAIN, repository)
+
+    @staticmethod
     def copy_key(principal: str, repository: str) -> str:
         """The key of the copy of ``repository`` kept for ``principal``."""
 

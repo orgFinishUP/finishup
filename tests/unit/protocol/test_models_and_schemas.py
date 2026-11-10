@@ -3515,8 +3515,9 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_904
-    )  # ADR-053 +10 (the REST v1 documents: the session's status and revision, the error's, the
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_906
+    )  # ADR-054 +2 (control 2.10.0: the code_copy request body in its request and result
+    # branches); ADR-053 +10 (the REST v1 documents: the session's status and revision, the error's, the
     # discovery's, the operation's, the agent's and the declaration's own defs); ADR-052 +3 (server-target-status target.connection, its helper and the helper's reason
     # token, layer 4) +18 (server-profile 1.0.0) +1 (its review's fallback_disclosure token, review
     # of layer 3: A1) +3 (control 2.10.0: the server_profile request body

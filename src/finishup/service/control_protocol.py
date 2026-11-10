@@ -1084,7 +1084,7 @@ def _allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
 # Methods newer than every released hello-result schema (ADR-052: ``server_profile``). The
 # manifest-mismatch answer goes to a peer of another installation, which must still decode it to
 # name ``manifest_mismatch`` (#436), so it lists only the methods a released peer knows.
-_UNRELEASED_METHODS: Final = frozenset({ControlMethod.SERVER_PROFILE})
+_UNRELEASED_METHODS: Final = frozenset({ControlMethod.SERVER_PROFILE, ControlMethod.CODE_COPY})
 
 
 def _released_allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:

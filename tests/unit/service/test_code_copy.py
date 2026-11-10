@@ -207,3 +207,88 @@ def test_copy_keys_are_derived_by_the_vault_per_copy_and_never_without_it() -> N
         keyring.unwrap("1" * 32, wrapped)
     domains = vault_module._INSTALLATION_DOMAINS  # pyright: ignore[reportPrivateUsage]
     assert CODE_COPY_KEK_MAC_DOMAIN in domains[vault_module.MacKeyPurpose.CATALOG_LOOKUP]
+
+
+# --- the code_copy control method (status, forget) --------------------------------------------------
+
+_CLAIM_COMMITMENT = "hmac-sha256:" + "4" * 64
+
+
+def _daemon(copies: object) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        _composition=SimpleNamespace(workspace_hub=SimpleNamespace(code_copies=copies))
+    )
+
+
+def _code_copy(copies: object, action: str, *, kind: str = "cli", claim: bool = True) -> object:
+    from types import SimpleNamespace
+
+    from finishup.ports.control import ControlClientKind, RepositoryPrivacyContext
+    from finishup.service.daemon import ServiceDaemon
+
+    context = RepositoryPrivacyContext(
+        commitment=_CLAIM_COMMITMENT,
+        identity_kind="client_claim" if claim else "directory",
+        workspace_handle=HANDLE if claim else None,
+    )
+    return ServiceDaemon._code_copy(  # pyright: ignore[reportPrivateUsage]
+        _daemon(copies),  # type: ignore[arg-type]
+        SimpleNamespace(body={"action": action}),  # type: ignore[arg-type]
+        context,
+        ControlClientKind(kind),
+    )
+
+
+def test_code_copy_answers_only_a_claim_of_a_service_that_keeps_copies(tmp_path: Path) -> None:
+    from finishup.ports.control import ControlError
+
+    copies, _hub, _store = _copies(tmp_path)
+    for case in (
+        lambda: _code_copy(None, "status"),
+        lambda: _code_copy(copies, "status", claim=False),
+        lambda: _code_copy(copies, "forget", kind="mcp_bridge"),
+    ):
+        with pytest.raises(ControlError, match="method_forbidden"):
+            case()
+    with pytest.raises(ControlError, match="frame_invalid"):
+        _code_copy(copies, "delete")
+
+
+def test_code_copy_status_and_forget_say_exactly_what_is_kept_and_deleted(tmp_path: Path) -> None:
+    from finishup.protocol.schemas import validate_schema_instance
+
+    copies, _hub, _store = _copies(tmp_path)
+    assert _code_copy(copies, "status") == {"action": "status", "copy": None, "forgot": None}
+    copies.remember(HANDLE, _CLAIM_COMMITMENT, WORKTREE)
+    assert copies.sync_blocking(HANDLE, purpose="check").outcome == "synced"
+    status = _code_copy(copies, "status")
+    assert status["copy"]["snapshots"] == 1  # type: ignore[index]
+    assert status["copy"]["retention"] == {"kind": "days", "days": 7}  # type: ignore[index]
+    forgot = _code_copy(copies, "forget")
+    assert forgot["forgot"]["copies"] == 1 and forgot["forgot"]["backups"] == "not_managed"  # type: ignore[index]
+    assert forgot["forgot"]["objects"] > 0 and forgot["forgot"]["bytes"] > 0  # type: ignore[index]
+    again = _code_copy(copies, "forget")
+    assert again["forgot"] == {  # type: ignore[index]
+        "copies": 0,
+        "snapshots": 0,
+        "objects": 0,
+        "bytes": 0,
+        "backups": "not_managed",
+    }
+    assert _code_copy(copies, "status")["copy"] is None  # type: ignore[index]
+    for body in (status, forgot):
+        validate_schema_instance(
+            "control-result",
+            "2.10.0",
+            {
+                "protocol_version": "1.0",
+                "rpc_id": "rpc_12345678-1234-4123-8123-123456789abc",
+                "service_instance_id": "svc_12345678-1234-4123-8123-123456789abc",
+                "service_generation": "1",
+                "method": "code_copy",
+                "outcome": "ok",
+                "body": body,
+            },
+        )

@@ -89,7 +89,11 @@ from finishup.ports.privacy import (
     PrivacyReceiptView,
 )
 from finishup.ports.workspace_agent import outcome_for_reason
-from finishup.protocol.canonical import canonical_encode, parse_canonical_integer_string
+from finishup.protocol.canonical import (
+    canonical_encode,
+    parse_canonical_integer_string,
+    strict_json_parse,
+)
 from finishup.protocol.errors import (
     AUTHORIZATION_REFUSAL_PHASES,
     REMOTE_CONNECTION_PHASES,
@@ -2072,6 +2076,18 @@ class ServiceClient(ControlClientPort):
             return profile_from_json(canonical_encode(cast(JsonValue, body)))
         except ProfileError:
             raise ControlError("frame_invalid") from None
+
+    async def code_copy(self, action: Literal["status", "forget"]) -> dict[str, JsonValue]:
+        """The server's copy of this connection's claimed repository (level L2, ADR-054):
+        ``status`` (what it holds, or null) or ``forget`` (exactly what was deleted)."""
+
+        if action not in {"status", "forget"}:
+            raise ValueError("code_copy_action_invalid")
+        body = await self._invoke(ControlMethod.CODE_COPY, JsonObject({"action": action}))
+        plain = strict_json_parse(canonical_encode(cast(JsonValue, body)))
+        if type(plain) is not dict or plain.get("action") != action:
+            raise ControlError("frame_invalid")
+        return cast(dict[str, JsonValue], plain)
 
     async def lock(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_LOCK, JsonObject({})))

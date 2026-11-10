@@ -423,6 +423,10 @@ _STRUCTURAL_METHODS = frozenset(
         ControlMethod.SERVICE_STOP,
         # What this server offers (ADR-052): no ledger, no vault, answered while locked.
         ControlMethod.SERVER_PROFILE,
+        # Level L2 (ADR-054): the claimed repository's copy, its status and forget; no ledger,
+        # and forget is answered even under another revision (reducing what is kept is always
+        # allowed).
+        ControlMethod.CODE_COPY,
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
@@ -1424,6 +1428,12 @@ class ServiceDaemon:
                     # cannot state exactly (it never offers one that understates it, ADR-052).
                     raise ControlError("method_forbidden")
                 body: object = freeze_json(source.document(self.status(), schema_manifest_digest()))
+            elif request.method is ControlMethod.CODE_COPY:
+                body = freeze_json(
+                    await asyncio.to_thread(
+                        self._code_copy, request, repository_privacy_context, client_kind
+                    )
+                )
             elif request.method is ControlMethod.SERVICE_STATUS:
                 body = self.status()
             elif request.method is ControlMethod.SERVICE_LOCK:
@@ -2733,6 +2743,58 @@ class ServiceDaemon:
 
         source = self._composition.server_profile
         return None if source is None else source.revision
+
+    def _code_copy(
+        self,
+        request: ControlCallRequest,
+        context: RepositoryPrivacyContext | None,
+        client_kind: ControlClientKind,
+    ) -> dict[str, JsonValue]:
+        """``code_copy`` (level L2, ADR-054): the claimed repository's copy, ``status`` or
+        ``forget``. Only a claim-bound connection names a repository, and only a service that
+        keeps copies answers; forget is idempotent and says exactly what it deleted."""
+
+        copies = self._composition.workspace_hub.code_copies
+        if (
+            copies is None
+            or client_kind is ControlClientKind.MCP_BRIDGE
+            or context is None
+            or context.identity_kind != "client_claim"
+        ):
+            raise ControlError("method_forbidden")
+        action = request.body.get("action")
+        from finishup.service.code_copy import COPY_PRINCIPAL
+
+        commitment = context.commitment
+        if action == "forget":
+            report = copies.forget(commitment)
+            return {
+                "action": "forget",
+                "copy": None,
+                "forgot": {
+                    key: value for key, value in report.to_json().items() if key != "reason"
+                },
+            }
+        if action != "status":
+            raise ControlError("frame_invalid")
+        repository = copies.store.repository_id(commitment)
+        summary = next(
+            (item for item in copies.store.copies(COPY_PRINCIPAL) if item.repository == repository),
+            None,
+        )
+        return {
+            "action": "status",
+            "copy": None
+            if summary is None
+            else {
+                "snapshots": summary.snapshots,
+                "stored_bytes": summary.stored_bytes,
+                "created_at": summary.created_at,
+                "last_sync_at": summary.last_sync_at,
+                "retention": {"kind": summary.retention_kind, "days": summary.retention_days},
+            },
+            "forgot": None,
+        }
 
     @staticmethod
     def _validate_client_method(client_kind: ControlClientKind, method: ControlMethod) -> None:
