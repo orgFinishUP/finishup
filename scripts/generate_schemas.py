@@ -12197,6 +12197,15 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "configuration",
         lambda: __import__("finishup.config.models", fromlist=["FinishUpConfig"]).FinishUpConfig,
     ),
+    # ADR-054: the ``[server]`` table and its ``[server.code_copy]`` offer (level L2).
+    _RegistryEntry(
+        "config/yoetz-config-1.4.0.schema.json",
+        "yoetz-config",
+        "1.4.0",
+        "config",
+        "configuration",
+        lambda: __import__("finishup.config.models", fromlist=["FinishUpConfig"]).FinishUpConfig,
+    ),
     _RegistryEntry(
         "consent/catalog-2.0.0.schema.json",
         "catalog",
@@ -14730,7 +14739,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/check-result-1.4.0.schema.json",
         "operations/check-result-1.5.0.schema.json",
         "operations/check-result-1.6.0.schema.json",
-        "config/yoetz-config-1.3.0.schema.json",
+        # ADR-054: config 1.4.0 (the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
+        "config/yoetz-config-1.4.0.schema.json",
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
         "operations/receipt-result-1.3.0.schema.json",
@@ -15118,6 +15128,8 @@ def build_schema_documents(
             "config/yoetz-config-1.0.0.schema.json",
             "config/yoetz-config-1.1.0.schema.json",
             "config/yoetz-config-1.2.0.schema.json",
+            # Released in v0.3.0; config 1.4.0 carries the ``[server]`` table (ADR-054).
+            "config/yoetz-config-1.3.0.schema.json",
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "events/result-recorded-1.0.0.schema.json",

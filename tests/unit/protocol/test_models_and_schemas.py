@@ -3427,7 +3427,8 @@ def test_schema_catalog_reports_complete_registry() -> None:
     # and the HTTPS binding v1's rest-error 1.0.0 and server-info 1.0.0; ADR-051 decision D4:
     # receipt-result 1.5.0; ADR-051 decision 5: check-recorded 1.7.0 and receipt-document 1.4.0;
     # ADR-052: server-profile 1.0.0; ADR-053: the seven REST v1 documents (rest-*)
-    assert SCHEMA_MEMBER_COUNT == 262
+    # ADR-054: config 1.4.0 (the [server] table)
+    assert SCHEMA_MEMBER_COUNT == 263
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3515,8 +3516,9 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_906
-    )  # ADR-054 +2 (control 2.10.0: the code_copy request body in its request and result
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 9_921
+    )  # ADR-054 +15 (config 1.4.0: the 13 refs of 1.3.0, the [server] table and its code_copy);
+    # ADR-054 +2 (control 2.10.0: the code_copy request body in its request and result
     # branches); ADR-053 +10 (the REST v1 documents: the session's status and revision, the error's, the
     # discovery's, the operation's, the agent's and the declaration's own defs); ADR-052 +3 (server-target-status target.connection, its helper and the helper's reason
     # token, layer 4) +18 (server-profile 1.0.0) +1 (its review's fallback_disclosure token, review
