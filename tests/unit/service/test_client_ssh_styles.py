@@ -279,6 +279,55 @@ def test_a_server_that_refuses_the_consented_revision_asks_the_helper_to_refresh
     assert (root / "state" / "profile-refresh-requested").exists()
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_refresh(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, running: bool
+) -> None:
+    """No helper is on the direct style's path: the refusal starts one (unless one runs), which
+    fetches the profile, so ``server status`` names the change and a narrowing is adjusted."""
+
+    from builders.server_profiles import _revision_of  # pyright: ignore[reportPrivateUsage]
+
+    record, root = ssh_selected
+    write_connection_style(root, "direct")
+    daemon = ScriptedDaemon()
+    daemon.profile_revision = _revision_of(profile_document(revision=2))
+
+    async def open_stream(  # noqa: ANN202
+        _ssh: str,
+        _root: Path,
+        _record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        del expected, deadline
+        client_end, server_end = memory_pair()
+        daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
+        return client_end
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
+    spawns: list[str] = []
+
+    def spawn(_root: Path, target_id: str) -> object:
+        spawns.append(target_id)
+        return object()
+
+    monkeypatch.setattr(helper_status, "spawn_helper", spawn)
+    monkeypatch.setattr(helper_status, "helper_holder", lambda _root: object() if running else None)
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            await connect_service(ControlClientKind.CLI)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.phase == "server_profile_changed"
+    assert (root / "state" / "profile-refresh-requested").exists()
+    assert spawns == ([] if running else [record.target_id])
+
+
 def test_the_holder_of_a_remote_root_is_its_helper_and_moves_with_its_status(
     ssh_selected: tuple[targets.ServerTarget, Path],
 ) -> None:

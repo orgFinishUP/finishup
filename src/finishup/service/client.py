@@ -2723,7 +2723,29 @@ async def _reach_remote(
     except ControlError as error:
         if error.phase == "server_profile_changed":
             request_profile_refresh(root)
+            if style == "direct":
+                _start_helper_to_refresh(root, admission.target_id)
         raise
+
+
+def _start_helper_to_refresh(root: Path, target_id: str) -> None:
+    """Start the target's helper so it fetches the server's profile again (never on this path).
+
+    The relay style's refusal came through the running helper, which takes the marker. The
+    direct style has no helper on its path, and none may run (no registration started one): the
+    marker alone would wait, ``server status`` would go on calling the consent current, and a
+    narrowed profile would never be adjusted. The helper is client-owned and vault-less and does
+    the fetch itself, detached (design v2 section 8.9: no profile refresh on a hook's path).
+    Never raises.
+    """
+
+    from finishup.client.helper_status import helper_holder, spawn_helper
+
+    try:
+        if helper_holder(root) is None:
+            spawn_helper(root, target_id)
+    except OSError:
+        return
 
 
 def _remaining(deadline: float) -> float:
