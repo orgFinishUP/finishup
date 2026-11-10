@@ -2439,7 +2439,9 @@ class ServiceDaemon:
                 session.admit(request)
                 if not isinstance(request, ControlCallRequest):
                     target = calls.get(request.target_rpc_id)
-                    if target is not None:
+                    if target is not None and session.is_running(request.target_rpc_id):
+                        # Only a call not answered yet: one whose result is being written (the
+                        # cancel crossed it) finishes writing it; the connection goes on.
                         target.cancel(EXPLICIT_CONTROL_CANCEL)
                     continue
                 task = asyncio.create_task(

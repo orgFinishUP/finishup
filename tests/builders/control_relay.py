@@ -244,6 +244,8 @@ class ScriptedDaemon:
         self.claims: list[WorkspaceClaim] = []
         # The repository keys clients named in a relay binding (``serve(relay=True)``).
         self.relay_keys: list[str] = []
+        # Cancels that named a call already answered (they crossed its answer): no-ops.
+        self.late_cancels = 0
 
     async def _key_claim(self, claim: WorkspaceClaim) -> RepositoryPrivacyContext | None:
         self.claims.append(claim)
@@ -293,6 +295,7 @@ class ScriptedDaemon:
         write_lock = asyncio.Lock()
         slow: dict[str, asyncio.Event] = {}
         tasks: set[asyncio.Task[None]] = set()
+        answered: set[str] = set()
         workspace_called = False
         try:
             session = await server_handshake(
@@ -316,10 +319,14 @@ class ScriptedDaemon:
                     continue
                 request = parse_control_request(frame)
                 if not isinstance(request, ControlCallRequest):
-                    # As the service admits a cancel (``ControlSession.admit``): one that names
-                    # no running call ends the connection, and every call on it with it.
+                    # As the service admits a cancel (``ControlSession.admit``): one that names a
+                    # call already answered crossed its answer and is a no-op; one that names no
+                    # call of this connection ends it, and every call on it with it.
                     running = slow.get(request.target_rpc_id)
                     if running is None:
+                        if request.target_rpc_id in answered:
+                            self.late_cancels += 1
+                            continue
                         return
                     running.set()
                     continue
@@ -332,6 +339,7 @@ class ScriptedDaemon:
                         await done.wait()
                         async with write_lock:
                             slow.pop(call.rpc_id, None)
+                            answered.add(call.rpc_id)
                             await self._send(
                                 stream, _result(call, ControlError("request_cancelled"))
                             )
@@ -343,6 +351,7 @@ class ScriptedDaemon:
                     self.held.set()
                     continue
                 async with write_lock:
+                    answered.add(request.rpc_id)
                     await self._send(stream, _answer(request))
                     if session.workspace_agent is not None and not workspace_called:
                         workspace_called = True

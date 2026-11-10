@@ -75,6 +75,7 @@ __all__ = [
     "CONTROL_PROTOCOL_VERSION",
     "MAX_ACTIVE_REQUESTS_PER_SESSION",
     "MAX_CONTROL_FRAME_BYTES",
+    "MAX_FINISHED_CALLS_REMEMBERED",
     "MAX_ORDINARY_CONTROL_FRAME_BYTES",
     "BoundedControlQueue",
     "ControlFrame",
@@ -110,6 +111,9 @@ CONTROL_PROTOCOL_VERSION: Final = "1.0"
 MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
+# How many answered calls a session remembers, newest kept, so a cancel that crossed its call's
+# answer on the wire (the peer sent it before it read the answer) is a no-op, not a mismatch.
+MAX_FINISHED_CALLS_REMEMBERED: Final = 256
 # The largest single ``ControlStream.receive`` a frame reader requests. The authenticated Unix
 # stream refuses a larger request (``receive_size_invalid``), so a frame above it is read in
 # bounded chunks. Asking for the whole remaining frame at once made every frame over 64 KiB
@@ -253,6 +257,10 @@ def _new_pending_calls() -> dict[str, _PendingCall]:
     return {}
 
 
+def _new_finished_calls() -> dict[str, None]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class ControlSession:
     """Peer-bound negotiated session with bounded request correlation state."""
@@ -295,6 +303,11 @@ class ControlSession:
     server_profile: ServerProfileRevision | None = field(default=None, repr=False, compare=False)
     _active: dict[str, _PendingCall] = field(
         default_factory=_new_pending_calls, init=False, repr=False, compare=False
+    )
+    # The rpc ids of calls answered on this session, oldest first, at most
+    # ``MAX_FINISHED_CALLS_REMEMBERED``: a late cancel naming one is a no-op.
+    _finished: dict[str, None] = field(
+        default_factory=_new_finished_calls, init=False, repr=False, compare=False
     )
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -374,7 +387,12 @@ class ControlSession:
         return len(self._active)
 
     def admit(self, request: ControlRequest) -> None:
-        """Admit one call under the per-session authority and 32-call cap."""
+        """Admit one call under the per-session authority and 32-call cap.
+
+        A cancel must name a call of this session: one still running, or one answered recently
+        (the cancel crossed its answer on the wire, so there is nothing left to cancel and the
+        session goes on). A cancel naming any other call is ``correlation_mismatch``.
+        """
 
         if self._closed:
             raise ControlProtocolError("session_closed")
@@ -386,7 +404,10 @@ class ControlSession:
         if isinstance(request, ControlCancelRequest):
             if request.rpc_id in self._active:
                 raise ControlProtocolError("duplicate_rpc_id")
-            if request.target_rpc_id not in self._active:
+            if (
+                request.target_rpc_id not in self._active
+                and request.target_rpc_id not in self._finished
+            ):
                 raise ControlProtocolError("correlation_mismatch")
             return
         if request.method not in self.allowed_methods:
@@ -412,9 +433,18 @@ class ControlSession:
         ):
             raise ControlProtocolError("correlation_mismatch")
         del self._active[result.rpc_id]
+        self._finished[result.rpc_id] = None
+        while len(self._finished) > MAX_FINISHED_CALLS_REMEMBERED:
+            del self._finished[next(iter(self._finished))]
+
+    def is_running(self, rpc_id: str) -> bool:
+        """Whether ``rpc_id`` names a call of this session that is not answered yet."""
+
+        return rpc_id in self._active
 
     def close(self) -> None:
         self._active.clear()
+        self._finished.clear()
         object.__setattr__(self, "_closed", True)
 
     def __reduce__(self) -> Never:

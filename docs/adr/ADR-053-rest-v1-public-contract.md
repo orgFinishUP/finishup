@@ -125,9 +125,13 @@ the agent its own hello declared (design v2 section 8.5): the agent must be the 
 and registered for the call's claim and revision (`agent_unknown`, or `server_profile_changed`
 for another revision). The native edge dispatches the call under that agent's hub channel
 (`live_call_scope`); the gateway writes it on the agent's own control connection and reads its
-result there. Once a call's frame reached the service, a result that cannot be read (no answer to
-the cancel in time, the connection lost) is `request_timeout` (outcome unknown), never
-`request_cancelled`. An agent's handle is let go when the agent is ended (`DELETE`, its lease, its
+result there. That connection is shared by the agent's calls, so a `DELETE` that reaches it after
+the service answered the call is harmless: the control session admits a cancel naming one of its
+recently answered calls (it remembers the newest 256) as a no-op and never interrupts an answer it
+is writing, so the agent and its other calls go on; a cancel naming no call of the connection is
+still `correlation_mismatch` (layer-5 review, second round). Once a call's frame reached the
+service, a result that cannot be read (no answer to the cancel in time, the connection lost) is
+`request_timeout` (outcome unknown), never `request_cancelled`. An agent's handle is let go when the agent is ended (`DELETE`, its lease, its
 key, the service's side).
 
 A start needs a claim (`workspace_claim_required`) and a `workspace_ref` must be a `client:` handle

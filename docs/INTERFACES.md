@@ -14827,7 +14827,12 @@ imported at runtime), `rest.api_keys` (`ApiKeyStore`, `ApiKeyRecord`, `ApiKeyErr
 `MAX_TCP_CONNECTIONS_PER_PEER` 64, `REQUEST_HEAD_SECONDS` 10, `REQUEST_BODY_SECONDS` 120) and
 `rest.audit` (`RestAudit`, `FileAuditSink`, `AUDIT_FILE_NAME`, `AUDIT_ROTATE_BYTES` 8 MiB).
 `finishup.gateway` (side GATEWAY: SHARED modules and `service.client` only):
-`gateway.backend.ControlSocketBackend` and `gateway.run.serve_gateway`. `service.rest_native`
+`gateway.backend.ControlSocketBackend` and `gateway.run.serve_gateway` (a call naming an agent is
+written on that agent's one control connection, and so is its cancel: a cancel that crossed its
+call's answer is a no-op there, `ControlSession` remembering its newest
+`MAX_FINISHED_CALLS_REMEMBERED` = 256 answered rpc ids and `ControlSession.is_running(rpc_id)`; the
+service never interrupts an answer it is writing, so the connection and its other calls go on; a
+cancel naming no call of the connection is still `correlation_mismatch`). `service.rest_native`
 (SERVER): `NativeBackend` and `NativeRestEdge` (`run_service(rest_edge=…)`). Client side:
 `client.rest_client` (`RestTransport`, `RestUnavailable`, `load_key`, `load_trust`, `TlsTrust`,
 `MAX_RESPONSE_BYTES`), `client.rest_stream.RestControlStream`, `client.rest_discovery`
