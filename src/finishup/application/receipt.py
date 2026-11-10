@@ -29,16 +29,19 @@ from finishup.domain.events import (
     encode_payload,
     media_type_for,
 )
+from finishup.domain.evidence_provenance import EvidenceProvenance
 from finishup.domain.receipt_closing import closing_prompt, declined_note_count
 from finishup.domain.receipts import (
     ReceiptDocument,
     ReceiptSectionKey,
     ReceiptVersionSlice,
     client_attested_receipt_block,
+    evidence_provenance_unknown_receipt_block,
     live_receipt_gap_codes,
     receipt_document_from_json,
     receipt_document_to_json,
     render_receipt_human,
+    server_copy_receipt_block,
     workspace_provenance_unknown_block,
 )
 from finishup.domain.values import (
@@ -69,6 +72,7 @@ from finishup.kernel.receipt_builder import (
     build_receipt,
 )
 from finishup.observability.logging import (
+    record_bounded_event_without_raising,
     record_classified_exception_without_raising,
     record_public_error_without_raising,
 )
@@ -113,7 +117,12 @@ from finishup.protocol.models import (
     ReceiptRequest,
 )
 
-__all__ = ["Application", "ReceiptInternalResult", "execute_receipt"]
+__all__ = [
+    "Application",
+    "EvidenceProvenanceSource",
+    "ReceiptInternalResult",
+    "execute_receipt",
+]
 
 # The receipt context moved to ``application.closure_basis`` so status builds the same one
 # (ADR-046); the names the receipt always exposed stay importable from here.
@@ -165,6 +174,22 @@ _LASTING_ENVELOPE_STATES: Final[Mapping[RedactionState, _Provenance]] = MappingP
 )
 
 
+# ADR-054, design v2 section 8.6: where a claim-bound task's workspace evidence was read, per
+# kind of evidence, from a service that keeps copies of repositories. Called with the claim's
+# ``client:`` workspace handle (from the task session's opening event) and the task's runtime
+# (``runtime.task_id``; its ledger), once per receipt, new or replayed, and only for a
+# claim-bound task. It answers the task's account, or None when it has none (the task read
+# nothing from a copy and no copy it read was forgotten). A service that keeps no copies has no
+# source, and its receipts are exactly as before.
+type EvidenceProvenanceSource = Callable[[str, TaskRuntime], Awaitable[EvidenceProvenance | None]]
+
+
+class _EvidenceUnreadable(Enum):
+    """The evidence source failed, or answered something that is not an account (ADR-054)."""
+
+    UNREADABLE = "evidence_provenance_unreadable"
+
+
 class Application(Protocol):
     runtime: BundleRuntimePort
     clock: ClockPort
@@ -206,6 +231,10 @@ class ReceiptInternalResult:
     # and whether that can pass or lasts (``domain.workspace_provenance``). Every format carries
     # it, JSON included; a closed reason and fixed words only.
     workspace_provenance_reason: WorkspaceProvenanceReason | None = None
+    # ADR-054, design v2 section 8.6: a claim-bound task's level-L2 evidence account (a read from
+    # the server's copy, or that copy's content-forgotten marker). Every format carries it, JSON
+    # included, as ``evidence_provenance``; recomputed on every receipt and replay, never stored.
+    evidence_provenance: EvidenceProvenance | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         versions = {
@@ -273,6 +302,11 @@ class ReceiptInternalResult:
                         workspace_provenance_unknown_wire(self.workspace_provenance_reason),
                     )
                 }
+            ),
+            **(
+                {}
+                if self.evidence_provenance is None
+                else {"evidence_provenance": cast(JsonValue, self.evidence_provenance.to_json())}
             ),
         }
 
@@ -557,6 +591,7 @@ def _internal_result(
     digest: str,
     result_frontier: Frontier,
     attested_by: str | _Provenance | None = None,
+    evidence: EvidenceProvenance | _EvidenceUnreadable | None = None,
 ) -> ReceiptInternalResult:
     """The result of one receipt; ``attested_by`` is the serving service's instance id when the
     task is claim-bound, so its text and markdown renderings end with the fixed client-attested
@@ -565,23 +600,42 @@ def _internal_result(
     what happened, why it matters, and what to do for a passing cause or why that cause lasts
     (decisions D4 and D4b), and the result of every format, JSON included, carries the
     ``workspace_provenance`` member saying so with the same reason. The stored document never
-    carries either."""
+    carries either.
+
+    ``evidence`` is a claim-bound task's evidence account (ADR-054, design v2 section 8.6). A
+    level-L2 account replaces the client-attested block with the server-copy block and is
+    carried by the result of every format as ``evidence_provenance``; any other account changes
+    nothing, so an L1 receipt keeps its bytes. ``_EvidenceUnreadable`` (the source failed) ends
+    the text with the evidence-unknown block instead: the receipt never claims more than the
+    server knows, so it says neither that the server did not read the repository itself nor that
+    it read its copy, and no member is carried (there is no account to carry). Only a source
+    that answered None keeps the client-attested block."""
 
     document_json = cast(JsonValue, receipt_document_to_json(document))
     markdown = request.format is ReceiptFormat.MARKDOWN
     provenance_reason: WorkspaceProvenanceReason | None = (
         attested_by.value if isinstance(attested_by, _Provenance) else None
     )
+    hook_observed = PublicationChannel.HOOK_OBSERVED in document.coverage.publication_channels
+    account = (
+        evidence
+        if type(attested_by) is str and type(evidence) is EvidenceProvenance and evidence.level_l2
+        else None
+    )
     trailer: str | None = None
     if provenance_reason is not None:
         trailer = workspace_provenance_unknown_block(markdown=markdown, reason=provenance_reason)
+    elif type(attested_by) is str and account is not None:
+        trailer = server_copy_receipt_block(
+            attested_by, account, markdown=markdown, hook_observed=hook_observed
+        )
+    elif type(attested_by) is str and evidence is _EvidenceUnreadable.UNREADABLE:
+        trailer = evidence_provenance_unknown_receipt_block(
+            attested_by, markdown=markdown, hook_observed=hook_observed
+        )
     elif type(attested_by) is str:
         trailer = client_attested_receipt_block(
-            attested_by,
-            markdown=markdown,
-            hook_observed=(
-                PublicationChannel.HOOK_OBSERVED in document.coverage.publication_channels
-            ),
+            attested_by, markdown=markdown, hook_observed=hook_observed
         )
     # The renderer reserves the closing section's room inside the 32,768-character wire bound,
     # so a long receipt still fits it and is delivered with the section whole (decision D4).
@@ -618,6 +672,7 @@ def _internal_result(
         document.correctness_advisory_counts,
         _agent_closing_prompt(document) or None,
         provenance_reason,
+        account,
     )
 
 
@@ -644,7 +699,11 @@ def _agent_closing_prompt(document: ReceiptDocument) -> str:
 
 
 async def read_recorded_receipt(
-    runtime: TaskRuntime, request: ReceiptRequest, operation: OperationRecord
+    runtime: TaskRuntime,
+    request: ReceiptRequest,
+    operation: OperationRecord,
+    *,
+    evidence_provenance: EvidenceProvenanceSource | None = None,
 ) -> ReceiptInternalResult:
     record, receipt_ref = await _accepted_receipt_event(runtime, operation)
     payload = cast(ReceiptRecordedPayload, record.payload)
@@ -681,14 +740,79 @@ async def read_recorded_receipt(
             operation="receipt_object_read",
             diagnostic_reason=mismatch_reason,
         ) from mismatch
+    attested_by = await _attested_by(runtime, request_id=request.request_id)
     return _internal_result(
         request,
         document,
         receipt_ref,
         digest,
         Frontier(record.ledger.ingestion_sequence, record.entry_digest),
-        await _attested_by(runtime, request_id=request.request_id),
+        attested_by,
+        await _evidence_account(
+            evidence_provenance, runtime, attested_by, request_id=request.request_id
+        ),
     )
+
+
+async def _evidence_account(
+    source: EvidenceProvenanceSource | None,
+    runtime: TaskRuntime,
+    attested_by: str | _Provenance | None,
+    *,
+    request_id: str | None,
+) -> EvidenceProvenance | _EvidenceUnreadable | None:
+    """A claim-bound task's evidence account from ``source`` (ADR-054), read once per receipt.
+
+    None without a source, for a task that is not claim-bound (``attested_by`` is not the
+    serving service's id, so a provenance-unknown receipt never asks) and when the source answers
+    None. A source that raises, or answers anything but an ``EvidenceProvenance``, and an opening
+    event that no longer names the claim's handle, are recorded as one bounded event (operation
+    ``receipt_evidence_provenance_read``, a closed reason, nothing user-controlled) and answer
+    ``_EvidenceUnreadable``: never a refusal of the receipt. Cancellation is never caught.
+    """
+
+    if source is None or type(attested_by) is not str:
+        return None
+    reason = "evidence_provenance_source_failed"
+    try:
+        handle = await _opening_handle(runtime)
+        if handle is None:
+            reason = "evidence_provenance_handle_unavailable"
+            raise LookupError(reason)
+        answer: object = await source(handle, runtime)
+    except Exception:  # noqa: BLE001 - a failed account is shown as unknown, never a refusal
+        record_bounded_event_without_raising(
+            component="application.receipt",
+            operation="receipt_evidence_provenance_read",
+            reason=reason,
+            request_id=request_id,
+        )
+        return _EvidenceUnreadable.UNREADABLE
+    if answer is None:
+        return None
+    if type(answer) is not EvidenceProvenance:
+        record_bounded_event_without_raising(
+            component="application.receipt",
+            operation="receipt_evidence_provenance_read",
+            reason="evidence_provenance_source_invalid",
+            request_id=request_id,
+        )
+        return _EvidenceUnreadable.UNREADABLE
+    return answer
+
+
+async def _opening_handle(runtime: TaskRuntime) -> str | None:
+    """The ``client:`` handle the session's opening event names, or None (ADR-051)."""
+
+    async for record in runtime.ledger.load_events(runtime.session_id):
+        if record.schema.name == "session_opened":
+            payload = record.payload
+            if isinstance(payload, SessionOpenedPayload) and workspace_handle_valid(
+                payload.workspace_ref
+            ):
+                return payload.workspace_ref
+            return None
+    return None
 
 
 async def _attested_by(
@@ -804,8 +928,18 @@ async def _payload_object_unverifiable(
 _replay_result = read_recorded_receipt
 
 
-async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptInternalResult:
-    """Freeze an exact case, publish its canonical document, and append one locator event."""
+async def execute_receipt(
+    app: Application,
+    request: ReceiptRequest,
+    *,
+    evidence_provenance: EvidenceProvenanceSource | None = None,
+) -> ReceiptInternalResult:
+    """Freeze an exact case, publish its canonical document, and append one locator event.
+
+    ``evidence_provenance`` is the service's source of a claim-bound task's evidence account
+    (ADR-054), asked once for a new receipt and once for a replayed one; None keeps every receipt
+    exactly as before.
+    """
 
     runtime = await app.runtime.route(
         RouteCommand(
@@ -833,7 +967,9 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         logical_digest = request_digest(_identity(request, versions))
         operation = await _preflight(runtime, request, logical_digest)
         if operation is not None:
-            return await read_recorded_receipt(runtime, request, operation)
+            return await read_recorded_receipt(
+                runtime, request, operation, evidence_provenance=evidence_provenance
+            )
 
         frontier = Frontier(
             int(request.expected_frontier.sequence), request.expected_frontier.head_digest
@@ -842,6 +978,9 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         # Read before anything is staged or appended. It never refuses: a read that fails or an
         # opening that cannot say renders the provenance-unknown section (decision D4).
         attested_by = await _attested_by(runtime, request_id=request.request_id)
+        evidence = await _evidence_account(
+            evidence_provenance, runtime, attested_by, request_id=request.request_id
+        )
         availability = await runtime.ledger.load_case_availability(
             runtime.session_id, frontier, projection
         )
@@ -991,6 +1130,7 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
             digest,
             result.result_frontier,
             attested_by,
+            evidence,
         )
     except ProtocolValueError as exc:
         raise _error(

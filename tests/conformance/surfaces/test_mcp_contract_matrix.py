@@ -374,7 +374,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert status_descriptor.input_schema_ref.endswith("status-request-1.3.0.schema.json")
     assert status_descriptor.output_schema_ref.endswith("status-result-1.5.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    # ADR-051 decision D4: 1.5.0 adds the optional ``workspace_provenance`` member.
+    # ADR-051 decision D4: 1.5.0 adds the optional ``workspace_provenance`` member, and ADR-054
+    # (in place, unreleased) the optional ``evidence_provenance`` member.
     assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.5.0.schema.json")
     closure_descriptor = descriptor_for("closure_prepare")
     assert closure_descriptor.input_schema_ref.endswith("closure-prepare-request-1.0.0.schema.json")

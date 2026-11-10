@@ -7986,6 +7986,9 @@ def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     ``finishup.domain.workspace_provenance``: nothing user-controlled. ``reason`` names the cause,
     and so whether it can pass or lasts, and ``oneOf`` pairs each reason with its own notice, so a
     reader that validates by schema alone admits no notice beside another reason's token.
+
+    ADR-054 (in place, 1.5.0 being unreleased) adds the optional ``evidence_provenance`` member, a
+    claim-bound task's level-L2 evidence account (``_evidence_provenance_schema``).
     """
 
     from finishup.domain.workspace_provenance import (
@@ -8030,7 +8033,83 @@ def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "required": ["status", "reason", "notice"],
         "type": "object",
     }
+    if "evidence_provenance" in properties:
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["evidence_provenance"] = _evidence_provenance_schema()
     return document
+
+
+def _evidence_provenance_schema() -> dict[str, JsonValue]:
+    """ADR-054 (in place on the unreleased 1.5.0): a claim-bound task's level-L2 evidence account.
+
+    Exactly ``finishup.domain.evidence_provenance.EvidenceProvenance.to_json()``: the schema tag,
+    every token's count, the outside reads a held repository fenced (ADR-052 O7), the copy
+    snapshot last read and the content-forgotten marker; closed tokens, bounded counts, synthetic
+    ids and service-stamped times only. ``anyOf`` admits only a level-L2 account: a read from the
+    server's copy, fresh or stale, or the marker.
+    """
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_COUNT_MAX,
+        EVIDENCE_PROVENANCE_SCHEMA,
+        EVIDENCE_PROVENANCE_TOKENS,
+    )
+
+    count: dict[str, JsonValue] = {"maximum": EVIDENCE_COUNT_MAX, "minimum": 0, "type": "integer"}
+    time: dict[str, JsonValue] = {
+        "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
+        "type": "string",
+    }
+    return {
+        "additionalProperties": False,
+        "anyOf": [
+            {"properties": {"reads": {"properties": {"server_copy_read": {"minimum": 1}}}}},
+            {"properties": {"reads": {"properties": {"stale_copy_read": {"minimum": 1}}}}},
+            {"properties": {"content_forgotten": {"type": "object"}}},
+        ],
+        "properties": {
+            "content_forgotten": {
+                "oneOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "at": dict(time),
+                            "reason": {"enum": ["expired", "owner"], "type": "string"},
+                        },
+                        "required": ["at", "reason"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "fenced_reads": dict(count),
+            "reads": {
+                "additionalProperties": False,
+                "properties": {token: dict(count) for token in EVIDENCE_PROVENANCE_TOKENS},
+                "required": list(EVIDENCE_PROVENANCE_TOKENS),
+                "type": "object",
+            },
+            "schema": {"const": EVIDENCE_PROVENANCE_SCHEMA, "type": "string"},
+            "snapshot": {
+                "oneOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "synced_at": dict(time),
+                            "tree": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+                        },
+                        "required": ["synced_at", "tree"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+        },
+        "required": ["schema", "reads", "fenced_reads", "snapshot", "content_forgotten"],
+        "type": "object",
+    }
 
 
 def _publish_work_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:

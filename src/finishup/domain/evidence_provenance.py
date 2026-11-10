@@ -33,6 +33,7 @@ from types import MappingProxyType
 from typing import Final, Literal, cast
 
 __all__ = [
+    "EVIDENCE_COUNT_MAX",
     "EVIDENCE_PROVENANCE_SCHEMA",
     "EVIDENCE_PROVENANCE_TOKENS",
     "ContentForgotten",
@@ -62,6 +63,8 @@ EVIDENCE_PROVENANCE_TOKENS: Final[tuple[EvidenceToken, ...]] = (
 type ForgottenReason = Literal["owner", "expired"]
 _FORGOTTEN_REASONS: Final = frozenset({"owner", "expired"})
 _MAX_COUNT: Final = 1_000_000_000
+# The largest count an account holds, per token and for ``fenced_reads``.
+EVIDENCE_COUNT_MAX: Final = _MAX_COUNT
 _HEX40: Final = re.compile(r"^[0-9a-f]{40}$")
 # RFC 3339 UTC with milliseconds, as the service stamps every time it records.
 _TIME: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
