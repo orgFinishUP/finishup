@@ -391,6 +391,51 @@ def test_expiry_follows_the_retention_chosen(tmp_path: Path) -> None:
     assert [summary.retention_kind for summary in store.copies("alice")] == ["until_forgotten"]
 
 
+def test_the_closed_task_question_is_asked_with_the_store_free(tmp_path: Path) -> None:
+    """The question may wait for the service loop, which may be waiting for this store: it is
+    asked with the lock released, and a copy a task pinned meanwhile is not forgotten."""
+
+    import threading
+
+    store = _store(tmp_path)
+    snap = snapshot_objects(BASE, CURRENT)
+    _upload(
+        store,
+        snap.bundle(),
+        _manifest(snap, snap.bundle()),
+        repository="close",
+        retention=("task_close", None),
+    )
+    store.pin("alice", "close", "task_1", snap.snapshot)
+
+    def from_the_loop(task: str) -> bool:
+        answered = threading.Event()
+        threading.Thread(
+            target=lambda: (store.pending_erasures(), answered.set()), daemon=True
+        ).start()
+        return answered.wait(5.0) and task == "task_1"
+
+    report = store.expire(task_closed=from_the_loop)
+    assert report.copies == 1
+    assert store.copies("alice") == ()
+
+    _upload(
+        store,
+        snap.bundle(),
+        _manifest(snap, snap.bundle()),
+        repository="close",
+        retention=("task_close", None),
+    )
+    store.pin("alice", "close", "task_1", snap.snapshot)
+
+    def while_another_task_reads_it(task: str) -> bool:
+        store.pin("alice", "close", "task_2", snap.snapshot)
+        return task == "task_1"
+
+    assert store.expire(task_closed=while_another_task_reads_it).copies == 0
+    assert [summary.retention_kind for summary in store.copies("alice")] == ["task_close"]
+
+
 def test_a_crash_leaves_the_previous_snapshot_in_force_and_start_removes_the_rest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

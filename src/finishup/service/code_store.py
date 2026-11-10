@@ -1177,27 +1177,46 @@ class CodeStore:
                 self._write_erasures(kept)
 
     def expire(self, *, task_closed: Callable[[str], bool]) -> ForgetReport:
-        """Forget every copy whose retention ran out (``days:N``; ``task_close``)."""
+        """Forget every copy whose retention ran out (``days:N``; ``task_close``).
+
+        ``task_closed`` is asked with the store's lock released: it may wait for the service's
+        event loop, which may itself be waiting for this lock (a forget, a pending-erasure read),
+        and asking under the lock would stall both until the question timed out. A
+        ``task_close`` copy is forgotten only when the tasks pinned to it are, once the lock is
+        taken again, exactly the ones that were all found closed.
+        """
 
         now = self._clock()
         report = ForgetReport(reason="expired")
+        candidates: list[tuple[str, frozenset[str]]] = []
         with self._lock:
             for copy_key, record in self._records():
                 retention = cast(dict[str, JsonValue], record["retention"])
                 kind = retention.get("kind")
-                due = False
                 if kind == "days":
                     stamp = record.get("last_sync_at") or record.get("created_at")
                     try:
                         last = parse_rfc3339_ms(stamp)
                     except ValueError:
                         last = now
-                    due = now - last >= timedelta(days=cast(int, retention["days"]))
+                    if now - last >= timedelta(days=cast(int, retention["days"])):
+                        report = report.plus(self._forget_one(copy_key, "expired"))
                 elif kind == "task_close":
-                    pins = cast(dict[str, JsonValue], record["pins"])
-                    due = bool(pins) and all(task_closed(task) for task in pins)
-                if due:
-                    report = report.plus(self._forget_one(copy_key, "expired"))
+                    pins = frozenset(cast(dict[str, JsonValue], record["pins"]))
+                    if pins:
+                        candidates.append((copy_key, pins))
+        due = [(key, pins) for key, pins in candidates if all(task_closed(task) for task in pins)]
+        if not due:
+            return report
+        with self._lock:
+            for copy_key, pins in due:
+                try:
+                    record = self._read_record(copy_key)
+                except CodeStoreError:
+                    continue
+                if record is None or frozenset(cast(dict[str, JsonValue], record["pins"])) != pins:
+                    continue  # a task read the copy meanwhile: asked again at the next run
+                report = report.plus(self._forget_one(copy_key, "expired"))
         return report
 
 
