@@ -11,7 +11,9 @@ import base64
 import contextlib
 import hashlib
 import os
+import shutil
 import stat
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -19,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from builders.server_targets import ambient_home
+from builders.server_targets import ambient_home, short_home_base
 from finishup.adapters.control.unix_socket import (
     LocalControlTransportError,
     connect_owner_only_endpoint,
@@ -390,10 +392,10 @@ def test_a_direct_stream_carries_bytes_both_ways_and_names_why_it_ended(tmp_path
     assert phase == "remote_service_not_running"
 
 
-def test_an_upstream_socket_is_reached_only_with_the_fixed_endpoint_fences(
-    tmp_path: Path,
-) -> None:
-    run_dir = tmp_path / "run"
+def test_an_upstream_socket_is_reached_only_with_the_fixed_endpoint_fences() -> None:
+    # A short base: CI's temporary folders are too deep for an AF_UNIX path.
+    base = Path(tempfile.mkdtemp(prefix=".yz-st-", dir=short_home_base()))
+    run_dir = base / "run"
     run_dir.mkdir(mode=0o700)
     path = run_dir / "upstream.sock"
 
@@ -425,13 +427,16 @@ def test_an_upstream_socket_is_reached_only_with_the_fixed_endpoint_fences(
             await server.wait_closed()
         return reasons
 
-    assert asyncio.run(run()) == [
-        "endpoint_missing",
-        "connected",
-        "runtime_directory_unsafe",
-        "endpoint_unsafe",
-    ]
-    assert stat.S_ISDIR(run_dir.stat().st_mode)
+    try:
+        assert asyncio.run(run()) == [
+            "endpoint_missing",
+            "connected",
+            "runtime_directory_unsafe",
+            "endpoint_unsafe",
+        ]
+        assert stat.S_ISDIR(run_dir.stat().st_mode)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def _key_line(blob: bytes) -> tuple[bytes, str]:
