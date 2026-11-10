@@ -88,21 +88,26 @@ class _Prepared:
     expires: float
 
 
+# The helper may run several background agents for one worktree (one per registration), and the
+# hub sends each call to the newest live one: a bundle prepared by one is read through another.
+# So prepared bundles and export databases are kept per (target, repository) for the process,
+# never per agent; at most one prepared bundle per repository.
+_SHARED_LOCK: Final = threading.Lock()
+_PREPARED: Final[dict[tuple[str, str], _Prepared]] = {}
+_DATABASES: Final[dict[tuple[str, str], ExportDatabase]] = {}
+_EXPORTS: Final[dict[tuple[str, str], threading.Lock]] = {}
+
+
+def _shared_lock(key: tuple[str, str]) -> threading.Lock:
+    with _SHARED_LOCK:
+        return _EXPORTS.setdefault(key, threading.Lock())
+
+
 class CodeSyncResponder:
     """Answers ``code_sync_prepare``/``code_sync_read`` for one claimed worktree (see the module
     text). Thread-safe: one export runs at a time; a later prepare replaces the bundle kept."""
 
-    __slots__ = (
-        "_check",
-        "_clock",
-        "_database",
-        "_lock",
-        "_prepared",
-        "_repository_key",
-        "_root",
-        "_target_id",
-        "_worktree",
-    )
+    __slots__ = ("_check", "_clock", "_key", "_repository_key", "_root", "_target_id", "_worktree")
 
     def __init__(
         self,
@@ -120,9 +125,7 @@ class CodeSyncResponder:
         self._worktree = worktree
         self._check = check
         self._clock = clock
-        self._lock = threading.Lock()
-        self._prepared: _Prepared | None = None
-        self._database: ExportDatabase | None = None
+        self._key = (target_id, repository_key)
 
     # --- the gate (FR-7) ------------------------------------------------------------------------
 
@@ -201,15 +204,17 @@ class CodeSyncResponder:
         return policy, kind, consent.retention_days  # type: ignore[return-value]
 
     def prepare(self, arguments: CodeSyncPrepareArguments) -> CodeSyncPrepared:
-        with self._lock:
+        with _shared_lock(self._key):
             # Every check first (FR-7): nothing is read, written or built before they pass.
             record = self._admitted(arguments)
             policy, kind, days = self._policy(record)
             try:
-                if self._database is None:
-                    self._database = ExportDatabase(
-                        export_folder(self._target_id, self._repository_key)
-                    )
+                with _SHARED_LOCK:
+                    database = _DATABASES.get(self._key)
+                if database is None or not database.present:
+                    database = ExportDatabase(export_folder(self._target_id, self._repository_key))
+                    with _SHARED_LOCK:
+                        _DATABASES[self._key] = database
                 prepared = export_snapshot(
                     ExportRequest(
                         root=self._root,
@@ -222,7 +227,7 @@ class CodeSyncResponder:
                         base_commit=arguments.base_commit,
                     ),
                     policy,
-                    self._database,
+                    database,
                     gate=_already_admitted,
                 )
             except ExportRefused as refused:
@@ -230,18 +235,22 @@ class CodeSyncResponder:
                     refused.reason if refused.reason in _UNAVAILABLE else "code_export_failed"
                 ) from None
             if prepared.unchanged:
-                self._prepared = None
+                with _SHARED_LOCK:
+                    _PREPARED.pop(self._key, None)
                 return CodeSyncPrepared(True, None, prepared.manifest, 0, None, kind, days)
             sync_id = secrets.token_hex(16)
-            self._prepared = _Prepared(sync_id, prepared.bundle, self._clock() + _PREPARED_SECONDS)
-            self._database.remember_sent(prepared.manifest.snapshot, prepared.ref_number)
+            with _SHARED_LOCK:
+                _PREPARED[self._key] = _Prepared(
+                    sync_id, prepared.bundle, self._clock() + _PREPARED_SECONDS
+                )
+            database.remember_sent(prepared.manifest.snapshot, prepared.ref_number)
             return CodeSyncPrepared(
                 False, sync_id, prepared.manifest, len(prepared.bundle), prepared.sha256, kind, days
             )
 
     def read(self, arguments: CodeSyncReadArguments) -> bytes:
-        with self._lock:
-            prepared = self._prepared
+        with _SHARED_LOCK:
+            prepared = _PREPARED.get(self._key)
             if (
                 prepared is None
                 or prepared.sync_id != arguments.sync_id
@@ -254,13 +263,12 @@ class CodeSyncResponder:
     def forget_local(self) -> None:
         """Delete this repository's export database (the copy was forgotten, or L2 → L1)."""
 
-        with self._lock:
-            self._prepared = None
-            database = self._database or ExportDatabase(
+        with _shared_lock(self._key), _SHARED_LOCK:
+            _PREPARED.pop(self._key, None)
+            database = _DATABASES.pop(self._key, None) or ExportDatabase(
                 export_folder(self._target_id, self._repository_key)
             )
             database.remove()
-            self._database = None
 
 
 def _already_admitted() -> None:

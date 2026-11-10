@@ -220,3 +220,23 @@ def test_an_admitted_sync_is_read_back_in_chunks_and_holds_the_consented_policy(
     responder.forget_local()
     assert not export_folder(record.target_id, _key(repository)).exists()
     _ = json
+
+
+def test_a_bundle_prepared_by_one_agent_is_read_through_another_of_the_same_worktree(
+    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
+) -> None:
+    """The helper runs one background agent per registration; the hub asks the newest."""
+
+    record, document = l2_target
+    first = _responder(record, repository)
+    second = _responder(record, repository)
+    with release_l2():
+        prepared = first.prepare(_arguments(document))
+    assert prepared.sync_id is not None
+    chunk = second.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 0, prepared.size))
+    assert len(chunk) == prepared.size
+    # The export folder removed from elsewhere ('server code forget') is made again, never reused.
+    first.forget_local()
+    with release_l2():
+        again = second.prepare(_arguments(document))
+    assert not again.unchanged and export_folder(record.target_id, _key(repository)).is_dir()

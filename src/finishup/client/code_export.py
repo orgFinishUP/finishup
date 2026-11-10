@@ -171,6 +171,12 @@ class ExportDatabase:
         return self._export_id
 
     @property
+    def present(self) -> bool:
+        """Whether its folder still exists (``server code forget`` removes it from elsewhere)."""
+
+        return (self._folder / _EXPORT_NAME).is_file()
+
+    @property
     def sent(self) -> tuple[str, ...]:
         return self._sent
 
