@@ -46,6 +46,7 @@ from finishup.ports.subject_state import (
     SubjectStateStatus,
 )
 from finishup.ports.workspace_agent import (
+    MAX_CODE_SYNC_CHUNK_BYTES,
     MAX_WORKSPACE_FRAME_BYTES,
     MAX_WORKSPACE_PAYLOAD_BYTES,
     WORKSPACE_FAILURE_REASONS,
@@ -60,6 +61,9 @@ from finishup.ports.workspace_agent import (
     CaptureMetadataArguments,
     CheckPolicyRead,
     ClassifyUndeclaredReferencesArguments,
+    CodeSyncPrepareArguments,
+    CodeSyncPrepared,
+    CodeSyncReadArguments,
     CountChangeLinesArguments,
     InspectArguments,
     ListBeneathArguments,
@@ -94,6 +98,11 @@ from finishup.ports.workspace_inspect import (
     WorkspaceInspectStatus,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from finishup.protocol.server_copy import (
+    COMPLETENESS_COUNTS,
+    COMPLETENESS_LISTS,
+    SnapshotManifest,
+)
 
 _HANDLE = "client:0123456789abcdef"
 _REMOTE = "rws_" + "a" * 32
@@ -152,6 +161,31 @@ def _check_result(output: bytes | None) -> ApprovedCheckResult:
             status, outcome, exit_status, digest, size, _SHA_A, commitment, 1234
         ),
         duration_ms=1234,
+    )
+
+
+def _snapshot_manifest() -> SnapshotManifest:
+    return SnapshotManifest(
+        snapshot="1" * 40,
+        base="2" * 40,
+        tree="3" * 40,
+        base_tree="4" * 40,
+        original_base_format="sha1",
+        original_base="5" * 40,
+        export_id="6" * 32,
+        worktree=_SHA_A,
+        policy=_SHA_B,
+        lists={name: () for name in COMPLETENESS_LISTS} | {"held_for_content": ("cfg/a.ini",)},
+        more=dict.fromkeys(COMPLETENESS_LISTS, 0),
+        counts=dict.fromkeys(COMPLETENESS_COUNTS, 0),
+        subject_state=None,
+        issuer="e" * 32,
+        revision=3,
+        profile_digest=_SHA_A,
+        purpose="check",
+        synced_at="2026-11-10T08:00:00.000Z",
+        files=2,
+        bytes=10,
     )
 
 
@@ -220,9 +254,25 @@ _ARGUMENTS: dict[WorkspaceOperation, tuple[object, ...]] = {
         RunApprovedCheckArguments(_REMOTE, _approval(), _SHA_A, None),
         RunApprovedCheckArguments(_REMOTE, _approval(2.5555), _SHA_A, _SHA_B),
     ),
+    WorkspaceOperation.CODE_SYNC_PREPARE: (
+        CodeSyncPrepareArguments(_HANDLE, "base", (), None, "e" * 32, 3, _SHA_A),
+        CodeSyncPrepareArguments(
+            _HANDLE, "check", ("1" * 40, "2" * 40), "d" * 64, "e" * 32, 3, _SHA_A
+        ),
+    ),
+    WorkspaceOperation.CODE_SYNC_READ: (
+        CodeSyncReadArguments(_HANDLE, "f" * 32, 0, MAX_CODE_SYNC_CHUNK_BYTES),
+    ),
 }
 
 _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
+    WorkspaceOperation.CODE_SYNC_PREPARE: (
+        CodeSyncPrepared(
+            False, "f" * 32, _snapshot_manifest(), 1_234, _SHA_A, "days", 7
+        ),
+        CodeSyncPrepared(True, None, _snapshot_manifest(), 0, None, "until_forgotten", None),
+    ),
+    WorkspaceOperation.CODE_SYNC_READ: (b"# v2 git bundle\n", bytes(range(256))),
     WorkspaceOperation.READ_TASK_BASE: (_base(), TaskChangeBase("sha256", "d" * 64)),
     WorkspaceOperation.CAPTURE: (
         CheckChangeCapture(
@@ -383,8 +433,8 @@ def _through_wire(value: JsonValue) -> JsonValue:
 # --- the catalog's shape ------------------------------------------------------------------
 
 
-def test_the_catalog_holds_exactly_the_eighteen_operations_in_three_families() -> None:
-    assert len(WorkspaceOperation) == 18
+def test_the_catalog_holds_exactly_the_twenty_operations_in_four_families() -> None:
+    assert len(WorkspaceOperation) == 20
     assert set(WORKSPACE_OPERATION_CATALOG) == set(WorkspaceOperation)
     assert WORKSPACE_OPERATION_NAMES == tuple(
         sorted((operation.value for operation in WorkspaceOperation), key=str.encode)
@@ -417,6 +467,8 @@ def test_the_catalog_holds_exactly_the_eighteen_operations_in_three_families() -
             "inspect",
             "run_approved_check",
         },
+        # Level L2's sync (ADR-054), answered only by the helper's background agent.
+        "copy": {"code_sync_prepare", "code_sync_read"},
     }
     for spec in WORKSPACE_OPERATION_CATALOG.values():
         assert 1 <= spec.max_argument_bytes <= MAX_WORKSPACE_PAYLOAD_BYTES

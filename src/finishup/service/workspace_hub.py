@@ -90,7 +90,13 @@ _MIN_CALL_SECONDS: Final = 0.001
 _REPLAYABLE_OPERATIONS: Final = frozenset(
     operation
     for operation in WorkspaceOperation
-    if operation is not WorkspaceOperation.RUN_APPROVED_CHECK
+    if operation
+    not in {
+        WorkspaceOperation.RUN_APPROVED_CHECK,
+        # A prepared snapshot lives in the one helper agent that built it (ADR-054).
+        WorkspaceOperation.CODE_SYNC_PREPARE,
+        WorkspaceOperation.CODE_SYNC_READ,
+    }
 )
 _COMPONENT: Final = "service.workspace_hub"
 _WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
