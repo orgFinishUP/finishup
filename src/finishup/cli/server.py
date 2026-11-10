@@ -425,14 +425,21 @@ DISCLOSURE_LINES: Final = (
 
 
 class ServerCommandRefused(Exception):
-    """A refused ``finishup server`` step: closed reason and detail tokens, fixed message text."""
+    """A refused ``finishup server`` step: closed reason and detail tokens, fixed message text,
+    and the registered recovery directive (``continuation``) its lines follow, when it has one."""
 
     def __init__(
-        self, reason: str, *, detail: str | None = None, message: str | None = None
+        self,
+        reason: str,
+        *,
+        detail: str | None = None,
+        message: str | None = None,
+        continuation: str | None = None,
     ) -> None:
         self.reason = reason
         self.detail = detail
         self.message = message
+        self.continuation = continuation
         super().__init__(reason)
 
 
@@ -451,10 +458,24 @@ def refusal_message(error: ServerCommandRefused) -> str:
     return text if error.detail is None else f"{text} ({error.detail})"
 
 
-def _fail(reason: str, *, detail: str | None = None, message: str | None = None) -> NoReturn:
+def _fail(
+    reason: str,
+    *,
+    detail: str | None = None,
+    message: str | None = None,
+    continuation: str | None = None,
+) -> NoReturn:
     _remedy, code = _REMEDIES.get(reason, (_DEFAULT_REMEDY, _UNAVAILABLE))
     text = refusal_message(ServerCommandRefused(reason, detail=detail, message=message))
     typer.echo(f"{reason}: {text}", err=True)
+    if continuation is not None:
+        from finishup.cli.render import render_recovery_directive_lines
+        from finishup.protocol.recovery import directive_for
+
+        directive = directive_for(continuation)
+        if directive is not None:
+            for line in render_recovery_directive_lines(directive):
+                typer.echo(line, err=True)
     raise typer.Exit(code)
 
 
@@ -466,7 +487,12 @@ def _cli[**P](command: Callable[P, None]) -> Callable[P, None]:
         try:
             command(*args, **kwargs)
         except ServerCommandRefused as error:
-            _fail(error.reason, detail=error.detail, message=error.message)
+            _fail(
+                error.reason,
+                detail=error.detail,
+                message=error.message,
+                continuation=error.continuation,
+            )
         except TargetError as error:
             _fail(error.reason)
         except PathSafetyError as error:
@@ -2752,6 +2778,13 @@ _KEY_KEPT: Final = (
 )
 
 
+_RECONSENT_AT_CONNECT: Final = (
+    "what that server offers or needs changed since you agreed to use it, so FinishUP connected "
+    "nothing and sent nothing; agree again on your own terminal with 'finishup server use NAME' "
+    "(it shows what changed and asks you), then connect"
+)
+
+
 def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> str:
     record, root, everyday = _resolve(name)
     kind: TargetKind = "local" if record is None else record.kind
@@ -2771,6 +2804,14 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
         else:
             runtime.stop(root)
     except TargetRuntimeError as error:
+        if error.reason == "service_unavailable" and error.phase == "server_profile_changed":
+            # What the server offers changed since the owner agreed: only the owner agrees
+            # again, on their own terminal; the registered directive says so (remote_reconsent).
+            raise ServerCommandRefused(
+                "server_profile_changed",
+                message=_RECONSENT_AT_CONNECT,
+                continuation="remote_reconsent",
+            ) from None
         _runtime_failure(error)
     if record is not None:
         return f"{record.name} ({record.target_id})"

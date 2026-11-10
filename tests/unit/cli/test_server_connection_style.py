@@ -190,3 +190,28 @@ def test_status_of_a_target_that_is_not_ssh_has_no_connection(
         result = _invoke("status", "web", "--json")
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["target"]["connection"] is None
+
+
+def test_connect_after_the_profile_widened_names_the_owners_way_to_agree_again(
+    lab: tuple[ServerTarget, Path],
+) -> None:
+    """C4: ``server connect`` renders the registered ``remote_reconsent`` directive and names
+    the trusted-console re-consent command, instead of a bare refusal."""
+
+    from finishup.protocol.recovery import directive_for
+    from finishup.protocol.server_profile import ReviewEgress
+
+    record, _root = lab
+    refreshed(record, profile_document(review=ReviewEgress("server_policy", "openai"), revision=2))
+
+    result = _invoke("connect", "lab")
+
+    assert result.exit_code != 0
+    first, *rest = result.stderr.splitlines()
+    assert first.startswith("server_profile_changed: ")
+    assert "'finishup server use NAME'" in first and "own terminal" in first
+    directive = directive_for("remote_reconsent")
+    assert directive is not None
+    assert rest[:2] == ["Continuation: remote_reconsent", f"Next: {directive.directive}"]
+    assert directive.nudge is not None and directive.nudge in rest
+    assert "lab.example" not in result.stderr
