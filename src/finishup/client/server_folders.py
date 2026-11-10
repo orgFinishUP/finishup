@@ -141,7 +141,8 @@ class OfficialOrigin:
 
     Scheme, host, port and path prefix: never a hostname alone. A base URL matches when its scheme
     is ``https``, its lowercase host and its port (443 when absent) are these, and its path is the
-    prefix or lies beneath it.
+    prefix or lies beneath it with no ``.`` or ``..`` segment (which a client library resolves
+    away before sending, so ``/api/../other`` would reach a path outside the prefix).
     """
 
     host: str
@@ -160,6 +161,8 @@ class OfficialOrigin:
         except ValueError:
             return False
         path = parts.path.rstrip("/")
+        if any(segment in {".", ".."} for segment in path.split("/")):
+            return False
         return (
             parts.scheme == self.scheme == "https"
             and (parts.hostname or "").lower() == self.host

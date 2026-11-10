@@ -14,6 +14,7 @@ runs with one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -1702,21 +1703,24 @@ def test_an_isolation_root_overrides_the_selection(
 def test_a_target_removed_during_a_slow_logout_stays_removed(
     home: Path, no_platform_store: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SRV-12: a target removed while ``logout`` deleted its key is not recreated with only its
-    record."""
+    """SRV-12: a target removed after ``logout`` read it is not recreated with only its record.
 
-    from finishup.client.credentials import KeyringOrFileCredential
+    Since the layer-5 review (C2) the key is deleted inside logout's registry-locked step, so a
+    removal can no longer land between the delete and the record's write; it lands before the
+    lock is taken (here: as logout asks for it), and logout then finds no record to update.
+    """
 
     record, root = _another_builds_target("team", key=True)
-    deleted = KeyringOrFileCredential.delete
+    real_lock = targets.registry_lock
 
-    def delete_then_removed(credential: KeyringOrFileCredential) -> bool:
-        removed = deleted(credential)
-        with targets.registry_lock():
+    @contextlib.contextmanager
+    def removed_first() -> Iterator[None]:
+        with real_lock():
             targets.remove_target_root(record)
-        return removed
+        with real_lock():
+            yield
 
-    monkeypatch.setattr(KeyringOrFileCredential, "delete", delete_then_removed)
+    monkeypatch.setattr(server_cli, "registry_lock", removed_first)
     assert _invoke("logout", "team").exit_code == 0
     assert not root.exists()
 

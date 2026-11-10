@@ -2877,57 +2877,73 @@ def server_login(
         raise refusal
     key = _read_api_key(key_file)
     try:
+        # The key and the profile it answers are checked (and the profile validated) before
+        # anything is stored, over the consented trust when the owner consented already.
         checked = check_key(record, key)
     except RestUnavailable as error:
         raise ServerCommandRefused(
             error.reason, message=_LOGIN_NOT_STORED.get(error.reason)
         ) from None
     root = target_root(record.target_id)
-    credential = KeyringOrFileCredential(record.target_id, root, recorded=record.credential)
+    verdict_phase: str | None = None
+    stored = False
     try:
-        location = credential.store(key)
         with registry_lock():
-            try:
-                # Field by field from the record as stored now (SRV-12): only the credential.
-                current = _stored_record(record)
-            except TargetError:
-                # Removed while the key was asked for: it keeps no key either.
-                with contextlib.suppress(CredentialError):
-                    credential.delete()
-                raise
+            # One registry-locked step (SRV-12): the record as stored now, then the key, the
+            # credential generation and the profile together, so a concurrent login or logout
+            # never pairs one key with another key's profile or deletes a key this one replaced.
+            current = _stored_record(record)
+            if current.kind not in _REST_TARGET_KINDS:
+                raise ServerCommandRefused("credential_not_applicable")
+            credential = KeyringOrFileCredential(
+                record.target_id, root, recorded=current.credential
+            )
+            location = credential.store(key)
+            stored = True
             current = replace(current, credential=location)
             write_target(root, current)
             # An owner action on the key: every connection made under the old one ends (O8).
             bump_credential_generation(root)
-            verdict_phase: str | None = None
             if checked.profile is not None:
                 from finishup.client.server_profile import refresh_profile
 
                 verdict_phase = refresh_profile(current, checked.profile).phase
+            else:
+                # Not verified: the cached profile was answered to the previous key, so nothing
+                # is sent under this one until its own profile is fetched and compared with the
+                # consent (the consent step refuses until then).
+                from finishup.client.server_profile import forget_cached_profile
+
+                forget_cached_profile(root)
     except CredentialError as error:
         raise ServerCommandRefused(error.reason) from None
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
+    finally:
+        if stored:
+            # The helper may hold the earlier key: it stops, so the next client starts one with
+            # the key stored now (A-CRED-STALE), whatever happened after the key was stored.
+            _stop_helper_for_key(record, root, which="earlier")
     where = "the platform credential store" if location == "keyring" else "an owner-only file"
     if checked.outcome == "accepted":
         typer.echo(
             f"Stored the API key for {record.name} ({record.target_id}) in {where}; the server "
             "accepted it."
         )
-    else:
-        typer.echo(
-            f"Stored the API key for {record.name} ({record.target_id}) in {where}, not verified "
-            f"yet: the server did not answer ({checked.phase}). It is checked on the first "
-            f"connection; run 'finishup server test {record.name}' once the server is up."
-        )
-    _stop_helper_for_key(record, root, which="earlier")
-    if checked.outcome == "accepted":
         if verdict_phase is not None:
             typer.echo(
                 "This key is a different identity at that server than the one you agreed to, so "
                 "FinishUP asks you again before it connects: run "
                 f"'finishup server use {record.name}' here."
             )
+    else:
+        typer.echo(
+            f"Stored the API key for {record.name} ({record.target_id}) in {where}, not verified "
+            f"yet: the server did not answer ({checked.phase}). FinishUP sends nothing to that "
+            "server until the key is checked: once the server is up, run "
+            f"'finishup server use {record.name}' here (it checks the key and asks you again), "
+            "or log in again."
+        )
 
 
 def _stop_helper_for_key(record: ServerTarget, root: Path, *, which: str) -> None:
@@ -2975,18 +2991,20 @@ def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server targ
     if record.kind not in {"https", "local_port"}:
         raise ServerCommandRefused("credential_not_applicable")
     root = target_root(record.target_id)
+    recorded = record.credential
     try:
-        removed = KeyringOrFileCredential(
-            record.target_id, root, recorded=record.credential
-        ).delete()
         with registry_lock():
+            # Serialized with login (SRV-12): the key deleted is the one the record names now,
+            # never one a concurrent login stored after this command read the record.
             current = read_target(root)
+            recorded = record.credential if current is None else current.credential
+            removed = KeyringOrFileCredential(record.target_id, root, recorded=recorded).delete()
             if current is not None:  # one removed meanwhile keeps no record to update
                 write_target(root, replace(current, credential=None))
                 # An owner action on the key: every connection made under it ends (ADR-052, O8).
                 bump_credential_generation(root)
     except CredentialError as error:
-        kept = error.reason == "credential_store_unavailable" and record.credential == "keyring"
+        kept = error.reason == "credential_store_unavailable" and recorded == "keyring"
         raise ServerCommandRefused(error.reason, message=_KEY_KEPT if kept else None) from None
     except TargetError as error:
         raise ServerCommandRefused(error.reason)

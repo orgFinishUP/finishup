@@ -497,3 +497,20 @@ def test_an_official_origin_pins_its_scheme_host_port_and_path_prefix() -> None:
     ):
         assert not origin.matches(other), other
     assert server_folders.official_preset_url() is None
+
+
+def test_an_official_prefix_is_never_matched_through_a_dot_segment() -> None:
+    """C4: ``/api/../tenant`` is sent as ``/tenant`` by the client library, outside the prefix;
+    it is neither official nor even a recordable base URL."""
+
+    origin = server_folders.OfficialOrigin("fu.example", 443, "/api")
+    for escaping in (
+        "https://fu.example/api/../tenant",
+        "https://fu.example/api/..",
+        "https://fu.example/api/./v",
+        "https://fu.example/api/v/../../tenant",
+    ):
+        assert not origin.matches(escaping), escaping
+        with pytest.raises(targets.TargetError):
+            targets.normalize_https_url(escaping)
+    assert origin.matches("https://fu.example/api/v.1/..x")

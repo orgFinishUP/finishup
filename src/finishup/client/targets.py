@@ -309,7 +309,8 @@ def validate_name(name: str) -> str:
 
 
 def normalize_https_url(raw: str, *, loopback_only: bool = False) -> str:
-    """Normalize ``https://host[:port][/base]``; refuse plain HTTP, userinfo, query, fragment.
+    """Normalize ``https://host[:port][/base]``; refuse plain HTTP, userinfo, query, fragment
+    and a ``.`` or ``..`` path segment.
 
     ``loopback_only`` additionally requires ``127.0.0.1`` or ``[::1]`` with an explicit port
     (the ``local_port`` kind).
@@ -331,6 +332,9 @@ def normalize_https_url(raw: str, *, loopback_only: bool = False) -> str:
         or "@" in parts.netloc
         or parts.hostname is None
         or not _URL_PATH.match(parts.path)
+        # A dot segment is resolved away by the client library before a request is sent, so
+        # the recorded path (official matching, the consented origin) would name another one.
+        or any(segment in {".", ".."} for segment in parts.path.split("/"))
     ):
         raise TargetError("target_url_invalid")
     host = parts.hostname.lower()

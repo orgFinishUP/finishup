@@ -362,3 +362,131 @@ def test_status_names_the_https_connection(
     connection = json.loads(status.stdout)["target"]["connection"]
     assert connection["style"] == "relay" and connection["styles_offered"] == ["relay", "direct"]
 
+
+# --- layer-5 review fixes ------------------------------------------------------------------------
+
+
+def _registry_locked() -> bool:
+    """Whether another holder has the registry lock now (a second open's non-blocking flock)."""
+
+    import fcntl
+
+    path = targets.servers_dir() / targets._REGISTRY_LOCK_NAME  # pyright: ignore[reportPrivateUsage]
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(descriptor)
+    return False
+
+
+def test_an_unverified_login_refuses_work_until_the_keys_own_profile_is_checked(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: a key stored while the server did not answer leaves no profile cached from the
+    previous key, so the consent step refuses until this key's profile is fetched and compared."""
+
+    from finishup.client.rest_discovery import fetch_profile
+    from finishup.client.server_profile import consent_verdict, refresh_profile
+
+    remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    assert consent_verdict(record).phase is None
+    _other, other_principal = server.keys.create("someone-else", "agent")
+    server.reachable = False
+    down = _invoke("login", "web", "--key-file", str(server.key_file(other_principal, "o.key")))
+    assert down.exit_code == 0, down.output
+    assert "sends nothing to that server until the key is checked" in down.stdout
+    assert read_cached_profile(root) is None
+    stored = targets.read_target(root)
+    assert stored is not None and consent_verdict(stored).phase == "server_profile_changed"
+    # The server is back: the profile this key answers is another identity than the consented
+    # one, so it stays refused until the owner agrees again.
+    server.reachable = True
+    with targets.registry_lock():
+        verdict = refresh_profile(stored, fetch_profile(stored, consented=True))
+    assert verdict.phase == "server_profile_changed"
+    # The same key as consented, stored while the server was down: its own profile, once
+    # fetched and compared, admits again.
+    server.reachable = False
+    again = _invoke("login", "web", "--key-file", str(server.key_file()))
+    assert again.exit_code == 0, again.output
+    assert read_cached_profile(root) is None
+    server.reachable = True
+    stored = targets.read_target(root)
+    assert stored is not None
+    with targets.registry_lock():
+        verdict = refresh_profile(stored, fetch_profile(stored, consented=True))
+    assert verdict.phase is None
+
+
+def test_login_and_logout_change_the_key_only_under_the_registry_lock(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2: the key is stored and deleted inside the registry-locked step that writes the record,
+    the generation and the profile, so concurrent logins and logouts are serialized."""
+
+    remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    held: list[tuple[str, bool]] = []
+    original_store = KeyringOrFileCredential.store
+    original_delete = KeyringOrFileCredential.delete
+
+    def store(self: KeyringOrFileCredential, key: str) -> Any:
+        held.append(("store", _registry_locked()))
+        return original_store(self, key)
+
+    def delete(self: KeyringOrFileCredential) -> Any:
+        held.append(("delete", _registry_locked()))
+        return original_delete(self)
+
+    monkeypatch.setattr(KeyringOrFileCredential, "store", store)
+    monkeypatch.setattr(KeyringOrFileCredential, "delete", delete)
+    assert _invoke("login", "web", "--key-file", str(server.key_file())).exit_code == 0
+    assert _invoke("logout", "web").exit_code == 0
+    assert held == [("store", True), ("delete", True)]
+
+
+@pytest.mark.parametrize("body", [b"{}", None], ids=["empty_document", "another_key"])
+def test_a_profile_this_release_cannot_use_stores_nothing_and_stops_nothing(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, body: bytes | None
+) -> None:
+    """C3 and B7: ``200`` with an invalid profile, or one naming another key than the one sent,
+    is ``remote_incompatible`` before anything changes: the working key, the generation and the
+    helper stay as they were."""
+
+    runtime: StandInRuntime = remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    generation = credential_generation_path(root).read_bytes()
+    cached = read_cached_profile(root)
+    _newer_record, newer = server.keys.create("laptop-2", "agent")
+    if body is None:
+        document = profile_document()
+        document["edges"] = ["rest-1"]
+        document["key"] = {"id": "0" * 12, "scope": "agent", "principal": "p_" + "1" * 16}
+        body = json.dumps(document).encode()
+    server.profile_body = body
+    refused = _invoke("login", "web", "--key-file", str(server.key_file(newer, "n.key")))
+    assert refused.exit_code != 0
+    assert refused.stderr.startswith("remote_incompatible:")
+    assert "nothing was stored" in refused.stderr
+    assert KeyringOrFileCredential(record.target_id, root, recorded="file").read() == server.key
+    assert credential_generation_path(root).read_bytes() == generation
+    assert read_cached_profile(root) == cached
+    assert runtime.stops == []
