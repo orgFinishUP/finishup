@@ -819,8 +819,110 @@ class Task:
 
 
 def frontier_of(status: dict[str, Any]) -> dict[str, Any] | None:
-    for key in ("head_frontier", "frontier", "subject_frontier"):
-        value = status.get(key)
-        if isinstance(value, dict) and "sequence" in value:
-            return {"sequence": value["sequence"], "head_digest": value["head_digest"]}
+    """The head frontier a status result names (searched one level down for a wrapped body)."""
+
+    for body in (status, *(v for v in status.values() if isinstance(v, dict))):
+        for key in ("head_frontier", "frontier", "subject_frontier", "result_frontier"):
+            value = body.get(key)
+            if isinstance(value, dict) and "sequence" in value:
+                return {"sequence": value["sequence"], "head_digest": value["head_digest"]}
     return None
+
+
+# --- an MCP bridge driven over stdio (JSON-RPC lines), as a host drives it -------------------------
+
+
+class Bridge:
+    """``finishup mcp serve`` started like a host starts it (absolute launcher, the project folder
+    as working directory), driven over stdio. Stopped by closing its stdin, then by its PID."""
+
+    def __init__(self, run: Run, launcher: Path, env: dict[str, str], cwd: Path) -> None:
+        import selectors
+
+        self._selectors = selectors
+        self.run = run
+        self.process = run.spawn(
+            [str(launcher), "mcp", "serve"],
+            env=env,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=run.base / f"bridge-{len(run.processes)}.stderr",
+        )
+        self.next_id = 0
+        answer = self.rpc(
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "acceptance-host", "version": "1"},
+            },
+        )
+        if "result" not in answer:
+            raise RuntimeError(f"bridge_initialize_failed: {answer}")
+        self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _write(self, message: dict[str, Any]) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.write((json.dumps(message) + "\n").encode())
+        self.process.stdin.flush()
+
+    def rpc(self, method: str, params: dict[str, Any], *, seconds: float = 120) -> dict[str, Any]:
+        self.next_id += 1
+        self._write({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
+        assert self.process.stdout is not None
+        deadline = time.monotonic() + seconds
+        with self._selectors.DefaultSelector() as selector:
+            selector.register(self.process.stdout, self._selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not selector.select(max(0.0, deadline - time.monotonic())):
+                    break
+                line = self.process.stdout.readline()
+                if not line:
+                    return {"error": {"message": "bridge_exited"}}
+                with contextlib.suppress(ValueError):
+                    value = json.loads(line)
+                    if isinstance(value, dict) and value.get("id") == self.next_id:
+                        return value
+        return {"error": {"message": "bridge_response_deadline"}}
+
+    def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One tool call: ``{"ok": bool, "body": <structured result>, "text": <text>}``."""
+
+        answer = self.rpc("tools/call", {"name": name, "arguments": arguments})
+        result = answer.get("result") or {}
+        text = "".join(
+            str(item.get("text", ""))
+            for item in result.get("content", [])
+            if isinstance(item, dict)
+        )
+        body = result.get("structuredContent")
+        if not isinstance(body, dict):
+            body = json_of(text)
+        ok = bool(result) and not result.get("isError") and body.get("ok", True) is not False
+        return {"ok": ok, "body": body, "text": text, "error": answer.get("error")}
+
+    def close(self) -> None:
+        if self.process.stdin is not None:
+            with contextlib.suppress(OSError):
+                self.process.stdin.close()
+        try:
+            self.process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            self.run.stop(self.process)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+
+
+def mcp_request(**fields: Any) -> dict[str, Any]:
+    """A request document as an MCP host's agent sends it (the cooperative MCP integration)."""
+
+    return {
+        **base_request(),
+        "client": {
+            "kind": "cooperative_agent",
+            "version": "0.1.0",
+            "integration": "cooperative_mcp",
+        },
+        **fields,
+    }
