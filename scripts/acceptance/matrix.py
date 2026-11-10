@@ -106,16 +106,30 @@ def select(patterns: str) -> list[Cell]:
 # --- one invocation's world ------------------------------------------------------------------------
 
 
+@dataclass
+class Direct:
+    """No relay: the server's own port (no dial count)."""
+
+    port: int
+    connections: int = 0
+
+
 class World:
     """The client, the servers the selected cells need, and the dial counters in front of them."""
 
-    def __init__(self, run: Run, launcher: Path, cells: list[Cell]) -> None:
+    def __init__(
+        self, run: Run, launcher: Path, cells: list[Cell], *, relay_delay: float | None = 0.0
+    ) -> None:
+        """``relay_delay`` ``None`` dials the servers' own ports (no relay, no dial count): the
+        WAN gate in a network namespace, where the namespace's loopback carries the delay."""
+
         self.run = run
         self.launcher = launcher
+        self.relay_delay = relay_delay
         needs = {cell.edge for cell in cells}
         self.sshd: Sshd | None = None
         self.servers: dict[str, Server] = {}
-        self.relays: dict[str, Relay] = {}
+        self.relays: dict[str, Relay | Direct] = {}
         self.keys: dict[str, dict[str, Path]] = {}
         self.tls: Any = None
         if "ssh" in needs:
@@ -131,7 +145,7 @@ class World:
             assert server.srv("service", "start", "--json").returncode == 0
             assert server.initialize_vault(), "ssh server vault"
             self.servers["ssh"] = server
-            self.relays["ssh"] = relay(run, self.sshd.port)
+            self.relays["ssh"] = self._relay(self.sshd.port)
             run.finalizers.append(lambda: server.srv("service", "stop", "--json"))
         if needs & {"gateway", "rest"}:
             server = Server(run, "srv-gw", launcher)
@@ -143,7 +157,7 @@ class World:
             }
             server.start_edge("gateway", free_port(), self.tls)
             self.servers["gateway"] = server
-            self.relays["gateway"] = relay(run, server.port)
+            self.relays["gateway"] = self._relay(server.port)
             run.finalizers.append(lambda: server.srv("service", "stop", "--json"))
         if "native" in needs:
             server = Server(run, "srv-nat", launcher)
@@ -151,8 +165,13 @@ class World:
             assert server.initialize_vault(), "native server vault"
             self.keys["native"] = {"operator": server.api_key("laptop")}
             self.servers["native"] = server
-            self.relays["native"] = relay(run, server.port)
+            self.relays["native"] = self._relay(server.port)
         run.finalizers.append(self.disconnect_all)
+
+    def _relay(self, port: int) -> Relay | Direct:
+        if self.relay_delay is None:
+            return Direct(port)
+        return relay(self.run, port, delay=self.relay_delay)
 
     def disconnect_all(self) -> None:
         listed = self.client.fu("server", "list", "--json")
@@ -452,14 +471,14 @@ def forget(world: World, report: Report, cell: Cell, task: Task) -> None:
     )
 
 
-def remote_cell(world: World, cell: Cell) -> Report:
-    report = Report(cell.name)
-    client, server = world.client, world.server(cell)
-    name = cell.target
+def address_of(world: World, cell: Cell) -> list[str]:
+    """``server add`` arguments after the name for a remote cell (through its relay)."""
+
+    server = world.server(cell)
     port = world.relays[cell.edge].port
     if cell.kind == "ssh":
         assert world.sshd is not None
-        address = [
+        return [
             f"ssh://{world.sshd.user}@127.0.0.1:{port}",
             "--remote-root",
             str(server.root),
@@ -467,7 +486,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
             str(server.launcher),
         ]
     elif cell.kind == "https":
-        address = [
+        return [
             f"https://localhost:{port}",
             "--ca-file",
             str(world.tls.ca_file),
@@ -475,7 +494,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
             str(world.keys[cell.edge]["operator"]),
         ]
     else:
-        address = [
+        return [
             "--port",
             str(port),
             "--tls-pin",
@@ -483,6 +502,13 @@ def remote_cell(world: World, cell: Cell) -> Report:
             "--key-file",
             str(world.keys[cell.edge]["operator"]),
         ]
+
+
+def remote_cell(world: World, cell: Cell) -> Report:
+    report = Report(cell.name)
+    client, server = world.client, world.server(cell)
+    name = cell.target
+    address = address_of(world, cell)
     level = ["--level", cell.level] + (["--retention", "days:7"] if cell.level == "L2" else [])
     dials = world.dials(cell)
     added = client.ceremony(["server", "add", name, *address, *level], consent_replies(name))
