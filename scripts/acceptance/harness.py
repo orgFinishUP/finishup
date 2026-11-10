@@ -175,15 +175,34 @@ class Run:
                 process.wait()
 
     def close(self) -> None:
+        # The relays first: no client of this run reaches a server again (a helper would start
+        # a stopped server service on its demand), then the finalizers, then the processes.
+        for relay in self.relays:
+            relay.stop()
         for finalizer in reversed(self.finalizers):
             with contextlib.suppress(Exception):
                 finalizer()
-        for relay in self.relays:
-            relay.stop()
         for process in reversed(self.processes):
             self.stop(process)
         if not self.keep:
-            shutil.rmtree(self.base, ignore_errors=True)
+            remove_tree(self.base)
+
+
+def remove_tree(path: Path) -> None:
+    """Remove a run's folder, read-only parts included: a FinishUP bridge or service retains a
+    read-only copy of its runtime beside its virtual environment (``.<venv>-releases``)."""
+
+    def writable(_function: object, failed: str, _error: BaseException) -> None:
+        with contextlib.suppress(OSError):
+            os.chmod(os.path.dirname(failed), 0o700)
+            if os.path.isdir(failed) and not os.path.islink(failed):
+                os.chmod(failed, 0o700)
+                shutil.rmtree(failed, onexc=writable)
+            else:
+                os.unlink(failed)
+
+    if path.exists():
+        shutil.rmtree(path, onexc=writable)
 
 
 def run_command(

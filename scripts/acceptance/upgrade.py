@@ -195,12 +195,19 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
     client_launcher = venv(run.base / "client-venv", old_wheel)
     digests = {"old": manifest_digest(server_launcher)}
     server = Server(run, "srv", server_launcher, code_copy=False)
+    run.finalizers.append(server.stop_service)
     begun = server.srv("service", "start", "--json")
     assert begun.returncode == 0, "server start: " + run.redact(begun.stdout + begun.stderr)[-600:]
     assert server.initialize_vault(), "server vault"
-    run.finalizers.append(lambda: server.srv("service", "stop", "--json"))
     client = Client(run, client_launcher, ssh_bin=sshd.bin)
     client.make_repository()
+
+    def stop_local() -> None:
+        # A bridge following the local selection starts this computer's own service on demand.
+        client.fu("server", "use", "local")
+        client.fu("service", "stop", "--json")
+
+    run.finalizers.append(stop_local)
 
     # --- 1. everything older -----------------------------------------------------------------
     added = client.ceremony(
@@ -415,6 +422,9 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
         f"server use exit {back.exit_code}; first {brief(returned)}; next {brief(returned_again)}",
     )
     bridge.close()
+    # The O1 step started this computer's own service on the bridge's demand: stop it under the
+    # local selection (the selection is the SSH server again by now).
+    client.fu("server", "use", "local")
     client.fu("service", "stop", "--json")
 
 

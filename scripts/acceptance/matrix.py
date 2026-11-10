@@ -148,13 +148,14 @@ class World:
         if "ssh" in needs:
             assert self.sshd is not None
             server = Server(run, "srv-ssh", launcher)
+            run.finalizers.append(server.stop_service)
             assert server.srv("service", "start", "--json").returncode == 0
             assert server.initialize_vault(), "ssh server vault"
             self.servers["ssh"] = server
             self.relays["ssh"] = self._relay(self.sshd.port)
-            run.finalizers.append(lambda: server.srv("service", "stop", "--json"))
         if needs & {"gateway", "rest"}:
             server = Server(run, "srv-gw", launcher)
+            run.finalizers.append(server.stop_service)
             assert server.srv("service", "start", "--json").returncode == 0
             assert server.initialize_vault(), "gateway server vault"
             self.keys["gateway"] = {
@@ -164,7 +165,6 @@ class World:
             server.start_edge("gateway", free_port(), self.tls)
             self.servers["gateway"] = server
             self.relays["gateway"] = self._relay(server.port)
-            run.finalizers.append(lambda: server.srv("service", "stop", "--json"))
         if "native" in needs:
             server = Server(run, "srv-nat", launcher)
             server.start_edge("native", free_port(), self.tls)
