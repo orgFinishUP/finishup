@@ -21,8 +21,8 @@ helper_app = typer.Typer(
 
 _REFUSALS: Final = {
     2: (
-        "helper_target_invalid: give the id of an SSH server target on this computer; an "
-        "isolation variable or runtime pin naming another root also refuses"
+        "helper_target_invalid: give the id of an SSH or HTTPS server target on this computer; "
+        "an isolation variable or runtime pin naming another root also refuses"
     ),
     20: "helper_failed: the target's local endpoint could not be bound safely",
 }

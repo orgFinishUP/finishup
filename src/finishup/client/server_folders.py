@@ -20,12 +20,12 @@ claim-bound sessions, even where the server's own input-root policy names no roo
 mode alone.
 
 The owner chooses the mode with ``finishup server folders mode NAME local|listed``; adding a
-server elsewhere asks it too, once such a server can be added (the remote kinds are closed in
-this release). There is no default per kind. An HTTPS target at an official FinishUP endpoint
-(``OFFICIAL_ENDPOINT_ORIGINS``, matched by scheme, host, port and path prefix, and only while it
-trusts the system certificate store) is not asked and is ``local`` while its owner has recorded no mode. Any other
-target with no mode recorded is ``listed`` (``not_chosen``), and a record that cannot be read is
-``listed`` with no folder: both fail closed.
+server elsewhere (SSH, HTTPS or a port) asks it too. There is no default per kind. An HTTPS
+target at an official FinishUP endpoint (``OFFICIAL_ENDPOINT_ORIGINS``, matched by scheme, host,
+port and path prefix, and only while it trusts the system certificate store) is not asked and is
+``local`` while its owner has recorded no mode. Any other target with no mode recorded is
+``listed`` (``not_chosen``), and a record that cannot be read is ``listed`` with no folder: both
+fail closed.
 
 The record is ``<target root>/config/folders.json`` (``yoetz.server-folders/1``): an owner-only
 regular file of canonical JSON with exactly ``schema``, ``target_id`` (the root's own id) and

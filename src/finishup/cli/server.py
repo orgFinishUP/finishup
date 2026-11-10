@@ -15,12 +15,14 @@ trusted console; refusals name a target by its id or not at all, with a closed r
 SSH servers are open (ADR-052, layer 4): ``add NAME ssh://[user@]host[:port]`` runs SSH discovery
 (the server's own launcher reports its endpoint and profile; an unknown host key is asked about
 only on the trusted console), then the owner's consent; ``set NAME --style relay|direct`` chooses
-how this computer reaches it. HTTPS and port servers stay closed: ``add NAME https://…`` and
-``add NAME --port PORT`` refuse with ``remote_kind_unavailable`` before any prompt, policy check,
-probe or write; ``use`` refuses such a record (one another build wrote, or written by hand) the
-same way and leaves the selection unchanged; ``login`` refuses too, while ``logout`` stays the
-offline way to delete a key such a record still has. ``list`` and ``status`` show such a record
-as not available in this release. ``login`` and ``logout`` are hidden from the help.
+how this computer reaches it. HTTPS and port servers are open (ADR-053, layer 5): ``add NAME
+https://HOST[:PORT][/BASE]`` or ``add NAME --port PORT`` runs HTTPS discovery without a key, reads
+the API key (an owner-only file or the trusted console), fetches the profile with it, then asks
+the owner's consent; ``add official`` fills the official service's pinned URL (none yet);
+``login`` replaces the key after the server checked it, ``logout`` deletes it offline; both bump
+the credential generation and stop the target's helper. A kind closed in a build (an address
+this release names none of) refuses with ``remote_kind_unavailable`` before any prompt, policy
+check, probe or write, and ``list`` and ``status`` show such a record as not available.
 
 An isolation root or a runtime pin outranks the selection; while one is in force every command
 that would change or use the selection is refused with ``selection_overridden``.
@@ -1031,8 +1033,8 @@ def server_add(
         from finishup.client import authorization
 
         # The kind is told by the arguments alone (the address is never parsed for this): a kind
-        # closed in this release (HTTPS, a port) is refused before the selection, the name, any
-        # prompt, policy check, probe or write.
+        # closed in this build (an address this release names none of) is refused before the
+        # selection, the name, any prompt, policy check, probe or write.
         if kind_of_arguments(address, port) not in authorization.OPEN_REMOTE_KINDS:
             raise ServerCommandRefused("remote_kind_unavailable")
         _add_remote(
@@ -1563,8 +1565,8 @@ def target_rows() -> tuple[tuple[TargetRow, ...], str]:
 
 
 def render_target_rows(rows: tuple[TargetRow, ...], source: str) -> tuple[str, ...]:
-    """The ``finishup server list`` lines; a record of a kind closed in this release (HTTPS or a
-    port) is shown as not available (one another build wrote can be listed and removed)."""
+    """The ``finishup server list`` lines; a record of a kind closed in this build is shown as not
+    available (one another build wrote can be listed and removed)."""
 
     table = [
         (
@@ -2270,8 +2272,7 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
     use = f"chosen by: {document['source']}" if in_use else "not the server in use"
     lines = [f"Server: {name} ({identity}{target['kind']}); {use}"]
     if target["kind"] != "local" and not _open_kind(str(target["kind"])):
-        # HTTPS and port servers are closed in this release: a record another build wrote is
-        # shown, never used.
+        # A kind closed in this build: a record another build wrote is shown, never used.
         lines.append(f"Not available: {REMOTE_KIND_UNAVAILABLE}.")
     if target["location"] is not None:
         lines.append(f"Address: {target['location']}")

@@ -216,7 +216,7 @@ async def test_a_hello_naming_a_path_is_never_sent(edge: _Edge) -> None:
             stream,
             ControlClientKind.CLI,
             "0.3.0",
-            workspace_locator=WorkspaceLocator("/home/someone/project"),
+            workspace_locator=WorkspaceLocator("/srv/work/project"),
         )
     assert edge.backend.sessions == []
     assert await stream.failure_phase() is None

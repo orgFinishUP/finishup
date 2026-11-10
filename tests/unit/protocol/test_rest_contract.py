@@ -116,7 +116,7 @@ def test_the_claim_header_round_trips_and_names_no_path() -> None:
     claim = WorkspaceClaim(**vector["claim"])
     assert encode_claim_header(claim) == vector["header"]
     assert parse_claim_header(vector["header"]) == claim
-    for bad in ("", "directory:sha256:00", "/home/user/project", vector["header"] + ":x"):
+    for bad in ("", "directory:sha256:00", "/srv/work/project", vector["header"] + ":x"):
         with pytest.raises(ValueError, match="workspace_claim_invalid"):
             parse_claim_header(bad)
 

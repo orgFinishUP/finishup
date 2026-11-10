@@ -300,7 +300,7 @@ async def test_a_network_call_never_names_a_path(edge: _Edge) -> None:
     path = await edge.client.post(
         "/v1/status",
         headers=edge.call_headers(claim=_CLAIM),
-        content=json.dumps({"workspace_ref": "/home/owner/project"}).encode(),
+        content=json.dumps({"workspace_ref": "/srv/work/project"}).encode(),
     )
     assert path.status_code == 400 and _reason(path) == "frame_invalid"
     assert edge.backend.calls == []
