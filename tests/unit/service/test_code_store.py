@@ -441,6 +441,45 @@ def test_a_held_file_is_never_admitted_again_as_a_link_it_could_not_be(tmp_path:
         assert store.have("alice", "repo-1") == (first.snapshot,)
 
 
+def test_a_held_subtree_grafted_deeper_is_refused_by_the_index_bounds(tmp_path: Path) -> None:
+    # B8: the copy's index keeps each tree's height, so placing it deeper is checked.
+    blob = GitObject("blob", b"leaf")
+    inner = GitObject("tree", encode_tree([TreeEntry(MODE_REGULAR, b"f", blob.oid)]))
+    objects = {blob.oid: blob, inner.oid: inner}
+    for _ in range(100):
+        inner = GitObject("tree", encode_tree([TreeEntry(MODE_TREE, b"d", inner.oid)]))
+        objects[inner.oid] = inner
+    empty = GitObject("tree", b"")
+    base = GitObject("commit", encode_commit(empty.oid, None))
+    tip = GitObject("commit", encode_commit(inner.oid, base.oid))
+    for item in (empty, base, tip):
+        objects[item.oid] = item
+    first = Snapshot(base.oid, tip.oid, empty.oid, inner.oid, objects)
+    store = _store(tmp_path)
+    _upload(store, first.bundle(), _manifest(first, b""))
+    for levels, admitted in ((28, True), (29, False)):
+        top = inner.oid
+        added: dict[str, GitObject] = {}
+        for _ in range(levels):
+            tree = GitObject("tree", encode_tree([TreeEntry(MODE_TREE, b"g", top)]))
+            added[tree.oid] = tree
+            top = tree.oid
+        graft_tip = GitObject("commit", encode_commit(top, base.oid))
+        added[graft_tip.oid] = graft_tip
+        snap = Snapshot(base.oid, graft_tip.oid, empty.oid, top, added)
+        manifest = canonical_encode(
+            manifest_to_json(
+                replace(manifest_from_json(_unverified_manifest(snap, 1)), bytes=len(b"leaf"))
+            )
+        )
+        bundle = write_bundle((first.snapshot,), graft_tip.oid, 2, write_pack(list(added.values())))
+        if admitted:
+            _upload(store, bundle, manifest)
+            continue
+        with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+            _upload(store, bundle, manifest)
+
+
 def test_one_principal_never_reaches_another_s_copy(tmp_path: Path) -> None:
     store = _store(tmp_path)
     snap = snapshot_objects(BASE, CURRENT)

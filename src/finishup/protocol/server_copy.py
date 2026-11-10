@@ -588,7 +588,10 @@ class Held:
     For a tree also what a checkout of it expands to, relative to the tree, so the tree can be
     checked where it is referenced again: ``entries`` (every path beneath it, directories
     included, a subtree counted at every place it is referenced) and ``names`` (the bytes of
-    those paths, each component with its separator). For a blob whether it may be a link's
+    those paths, each component with its separator), ``height`` (how many directory levels lie
+    beneath it) and ``longest`` (the bytes of its longest path), so a held tree grafted beneath
+    more directories is still held to the depth and path-length bounds. For a blob whether it
+    may be a link's
     target (``link_safe``: at most 4 KiB, no NUL), so a blob held as a file is never reused as a
     link it could not be. ``None``: not known (kept before these were recorded); the verifier
     refuses a reuse it cannot check.
@@ -601,10 +604,12 @@ class Held:
     entries: int | None = None
     names: int | None = None
     link_safe: bool | None = None
+    height: int | None = None
+    longest: int | None = None
 
 
 # The members after the first four were added later: an older entry reads them as unknown.
-_HELD_MEMBERS: Final = 7
+_HELD_MEMBERS: Final = 9
 
 
 def held_to_json(held: Held) -> list[JsonValue]:
@@ -618,6 +623,8 @@ def held_to_json(held: Held) -> list[JsonValue]:
         held.entries,
         held.names,
         held.link_safe,
+        held.height,
+        held.longest,
     ]
 
 
@@ -642,7 +649,7 @@ def held_from_json(value: JsonValue) -> Held:
     if type(value) is not list or not 4 <= len(value) <= _HELD_MEMBERS:
         raise CopyError("held_invalid")
     members: list[JsonValue] = [*value, *([None] * (_HELD_MEMBERS - len(value)))]
-    kind, size, files, tree, entries, names, link_safe = members
+    kind, size, files, tree, entries, names, link_safe, height, longest = members
     if kind not in _KINDS or type(size) is not int or type(files) is not int:
         raise CopyError("held_invalid")
     if size < 0 or files < 0 or (tree is not None and type(tree) is not str):
@@ -655,6 +662,8 @@ def held_from_json(value: JsonValue) -> Held:
         _held_count(entries),
         _held_count(names),
         _held_flag(link_safe),
+        _held_count(height),
+        _held_count(longest),
     )
 
 
@@ -689,12 +698,15 @@ class VerifiedSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class _Shape:
-    """A tree as a checkout expands it: size, files, and its paths and their bytes (``Held``)."""
+    """A tree as a checkout expands it: size, files, its paths and their bytes, and how deep and
+    how long its paths reach beneath it (``Held``)."""
 
     bytes: int
     files: int
     entries: int
     names: int
+    height: int
+    longest: int
 
 
 class _Walk:
@@ -716,6 +728,16 @@ class _Walk:
         # Checked as each tree is summed, so a hostile tree's counts never grow past the cap.
         if entries > self.limits.max_entries or names > self.limits.max_path_bytes:
             raise CopyError("tree_too_many_entries")
+
+    @staticmethod
+    def _place(shape: _Shape, depth: int, path_bytes: int) -> _Shape:
+        """A tree already summed (held, or seen at another place) checked where it is now."""
+
+        if depth + shape.height > _MAX_TREE_DEPTH:
+            raise CopyError("tree_too_deep")
+        if path_bytes + shape.longest > _MAX_PATH_BYTES:
+            raise CopyError("path_invalid")
+        return shape
 
     def _held(self, oid: str) -> Held:
         held = self.have(oid)
@@ -754,22 +776,32 @@ class _Walk:
             held = self._held(oid)
             if held.kind != "tree":
                 raise CopyError("tree_entry_type_mismatch")
-            if held.entries is None or held.names is None:
+            if (
+                held.entries is None
+                or held.names is None
+                or held.height is None
+                or held.longest is None
+            ):
                 raise CopyError("held_tree_unbounded")
-            # Held by the receiver: its closure was verified when it was admitted.
-            shape = _Shape(held.bytes, held.files, held.entries, held.names)
+            # Held by the receiver: its closure was verified when it was admitted, at the place
+            # it had then; its bounds are checked again at the place it has here.
+            shape = _Shape(
+                held.bytes, held.files, held.entries, held.names, held.height, held.longest
+            )
             self._bound(shape.entries, shape.names)
-            return shape
+            return self._place(shape, depth, path_bytes)
         if item.kind != "tree":
             raise CopyError("tree_entry_type_mismatch")
         self.reached.add(oid)
         known = self.shapes.get(oid)
         if known is not None:
-            return known
+            return self._place(known, depth, path_bytes)
         size = 0
         files = 0
         entries = 0
         names = 0
+        height = 0
+        longest = 0
         for entry in decode_tree(item.data):
             length = path_bytes + 1 + len(entry.name)
             if length > _MAX_PATH_BYTES:
@@ -777,6 +809,7 @@ class _Walk:
             step = 1 + len(entry.name)
             entries += 1
             names += step
+            longest = max(longest, step)
             if entry.mode == MODE_TREE:
                 below = self.tree(entry.oid, depth + 1, length)
                 size += below.bytes
@@ -784,6 +817,8 @@ class _Walk:
                 entries += below.entries
                 # Every path beneath the subtree is prefixed by this entry's name here.
                 names += below.names + below.entries * step
+                height = max(height, 1 + below.height)
+                longest = max(longest, step + below.longest)
             elif entry.mode == MODE_GITLINK:
                 if entry.oid in self.objects:
                     raise CopyError("gitlink_content_refused")
@@ -792,7 +827,7 @@ class _Walk:
                 size += self.blob(entry.oid, entry.mode)
                 files += 1
             self._bound(entries, names)
-        shape = _Shape(size, files, entries, names)
+        shape = _Shape(size, files, entries, names, height, longest)
         self.shapes[oid] = shape
         return shape
 
@@ -846,7 +881,13 @@ def verify_snapshot_bundle(
         elif item.kind == "tree":
             below = walk.shapes[oid]
             kept[oid] = Held(
-                "tree", below.bytes, below.files, entries=below.entries, names=below.names
+                "tree",
+                below.bytes,
+                below.files,
+                entries=below.entries,
+                names=below.names,
+                height=below.height,
+                longest=below.longest,
             )
         else:
             kept[oid] = Held("commit", tree=tree if oid == bundle.tip else base_tree)

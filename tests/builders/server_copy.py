@@ -151,24 +151,26 @@ def held_lookup(
 
     from finishup.protocol.server_copy import decode_commit, decode_tree
 
-    shapes: dict[str, tuple[int, int]] = {}
+    shapes: dict[str, tuple[int, int, int, int]] = {}
 
-    def shape(oid: str) -> tuple[int, int]:
+    def shape(oid: str) -> tuple[int, int, int, int]:
         known = shapes.get(oid)
         if known is not None:
             return known
-        entries = 0
-        names = 0
+        entries = names = height = longest = 0
         for entry in decode_tree(objects[oid].data):
             step = 1 + len(entry.name)
             entries += 1
             names += step
+            longest = max(longest, step)
             if entry.mode == MODE_TREE:
-                below_entries, below_names = shape(entry.oid)
+                below_entries, below_names, below_height, below_longest = shape(entry.oid)
                 entries += below_entries
                 names += below_names + below_entries * step
-        shapes[oid] = (entries, names)
-        return entries, names
+                height = max(height, 1 + below_height)
+                longest = max(longest, step + below_longest)
+        shapes[oid] = (entries, names, height, longest)
+        return shapes[oid]
 
     def have(oid: str) -> Held | None:
         item = objects.get(oid)
@@ -179,8 +181,16 @@ def held_lookup(
             return Held("blob", len(item.data), link_safe=safe)
         if item.kind == "tree":
             size, files = trees[oid]
-            entries, names = shape(oid)
-            return Held("tree", size, files, entries=entries, names=names)
+            entries, names, height, longest = shape(oid)
+            return Held(
+                "tree",
+                size,
+                files,
+                entries=entries,
+                names=names,
+                height=height,
+                longest=longest,
+            )
         tree, _parent = decode_commit(item.data)
         return Held("commit", tree=tree)
 

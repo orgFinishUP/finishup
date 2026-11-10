@@ -1051,16 +1051,21 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
         files = 0
         entries = 0
         names = 0
+        height = 0
+        longest = 0
         for entry in decode_tree(item.data):
             step = 1 + len(entry.name)
             entries += 1
             names += step
+            longest = max(longest, step)
             if entry.mode == MODE_TREE:
                 below = tree(entry.oid)
                 size += below.bytes
                 files += below.files
                 entries += below.entries or 0
                 names += (below.names or 0) + (below.entries or 0) * step
+                height = max(height, 1 + (below.height or 0))
+                longest = max(longest, step + (below.longest or 0))
             elif entry.mode == MODE_GITLINK:
                 files += 1
             else:
@@ -1075,7 +1080,15 @@ def _closure(database: ExportDatabase, commits: Iterable[str], limit: int) -> di
                     held[entry.oid] = blob
                 size += blob.bytes
                 files += 1
-        shape = Held("tree", size, files, entries=entries, names=names)
+        shape = Held(
+            "tree",
+            size,
+            files,
+            entries=entries,
+            names=names,
+            height=height,
+            longest=longest,
+        )
         held[oid] = shape
         return shape
 

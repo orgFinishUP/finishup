@@ -579,6 +579,96 @@ def test_a_held_blob_is_checked_against_the_mode_it_is_reused_as() -> None:
         )
 
 
+def _nested(levels: int, below: GitObject, name: bytes = b"d") -> list[GitObject]:
+    """``levels`` directories named ``name``, each holding the next, around ``below``."""
+
+    chain = [below]
+    for _ in range(levels):
+        chain.append(GitObject("tree", _raw_tree((b"40000", name, chain[-1].oid))))
+    return chain
+
+
+def test_a_subtree_seen_once_is_checked_again_where_it_is_referenced_deeper() -> None:
+    # B8: the walk's cache returned a tree first seen near the top without checking it again.
+    blob = GitObject("blob", b"leaf")
+    leaf = GitObject("tree", _raw_tree((b"100644", b"f", blob.oid)))
+    deep = _nested(100, leaf)
+    graft = _nested(40, deep[-1])
+    root = _raw_tree((b"40000", b"a", deep[-1].oid), (b"40000", b"z", graft[-1].oid))
+    with pytest.raises(CopyError, match="tree_too_deep"):
+        verify_snapshot_bundle(
+            _snapshot_with_tree(root, blob, *deep, *graft[1:]), have=_nothing, limits=LIMITS
+        )
+    shallow = _nested(20, deep[-1])
+    verify_snapshot_bundle(
+        _snapshot_with_tree(
+            _raw_tree((b"40000", b"a", deep[-1].oid), (b"40000", b"z", shallow[-1].oid)),
+            blob,
+            *deep,
+            *shallow[1:],
+        ),
+        have=_nothing,
+        limits=LIMITS,
+    )
+    # The same for the length of the paths beneath it.
+    long_chain = _nested(15, leaf, b"n" * 200)
+    prefix = _nested(5, long_chain[-1], b"p" * 250)
+    root = _raw_tree((b"40000", b"a", long_chain[-1].oid), (b"40000", b"z", prefix[-1].oid))
+    with pytest.raises(CopyError, match="path_invalid"):
+        verify_snapshot_bundle(
+            _snapshot_with_tree(root, blob, *long_chain, *prefix[1:]), have=_nothing, limits=LIMITS
+        )
+
+
+def test_a_held_subtree_grafted_beneath_more_directories_keeps_the_bounds() -> None:
+    # B8: a subtree admitted near the top, then placed deeper by an incremental tree.
+    blob = GitObject("blob", b"leaf")
+    leaf = GitObject("tree", _raw_tree((b"100644", b"f", blob.oid)))
+    deep = _nested(100, leaf)
+    first = verify_snapshot_bundle(
+        _snapshot_with_tree(deep[-1].data, blob, *deep[:-1]), have=_nothing, limits=LIMITS
+    )
+    held_deep = deep[-2].oid
+    assert first.held[held_deep].height == 99
+
+    def have(oid: str) -> Held | None:
+        return first.held.get(oid)
+
+    def grafted(levels: int, held: str, name: bytes = b"g") -> bytes:
+        chain = [GitObject("tree", _raw_tree((b"40000", name, held)))]
+        for _ in range(levels - 1):
+            chain.append(GitObject("tree", _raw_tree((b"40000", name, chain[-1].oid))))
+        empty = GitObject("tree", b"")
+        base = GitObject("commit", encode_commit(empty.oid, None))
+        tip = GitObject("commit", encode_commit(chain[-1].oid, base.oid))
+        return _bundle_of([tip, base, empty, *chain], tip.oid, ref=2)
+
+    # Placed at depth 29 its deepest directory is at 128: admitted; at depth 30 it is not.
+    verify_snapshot_bundle(grafted(29, held_deep), have=have, limits=LIMITS)
+    with pytest.raises(CopyError, match="tree_too_deep"):
+        verify_snapshot_bundle(grafted(30, held_deep), have=have, limits=LIMITS)
+    long_chain = _nested(15, leaf, b"n" * 200)
+    long_first = verify_snapshot_bundle(
+        _snapshot_with_tree(long_chain[-1].data, blob, *long_chain[:-1]),
+        have=_nothing,
+        limits=LIMITS,
+    )
+    held_long = long_chain[-2].oid
+    longest = long_first.held[held_long].longest
+    assert longest == 14 * 201 + 2
+
+    def have_long(oid: str) -> Held | None:
+        return long_first.held.get(oid)
+
+    # Beneath five 250-byte names its longest path is 4,071 bytes; beneath six, 4,322.
+    verify_snapshot_bundle(grafted(5, held_long, b"p" * 250), have=have_long, limits=LIMITS)
+    with pytest.raises(CopyError, match="path_invalid"):
+        verify_snapshot_bundle(grafted(6, held_long, b"p" * 250), have=have_long, limits=LIMITS)
+    unknown = {oid: replace(item, height=None) for oid, item in first.held.items()}
+    with pytest.raises(CopyError, match="held_tree_unbounded"):
+        verify_snapshot_bundle(grafted(1, held_deep), have=unknown.get, limits=LIMITS)
+
+
 def test_what_a_receiver_keeps_round_trips_and_older_entries_read_as_unknown() -> None:
     snap = snapshot_objects(BASE, CURRENT)
     verified = verify_snapshot_bundle(snap.bundle(), have=_nothing, limits=LIMITS)
