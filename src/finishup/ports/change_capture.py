@@ -64,6 +64,7 @@ __all__ = [
     "check_workspace_source_scope",
     "current_check_workspace_source",
     "current_evidence_task",
+    "evidence_task_of",
     "decode_check_change",
     "decode_task_change_base",
     "drop_space_cut_words",
@@ -1134,6 +1135,17 @@ def evidence_task_scope(task_id: str | None) -> Generator[None]:
         yield
     finally:
         _EVIDENCE_TASK.reset(token)
+
+
+def evidence_task_of(runtime: object) -> str | None:
+    """The task id a task runtime names, for ``evidence_task_scope``; None for anything else.
+
+    A stand-in or mismatched runtime (one a later identity check refuses) names no task, so the
+    scope never decides that refusal earlier or differently.
+    """
+
+    task_id = getattr(runtime, "task_id", None)
+    return task_id if type(task_id) is str and 1 <= len(task_id) <= 128 else None
 
 
 def current_evidence_task() -> str | None:

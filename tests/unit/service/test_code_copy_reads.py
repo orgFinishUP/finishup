@@ -506,7 +506,8 @@ def test_task_close_retention_expires_once_no_pinned_task_is_open(tmp_path: Path
     with evidence_task_scope("task_two"):
         routed.read_task_base(HANDLE)
     closed: set[str] = set()
-    copies.attach_task_closed(closed.__contains__)
+    # The expiry attaching runs at once must end before the tasks close, or it races the test.
+    copies.attach_task_closed(closed.__contains__).join(timeout=30)
     assert copies.expire_now().copies == 0
     closed.add(TASK)
     assert copies.expire_now().copies == 0
@@ -519,7 +520,7 @@ def test_task_close_retention_expires_once_no_pinned_task_is_open(tmp_path: Path
     def broken(_task: str) -> bool:
         raise RuntimeError("catalog unavailable")
 
-    copies.attach_task_closed(broken)  # unknown is open: nothing expires
+    copies.attach_task_closed(broken).join(timeout=30)  # unknown is open: nothing expires
     with evidence_task_scope(TASK):
         routed.read_task_base(HANDLE)
     assert copies.expire_now().copies == 0

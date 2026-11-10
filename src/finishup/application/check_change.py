@@ -69,6 +69,7 @@ from finishup.ports.change_capture import (
     drop_space_cut_words,
     encode_check_change,
     encode_task_change_base,
+    evidence_task_of,
     evidence_task_scope,
 )
 from finishup.ports.clock import ClockPort
@@ -1065,7 +1066,7 @@ async def record_task_change_base(
         if await cast(Callable[[], Awaitable[ObjectRef | None]], loader)() is not None:
             return False
         # Level L2 (ADR-054): the base is this task's evidence, read (and pinned) for it.
-        with evidence_task_scope(runtime.task_id):
+        with evidence_task_scope(evidence_task_of(runtime)):
             base = await asyncio.to_thread(port.read_task_base, workspace)
         if type(base) is not TaskChangeBase:
             raise TypeError("task_change_base_invalid")

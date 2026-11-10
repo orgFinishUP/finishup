@@ -352,6 +352,7 @@ from finishup.ports.change_capture import (
     TaskInputFile,
     TaskInputSnapshotSet,
     current_check_workspace_source,
+    evidence_task_of,
     evidence_task_scope,
 )
 from finishup.ports.clock import ClockPort
@@ -5671,7 +5672,7 @@ def _privacy_gated_semantic_evaluator(
         kept_back: list[OutsideReadsKeptBack | None] = [None]
         # Level L2 (ADR-054): the review's reads (the change, the reviewer's files, the inputs)
         # are this task's evidence, pinned to its snapshot and counted for it.
-        with evidence_task_scope(None if runtime is None else runtime.task_id):
+        with evidence_task_scope(evidence_task_of(runtime)):
             result = await _evaluate_case(
                 frozen,
                 findings,

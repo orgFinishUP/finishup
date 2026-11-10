@@ -280,6 +280,7 @@ from finishup.ports.change_capture import (
     CheckChangeMetadata,
     CheckWorkspaceSource,
     current_check_workspace_source,
+    evidence_task_of,
     evidence_task_scope,
 )
 from finishup.ports.clock import ClockPort
@@ -6840,7 +6841,7 @@ async def execute_check_commit(
     lineage_evaluation: LineageEvaluation
     # Level L2 (ADR-054): every workspace read this check makes is the task's evidence, pinned and
     # counted for it.
-    evidence_scope = evidence_task_scope(runtime.task_id)
+    evidence_scope = evidence_task_scope(evidence_task_of(runtime))
     evidence_scope.__enter__()
     try:
         if runtime.session_id != request.session_id or runtime.writer_id != request.writer_id:
