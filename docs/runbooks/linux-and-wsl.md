@@ -489,7 +489,8 @@ no host session (Codex, Claude Code, Cursor) has run against an SSH server yet (
   way, `remote_service_not_running` → start it on the server, `remote_incompatible` → the same
   release on both). The helper's own records are beneath the target's client root
   (`state/helper-status.json`, `log/helper.stderr`).
-- **Stop one.** `finishup server disconnect NAME` stops this computer's helper by its stamped pid
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper (it moves the
+  target's owner-only stop epoch, which the helper reads within a second; no process is signalled)
   and ends the OpenSSH master (`ssh -O exit`); the server's FinishUP keeps running. Never stop a
   helper or an `ssh` process by pattern: `ps`-matching `finishup` or `ssh` also hits the owner's
   other sessions. `server remove NAME` stops both and removes only this computer's record.
@@ -549,7 +550,8 @@ session (Codex, Claude Code, Cursor) has run against an HTTPS server yet (layer 
   (`remote_unreachable`, `remote_auth_failed` → `finishup server login NAME`,
   `remote_identity_changed` → verify the certificate another way, `remote_service_not_running`,
   `remote_incompatible` → the same release on both).
-- **Stop one.** `finishup server disconnect NAME` stops this computer's helper by its stamped pid;
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper through its stop
+  epoch (no process is signalled);
   `finishup server logout NAME` deletes the key and stops it too; `finishup server remove NAME`
   removes only this computer's record and key. The server's own edge and service keep running.
 - **WSL 2: untested** (gap, owner: layer 7). No run of the REST edge or of an HTTPS client is

@@ -305,6 +305,14 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "SSH server, or give a valid API key for an HTTPS server",
         _UNAVAILABLE,
     ),
+    # 'server add ssh://' (ADR-052): a socket path OpenSSH would not take verbatim (it splits on
+    # ':' and expands '%' tokens and '${VAR}'), here or on the server; spaces are fine.
+    "ssh_path_unusable": (
+        "OpenSSH cannot use a socket path of this server as written (this computer's FinishUP "
+        "folder, or the server's FinishUP endpoint, holds ':', '%' or '$'), so nothing was added; "
+        "move that FinishUP folder or give the server a --remote-root without those characters",
+        _UNSAFE,
+    ),
     # 'server add ssh://' (ADR-051 decision 7): OpenSSH asked to confirm a host key this computer
     # does not know yet, on the owner's terminal, and the owner declined or did not answer.
     "remote_host_key_unconfirmed": (
@@ -429,14 +437,21 @@ DISCLOSURE_LINES: Final = (
 
 
 class ServerCommandRefused(Exception):
-    """A refused ``finishup server`` step: closed reason and detail tokens, fixed message text."""
+    """A refused ``finishup server`` step: closed reason and detail tokens, fixed message text,
+    and the registered recovery directive (``continuation``) its lines follow, when it has one."""
 
     def __init__(
-        self, reason: str, *, detail: str | None = None, message: str | None = None
+        self,
+        reason: str,
+        *,
+        detail: str | None = None,
+        message: str | None = None,
+        continuation: str | None = None,
     ) -> None:
         self.reason = reason
         self.detail = detail
         self.message = message
+        self.continuation = continuation
         super().__init__(reason)
 
 
@@ -455,10 +470,24 @@ def refusal_message(error: ServerCommandRefused) -> str:
     return text if error.detail is None else f"{text} ({error.detail})"
 
 
-def _fail(reason: str, *, detail: str | None = None, message: str | None = None) -> NoReturn:
+def _fail(
+    reason: str,
+    *,
+    detail: str | None = None,
+    message: str | None = None,
+    continuation: str | None = None,
+) -> NoReturn:
     _remedy, code = _REMEDIES.get(reason, (_DEFAULT_REMEDY, _UNAVAILABLE))
     text = refusal_message(ServerCommandRefused(reason, detail=detail, message=message))
     typer.echo(f"{reason}: {text}", err=True)
+    if continuation is not None:
+        from finishup.cli.render import render_recovery_directive_lines
+        from finishup.protocol.recovery import directive_for
+
+        directive = directive_for(continuation)
+        if directive is not None:
+            for line in render_recovery_directive_lines(directive):
+                typer.echo(line, err=True)
     raise typer.Exit(code)
 
 
@@ -470,7 +499,12 @@ def _cli[**P](command: Callable[P, None]) -> Callable[P, None]:
         try:
             command(*args, **kwargs)
         except ServerCommandRefused as error:
-            _fail(error.reason, detail=error.detail, message=error.message)
+            _fail(
+                error.reason,
+                detail=error.detail,
+                message=error.message,
+                continuation=error.continuation,
+            )
         except TargetError as error:
             _fail(error.reason)
         except PathSafetyError as error:
@@ -1226,11 +1260,15 @@ def _add_remote(
     session_bound = False
     api_key: str | None = None
     if kind == "ssh":
+        # Every socket path OpenSSH will be given must be usable as written, checked before
+        # anything reaches the server and again for the endpoint it reports, before a record.
+        _require_ssh_paths(provisional.remote_endpoint)
         # SSH discovery (design v2 section 2.1): the endpoint and the profile, from the server's
         # own launcher; an unknown host key is asked about only on this trusted console.
         found = _discover_ssh(
             user, cast(str, host), cast(int, ssh_port), remote_root, remote_launcher
         )
+        _require_ssh_paths(found.endpoint)
         remote_launcher, session_bound = found.launcher, found.session_bound
         try:
             provisional = replace(
@@ -1367,6 +1405,21 @@ def _store_added_key(record: ServerTarget, root: Path, key: str) -> ServerTarget
     # An owner action on the key (ADR-052, O8).
     bump_credential_generation(root)
     return stored
+
+
+def _require_ssh_paths(remote_endpoint: str | None) -> None:
+    """Refuse ``ssh_path_unusable`` unless OpenSSH can take every socket path of a new SSH
+    target as written: its root's (named like every target root) and ``remote_endpoint``."""
+
+    from finishup.client.ssh_transport import ssh_paths_usable
+    from finishup.client.targets import servers_dir
+
+    try:
+        root = servers_dir() / "t_00000000"
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
+    if not ssh_paths_usable(root, remote_endpoint):
+        raise ServerCommandRefused("ssh_path_unusable")
 
 
 def _discover_ssh(
@@ -2954,6 +3007,13 @@ _KEY_KEPT: Final = (
 )
 
 
+_RECONSENT_AT_CONNECT: Final = (
+    "what that server offers or needs changed since you agreed to use it, so FinishUP connected "
+    "nothing and sent nothing; agree again on your own terminal with 'finishup server use NAME' "
+    "(it shows what changed and asks you), then connect"
+)
+
+
 def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> str:
     record, root, everyday = _resolve(name)
     kind: TargetKind = "local" if record is None else record.kind
@@ -2973,6 +3033,14 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
         else:
             runtime.stop(root)
     except TargetRuntimeError as error:
+        if error.reason == "service_unavailable" and error.phase == "server_profile_changed":
+            # What the server offers changed since the owner agreed: only the owner agrees
+            # again, on their own terminal; the registered directive says so (remote_reconsent).
+            raise ServerCommandRefused(
+                "server_profile_changed",
+                message=_RECONSENT_AT_CONNECT,
+                continuation="remote_reconsent",
+            ) from None
         _runtime_failure(error)
     if record is not None:
         return f"{record.name} ({record.target_id})"
@@ -3043,6 +3111,9 @@ def server_set(
     from finishup.client.helper_status import CONNECTION_STYLES, write_connection_style
     from finishup.client.server_profile import styles_offered
 
+    # Like every command that changes a target: never from a process an isolation variable or a
+    # pinned launcher points elsewhere (it would stop and restyle the ambient registry's target).
+    _require_no_explicit_source()
     if style not in CONNECTION_STYLES:
         raise ServerCommandRefused("style_invalid")
     record = _target_or_fail(name)

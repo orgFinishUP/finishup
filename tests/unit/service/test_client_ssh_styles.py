@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Buffer, Iterator
 from pathlib import Path
 
 import pytest
@@ -33,6 +33,7 @@ from finishup.config.paths import reset_selection_memo
 from finishup.ports.control import ControlClientKind, ControlError
 from finishup.service import client as service_client
 from finishup.service.client import connect_service, connect_service_on_demand
+from finishup.service.control_protocol import ControlStream
 
 
 @pytest.fixture
@@ -212,16 +213,25 @@ def test_the_direct_style_dials_its_own_stream_and_checks_every_frame(
     _record, root = ssh_selected
     write_connection_style(root, "direct")
     daemon = ScriptedDaemon()
-    opened: list[tuple[str, ...]] = []
+    opened: list[tuple[str, str | None, bool]] = []
 
-    async def open_stream(argv: tuple[str, ...]):  # noqa: ANN202
-        opened.append(tuple(argv))
+    async def open_stream(  # noqa: ANN202
+        ssh: str,
+        _root: Path,
+        record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        # The verified direct transport (``ssh_transport.open_direct_stream``), stood in: it is
+        # asked for the key the owner's consent names, within the connection's deadline.
+        opened.append((ssh, expected, deadline is not None))
         client_end, server_end = memory_pair()
         daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
         return client_end
 
     monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
-    monkeypatch.setattr(ssh_transport.SshControlStream, "open", staticmethod(open_stream))
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
 
     def no_helper(*_args: object) -> object:
         raise AssertionError("the direct style never dials the helper's endpoint")
@@ -243,7 +253,9 @@ def test_the_direct_style_dials_its_own_stream_and_checks_every_frame(
     transport, refused = asyncio.run(run())
     assert transport == "ssh"
     assert refused.phase == "server_authorization_changed"
-    assert len(opened) == 1 and "-W" in opened[0] and "ControlMaster=auto" in opened[0]
+    from builders.server_profiles import HOST_KEY
+
+    assert opened == [("/usr/bin/ssh", HOST_KEY, True)]
     # One status call reached the server; the one after the owner's change never left.
     assert len(daemon.received(0)) == 2
 
@@ -317,3 +329,73 @@ def test_a_hello_the_helper_closes_unanswered_is_named_by_what_it_recorded(
 
     error = asyncio.run(run())
     assert (error.reason, error.phase) == ("service_unavailable", "remote_service_not_running")
+
+
+class _WedgedDirectStream:
+    """A direct stream whose server end answers the hello with bytes that are no frame, and whose
+    ``ssh`` never says why it ended (it keeps running, its diagnostics open)."""
+
+    def __init__(self, *, broken: bool) -> None:
+        self.asked_why = 0
+        self.closed = False
+        self.broken = broken
+
+    @property
+    def peer_identity(self) -> object:
+        return self
+
+    async def send_all(self, data: Buffer) -> None:
+        del data
+
+    async def receive(self, max_bytes: int) -> bytes:
+        del max_bytes
+        if self.broken:
+            raise LocalControlTransportError("connection_failed")
+        return b"\x00\x00\x00\x02{]"
+
+    async def failure_phase(self) -> str | None:
+        self.asked_why += 1
+        await asyncio.Event().wait()
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize("failure", ["protocol", "transport"])
+def test_why_a_direct_stream_ended_is_asked_only_within_the_connections_deadline(
+    failure: str,
+) -> None:
+    """B5: classifying a failed handshake never outlives the connection's own deadline."""
+
+    import time
+
+    from finishup.service.client import connect_service_via
+
+    stream = _WedgedDirectStream(broken=failure == "transport")
+
+    async def dial() -> ControlStream:
+        return stream
+
+    async def run() -> tuple[ControlError, float]:
+        started = time.monotonic()
+        with pytest.raises(ControlError) as raised:
+            # Bounded from outside: a classification that ignored the deadline would hang.
+            async with asyncio.timeout(10):
+                await connect_service_via(
+                    dial,
+                    ControlClientKind.CLI,
+                    workspace_binding=None,
+                    authorization=None,
+                    transport="ssh",
+                    timeout_seconds=0.3,
+                )
+        return raised.value, time.monotonic() - started
+
+    error, took = asyncio.run(run())
+    # The protocol's own reason, or the transport's; never a phase it could not name in time.
+    assert (error.reason, error.phase) == (
+        ("frame_invalid", None) if failure == "protocol" else ("service_unavailable", None)
+    )
+    assert stream.asked_why == 1 and stream.closed
+    assert took < 5.0

@@ -15,7 +15,11 @@ test off the account's own ``~/.ssh``. Exercised for real:
   launcher, ``service endpoint --json`` and ``service profile --json``), with the host key
   OpenSSH verified as the endpoint identity;
 * the host key: unknown and confirmed on a terminal (a pseudo-terminal answers OpenSSH's own
-  question), unknown and declined, and changed (never asked about).
+  question), unknown and declined, and changed (never asked about);
+* the consented host key on every new connection (ADR-052, B1): the server's key rotates and
+  ``known_hosts`` follows it, so OpenSSH connects; the relay's master and the direct style's are
+  refused before any hello until the owner agrees to the new key, and a direct master verified
+  for one consent is never ridden under another.
 
 Skipped where ``ssh``, ``sshd`` or ``ssh-keygen`` is missing or ``sshd`` cannot start here.
 """
@@ -81,6 +85,37 @@ class Sshd:
     port: int
     user: str
     ssh: str  # the wrapper: the real ssh with this test's config
+    # The sshd processes this fixture started, newest last; each is stopped by its own PID.
+    processes: list[subprocess.Popen[bytes]]
+
+    def rotate_host_key(self) -> None:
+        """The server's host key changes and this computer's ``known_hosts`` follows it.
+
+        The listening sshd (the one this fixture started) is stopped by its PID and started
+        again on the same port with a new host key; connections it accepted before keep their
+        own processes, as on a real server. Then ``known_hosts`` names the new key only.
+        """
+
+        current = self.processes[-1]
+        current.terminate()
+        current.wait(timeout=10)
+        for name in ("host_key", "host_key.pub"):
+            (self.directory / name).unlink()
+        subprocess.run(  # noqa: S603 - fixed test argv
+            (
+                _tool("ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(self.directory / "host_key"),
+            ),
+            check=True,
+        )
+        self.processes.append(_start_sshd(self.directory, self.port))
+        self.pin_host_key()
 
     def pin_host_key(self) -> None:
         key = (self.directory / "host_key.pub").read_text(encoding="utf-8").split()
@@ -165,34 +200,45 @@ def sshd() -> Iterator[Sshd]:
         f'#!/bin/sh\nexec {_tool("ssh")} -F {directory / "ssh_config"} "$@"\n', encoding="utf-8"
     )
     wrapper.chmod(0o700)
+    processes: list[subprocess.Popen[bytes]] = []
+    try:
+        processes.append(_start_sshd(directory, port))
+        yield Sshd(directory, port, user, str(wrapper), processes)
+    finally:
+        # Stopped by the PIDs this fixture started (never by a pattern).
+        for server in processes:
+            if server.poll() is None:
+                server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _start_sshd(directory: Path, port: int) -> subprocess.Popen[bytes]:
+    """Start the private sshd and wait, bounded, until it listens (skip where it cannot run)."""
+
     server = subprocess.Popen(  # noqa: S603 - fixed test argv
         (_tool("sshd"), "-D", "-e", "-f", str(directory / "sshd_config")),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    try:
-        deadline = time.monotonic() + 10
-        while True:
-            if server.poll() is not None:
-                pytest.skip("sshd cannot run in this environment")
-            try:
-                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-                break
-            except OSError:
-                if time.monotonic() > deadline:
-                    pytest.skip("sshd did not start listening")
-                time.sleep(0.05)
-        yield Sshd(directory, port, user, str(wrapper))
-    finally:
-        # Stopped by the one PID this fixture started (never by a pattern).
-        server.terminate()
+    deadline = time.monotonic() + 10
+    while True:
+        if server.poll() is not None:
+            pytest.skip("sshd cannot run in this environment")
         try:
-            server.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        shutil.rmtree(directory, ignore_errors=True)
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            return server
+        except OSError:
+            if time.monotonic() > deadline:
+                server.terminate()
+                server.wait()
+                pytest.skip("sshd did not start listening")
+            time.sleep(0.05)
 
 
 @pytest.fixture
@@ -247,6 +293,12 @@ def _ssh_record(sshd: Sshd, endpoint: Path) -> tuple[ServerTarget, Path]:
         )
     stored = targets.read_target(root)
     assert stored is not None
+    if stored.consent is not None:
+        # The owner agreed to the key this server really has (the default test consent names
+        # another), as 'server add' records the key OpenSSH verified.
+        from builders.server_profiles import consent_to
+
+        stored = consent_to(stored, identity=sshd.host_key_identity())
     return stored, root
 
 
@@ -324,10 +376,72 @@ def test_the_helper_relays_a_session_through_the_real_forward(
         assert not (root / "run" / "m").exists()
 
 
+def test_a_target_root_and_an_endpoint_with_spaces_work_as_on_macos(
+    sshd: Sshd, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: macOS keeps FinishUP under "Application Support"; both styles work through it."""
+
+    from finishup.client.helper import Helper, SshRelayUpstream
+    from finishup.client.ssh_transport import exit_master_now, open_direct_stream
+
+    sshd.pin_host_key()
+    expected = asyncio.run(_reference())
+    with ambient_home(monkeypatch) as home:
+        spaced = home / "A S"
+        spaced.mkdir(mode=0o700)
+        monkeypatch.setenv("XDG_STATE_HOME", str(spaced))
+        open_remote_kinds(monkeypatch, "ssh")
+        endpoint = sshd.directory / "srv d" / "c.sock"
+        endpoint.parent.mkdir(mode=0o700)
+        record, root = _ssh_record(sshd, endpoint)
+        assert " " in str(root) and " " in str(record.remote_endpoint)
+
+        async def no_refresh(_record: ServerTarget) -> None:
+            return None
+
+        async def exercise() -> tuple[list[bytes], list[bytes]]:
+            daemon = ScriptedDaemon()
+            accepting = await _serve_unix(endpoint, daemon)
+            upstream = SshRelayUpstream(root, record, ssh=sshd.ssh)
+            try:
+                helper = Helper(root, record, upstream=upstream, refresher=no_refresh)
+                left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+                client = AuthenticatedUnixStream(left, authenticate_peer(left))
+                local = AuthenticatedUnixStream(right, authenticate_peer(right))
+                relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+                try:
+                    async with asyncio.timeout(60):
+                        relayed = await run_scripted_session(client, server_profile=TEST_REVISION)
+                        await client.shutdown_write()
+                        await asyncio.wait((relay,), timeout=60)
+                finally:
+                    await client.aclose()
+                    await upstream.close()
+                stream = await open_direct_stream(
+                    sshd.ssh, root, record, expected=sshd.host_key_identity()
+                )
+                try:
+                    async with asyncio.timeout(60):
+                        direct = await run_scripted_session(stream, server_profile=TEST_REVISION)
+                finally:
+                    await stream.aclose()
+                return relayed, direct
+            finally:
+                accepting.cancel()
+                await asyncio.gather(accepting, return_exceptions=True)
+
+        try:
+            relayed, direct = asyncio.run(exercise())
+        finally:
+            exit_master_now(sshd.ssh, root, record)
+        assert relayed == expected and direct == expected
+        assert not (root / "run" / "m").exists()
+
+
 def test_the_direct_style_dials_ssh_w_through_one_control_master(
     sshd: Sshd, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from finishup.client.ssh_transport import SshControlStream, direct_argv, exit_master_now
+    from finishup.client.ssh_transport import exit_master_now, open_direct_stream
 
     sshd.pin_host_key()
     expected = asyncio.run(_reference())
@@ -340,7 +454,9 @@ def test_the_direct_style_dials_ssh_w_through_one_control_master(
             sessions: list[list[bytes]] = []
             try:
                 for _ in range(2):
-                    stream = await SshControlStream.open(direct_argv(sshd.ssh, root, record))
+                    stream = await open_direct_stream(
+                        sshd.ssh, root, record, expected=sshd.host_key_identity()
+                    )
                     try:
                         async with asyncio.timeout(60):
                             sessions.append(
@@ -360,6 +476,117 @@ def test_the_direct_style_dials_ssh_w_through_one_control_master(
         finally:
             exit_master_now(sshd.ssh, root, record)
         assert sessions == [expected, expected] and connections == 2
+        assert not (root / "run" / "m").exists()
+
+
+def test_a_rotated_host_key_is_refused_before_any_hello_until_the_owner_agrees_again(
+    sshd: Sshd, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: ``known_hosts`` follows a rotated server key, so OpenSSH connects; FinishUP does not.
+
+    The consent names the key the owner agreed to. After the rotation every new connection, the
+    relay's master and the direct style's alike, verifies another key and is refused before
+    any hello (the scripted service sees no new connection, the helper records
+    ``remote_identity_changed``). Once the owner agrees to the new key it works again, and a
+    direct master verified for that consent is never ridden under another.
+    """
+
+    from builders.server_profiles import consent_to
+    from finishup.client.helper import Helper, SshRelayUpstream
+    from finishup.client.helper_status import read_helper_status
+    from finishup.client.ssh_transport import (
+        UpstreamUnavailable,
+        exit_master,
+        exit_master_now,
+        open_direct_stream,
+    )
+
+    sshd.pin_host_key()
+    expected = asyncio.run(_reference())
+    with ambient_home(monkeypatch):
+        open_remote_kinds(monkeypatch, "ssh")
+        record, root = _ssh_record(sshd, sshd.directory / "d.sock")
+        before = sshd.host_key_identity()
+
+        async def no_refresh(_record: ServerTarget) -> None:
+            return None
+
+        async def relayed(stored: ServerTarget) -> tuple[list[bytes] | bytes, str | None]:
+            """One client session through a new helper's relay; its status reason after."""
+
+            upstream = SshRelayUpstream(root, stored, ssh=sshd.ssh)
+            helper = Helper(root, stored, upstream=upstream, refresher=no_refresh)
+            left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            client = AuthenticatedUnixStream(left, authenticate_peer(left))
+            local = AuthenticatedUnixStream(right, authenticate_peer(right))
+            relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+            try:
+                async with asyncio.timeout(60):
+                    try:
+                        received: list[bytes] | bytes = await run_scripted_session(
+                            client, server_profile=TEST_REVISION
+                        )
+                    except Exception:  # noqa: BLE001 - the relay closed the hello unanswered
+                        received = b""
+                    await client.shutdown_write()
+                    await asyncio.wait((relay,), timeout=60)
+            finally:
+                await client.aclose()
+                await upstream.close()
+            status = read_helper_status(root)
+            return received, None if status is None else status.reason
+
+        async def direct(expected_key: str) -> list[bytes] | str:
+            try:
+                stream = await open_direct_stream(sshd.ssh, root, record, expected=expected_key)
+            except UpstreamUnavailable as error:
+                return error.reason
+            try:
+                async with asyncio.timeout(60):
+                    return await run_scripted_session(stream, server_profile=TEST_REVISION)
+            finally:
+                await stream.aclose()
+
+        async def exercise() -> dict[str, object]:
+            daemon = ScriptedDaemon()
+            accepting = await _serve_unix(sshd.directory / "d.sock", daemon)
+            seen: dict[str, object] = {}
+            try:
+                seen["direct_before"] = await direct(before)
+                await exit_master(sshd.ssh, root, record)
+                sshd.rotate_host_key()
+                after = sshd.host_key_identity()
+                assert after != before
+                connections = daemon.connections
+                seen["relay_rotated"] = await relayed(record)
+                seen["direct_rotated"] = await direct(before)
+                seen["sent_while_rotated"] = daemon.connections - connections
+                # The owner agrees to the new key (as 'server use' records it after asking).
+                agreed = consent_to(record, identity=after)
+                seen["relay_agreed"] = await relayed(agreed)
+                seen["direct_agreed"] = await direct(after)
+                # A master verified for the new consent, under a consent naming the old key:
+                # replaced and checked again, never ridden.
+                connections = daemon.connections
+                seen["direct_master_of_another_consent"] = await direct(before)
+                seen["sent_under_another_consent"] = daemon.connections - connections
+            finally:
+                accepting.cancel()
+                await asyncio.gather(accepting, return_exceptions=True)
+            return seen
+
+        try:
+            seen = asyncio.run(exercise())
+        finally:
+            exit_master_now(sshd.ssh, root, record)
+        assert seen["direct_before"] == expected
+        assert seen["relay_rotated"] == (b"", "remote_identity_changed")
+        assert seen["direct_rotated"] == "remote_identity_changed"
+        assert seen["sent_while_rotated"] == 0
+        assert seen["relay_agreed"] == (expected, None)
+        assert seen["direct_agreed"] == expected
+        assert seen["direct_master_of_another_consent"] == "remote_identity_changed"
+        assert seen["sent_under_another_consent"] == 0
         assert not (root / "run" / "m").exists()
 
 

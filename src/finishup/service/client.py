@@ -2348,14 +2348,14 @@ async def _connect_service_attempt(
             error = ControlError("service_unavailable", retryable=True)
         raise error from exc
     except LocalControlTransportError as exc:
-        named = await _remote_end_phase(stream)
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
         if named is not None:
             raise ControlError("service_unavailable", retryable=True, phase=named) from exc
         raise _transport_error(exc) from exc
     except ControlProtocolError as exc:
-        named = await _remote_end_phase(stream)
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
         if guarded is not None and guarded.refused is not None:
@@ -2396,16 +2396,27 @@ async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlS
         ) from None
 
 
-async def _remote_end_phase(stream: ControlStream | None) -> str | None:
-    """The closed remote phase a direct stream names for its own end, if it can name one."""
+async def _remote_end_phase(stream: ControlStream | None, deadline: float) -> str | None:
+    """The closed remote phase a direct stream names for its own end, if it can name one.
+
+    Asked only within the connection's own ``deadline`` (a monotonic time): a transport that
+    takes longer to say why (``ssh`` still running, its diagnostics still open) names nothing,
+    and nothing is waited for once the deadline passed (a hook's budget is never overspent).
+    """
 
     failure_phase = cast(
         Callable[[], Awaitable[str | None]] | None, getattr(stream, "failure_phase", None)
     )
     if failure_phase is None:
         return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
     try:
-        phase = await failure_phase()
+        async with asyncio.timeout(remaining):
+            phase = await failure_phase()
+    except TimeoutError:
+        return None
     except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
         return None
     return phase if phase in REMOTE_CONNECTION_PHASES else None
@@ -2638,11 +2649,13 @@ async def _connect_direct(
     client's demand), then dialled again inside the same deadline.
     """
 
+    from finishup.client.server_profile import consented_host_key
     from finishup.client.ssh_transport import (
-        SshControlStream,
         UpstreamUnavailable,
-        direct_argv,
         direct_remote_argv,
+        ensure_direct_master,
+        open_direct_stream,
+        require_host_key,
         resolve_ssh,
         run_ssh,
     )
@@ -2662,7 +2675,11 @@ async def _connect_direct(
         raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
 
     async def dial() -> ControlStream:
-        return await SshControlStream.open(direct_argv(ssh, root, record))
+        # Verified before it is handed back: it rode the master that verified the consented
+        # host key, or verified that key over a connection of its own (ADR-052).
+        return await open_direct_stream(
+            ssh, root, record, expected=consented_host_key(root), deadline=deadline
+        )
 
     async def attempt() -> ServiceClient:
         return await _connect_service_attempt(
@@ -2685,10 +2702,16 @@ async def _connect_direct(
     phase = admission.authorization.refusal()
     if phase is not None:
         raise ControlError("service_unavailable", retryable=True, phase=phase)
-    code, _stdout, _stderr = await run_ssh(
-        direct_remote_argv(ssh, root, record, "service", "start", "--json"),
-        seconds=_remaining(deadline),
-    )
+    expected = consented_host_key(root)
+    try:
+        await ensure_direct_master(ssh, root, record, expected=expected, deadline=deadline)
+        code, _stdout, stderr = await run_ssh(
+            direct_remote_argv(ssh, root, record, "service", "start", "--json"),
+            seconds=_remaining(deadline),
+        )
+        require_host_key(stderr, expected)
+    except UpstreamUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
     if code != 0:
         raise ControlError(
             "service_unavailable", retryable=True, phase="remote_service_not_running"
@@ -2798,9 +2821,9 @@ async def _connect_through_helper(
 
     The helper is client-owned and vault-less, so starting one is always safe: when nothing
     answers, one is started (never a service), and a helper left by an older release of this
-    client is replaced by its stamped pid (never a newer one). A helper ending at its idle exit
-    is followed by a successor; any other stop (a ``server use``, ``disconnect``, ``remove``, a
-    zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
+    client is replaced through the target's stop epoch (never a newer one). A helper ending at its
+    idle exit is followed by a successor; any other stop (a ``server use``, ``disconnect``,
+    ``remove``, a zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
     ends the wait at once; every ``service_unavailable`` raised here names a remote phase.
     """
 
@@ -2865,7 +2888,8 @@ async def _connect_through_helper(
         and holder_version_order(holder.version) != "newer"
     ):
         # A helper left by an older release of this client (an in-place upgrade) is client-owned:
-        # replace it by its stamped pid. One a newer release started is never replaced from here.
+        # stop it (its stop epoch moves; no pid is signalled), then start this release's. One a
+        # newer release started is never replaced from here.
         if not await asyncio.to_thread(stop_helper, root, timeout_seconds=_remaining(deadline)):
             raise named(ControlError("service_unavailable", retryable=True))
         holder = None

@@ -207,6 +207,60 @@ def test_zero_network_refuses_before_anything_reaches_the_server(
     assert targets.list_targets() == ()
 
 
+def test_a_folder_openssh_cannot_use_as_written_refuses_before_the_server_is_asked(
+    server: FakeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B2: this computer's FinishUP folder holds '%' (OpenSSH would expand it): refused first."""
+
+    state = tmp_path / "st%h"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    console = _console(monkeypatch, b"listed", b"lab")
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code != 0
+    assert result.stderr.startswith("ssh_path_unusable:")
+    assert server.calls() == [] and console.opened == 0
+    assert targets.list_targets() == ()
+
+
+def test_an_endpoint_openssh_cannot_forward_is_refused_before_anything_is_recorded(
+    server: FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: the endpoint the server reports is checked before the consent and the record."""
+
+    script = server.directory / "ssh"
+    script.write_text(
+        script.read_text().replace('"/srv/fu/run/control.sock"', '"/srv/f:u/run/control.sock"')
+    )
+    console = _console(monkeypatch, b"listed", b"lab")
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code != 0
+    assert result.stderr.startswith("ssh_path_unusable:")
+    assert console.opened == 0 and targets.list_targets() == ()
+
+
+def test_an_endpoint_with_spaces_is_recorded_as_reported(
+    server: FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: a server whose FinishUP lives under "Application Support" (macOS) is added."""
+
+    # As under a macOS home's "Library/Application Support" (no account's path is named here).
+    endpoint = "/srv/Library/Application Support/finishup/run/control.sock"
+    script = server.directory / "ssh"
+    script.write_text(script.read_text().replace('"/srv/fu/run/control.sock"', f'"{endpoint}"'))
+    _console(monkeypatch, b"listed", b"lab")
+
+    result = _invoke("add", "lab", "ssh://owner@lab.example")
+
+    assert result.exit_code == 0, result.output
+    (record,) = targets.list_targets()
+    assert record.remote_endpoint == endpoint
+
+
 def test_a_server_whose_endpoint_is_session_bound_is_named(
     server: FakeServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

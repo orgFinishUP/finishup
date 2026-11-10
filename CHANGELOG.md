@@ -156,15 +156,17 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   listens and what it offers, then shows that and asks you to type the name, on your own terminal.
   If this computer does not know the server's SSH host key yet, FinishUP says so and OpenSSH asks
   you to confirm the fingerprint; a key that changed is refused and never asked about. Your
-  agreement is bound to the host key OpenSSH verified. `finishup server use NAME` asks again each
-  time. The server needs the same FinishUP release, SSH key login (FinishUP uses your own OpenSSH,
+  agreement is bound to the host key OpenSSH verified, and every connection checks it: a key that
+  changed is refused even after your known hosts accept it, until you agree again. `finishup
+  server use NAME` asks again each time. The server needs the same FinishUP release, SSH key login (FinishUP uses your own OpenSSH,
   keys and agent, and never reads or stores a key or password), and an endpoint that outlives your
   login there (`server add` warns when it does not; enable linger, or use `--remote-root`). See
   [FinishUP servers](docs/usage/servers.md) and
   [ADR-052](docs/adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md).
 - **One background helper per SSH server.** It starts when something first needs the server,
   stops 15 minutes after its last use, and is stopped by `server disconnect`, `server remove`,
-  `server use` of another server and `server set --style`. By default (relay) it keeps one SSH
+  `server use` of another server and `server set --style` (one that was still starting never
+  serves; FinishUP never signals a process to stop it). By default (relay) it keeps one SSH
   connection for every program here; `finishup server set NAME --style direct` (advanced) has each
   program open its own SSH channel through one shared OpenSSH connection, and `--style relay` goes
   back. The helper answers the server's background reads of your project, delivers captured

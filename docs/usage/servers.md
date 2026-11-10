@@ -75,8 +75,13 @@ What `server add` does, in order:
    `--outside-reads` answers it up front), and asks you to type the server's name.
 
 The server is then added but not in use; `finishup server use lab` chooses it. FinishUP binds your
-agreement to the host key OpenSSH verified: if the server's key changes, FinishUP does not connect
-until you have checked the new key and agreed again.
+agreement to the host key OpenSSH verified, and checks it on every connection: if the server's key
+changes, FinishUP does not connect, even after your known hosts accept the new key, until you have
+checked it and agreed again with `finishup server use lab`.
+
+`server add` refuses with `ssh_path_unusable` when a socket path OpenSSH would be given cannot be
+used as written: this computer's FinishUP folder, or the server's FinishUP endpoint, holds `:`,
+`%` or `$`. Spaces are fine.
 
 ## Add an HTTPS server
 

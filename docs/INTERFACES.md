@@ -4746,7 +4746,9 @@ never inside a repository, with exact field sets.
 | `yoetz.helper-registration/1` | `<target root>/state/registrations/<claim hex>-<worktree hex>-<registrant>.json` (layer 3) | `schema`, `target_id`, `registrant` (16 hex), `source` (`cli`, `hook`, `mcp_bridge`, `mcp_roots`, `registered_project`, `ui`), `claim` (`{identity_kind, digest, worktree}`), `worktree` (absolute, never sent), `repository_key`, `grant` (`{identity_digest, consent_digest, credential_generation}`), `server_profile` (the revision triple), `selection_bound` (the registering connection followed the selection file, rather than a root pinned on purpose), `registered_at`, `expires_at` (a 15-minute lease). At most 64 per target; written and pruned under the registry lock. See *Server profiles and consent*. |
 | `yoetz.helper-status/1` | `<target root>/state/helper-status.json` (SSH targets from layer 4, HTTPS and port targets from layer 5; ADR-052 decision 13) | `generation` (integer ≥ 1; moves on every change of phase or reason and with every new helper process), `phase` (`starting\|ready\|unavailable\|stopped`), `reason` (`null`; for `unavailable` a member of `REMOTE_CONNECTION_PHASES`; for `stopped` `idle_timeout`, `stop_requested`, `helper_failed`, `target_removed` or `zero_network_remote_selected`), `correlation_id`, `pid`, `started_at`, `style` (`relay\|direct`). Written by the helper only, atomically, never creating a removed target's folder; read by clients (the phase of a connection the helper closed, the bridge's availability latch) and `server status`. |
 | `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets from layer 4, HTTPS and port targets from layer 5) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper (and, for SSH, the master) stopped. |
-| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest; a client stops or replaces a helper only by that stamped pid. |
+| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest. The stamp is advisory (the release a client compares, the status latch); no process is signalled by it. |
+| `yoetz.helper-epoch/1` | `<target root>/state/helper-epoch` (SSH targets from the layer-4 review, HTTPS and port targets from layer 5) | `schema`, `epoch` (32 lowercase hex, random), canonical JSON and a newline; absent reads as `none`. Every stop (`server disconnect`, `remove`, `use <other>`, `set --style`, `login`, `logout`, a replacement) writes a new token; the helper stops on its next tick when it moves, and one spawned with an older token (`helper run --epoch`) exits without serving once it holds the lock. Never sent to a server. |
+| `yoetz.ssh-master/1` | `<target root>/state/ssh-master.json` and `state/ssh-master.lock` (SSH targets, direct style, layer 4 review) | `schema`, `host_key` (`sha256:<64 hex>`: the consented key the master verified) and `socket` (`[device, inode]` of `run/m` when it was verified); written under the flock `ssh-master.lock` by the process that started and verified the direct style's master, removed with every `-O exit`. A master is ridden only when this record names the current consent's key and its socket. Never sent to a server. |
 | `profile-refresh-requested` | `<target root>/state/profile-refresh-requested` (SSH targets from layer 4, HTTPS and port targets from layer 5) | An empty marker a client leaves when the server refused its hello or request with `server_profile_changed`; the helper takes it and fetches the profile (at most once per 30 seconds). |
 | `helper.stderr` | `<target root>/log/helper.stderr` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper process's standard error (owner-only, `0600`, appended), made only beneath an existing target folder: what the interpreter itself prints, such as an unexpected failure. OpenSSH's diagnostics go to the helper through a pipe and only choose a closed reason; they are not written there. |
 | `yoetz.server-profile-revision/1` | `<service state dir>/server-profile-revision.json` (server side, layer 3) | `schema`, `issuer` (32 hex, random), `revision` (integer ≥ 1), `profile_digest`; advanced at service start when the offer's digest changes; one that cannot be read is replaced under a new issuer. |
@@ -4897,12 +4899,12 @@ registers only `LocalTargetRuntime` for `local`, so `runtime_for` raises
 `TargetRuntimeError("remote_unreachable", phase="runtime_unavailable")` for a remote kind; the
 remote runtimes arrive with the background helper (layer 4) and REST (layer 5). Layer 4 registers
 `SshTargetRuntime` for `ssh` (`ensure_ready`: the shared gate, then a connection as any client
-makes one; `stop`: the helper by its stamped pid and `ssh -O exit` for the master,
-`target_still_connected` when the helper does not stop; `probe`: status round trips over the real
-transport); `https` and `local_port` keep the layer-1 answer until layer 5 registers the same
-runtime for both (`ensure_ready` through the helper or the direct REST dial; `stop` the helper,
-with no master to end). The server-host commands `finishup service start` and `finishup service
-endpoint --json` are added.
+makes one; `stop`: the helper through its stop epoch (no pid is signalled; it succeeds once the
+lock is seen free) and `ssh -O exit` for the master, `target_still_connected` when the helper
+does not stop; `probe`: status round trips over the real transport); `https` and `local_port` keep
+the layer-1 answer until layer 5 registers the same runtime for both (`ensure_ready` through the
+helper or the direct REST dial; `stop` the helper through its stop epoch, with no master to end).
+The server-host commands `finishup service start` and `finishup service endpoint --json` are added.
 
 **Command scope.** `cli/command_scope.py` labels every Typer and terminal-interface command `any`,
 `server_host` or `client_only`. `require_server_host()` refuses a `server_host` command while the
@@ -14723,32 +14725,49 @@ probes, is `remote_identity_changed`.
 FinishUP's own variables, `ssh_environment()`; `ssh` is `shutil.which("ssh")`, none is
 `remote_unreachable`). Relay master: `ssh -M -S <troot>/run/m -N -T -o BatchMode=yes -o
 StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o StreamLocalBindMask=0177 -o
-StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p PORT -L
-<troot>/run/upstream.sock:<remote endpoint> [user@]host`. Direct stream: `ssh -S <troot>/run/m -o
-ControlMaster=auto -o ControlPersist=15m -o BatchMode=yes -o StrictHostKeyChecking=yes -o
-ServerAliveInterval=15 -o ServerAliveCountMax=3 -p PORT -W <remote endpoint> [user@]host`. Remote
-commands (`service start`) run the recorded absolute launcher, shell-quoted and pinned to the
-recorded remote root, over the master. Master control: `ssh -S <troot>/run/m -O check|exit -p PORT
-[user@]host`. Failures are closed phases chosen by fixed OpenSSH phrases (`classify_ssh_failure`):
-a host-key failure is `remote_identity_changed`, a refused key `remote_auth_failed`, a refused
-channel `remote_service_not_running`, anything else `remote_unreachable`.
+StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1
+-p PORT -L <troot>/run/upstream.sock:<remote endpoint> [user@]host`. Direct master
+(`ensure_direct_master(ssh, root, record, *, expected, deadline=None)`): `ssh -M -S <troot>/run/m
+-o ControlPersist=15m -N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o
+ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1 -p PORT [user@]host`. Direct
+stream (`open_direct_stream(ssh, root, record, *, expected, deadline=None)`): `ssh -S
+<troot>/run/m -o ControlMaster=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o
+ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1 -p PORT -W <remote endpoint>
+[user@]host`, handed back after `SshControlStream.verify(expected)`. Remote commands (`service
+start`) run the recorded absolute launcher, shell-quoted and pinned to the recorded remote root,
+over the master (`-o ControlMaster=no -o LogLevel=DEBUG1`). Master control: `ssh -S <troot>/run/m
+-O check|exit -p PORT [user@]host`. `expected` is `server_profile.consented_host_key(root)`: every
+connection is used only once its own `Server host key` line named it (`host_keys`,
+`require_host_key`; ADR-052 decision 20), else `remote_identity_changed`. Socket paths are handed
+over as written (spaces included); one holding `:`, `%`, `$` or a control character is refused
+(`forwardable_path`, `ssh_paths_usable`; `server add` refuses `ssh_path_unusable`). `run_ssh(argv,
+*, seconds, stdout_limit=65536, stderr_limit=65536)` reads both streams bounded and kills and reaps
+a command past either (`remote_incompatible`). Failures are closed phases chosen by fixed OpenSSH
+phrases (`classify_ssh_failure`): a host-key failure is `remote_identity_changed`, a refused key
+`remote_auth_failed`, a refused channel `remote_service_not_running`, anything else
+`remote_unreachable`.
 
 **Helper** (`client.helper_status`, hook-safe; `client.helper`; ADR-052 decisions 13 to 16).
 `HELPER_STATUS_SCHEMA` `yoetz.helper-status/1`, `CONNECTION_STYLE_SCHEMA`
 `yoetz.connection-style/1`, `HELPER_IDLE_SECONDS` 900, `HELPER_PHASES`, `HELPER_REASONS`,
 `PROFILE_REFRESH_MARKER`; `read_helper_status`, `write_helper_status`, `read_connection_style`,
 `write_connection_style`, `request_profile_refresh`, `take_profile_refresh_request`,
-`HelperLock`, `helper_holder(root) -> HelperStamp | None`, `spawn_helper(root, target_id)` (a
-detached `python -m finishup helper run --target ID` with the scrubbed `helper_environment()`,
-stderr to `log/helper.stderr`, reaped by a daemon thread), `stop_helper(root, *, timeout_seconds)`
-(SIGTERM to the stamped pid, wait for the lock). Records and sockets beneath an SSH target root:
-`state/helper.lock`, `state/helper-status.json`, `config/connection-style.json`,
+`HelperLock`, `helper_holder(root) -> HelperStamp | None`, `read_helper_epoch(root)`,
+`start_fenced(root, epoch)`, `spawn_helper(root, target_id)` (a detached `python -m finishup helper
+run --target ID --epoch <epoch read now>` with the scrubbed `helper_environment()`, stderr to
+`log/helper.stderr`, reaped by a daemon thread), `stop_helper(root, *, timeout_seconds)` (moves the
+stop epoch; `True` only once the lock is seen free; never signals). Records and sockets beneath an
+SSH target root: `state/helper.lock`, `state/helper-status.json`, `state/helper-epoch`,
+`config/connection-style.json`, `state/ssh-master.json` and `state/ssh-master.lock`,
 `state/profile-refresh-requested`, `log/helper.stderr`, and in `run/` `control.sock` (the relay's
 endpoint), `upstream.sock` (the master's forward) and `m` (the OpenSSH master, either style); see
 *Target records*. Timings: drain every 30 s per agent; registrations re-read on a folder change
 (1-second tick) and every 30 s; profile refresh at start, every 10 min while an upstream was used
-in the last 10 min, on demand, at most every 30 s; hello read within 10 s; the server's `service
-start` at most once per 30 s, for a client's connection only; a last drain bounded to 2 s.
+in the last 10 min (a live agent connection counts as use), on demand, at most every 30 s, and
+scheduled under gate steps 2 to 4 only (not under the admission); hello read within 10 s; each
+upstream attempt (master, channel, hello, first answer) within 30 s; the captured admission asked
+again before every forwarded hello and every remote `service start`; the server's `service start`
+at most once per 30 s, for a client's connection only; a last drain bounded to 2 s.
 
 **Service client.** `connect_service` and `connect_service_on_demand` reach an admitted SSH root
 through its transport: the relay style dials `<troot>/run/control.sock` (transport `connector`),

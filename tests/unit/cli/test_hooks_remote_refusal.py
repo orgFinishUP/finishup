@@ -281,11 +281,12 @@ def test_the_menu_names_the_refusal_and_never_a_service_to_start(
     assert directive is not None
     service = [line for line in captured.out.splitlines() if line.startswith("  Service ")]
     assert service == [
-        f"  Service    refused before anything was sent ({refused.phase}) — {directive.directive}"
+        f"  Service    FinishUP refused the selected server's connection before anything was "
+        f"sent ({refused.phase}) — {directive.directive}"
     ]
     assert captured.err.startswith(
-        f"service_unavailable: {refused.phase}: this computer refused the selected FinishUP "
-        "server before anything was sent\n"
+        f"service_unavailable: {refused.phase}: FinishUP refused the selected server's "
+        "connection before anything was sent\n"
         f"Continuation: {refused.continuation}\n"
         f"Next: {directive.directive}\n"
     )
@@ -308,3 +309,33 @@ def test_the_menu_keeps_its_service_hint_without_a_remote_root() -> None:
     assert guidance == (
         "service_unavailable: run 'finishup service run' under your selected user supervisor"
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "said"),
+    [
+        ("server_authorization_changed", "stopped sending over it"),
+        ("server_profile_changed", "refused before that server did any work for it"),
+    ],
+)
+def test_a_refusal_after_sending_never_says_nothing_was_sent(phase: str, said: str) -> None:
+    """C2: a connection whose selection changed may already have sent a request (its outcome is
+    unknown); a profile change may be the server's own answer to one. The menu and the hooks say
+    what the shared summary says, never 'before anything was sent'."""
+
+    from finishup.cli import menu
+    from finishup.cli.hooks import remote_refusal_context
+    from finishup.ports.control import ControlError
+
+    guidance = menu._control_guidance(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase)
+    )
+    assert guidance.startswith(f"service_unavailable: {phase}: ")
+    assert said in guidance and "before anything was sent" not in guidance
+    context = remote_refusal_context(phase)
+    assert "before anything was sent" not in context
+    if phase == "server_profile_changed":
+        assert context.startswith("What the selected FinishUP server offers or needs changed")
+        assert said in context
+    else:
+        assert context.startswith("FinishUP ended the selected server's connection")

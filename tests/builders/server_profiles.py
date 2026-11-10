@@ -101,14 +101,20 @@ def fetched(
 
 
 def consent_to(
-    record: ServerTarget, document: dict[str, Any] | None = None, *, lock: bool = True
+    record: ServerTarget,
+    document: dict[str, Any] | None = None,
+    *,
+    lock: bool = True,
+    identity: str | None = None,
 ) -> ServerTarget:
     """Record the owner's consent to ``document`` at level L1 for ``record``; the new record.
 
     ``lock`` takes the registry lock; pass False where the caller already holds it.
+    ``identity`` is the endpoint identity the transport observed (an SSH target's default is
+    ``HOST_KEY``).
     """
 
-    profile = fetched(record, document)
+    profile = fetched(record, document, identity=identity)
 
     def write() -> ServerTarget:
         stored = targets.read_target(targets.target_root(record.target_id))

@@ -9,8 +9,9 @@ Records beneath ``<target root>``, every one owner-only and holding closed token
 integers and timestamps only (no host, name, path or remote text):
 
 * ``state/helper.lock``: the singleton flock, stamped with the holder's pid, package version and
-  schema-manifest digest. A client stops or supersedes a helper only by this stamped pid, never by
-  matching a process name or path.
+  schema-manifest digest. The stamp is advisory (a status record, the release a client compares);
+  a client stops or supersedes a helper through the stop epoch below, never by signalling a pid
+  and never by matching a process name or path.
 * ``state/helper-status.json`` (``yoetz.helper-status/1``): ``generation``, ``phase``, ``reason``,
   ``correlation_id``, ``pid``, ``started_at`` and the connection ``style``. The generation moves on
   every change of phase or reason and with every new helper process, so a client that latched an
@@ -20,11 +21,17 @@ integers and timestamps only (no host, name, path or remote text):
   --style``).
 * ``state/profile-refresh-requested``: an empty marker a client leaves when the server refused it
   with ``server_profile_changed``; the helper refreshes the profile and removes it.
+* ``state/helper-epoch`` (``yoetz.helper-epoch/1``): a random token every stop replaces. A helper
+  is spawned with the token its spawner read (``--epoch``); one that finds another token once it
+  holds the lock (a stop came while it was starting) exits without serving anything, and a
+  running helper stops on its next tick when the token moves.
 
 Ownership and reaping never depend on the process that started a helper: the lock and its stamp
-in the target root are the ownership, a stop signals only the stamped pid, and the spawner reaps
-its own child (exactly that pid) on a daemon thread while it lives; a spawner that exits first
-leaves the helper to the system, which reaps it.
+in the target root are the ownership, and the spawner reaps its own child (exactly that pid) on a
+daemon thread while it lives; a spawner that exits first leaves the helper to the system, which
+reaps it. A stop never signals a process: the stamp's pid is advisory (it may be reused once the
+helper exits), so a stop moves the owner-only epoch, which only that target's helper reads, and
+succeeds only once the lock is proven free.
 """
 
 from __future__ import annotations
@@ -33,8 +40,8 @@ import contextlib
 import errno
 import fcntl
 import os
+import re
 import secrets
-import signal
 import stat
 import subprocess
 import sys
@@ -54,6 +61,8 @@ __all__ = [
     "CONNECTION_STYLES",
     "CONNECTION_STYLE_NAME",
     "CONNECTION_STYLE_SCHEMA",
+    "HELPER_EPOCH_NAME",
+    "HELPER_EPOCH_SCHEMA",
     "HELPER_IDLE_SECONDS",
     "HELPER_LOCK_NAME",
     "HELPER_PHASES",
@@ -72,9 +81,11 @@ __all__ = [
     "new_status",
     "now_stamp",
     "read_connection_style",
+    "read_helper_epoch",
     "read_helper_status",
     "request_profile_refresh",
     "spawn_helper",
+    "start_fenced",
     "stop_helper",
     "take_profile_refresh_request",
     "write_connection_style",
@@ -87,6 +98,10 @@ HELPER_LOCK_NAME: Final = "helper.lock"
 CONNECTION_STYLE_SCHEMA: Final = "yoetz.connection-style/1"
 CONNECTION_STYLE_NAME: Final = "connection-style.json"
 PROFILE_REFRESH_MARKER: Final = "profile-refresh-requested"
+HELPER_EPOCH_SCHEMA: Final = "yoetz.helper-epoch/1"
+HELPER_EPOCH_NAME: Final = "helper-epoch"
+# The epoch of a target root no stop has moved yet (no file).
+_NO_EPOCH: Final = "none"
 # A helper with no client for this long exits; the next client starts a new one (design v2 §3).
 HELPER_IDLE_SECONDS: Final = 900.0
 HELPER_PHASES: Final = frozenset({"starting", "ready", "unavailable", "stopped"})
@@ -353,6 +368,64 @@ def request_profile_refresh(root: Path) -> None:
         return
 
 
+_EPOCH_TOKEN: Final = re.compile(r"^[0-9a-f]{32}$")
+
+
+def read_helper_epoch(root: Path) -> str:
+    """The target's stop epoch: a token every stop replaces, ``none`` before the first.
+
+    A record that cannot be read safely reads as ``unreadable``: never the epoch a spawner saw,
+    so a helper that cannot tell whether a stop came does not serve. Never raises.
+    """
+
+    path = root / "state" / HELPER_EPOCH_NAME
+    if not os.path.lexists(path):
+        return _NO_EPOCH
+    data = _read_owner_only(path)
+    if data is None or not data.endswith(b"\n"):
+        return "unreadable"
+    try:
+        parsed = strict_json_parse(data[:-1])
+    except ValueError:
+        return "unreadable"
+    if type(parsed) is not dict:
+        return "unreadable"
+    body = cast(dict[str, JsonValue], parsed)
+    token = body.get("epoch")
+    if (
+        set(body) != {"schema", "epoch"}
+        or body["schema"] != HELPER_EPOCH_SCHEMA
+        or type(token) is not str
+        or not _EPOCH_TOKEN.match(token)
+    ):
+        return "unreadable"
+    return token
+
+
+def _move_helper_epoch(root: Path) -> bool:
+    """Replace the target's stop epoch with a fresh token; whether it was written. Never raises.
+
+    The folder is never made here (a removed target stays removed).
+    """
+
+    body: dict[str, JsonValue] = {"schema": HELPER_EPOCH_SCHEMA, "epoch": secrets.token_hex(16)}
+    try:
+        _write_owner_only(root / "state" / HELPER_EPOCH_NAME, canonical_encode(body) + b"\n")
+    except OSError:
+        return False
+    return True
+
+
+def start_fenced(root: Path, epoch: str | None) -> bool:
+    """Whether a helper spawned with ``epoch`` must not serve: a stop moved it since.
+
+    Asked by the helper right after it took the lock, before anything else; ``None`` (a helper
+    the owner started by hand) is never fenced.
+    """
+
+    return epoch is not None and read_helper_epoch(root) != epoch
+
+
 def take_profile_refresh_request(root: Path) -> bool:
     """Remove the refresh marker; whether one was there. Never raises."""
 
@@ -502,8 +575,18 @@ def helper_environment() -> dict[str, str]:
     return {name: os.environ[name] for name in _ENVIRONMENT_NAMES if name in os.environ}
 
 
-def _helper_command(target_id: str) -> tuple[str, ...]:
-    return (sys.executable, "-m", "finishup", "helper", "run", "--target", target_id)
+def _helper_command(target_id: str, epoch: str) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        "-m",
+        "finishup",
+        "helper",
+        "run",
+        "--target",
+        target_id,
+        "--epoch",
+        epoch,
+    )
 
 
 def _reap(process: subprocess.Popen[bytes]) -> None:
@@ -534,6 +617,9 @@ def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
             raise FileNotFoundError(errno.ENOENT, "target_missing")
     except PathSafetyError:
         raise PermissionError(errno.EPERM, "target_unsafe") from None
+    # The epoch read now travels with the helper: a stop between this spawn and its lock fences
+    # it (``start_fenced``).
+    epoch = read_helper_epoch(root)
     with contextlib.suppress(FileExistsError):
         log.mkdir(mode=0o700)
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -541,7 +627,7 @@ def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
     try:
         os.fchmod(descriptor, 0o600)
         process = subprocess.Popen(  # noqa: S603 - fixed interpreter, module and arguments
-            _helper_command(target_id),
+            _helper_command(target_id, epoch),
             close_fds=True,
             env=helper_environment(),
             stdin=subprocess.DEVNULL,
@@ -558,27 +644,29 @@ def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
 
 
 def stop_helper(root: Path, *, timeout_seconds: float = 5.0) -> bool:
-    """Ask ``root``'s stamped helper to stop and wait for its lock; ``True`` once free.
+    """Stop ``root``'s helper and wait until its lock is free; ``True`` once proven free.
 
-    Only the pid stamped in the held lock is signalled (AGENTS.md: never by pattern). Returns
-    ``True`` when no helper runs or it released the lock in time, ``False`` otherwise.
+    No process is signalled (AGENTS.md: never by pattern, and a stamped pid may belong to another
+    process once the helper exited): the stop moves the target's owner-only epoch, which its
+    helper reads on its next tick, and which also fences a helper spawned before the stop that
+    has not taken the lock yet (it exits without serving). ``True`` only when the lock is seen
+    free; ``False`` when it is still held at the bound, cannot be inspected, or the epoch could
+    not be moved while a holder runs.
     """
 
-    holder = helper_holder(root)
-    if holder is None:
-        return True
-    try:
-        os.kill(holder.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
+    moved = _move_helper_epoch(root)
+    path = _lock_path(root)
     deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if _lock_held(_lock_path(root)) is False:
+    while True:
+        held = _lock_held(path)
+        if held is False:
             return True
+        if held is True and not moved:
+            # A holder that was never told to stop: it is not reported stopped.
+            return False
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(_STOP_POLL_SECONDS)
-    return _lock_held(_lock_path(root)) is False
 
 
 def new_status(

@@ -251,7 +251,7 @@ discovery).
 - Two connection styles: **relay** (the default; the helper serves `<target root>/run/control.sock`
   and carries each local connection over one channel of its OpenSSH master's stream-local
   forward) and **direct** (an advanced option; each process opens its own `ssh -W` stream through
-  a shared `ControlMaster=auto` master), chosen with `finishup server set NAME --style
+  one shared master that verified the consented host key), chosen with `finishup server set NAME --style
   relay|direct` among the styles the server's last profile offers (ADR-052 decision 15).
 - The background workspace agent per served registration, the observation drain and the profile
   re-check, all inside the helper and all under its own admission through the shared gate
@@ -514,8 +514,9 @@ of an SSH target fetches the profile again and asks for the consent on the trust
 --style relay|direct` and the SSH runtime (`client.helper_runtime.SshTargetRuntime`, registered
 for `ssh`) arrive with it: `connect` admits the target through the shared gate and connects as any
 client would (the relay starts the helper; the direct style dials and starts the helper for its
-background agents), `disconnect` stops the helper by its stamped pid and asks the OpenSSH master to
-exit (`ssh -O exit`), and `test` probes over the real transport.
+background agents), `disconnect` stops the helper through its stop epoch (no pid is signalled; a
+pending start is fenced; it succeeds once the helper's lock is seen free) and asks the OpenSSH
+master to exit (`ssh -O exit`), and `test` probes over the real transport.
 
 **Layer 5 opens `https` and `local_port`** (`OPEN_REMOTE_KINDS == {"ssh", "https",
 "local_port"}`; ADR-053 decision 12). The kind is still told by the argument's prefix alone, and
@@ -1761,11 +1762,13 @@ that finds nothing answering on `<troot>/run/control.sock` (a hook within its ow
 the direct style by the MCP bridge and CLI commands after they register a workspace, and by
 `server connect`. It exits 15 minutes after its last relayed client connection when it serves no
 registration, and is stopped by `server disconnect`, `remove`, a `server use` that leaves the
-target and `server set --style` (SIGTERM to the stamped pid, then a wait for the lock; never by
-pattern; one that does not stop is `target_still_connected`). `server logout` does not apply to
-SSH. The spawner reaps its own child on a daemon thread; a spawner that exits first leaves it to
-the system, so reaping never depends on the short-lived starter. A helper stamped by an older
-release of this client is replaced by its stamped pid, a newer one never. A client dialling while
+target and `server set --style` (the target's owner-only stop epoch moves and the helper stops on
+its next tick, then a wait until its lock is seen free; no process is ever signalled, never by
+pattern; a helper spawned before the stop exits without serving; one that does not stop is
+`target_still_connected`). `server logout` does not apply to SSH. The spawner reaps its own child
+on a daemon thread; a spawner that exits first leaves it to the system, so reaping never depends
+on the short-lived starter. A helper stamped by an older release of this client is replaced
+through the stop epoch, a newer one never. A client dialling while
 the helper ends its idle exit starts its successor; any other stop has no successor in that
 client's wait.
 
@@ -1773,16 +1776,19 @@ client's wait.
   fences and peer-UID check and keeps one OpenSSH master: `ssh -M -S <troot>/run/m -N -T -o
   BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o
   StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o
-  ServerAliveCountMax=3 -p PORT -L <troot>/run/upstream.sock:<remote control.sock>
-  [user@]host`. Each local connection is one channel of that forward. A hello naming a
+  ServerAliveCountMax=3 -o LogLevel=DEBUG1 -p PORT -L <troot>/run/upstream.sock:<remote
+  control.sock> [user@]host`, used only once it verified the host key the owner's consent names
+  (ADR-052 decision 20). Each local connection is one channel of that forward. A hello naming a
   `workspace_locator` or no `server_profile` revision is never forwarded; every later client frame
   is checked against the helper's admission before it is forwarded; frames from the server pass
   unparsed. When the server's service is not running, the helper runs the server's own
   `<launcher> service start` over the master, at most once per 30 seconds and only for a client's
   connection, never for a background agent.
-- **Direct** (advanced). Each dialing process opens `ssh -S <troot>/run/m -o ControlMaster=auto -o
-  ControlPersist=15m -o BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o
-  ServerAliveCountMax=3 -p PORT -W <remote control.sock> [user@]host` and is an ordinary
+- **Direct** (advanced). Each dialing process opens `ssh -S <troot>/run/m -o ControlMaster=no -o
+  BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+  -o LogLevel=DEBUG1 -p PORT -W <remote control.sock> [user@]host` through the target's master
+  (`ssh -M -S <troot>/run/m -o ControlPersist=15m -N …`, started, verified and recorded under a
+  lock by whichever process needs it first; ADR-052 decision 20) and is an ordinary
   `ServiceClient` (gate before the dial, the authorization before every frame and on its watch).
   A stopped server service is started once through the launcher, on that client's demand. The
   helper still runs, for the background agents, the drain and the refresh. `server disconnect`
@@ -1790,9 +1796,10 @@ client's wait.
 - **Both.** FinishUP's own environment variables are removed from every `ssh` child; the helper
   runs with a fixed, scrubbed environment (`SSH_AUTH_SOCK` kept for the owner's agent). Its
   records are owner-only and hold closed tokens, generated ids, integers and times only:
-  `state/helper-status.json`, `config/connection-style.json`,
-  `state/profile-refresh-requested` and `log/helper.stderr` (INTERFACES, *SSH servers and the
-  helper*). There is no code sync in the helper yet (layer 6).
+  `state/helper-status.json`, `config/connection-style.json`, `state/helper-epoch`,
+  `state/ssh-master.json` and its lock, `state/profile-refresh-requested` and `log/helper.stderr`
+  (INTERFACES, *SSH servers and the helper*). Socket paths may hold spaces (the default root on
+  macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. There is no code sync in the helper yet (layer 6).
 - **SSH edge.** `sshd` on the server must allow stream-local forwarding; it connects to the
   server's owner-only control socket as the login user, so the service's peer-UID check passes
   unchanged and the SSH login is the service owner (ADR-008 amendment, layer 4).
@@ -1842,7 +1849,7 @@ stays HTTPS-only (an SSH target holds no key, and `server logout` refuses it as
 | This computer's everyday service reports its machine-scope policy (the zero-network check, `privacy show`, a privacy change here): the owner-only marker of what it last reported (decision 8) | the next report replaces it; deleting FinishUP's folders removes it; the zero-network check removes it once the everyday installation no longer exists | `server status [--json]` (`policy_read`, `last_reported_at`), `server list`, `setup status --next`, the menu home, `/server` and the header |
 | Layer 2, once a server elsewhere is recorded: this computer's FinishUP reports a repository's policy (a session start, a privacy ceremony or change here, `provider status`): the owner-only repository report (decision 8) | the next report replaces it; a report whose folders are all gone is forgotten by `server repositories list`; removing the last server elsewhere deletes the record; deleting FinishUP's folders removes it | `server repositories list`, `server status [NAME] [--json]` (`target.repositories`) |
 | Layer 2: `server repositories add` (trusted console; acts for an SSH target from layer 4, refused `remote_kind_unavailable` for a kind still closed) or `keep` | `server repositories remove [NAME] [--repository FOLDER]` or `--all` (also repairs a damaged record) | `server repositories list`, `server status [NAME] [--json]`, `/server` and the header |
-| Layer 4: a client starts an SSH target's helper on demand (relay: any connecting client; direct: a registrant, `server connect`) | `server disconnect`, `server remove`, a `server use` that leaves the target, `server set --style` (stamped pid, never by pattern); its idle exit 15 minutes after its last client | `server status [--json]` (`target.connection.helper`: running, last phase and reason) |
+| Layer 4: a client starts an SSH target's helper on demand (relay: any connecting client; direct: a registrant, `server connect`) | `server disconnect`, `server remove`, a `server use` that leaves the target, `server set --style` (the stop epoch; no signal, never by pattern); its idle exit 15 minutes after its last client | `server status [--json]` (`target.connection.helper`: running, last phase and reason) |
 | Layer 4: `server set NAME --style direct` (a style the server's last profile offers) | `server set NAME --style relay` (both stop the helper and the master first) | `server status [--json]` (`target.connection.style`, `styles_offered`) |
 | Layer 4: the owner confirms an unknown SSH host key when OpenSSH asks at `server add` or `server use` (OpenSSH writes the owner's `known_hosts`; FinishUP never does) | OpenSSH's own tools remove the pin (for example `ssh-keygen -R`); `server remove` removes FinishUP's record of the identity with the root | `server status` (consent), and `remote_identity_changed` on a key that no longer matches |
 

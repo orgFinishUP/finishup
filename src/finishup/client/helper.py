@@ -3,7 +3,8 @@
 One process per remote target (SSH, HTTPS or a port on this computer; ``state/helper.lock``), started on demand by a client that needs it,
 never by ``service run``; it exits 15 minutes after its last client (a relayed connection or a
 served registration) and is stopped by ``server disconnect``, ``remove``, ``use <other>`` and
-``set --style`` through its stamped pid. Its roles:
+``set --style`` through its target's stop epoch (``helper_status``: never a signal to a pid);
+one spawned before such a stop never serves. Its roles:
 
 1. **Relay** (the default style, U21): it serves ``<target root>/run/control.sock`` with the
    service's owner-only fences and peer-UID check, and carries each local connection over one
@@ -72,17 +73,19 @@ from finishup.client.helper_status import (
     new_status,
     now_stamp,
     read_connection_style,
+    read_helper_epoch,
     read_helper_status,
     take_profile_refresh_request,
     write_helper_status,
 )
 from finishup.client.ssh_transport import (
-    SshControlStream,
     SshMaster,
     UpstreamUnavailable,
-    direct_argv,
     direct_remote_argv,
+    ensure_direct_master,
     exit_master,
+    open_direct_stream,
+    require_host_key,
     run_ssh,
 )
 from finishup.client.targets import ServerTarget, TargetError
@@ -120,6 +123,9 @@ _REFRESH_MIN_SECONDS: Final = 30.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
 _HELLO_SECONDS: Final = 10.0
+# One upstream attempt, from the master's start to the server's first answer to the hello: a
+# server that accepts the channel and never answers ends the relay here, its stream closed.
+_UPSTREAM_SETUP_SECONDS: Final = 30.0
 _TICK_SECONDS: Final = 1.0
 _PUMP_CHUNK: Final = 65_536
 _FRAME_PREFIX: Final = 4
@@ -150,8 +156,18 @@ class Upstream(Protocol):
     async def zero_network(self) -> None: ...
 
 
+def _consented_host_key(root: Path) -> str | None:
+    from finishup.client.server_profile import consented_host_key
+
+    return consented_host_key(root)
+
+
 class SshRelayUpstream:
-    """The relay style: one warm master; each stream is one channel of its ``-L`` forward."""
+    """The relay style: one warm master; each stream is one channel of its ``-L`` forward.
+
+    The master is used only while it verified the host key the owner's consent names now
+    (``SshMaster.ensure``), read again for every stream.
+    """
 
     def __init__(self, root: Path, record: ServerTarget, *, ssh: str | None = None) -> None:
         self._master = SshMaster(root, record, ssh=ssh)
@@ -159,11 +175,11 @@ class SshRelayUpstream:
         self._record = record
 
     async def ensure(self) -> None:
-        await self._master.ensure()
+        await self._master.ensure(expected=_consented_host_key(self._root))
 
     async def open_stream(self) -> ControlStream:
         for attempt in range(2):
-            await self._master.ensure()
+            await self._master.ensure(expected=_consented_host_key(self._root))
             try:
                 return await connect_owner_only_endpoint(self._master.upstream_path)
             except LocalControlTransportError:
@@ -174,7 +190,10 @@ class SshRelayUpstream:
         raise UpstreamUnavailable("remote_unreachable")
 
     async def start_remote_service(self) -> bool:
-        return await self._master.run_remote("service", "start") == 0
+        code = await self._master.run_remote(
+            "service", "start", expected=_consented_host_key(self._root)
+        )
+        return code == 0
 
     async def close(self) -> None:
         await self._master.close()
@@ -206,17 +225,23 @@ class SshDirectUpstream:
         return None
 
     async def open_stream(self) -> ControlStream:
-        return await SshControlStream.open(
-            direct_argv(self._executable(), self._root, self._record)
+        return await open_direct_stream(
+            self._executable(),
+            self._root,
+            self._record,
+            expected=_consented_host_key(self._root),
         )
 
     async def start_remote_service(self) -> bool:
-        code, _stdout, _stderr = await run_ssh(
+        expected = _consented_host_key(self._root)
+        await ensure_direct_master(self._executable(), self._root, self._record, expected=expected)
+        code, _stdout, stderr = await run_ssh(
             direct_remote_argv(
                 self._executable(), self._root, self._record, "service", "start", "--json"
             ),
             seconds=30.0,
         )
+        require_host_key(stderr, expected)
         return code == 0
 
     async def close(self) -> None:
@@ -321,6 +346,13 @@ class _RelayEnded(Exception):
 
 async def _wait(seconds: float) -> None:
     await asyncio.sleep(seconds)
+
+
+async def _discard(stream: ControlStream) -> None:
+    """Close ``stream``, whatever it raises; a cancellation still closes it first."""
+
+    with contextlib.suppress(Exception):
+        await asyncio.shield(stream.aclose())
 
 
 class HelperAgent:
@@ -596,9 +628,14 @@ class Helper:
         tick: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         ssh: str | None = None,
+        setup_seconds: float = _UPSTREAM_SETUP_SECONDS,
+        epoch: str | None = None,
     ) -> None:
         if record.kind != "ssh" and record.kind not in _REST_KINDS:
             raise ValueError("target_not_remote")
+        self._setup_seconds = setup_seconds
+        # The stop epoch this helper serves under (``helper_status``); a stop moves it.
+        self._epoch = read_helper_epoch(root) if epoch is None else epoch
         self._root = root
         self._record = record
         self._style: ConnectionStyle = style
@@ -691,8 +728,7 @@ class Helper:
             return admission
         if admission is not None:
             # Lapsed: every connection made under it ends (O8: the relay too).
-            self._admission = None
-            self._end_relays()
+            self._lapse(admission)
         try:
             from finishup.client.targets import read_target
 
@@ -745,8 +781,25 @@ class Helper:
     # -- the relay -------------------------------------------------------------------------------
 
     def _end_relays(self) -> None:
+        # The relay asking (an admission refused while it opens) ends by its own refusal; every
+        # other one is cancelled.
+        current = asyncio.current_task()
         for task in tuple(self._relays):
-            task.cancel()
+            if task is not current:
+                task.cancel()
+
+    def _lapse(self, admission: ConnectionAuthorization) -> None:
+        """``admission`` no longer admits: end every relay made under it, then forget it.
+
+        Every relay of the helper runs under its one current admission (a lapse ends them all
+        before another is taken), so a refusal seen by one relay, by the refresh or by the
+        watch ends every other one too, its server-to-client direction included (O8), and the
+        next admission starts with none of them.
+        """
+
+        self._end_relays()
+        if self._admission is admission:
+            self._admission = None
 
     async def _dial_own(self) -> ControlStream:
         """A connection to this helper's relay that bypasses its endpoint (background agents).
@@ -771,37 +824,84 @@ class Helper:
         self._relays.add(task)
         task.add_done_callback(self._relays.discard)
 
-    async def _open_channel(self, hello: bytes, *, restart: bool) -> tuple[ControlStream, bytes]:
+    def _may_forward(self, admission: ConnectionAuthorization) -> bool:
+        """Whether something admitted under ``admission`` may leave this computer now.
+
+        Asked again right before every hello and every remote ``service start`` the helper makes
+        (the dial, the master and the service start all await, and the authorization may change
+        meanwhile), and before every relayed frame.
+        """
+
+        if self._refuse_zero_network():
+            return False
+        if self._stop.is_set() and self._stop_reason == _ZERO_NETWORK:
+            return False
+        return admission.refusal() is None
+
+    async def _open_channel(
+        self, hello: bytes, admission: ConnectionAuthorization, *, restart: bool
+    ) -> tuple[ControlStream, bytes]:
         """One upstream stream with the hello sent, and the first answered bytes.
 
         With ``restart`` (a client's connection) a remote service that is not running is started
         once with the server's own launcher; a background agent's connection never starts it.
+        ``admission`` is asked again right before the hello is sent and right before the remote
+        service is started: a refusal then sends nothing (``_RelayEnded``).
         """
 
         for attempt in range(2):
-            await self._upstream.ensure()
-            upstream = await self._upstream.open_stream()
-            try:
-                await upstream.send_all(hello)
-                first = await upstream.receive(_PUMP_CHUNK)
-            except (LocalControlTransportError, OSError):
-                first = b""
+            upstream, first = await self._attempt(hello, admission)
             if first:
                 return upstream, first
             named = await _stream_failure(upstream)
-            with contextlib.suppress(Exception):
-                await upstream.aclose()
+            await _discard(upstream)
             if named is not None and named != "remote_service_not_running":
                 # The upstream named why it could not carry the hello (a REST server's refusal).
                 raise UpstreamUnavailable(named)
             # sshd could not reach the server's endpoint: its service is not running.
             now = self._clock()
             if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
+                if not self._may_forward(admission):
+                    self._lapse(admission)
+                    raise _RelayEnded
                 self._last_restart = now
                 if await self._upstream.start_remote_service():
                     continue
             break
         raise UpstreamUnavailable("remote_service_not_running")
+
+    async def _attempt(
+        self, hello: bytes, admission: ConnectionAuthorization
+    ) -> tuple[ControlStream, bytes]:
+        """One bounded upstream attempt: the stream and the server's first answer (``b""``: none).
+
+        The master's start, the channel's open, the hello and the first answer share one bound
+        (``remote_unreachable`` past it); the stream it opened is closed on every failure and on
+        a cancellation (the relay ending, a lapse, the helper stopping), never left behind.
+        """
+
+        upstream: ControlStream | None = None
+        try:
+            async with asyncio.timeout(self._setup_seconds):
+                await self._upstream.ensure()
+                upstream = await self._upstream.open_stream()
+                if not self._may_forward(admission):
+                    self._lapse(admission)
+                    raise _RelayEnded
+                try:
+                    await upstream.send_all(hello)
+                    first = await upstream.receive(_PUMP_CHUNK)
+                except (LocalControlTransportError, OSError):
+                    first = b""
+        except TimeoutError:
+            if upstream is not None:
+                await _discard(upstream)
+            raise UpstreamUnavailable("remote_unreachable") from None
+        except BaseException:
+            if upstream is not None:
+                await _discard(upstream)
+            raise
+        return upstream, first
 
     async def _serve_local(self, local: AuthenticatedUnixStream, *, own: bool = False) -> None:
         if not own:
@@ -829,7 +929,7 @@ class Helper:
                 return
             try:
                 upstream, first = await self._open_channel(
-                    encode_control_frame(hello), restart=not own
+                    encode_control_frame(hello), admission, restart=not own
                 )
             except UpstreamUnavailable as error:
                 self._write_status("unavailable", error.reason)
@@ -843,14 +943,16 @@ class Helper:
         except Exception:  # noqa: BLE001 - a relay fault ends this connection only
             pass
         finally:
+            # Counted first: a cancellation landing while the streams close never leaves the
+            # helper believing a client is still connected.
+            if not own:
+                self._active -= 1
+                self._last_activity = self._clock()
             if upstream is not None:
                 with contextlib.suppress(Exception):
                     await upstream.aclose()
             with contextlib.suppress(Exception):
                 await local.aclose()
-            if not own:
-                self._active -= 1
-                self._last_activity = self._clock()
 
     async def _pump_checked(
         self, source: ControlStream, sink: ControlStream, admission: ConnectionAuthorization
@@ -867,9 +969,10 @@ class Helper:
                 end = _FRAME_PREFIX + size
                 if len(buffer) < end:
                     break
-                if admission.refusal() is not None or not self._may_send():
-                    # What this connection was admitted under changed: nothing more is sent.
-                    self._admission = None
+                if not self._may_forward(admission) or not self._may_send():
+                    # What this connection was admitted under changed: nothing more is sent,
+                    # over this relay or any other made under it.
+                    self._lapse(admission)
                     raise _RelayEnded
                 frame = bytes(buffer[:end])
                 del buffer[:end]
@@ -1051,9 +1154,11 @@ class Helper:
             await self._refresher(current)
         except Exception:  # noqa: BLE001 - the cached profile stays; the next due fetch retries
             return
-        # A refreshed consent or revision: connections admitted before it are admitted again.
-        if self._admission is not None and self._admission.refusal() is not None:
-            self._admission = None
+        # A refreshed consent or revision: connections admitted before it end, and the next one
+        # is admitted again.
+        admission = self._admission
+        if admission is not None and admission.refusal() is not None:
+            self._lapse(admission)
 
     def _start_refresh(self) -> None:
         self._refresh.task = asyncio.create_task(self._run_refresh())
@@ -1079,12 +1184,19 @@ class Helper:
     async def step(self) -> bool:
         """One tick of the helper's watch; whether it is stopping.
 
-        Zero-network first (a stop, at once); then the admission (a lapse ends every relay and
+        Zero-network first (a stop, at once); a moved stop epoch (a stop); then the admission (a
+        lapse ends every relay and
         every agent); the registrations when their folder changed or every 30 seconds; the drain
-        and the profile refresh when due, each as its own task; the idle exit.
+        and the profile refresh when due, each as its own task (the refresh under gate steps 2 to
+        4 only, so it also runs while the consent refuses the cached profile); the idle exit.
         """
 
         if self._stop.is_set() or self._refuse_zero_network():
+            return True
+        if read_helper_epoch(self._root) != self._epoch:
+            # A stop (``server disconnect``, ``remove``, ``use <other>``, ``set --style``, a
+            # replacement) moved the epoch: no signal is ever sent to a helper.
+            self.request_stop("stop_requested")
             return True
         admission = self._admitted()
         if self._stop.is_set():
@@ -1099,12 +1211,19 @@ class Helper:
         if self._agents or self._served_count:
             # A served registration is a client: the helper stays while one is live.
             self._last_activity = now
+        if any(agent.client is not None for agent in self._agents.values()):
+            # A live agent connection uses the upstream (in the direct style its frames never
+            # pass the relay that counts them), so the periodic profile refresh stays due.
+            self._last_upstream_use = now
         delivering = self._delivery is not None and not self._delivery.done()
         if not delivering and now - self._last_drain >= self._drain_interval:
             # Its own task: the tick keeps checking zero-network and idleness every second, and
             # a stop cancels the pass instead of waiting for it (A-ZN-DRAIN).
             self._delivery = asyncio.create_task(self._drain())
-        if admission is not None and self._refresh_due():
+        # Not under the admission: the refresh is how a consent that no longer admits the cached
+        # profile (an interrupted narrowing, a changed offer) catches up, so it asks only gate
+        # steps 2 to 4 (``_may_refresh``), and is asked first so a marker waits while it refuses.
+        if self._may_refresh() and self._refresh_due():
             self._start_refresh()
         if self._idle():
             self.request_stop("idle_timeout")
@@ -1124,9 +1243,9 @@ class Helper:
         if listener is not None:
             running.append(asyncio.create_task(self._accept(listener)))
         running.append(asyncio.create_task(self._watch()))
-        if self._admitted() is not None:
-            if self._style == "direct":
-                self._write_status("ready", None)
+        if self._admitted() is not None and self._style == "direct":
+            self._write_status("ready", None)
+        if self._may_refresh():
             self._start_refresh()
         try:
             await self._stop.wait()
@@ -1169,8 +1288,11 @@ async def _bind(lock: HelperLock) -> UnixEndpointListener:
     return await bind_control_listener()
 
 
-async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: float) -> int:
-    """The helper process body: lock, bind (relay), serve, release. Exit 0 also when one runs."""
+async def run_helper_process(
+    root: Path, record: ServerTarget, *, idle_seconds: float, epoch: str | None = None
+) -> int:
+    """The helper process body: lock, fence, bind (relay), serve, release. Exit 0 also when one
+    runs, and when a stop came after its spawner read ``epoch`` (it serves nothing then)."""
 
     from finishup.protocol.schemas import schema_manifest_digest
 
@@ -1182,9 +1304,25 @@ async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: 
     except OSError:
         return 20
     try:
+        # Read once, right after the lock: a stop before this read fences this start, one after
+        # it is seen on the first tick.
+        current = read_helper_epoch(root)
+        if epoch is not None and current != epoch:
+            with contextlib.suppress(OSError):
+                write_helper_status(
+                    root,
+                    new_status(
+                        read_helper_status(root),
+                        "stopped",
+                        "stop_requested",
+                        started_at=now_stamp(),
+                        style=read_connection_style(root),
+                    ),
+                )
+            return 0
         style = read_connection_style(root)
         listener = await _bind(lock) if style == "relay" else None
-        helper = Helper(root, record, style=style, idle_seconds=idle_seconds)
+        helper = Helper(root, record, style=style, idle_seconds=idle_seconds, epoch=current)
         loop = asyncio.get_running_loop()
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             with contextlib.suppress(NotImplementedError, RuntimeError):
@@ -1204,13 +1342,16 @@ async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: 
         lock.release()
 
 
-def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> int:
+def run_helper(
+    target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS, epoch: str | None = None
+) -> int:
     """``finishup helper run --target ID``: serve one remote target in the foreground.
 
     ``ID`` must name an SSH, HTTPS or ``local_port`` target in this computer's server registry. An isolation variable or
     runtime pin naming another root refuses (exit 2): the helper never serves a root its process
     would not resolve. Exit 0 when it stopped (or another helper already serves the target), 20
-    when its endpoint could not be bound.
+    when its endpoint could not be bound. ``epoch`` is the stop epoch its spawner read
+    (``helper_status.spawn_helper``): a stop since then ends it before it serves anything.
     """
 
     from finishup.client.targets import read_target, target_root
@@ -1233,4 +1374,4 @@ def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> 
     # Every path this process resolves is the target's own: its endpoint, its records, and the
     # outside reads its agents answer (bound to this target's claim salt).
     with selection_override(root):
-        return asyncio.run(run_helper_process(root, record, idle_seconds=idle_seconds))
+        return asyncio.run(run_helper_process(root, record, idle_seconds=idle_seconds, epoch=epoch))

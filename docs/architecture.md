@@ -195,11 +195,15 @@ part of it is CLIENT and never runs or loads on a hook's path unless an SSH targ
   bound to. An unknown host key is asked about only by OpenSSH on the owner's terminal; a changed
   one is refused (`remote_identity_changed`).
 - `client/ssh_transport.py` holds the fixed OpenSSH argv: the relay's master with its stream-local
-  forward, the direct style's `ssh -W` stream through a shared `ControlMaster=auto` master, and the
-  closed classification of OpenSSH failures.
+  forward, the direct style's verified master and its `ssh -W` streams, and the closed
+  classification of OpenSSH failures. Every new connection is used only once it verified the host
+  key the owner's consent names (OpenSSH's own `DEBUG1` line; a rotated key with `known_hosts`
+  updated is refused until the owner agrees again), every command's output is bounded while it is
+  read, and a socket path is handed over as written (spaces included) or refused.
 - `client/helper.py` (`finishup helper run --target <id>`, hidden, `client_only`) is the one
   background helper per SSH target, started on demand by a client and never by `service run`,
-  stopped by `server disconnect|remove|use <other>|set --style` through its stamped pid, idle
+  stopped by `server disconnect|remove|use <other>|set --style` through its owner-only stop epoch
+  (never a signal; a pending start is fenced), idle
   15 minutes after its last client. In the relay style (the default) it serves
   `<target root>/run/control.sock`, so hooks, the MCP bridge, the CLI and the terminal interface
   keep dialling a Unix endpoint, and checks every client frame against its own admission before
@@ -208,7 +212,8 @@ part of it is CLIENT and never runs or loads on a hook's path unless an SSH targ
   server's profile. It admits itself through the shared gate (`authorization.authorize_target`);
   a lapse ends every relayed connection and agent, and zero-network stops it at once.
   `client/helper_status.py` (hook-safe) is what a client needs of it: the lock, the status record
-  and its phases, start and stop by stamped pid. `client/helper_runtime.py` is the SSH
+  and its phases, start (with the stop epoch it read) and stop (the epoch, then the lock seen
+  free). `client/helper_runtime.py` is the SSH
   `TargetRuntime` and the CLI's one-time registration.
 - `service/client.py` dispatches an admitted SSH root on its connection style (the helper's
   endpoint, or `ssh -W`), within one deadline for a hook (design v2 section 8.9), and names a

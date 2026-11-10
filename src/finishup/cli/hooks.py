@@ -191,13 +191,26 @@ def remote_refusal_context(phase: str) -> str:
     directive = directive_for(token)
     assert token is not None and directive is not None
     nudge = "" if directive.nudge is None else f" {directive.nudge}"
-    return (
-        f"{_REFUSAL_HEADS.get(phase, _REFUSAL_HEAD)} ({phase}). "
-        f"{directive.directive}{nudge} Continuation: {token}. "
-    )
+    return f"{_refusal_head(phase)} ({phase}). {directive.directive}{nudge} Continuation: {token}. "
+
+
+def _refusal_head(phase: str) -> str:
+    head = _REFUSAL_HEADS.get(phase)
+    if head is not None:
+        return head
+    if phase in _REFUSED_AFTER_SENDING:
+        # Also the server's own refusal of a hello or request it was sent: the shared summary
+        # says only that it did no work for it, never that nothing was sent.
+        from finishup.client.authorization import refusal_summary
+
+        summary = refusal_summary(phase) or ""
+        return summary[:1].upper() + summary[1:]
+    return _REFUSAL_HEAD
 
 
 _REFUSAL_HEAD: Final = "FinishUP refused the selected server's connection before anything was sent"
+# A phase that may come after something was sent, whose head is the shared summary.
+_REFUSED_AFTER_SENDING: Final = frozenset({"server_profile_changed"})
 _UNREACHED_HEAD: Final = "FinishUP could not reach the selected server elsewhere"
 # A connection whose authorization changed (ADR-052) had sent things before it ended; a server
 # that could not be reached through its transport refused nothing itself.

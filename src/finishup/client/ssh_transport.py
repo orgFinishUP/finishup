@@ -20,10 +20,22 @@ launcher (an absolute path recorded with the target, never a bare name resolved 
 sshd hands the command line to the remote login shell. Every ``ssh`` child runs with FinishUP's own
 variables removed from its environment, so none can ride a ``SendEnv`` line to the server.
 
+**The consented host key, on every new connection** (ADR-052). ``known_hosts`` decides whether
+OpenSSH connects at all; the owner's consent is bound to one host key (the envelope's endpoint
+identity, ``server_profile.consented_host_key``). So every OpenSSH connection FinishUP makes to a
+target runs at ``LogLevel=DEBUG1`` and must print exactly that key in its ``Server host key`` line
+before anything is sent over it: the relay's master before its forward is used, the direct
+style's master before it is recorded, and a direct stream or remote command that made its own
+connection (no master answered) before its first byte. A master is reused only as verified: the
+relay's by the helper that started it, the direct style's by its owner-only record
+(``state/ssh-master.json``: the key and the control socket it was verified with), made under a
+lock (``state/ssh-master.lock``) so no stream rides a master nobody verified yet. Another key is
+``remote_identity_changed``: nothing is sent, and the master is asked to exit.
+
 Failures are closed reasons (``protocol.errors.REMOTE_CONNECTION_PHASES``). OpenSSH's diagnostic
 text is matched against fixed phrases only, to choose between them; the one value read from it is
 the host key fingerprint OpenSSH itself verified (``observed_host_key``). It is never stored,
-logged or shown otherwise.
+logged or shown otherwise, except as the digest a verified master is recorded with.
 """
 
 from __future__ import annotations
@@ -32,16 +44,20 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import errno
+import fcntl
+import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import stat
 import time
 from collections import deque
-from collections.abc import Buffer, Sequence
+from collections.abc import AsyncGenerator, Buffer, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn
+from typing import TYPE_CHECKING, Final, NoReturn, cast
 
 from finishup.config.installation import socket_path_fits
 
@@ -60,21 +76,28 @@ __all__ = [
     "control_argv",
     "destination",
     "direct_argv",
+    "direct_master_argv",
     "direct_remote_argv",
+    "ensure_direct_master",
     "exit_master",
     "exit_master_now",
+    "forwardable_path",
     "host_key_changed",
     "host_key_unconfirmed",
+    "host_keys",
     "master_argv",
     "observed_host_key",
+    "open_direct_stream",
     "probe_argv",
     "remote_argv",
     "remote_command",
     "remote_command_line",
     "remove_owned_socket",
+    "require_host_key",
     "resolve_ssh",
     "run_ssh",
     "ssh_environment",
+    "ssh_paths_usable",
     "ssh_root_fits",
 ]
 
@@ -88,9 +111,20 @@ _REMOTE_COMMAND_SECONDS: Final = 30.0
 _POLL_SECONDS: Final = 0.05
 _STDERR_TAIL_BYTES: Final = 8_192
 _MAX_RECEIVE_BYTES: Final = 65_536
+# What one fixed remote command or probe may write on each stream before it is killed.
+_MAX_OUTPUT_BYTES: Final = 65_536
+_READ_CHUNK: Final = 8_192
+_REAP_SECONDS: Final = 5.0
 _EXIT_WAIT_SECONDS: Final = 1.0
 _TERMINATE_WAIT_SECONDS: Final = 0.5
 _UNREACHABLE: Final = "remote_unreachable"
+_IDENTITY_CHANGED: Final = "remote_identity_changed"
+_CHECK_SECONDS: Final = 2.0
+_MASTER_RECORD_NAME: Final = "ssh-master.json"
+_MASTER_RECORD_SCHEMA: Final = "yoetz.ssh-master/1"
+_MASTER_LOCK_NAME: Final = "ssh-master.lock"
+_MAX_MASTER_RECORD_BYTES: Final = 512
+_MAX_LINE_BYTES: Final = 4_096
 _REASONS: Final = frozenset(
     {
         "remote_auth_failed",
@@ -105,6 +139,10 @@ _REASONS: Final = frozenset(
 )
 _TRUST: Final = ("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes")
 _LIVENESS: Final = ("-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3")
+# Every connection's own ``Server host key`` line (and a stream's multiplexing line) is printed at
+# this level. Set as an option, never ``-v``: a master backgrounded by ``ControlPersist`` then
+# leaves its standard error to ``/dev/null`` instead of holding the caller's pipe.
+_DEBUG: Final = ("-o", "LogLevel=DEBUG1")
 # Fixed OpenSSH phrases, matched only to choose a closed reason.
 _CHANGED_PHRASE: Final = b"REMOTE HOST IDENTIFICATION HAS CHANGED"
 _IDENTITY_PHRASES: Final = (
@@ -126,6 +164,10 @@ _NOT_RUNNING_PHRASES: Final = (
 _HOST_KEY_LINE: Final = re.compile(
     rb"^debug1: Server host key: ([A-Za-z0-9@._-]{1,64}) SHA256:([A-Za-z0-9+/]{43})\r?$",
     re.MULTILINE,
+)
+# ``debug1: mux_client_request_stdio_fwd: master session id: N``: a ``-W`` stream rides a master.
+_MUX_STDIO_LINE: Final = re.compile(
+    rb"^debug1: mux_client_request_stdio_fwd: master session id: [0-9]{1,10}\r?$"
 )
 
 
@@ -187,11 +229,43 @@ def ssh_root_fits(root: Path) -> bool:
     ) and socket_path_fits(root / "run" / UPSTREAM_NAME)
 
 
+# ``-L local:remote`` splits on ':', and OpenSSH expands ``%`` tokens and ``${VAR}`` in a forward's
+# and a ControlPath's socket paths: a path holding any of them, or a control character, cannot be
+# handed to it verbatim. A space can (the default root on macOS lives under "Application Support").
+_UNFORWARDABLE: Final = frozenset(":%$")
+
+
+def forwardable_path(text: str) -> bool:
+    """Whether OpenSSH takes ``text`` as a socket path verbatim (absolute, none of ``:%$``, no
+    control character); spaces are fine."""
+
+    return text.startswith("/") and not any(
+        character in _UNFORWARDABLE or ord(character) < 0x20 or ord(character) == 0x7F
+        for character in text
+    )
+
+
+def ssh_paths_usable(root: Path, remote_endpoint: str | None = None) -> bool:
+    """Whether every socket path OpenSSH is given for the target at ``root`` is taken verbatim.
+
+    Its master's ControlPath and the relay's forward beneath ``root``, and the server's
+    ``remote_endpoint`` when given. ``server add`` checks it before a target is recorded.
+    """
+
+    local = (root / "run" / MASTER_NAME, root / "run" / UPSTREAM_NAME)
+    return all(forwardable_path(str(path)) for path in local) and (
+        remote_endpoint is None or forwardable_path(remote_endpoint)
+    )
+
+
 def _forward_path(text: str) -> str:
-    # ``-L local:remote`` splits on ':'; a path that holds one, or whitespace, cannot be forwarded.
-    if not text.startswith("/") or ":" in text or any(ord(c) <= 0x20 for c in text):
+    if not forwardable_path(text):
         raise UpstreamUnavailable(_UNREACHABLE)
     return text
+
+
+def _control_path(root: Path) -> str:
+    return _forward_path(str(root / "run" / MASTER_NAME))
 
 
 def _endpoint(record: ServerTarget) -> str:
@@ -208,7 +282,7 @@ def master_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
         ssh,
         "-M",
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-N",
         "-T",
         *_TRUST,
@@ -219,6 +293,7 @@ def master_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
         "-o",
         "StreamLocalBindUnlink=yes",
         *_LIVENESS,
+        *_DEBUG,
         "-p",
         _port(record),
         "-L",
@@ -235,7 +310,7 @@ def control_argv(ssh: str, root: Path, record: ServerTarget, operation: str) -> 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-O",
         operation,
         "-p",
@@ -248,25 +323,51 @@ def direct_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
     """One direct-style stream to the remote control endpoint (no secret, no shell).
 
     ``-W`` forwards standard input and output to the remote Unix socket over a channel of the
-    shared ``ControlMaster=auto`` master (it implies ``-N``, ``-T`` and ``ExitOnForwardFailure``);
-    the first stream leaves a master that persists for 15 idle minutes, so a later hook pays one
-    channel open instead of a key exchange.
+    target's verified master (``ensure_direct_master``; it implies ``-N``, ``-T`` and
+    ``ExitOnForwardFailure``), so a later hook pays one channel open instead of a key exchange.
+    ``ControlMaster=no``: a stream never becomes a master itself. When no master answers, OpenSSH
+    connects on its own; its host key line is then checked before the stream is used
+    (``SshControlStream.verify``).
     """
 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
-        "ControlMaster=auto",
-        "-o",
-        f"ControlPersist={CONTROL_PERSIST}",
+        "ControlMaster=no",
         *_TRUST,
         *_LIVENESS,
+        *_DEBUG,
         "-p",
         _port(record),
         "-W",
         _endpoint(record),
+        destination(record),
+    )
+
+
+def direct_master_argv(ssh: str, root: Path, record: ServerTarget) -> tuple[str, ...]:
+    """The direct style's master: it authenticates, then persists for 15 idle minutes.
+
+    With ``ControlPersist`` and ``-N`` OpenSSH backgrounds the master once it listens and the
+    command exits 0; its standard error (the host key line) is read to verify it first.
+    """
+
+    return (
+        ssh,
+        "-M",
+        "-S",
+        _control_path(root),
+        "-o",
+        f"ControlPersist={CONTROL_PERSIST}",
+        "-N",
+        "-T",
+        *_TRUST,
+        *_LIVENESS,
+        *_DEBUG,
+        "-p",
+        _port(record),
         destination(record),
     )
 
@@ -297,8 +398,11 @@ def remote_argv(ssh: str, root: Path, record: ServerTarget, *arguments: str) -> 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
+        "-o",
+        "ControlMaster=no",
         *_TRUST,
+        *_DEBUG,
         "-T",
         "-p",
         _port(record),
@@ -311,17 +415,16 @@ def remote_argv(ssh: str, root: Path, record: ServerTarget, *arguments: str) -> 
 def direct_remote_argv(
     ssh: str, root: Path, record: ServerTarget, *arguments: str
 ) -> tuple[str, ...]:
-    """A fixed remote command over the direct style's master (started when none runs)."""
+    """A fixed remote command over the direct style's verified master (``ensure_direct_master``)."""
 
     return (
         ssh,
         "-S",
-        str(root / "run" / MASTER_NAME),
+        _control_path(root),
         "-o",
-        "ControlMaster=auto",
-        "-o",
-        f"ControlPersist={CONTROL_PERSIST}",
+        "ControlMaster=no",
         *_TRUST,
+        *_DEBUG,
         "-T",
         "-p",
         _port(record),
@@ -431,13 +534,67 @@ def observed_host_key(stderr: bytes) -> str | None:
     return "sha256:" + digest.hex()
 
 
-async def run_ssh(argv: Sequence[str], *, seconds: float) -> tuple[int | None, bytes, bytes]:
+def _digest_of(fingerprint: bytes) -> str | None:
+    try:
+        digest = base64.b64decode(fingerprint + b"=", validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return "sha256:" + digest.hex() if len(digest) == 32 else None
+
+
+def host_keys(stderr: bytes) -> frozenset[str]:
+    """Every distinct host key OpenSSH printed verifying a connection it made (``sha256:<hex>``).
+
+    Empty when it made none of its own (it rode a master) or printed no such line.
+    """
+
+    found = (_digest_of(match.group(2)) for match in _HOST_KEY_LINE.finditer(stderr))
+    return frozenset(key for key in found if key is not None)
+
+
+def require_host_key(stderr: bytes, expected: str | None) -> None:
+    """Refuse a connection OpenSSH made itself unless it verified exactly the consented key.
+
+    ``remote_identity_changed`` when ``stderr`` names any other host key (or ``expected`` is
+    ``None``). A run that printed none rode a master, which its caller verified.
+    """
+
+    keys = host_keys(stderr)
+    if keys and (expected is None or keys != frozenset((expected,))):
+        raise UpstreamUnavailable(_IDENTITY_CHANGED)
+
+
+class _OutputExceeded(Exception):
+    """One of a command's streams outgrew its bound while it was read."""
+
+
+async def _read_bounded(reader: asyncio.StreamReader | None, limit: int, sink: bytearray) -> None:
+    """Read ``reader`` to its end into ``sink``; ``_OutputExceeded`` past ``limit`` bytes."""
+
+    if reader is None:
+        return
+    while chunk := await reader.read(_READ_CHUNK):
+        if len(sink) + len(chunk) > limit:
+            raise _OutputExceeded
+        sink.extend(chunk)
+
+
+async def run_ssh(
+    argv: Sequence[str],
+    *,
+    seconds: float,
+    stdout_limit: int = _MAX_OUTPUT_BYTES,
+    stderr_limit: int = _MAX_OUTPUT_BYTES,
+) -> tuple[int | None, bytes, bytes]:
     """Run one fixed ``ssh`` argv to completion within ``seconds``: ``(code, stdout, stderr)``.
 
     ``code`` is ``None`` when it could not start or outlived its bound (it is then killed, by its
-    own pid). Standard input is never the caller's; a host-key question OpenSSH asks (only with
-    ``probe_argv(ask=True)``) is asked on the controlling terminal (``/dev/tty``), which the child
-    shares with this process.
+    own pid, and reaped). Both streams are read as they arrive and bounded while they are read
+    (64 KiB each by default): a command that writes more is killed and reaped at once and
+    raises ``UpstreamUnavailable("remote_incompatible")`` (a launcher that is not this release's
+    FinishUP), so a faulty or hostile one never fills this process's memory. Standard input is
+    never the caller's; a host-key question OpenSSH asks (only with ``probe_argv(ask=True)``) is
+    asked on the controlling terminal (``/dev/tty``), which the child shares with this process.
     """
 
     try:
@@ -451,22 +608,59 @@ async def run_ssh(argv: Sequence[str], *, seconds: float) -> tuple[int | None, b
         )
     except OSError:
         return None, b"", b""
+    stdout, stderr = bytearray(), bytearray()
+    readers = (
+        asyncio.create_task(_read_bounded(process.stdout, stdout_limit, stdout)),
+        asyncio.create_task(_read_bounded(process.stderr, stderr_limit, stderr)),
+    )
     try:
         async with asyncio.timeout(seconds):
-            stdout, stderr = await process.communicate()
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        with contextlib.suppress(Exception):
+            await asyncio.wait(readers, return_when=asyncio.FIRST_EXCEPTION)
+            for reader in readers:
+                if reader.done() and reader.exception() is not None:
+                    raise _OutputExceeded
+            await asyncio.gather(*readers)
             await process.wait()
+    except TimeoutError:
+        await _kill_and_reap(process, readers)
         return None, b"", b""
+    except _OutputExceeded:
+        await _kill_and_reap(process, readers)
+        raise UpstreamUnavailable("remote_incompatible") from None
     except BaseException:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        with contextlib.suppress(Exception):
-            await asyncio.shield(process.wait())
+        await _kill_and_reap(process, readers)
         raise
-    return process.returncode, stdout, stderr
+    return process.returncode, bytes(stdout), bytes(stderr)
+
+
+async def _discard(reader: asyncio.StreamReader | None) -> None:
+    if reader is None:
+        return
+    with contextlib.suppress(Exception):
+        while await reader.read(_READ_CHUNK):
+            pass
+
+
+async def _kill_and_reap(
+    process: asyncio.subprocess.Process, readers: Sequence[asyncio.Task[None]] = ()
+) -> None:
+    """Kill ``process`` by its own pid and wait for it, a cancellation of the caller included.
+
+    Its stream readers end; what is left in its pipes is read and dropped, so a pipe paused on
+    an unread buffer still reaches its end and the wait finishes (bounded: a process that
+    handed its pipe on keeps nothing waiting here). The system's child watcher reaps it once it
+    exits, whatever this wait sees.
+    """
+
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    for reader in readers:
+        reader.cancel()
+    await asyncio.gather(*readers, return_exceptions=True)
+    ending = asyncio.gather(_discard(process.stdout), _discard(process.stderr), process.wait())
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(_REAP_SECONDS):
+            await asyncio.shield(ending)
 
 
 def _owned_socket(path: Path) -> tuple[int, int] | None:
@@ -498,6 +692,7 @@ async def exit_master(ssh: str, root: Path, record: ServerTarget) -> None:
     then remove what it leaves behind. Bounded; never raises."""
 
     control = root / "run" / MASTER_NAME
+    _forget_master(root)
     if _owned_socket(control) is not None:
         with contextlib.suppress(Exception):
             await run_ssh(control_argv(ssh, root, record, "exit"), seconds=2.0)
@@ -516,8 +711,9 @@ def exit_master_now(ssh: str, root: Path, record: ServerTarget) -> None:
     import subprocess
 
     control = root / "run" / MASTER_NAME
+    _forget_master(root)
     if _owned_socket(control) is not None:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
+        with contextlib.suppress(OSError, subprocess.SubprocessError, UpstreamUnavailable):
             subprocess.run(  # noqa: S603 - fixed argv
                 control_argv(ssh, root, record, "exit"),
                 stdin=subprocess.DEVNULL,
@@ -529,6 +725,253 @@ def exit_master_now(ssh: str, root: Path, record: ServerTarget) -> None:
             )
     for path in (control, root / "run" / UPSTREAM_NAME):
         remove_owned_socket(path)
+
+
+class _LineWatch:
+    """OpenSSH's standard error, read line by line for the lines a connection is verified by.
+
+    ``keys``: every distinct host key a ``Server host key`` line named; ``muxed``: a ``-W``
+    stream's multiplexing line was printed (it rides a master). ``settled`` is set at the first
+    of either, and when the stream ends.
+    """
+
+    __slots__ = ("_pending", "keys", "muxed", "settled")
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+        self.keys: set[str] = set()
+        self.muxed = False
+        self.settled = asyncio.Event()
+
+    def feed(self, chunk: bytes) -> None:
+        self._pending.extend(chunk)
+        while (end := self._pending.find(b"\n")) >= 0:
+            self._line(bytes(self._pending[:end]))
+            del self._pending[: end + 1]
+        if len(self._pending) > _MAX_LINE_BYTES:
+            # An endless line is no line OpenSSH prints for a connection: dropped unread.
+            self._pending.clear()
+
+    def _line(self, line: bytes) -> None:
+        found = _HOST_KEY_LINE.match(line)
+        if found is not None:
+            key = _digest_of(found.group(2))
+            if key is not None:
+                self.keys.add(key)
+                self.settled.set()
+        elif _MUX_STDIO_LINE.match(line) is not None:
+            self.muxed = True
+            self.settled.set()
+
+    def finish(self) -> None:
+        self.settled.set()
+
+
+# --- the direct style's verified master ---------------------------------------------------------
+
+
+def _bounded(seconds: float, deadline: float | None) -> float:
+    if deadline is None:
+        return seconds
+    return max(0.0, min(seconds, deadline - time.monotonic()))
+
+
+def _master_record_path(root: Path) -> Path:
+    return root / "state" / _MASTER_RECORD_NAME
+
+
+def _read_master(root: Path) -> tuple[str, tuple[int, int]] | None:
+    """``(host key, control socket identity)`` of the verified master record; ``None`` else.
+
+    Owner-only, regular, never followed, bounded; anything else is no record (never trusted).
+    """
+
+    try:
+        descriptor = os.open(
+            _master_record_path(root), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+    except OSError:
+        return None
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+            or facts.st_size > _MAX_MASTER_RECORD_BYTES
+        ):
+            return None
+        data = os.read(descriptor, _MAX_MASTER_RECORD_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    try:
+        parsed: object = json.loads(data)
+    except ValueError:
+        return None
+    if type(parsed) is not dict:
+        return None
+    body = cast("dict[str, object]", parsed)
+    key = body.get("host_key")
+    socket_id = body.get("socket")
+    if (
+        set(body) != {"schema", "host_key", "socket"}
+        or body.get("schema") != _MASTER_RECORD_SCHEMA
+        or type(key) is not str
+        or type(socket_id) is not list
+    ):
+        return None
+    items = cast("list[object]", socket_id)
+    device, inode = items if len(items) == 2 else (None, None)
+    if type(device) is not int or type(inode) is not int:
+        return None
+    return key, (device, inode)
+
+
+def _record_master(root: Path, key: str, socket_id: tuple[int, int]) -> None:
+    """Record the verified master atomically (owner-only temp, fsync, rename); never raises."""
+
+    path = _master_record_path(root)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    body = {"schema": _MASTER_RECORD_SCHEMA, "host_key": key, "socket": list(socket_id)}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    try:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+        )
+        try:
+            os.write(descriptor, encoded)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _forget_master(root: Path) -> None:
+    with contextlib.suppress(OSError):
+        _master_record_path(root).unlink()
+
+
+@contextlib.asynccontextmanager
+async def _master_lock(root: Path, deadline: float | None) -> AsyncGenerator[None]:
+    """The target's master lock (``state/ssh-master.lock``), waited for within ``deadline``.
+
+    Every process that verifies, starts or replaces the direct style's master holds it, so a
+    master is recorded verified before any stream can ride it.
+    """
+
+    try:
+        descriptor = os.open(
+            root / "state" / _MASTER_LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+    except OSError:
+        raise UpstreamUnavailable(_UNREACHABLE) from None
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+        ):
+            raise UpstreamUnavailable(_UNREACHABLE)
+        bound = time.monotonic() + _bounded(_MASTER_START_SECONDS, deadline)
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                    raise UpstreamUnavailable(_UNREACHABLE) from None
+            if time.monotonic() >= bound:
+                raise UpstreamUnavailable(_UNREACHABLE)
+            await asyncio.sleep(_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+async def ensure_direct_master(
+    ssh: str,
+    root: Path,
+    record: ServerTarget,
+    *,
+    expected: str | None,
+    deadline: float | None = None,
+) -> None:
+    """A running direct-style master that verified the consented host key ``expected``.
+
+    Reused only when its control socket is the one recorded verified with ``expected`` and it
+    answers ``-O check``; anything else at its path (an older master, one verified for another
+    consent, a relay master, a stale socket) is asked to exit, and a new one is started, its host
+    key line read and compared before it is recorded. Another key is ``remote_identity_changed``
+    (the new master is asked to exit at once: nothing was sent over it). Raises
+    ``UpstreamUnavailable``.
+    """
+
+    if expected is None:
+        raise UpstreamUnavailable(_IDENTITY_CHANGED)
+    if not ssh_root_fits(root):
+        raise UpstreamUnavailable(_UNREACHABLE)
+    control = root / "run" / MASTER_NAME
+    async with _master_lock(root, deadline):
+        current = _owned_socket(control)
+        if current is not None and _read_master(root) == (expected, current):
+            code, _stdout, _stderr = await run_ssh(
+                control_argv(ssh, root, record, "check"),
+                seconds=_bounded(_CHECK_SECONDS, deadline),
+            )
+            if code == 0:
+                return
+        await exit_master(ssh, root, record)
+        code, _stdout, stderr = await run_ssh(
+            direct_master_argv(ssh, root, record),
+            seconds=_bounded(_MASTER_START_SECONDS, deadline),
+        )
+        if code != 0:
+            # Whatever it left behind (a master that backgrounded before the bound) is asked to
+            # exit; nothing was sent over it.
+            await exit_master(ssh, root, record)
+            reason = _UNREACHABLE if code is None else classify_ssh_failure(code, stderr)
+            raise UpstreamUnavailable(reason)
+        started = _owned_socket(control)
+        if host_keys(stderr) != frozenset((expected,)) or started is None:
+            await exit_master(ssh, root, record)
+            raise UpstreamUnavailable(_IDENTITY_CHANGED if started is not None else _UNREACHABLE)
+        _record_master(root, expected, started)
+
+
+async def open_direct_stream(
+    ssh: str,
+    root: Path,
+    record: ServerTarget,
+    *,
+    expected: str | None,
+    deadline: float | None = None,
+) -> SshControlStream:
+    """One direct-style ``ssh -W`` stream, verified before it is handed back (see the module text).
+
+    The master first (``ensure_direct_master``); then the stream, used only once OpenSSH said it
+    rode that master or verified ``expected`` over a connection of its own.
+    """
+
+    await ensure_direct_master(ssh, root, record, expected=expected, deadline=deadline)
+    stream = await SshControlStream.open(direct_argv(ssh, root, record))
+    try:
+        await stream.verify(expected, deadline=deadline)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await asyncio.shield(stream.aclose())
+        raise
+    return stream
 
 
 class SshMaster:
@@ -544,6 +987,9 @@ class SshMaster:
         self._stderr: deque[bytes] = deque()
         self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._watch = _LineWatch()
+        # The consented host key the running master verified; ``None`` while none is verified.
+        self._verified: str | None = None
 
     @property
     def upstream_path(self) -> Path:
@@ -563,21 +1009,37 @@ class SshMaster:
         if stream is None:
             return
         held = 0
-        while chunk := await stream.read(1_024):
-            self._stderr.append(chunk)
-            held += len(chunk)
-            while held > _STDERR_TAIL_BYTES and len(self._stderr) > 1:
-                held -= len(self._stderr.popleft())
+        watch = self._watch
+        try:
+            while chunk := await stream.read(1_024):
+                watch.feed(chunk)
+                self._stderr.append(chunk)
+                held += len(chunk)
+                while held > _STDERR_TAIL_BYTES and len(self._stderr) > 1:
+                    held -= len(self._stderr.popleft())
+        finally:
+            watch.finish()
 
-    async def ensure(self, *, deadline: float | None = None) -> None:
-        """Start the master unless it runs; raise ``UpstreamUnavailable`` when it cannot.
+    async def ensure(self, *, expected: str | None, deadline: float | None = None) -> None:
+        """A running master that verified the consented host key ``expected``; else raise.
 
-        Bounded by ``_MASTER_START_SECONDS`` and by ``deadline`` (a monotonic time), whichever
-        comes first; a master still starting when the bound passes is stopped.
+        A running master is reused only when it verified ``expected`` (the consent may have
+        changed since it started); otherwise it is replaced. A new master is ready once its
+        forward listens **and** its ``Server host key`` line named ``expected``; another key is
+        ``remote_identity_changed`` and the master is stopped before anything is sent over it.
+        Bounded by ``_MASTER_START_SECONDS`` and by ``deadline`` (a monotonic time); a master
+        still starting when the bound passes, or when the caller is cancelled, is stopped.
+        Raises ``UpstreamUnavailable``.
         """
 
+        if expected is None:
+            raise UpstreamUnavailable(_IDENTITY_CHANGED)
         async with self._lock:
-            if self.alive and _owned_socket(self.upstream_path) is not None:
+            if (
+                self.alive
+                and self._verified == expected
+                and _owned_socket(self.upstream_path) is not None
+            ):
                 return
             await self._stop_process()
             if not ssh_root_fits(self._root):
@@ -588,6 +1050,7 @@ class SshMaster:
             stale = _owned_socket(self.upstream_path)
             argv = master_argv(self.executable(), self._root, self._record)
             self._stderr.clear()
+            self._watch = _LineWatch()
             try:
                 process = await asyncio.create_subprocess_exec(
                     *argv,
@@ -601,37 +1064,61 @@ class SshMaster:
                 raise UpstreamUnavailable(_UNREACHABLE) from None
             self._process = process
             self._stderr_task = asyncio.create_task(self._drain_stderr(process))
-            bound = time.monotonic() + _MASTER_START_SECONDS
-            if deadline is not None:
-                bound = min(bound, deadline)
-            while time.monotonic() < bound:
-                if process.returncode is not None:
-                    break
-                ready = _owned_socket(self.upstream_path)
-                if ready is not None and ready != stale:
-                    return
-                await asyncio.sleep(_POLL_SECONDS)
-            if process.returncode is None:
-                await self._stop_process()
-                raise UpstreamUnavailable(_UNREACHABLE)
+            try:
+                await self._await_verified(process, stale, expected, deadline)
+            except BaseException:
+                # Not verified (another key, no key, a bound passed, a cancellation): the
+                # master that started is stopped; nothing was sent over it.
+                await asyncio.shield(self._stop_process())
+                raise
+
+    async def _await_verified(
+        self,
+        process: asyncio.subprocess.Process,
+        stale: tuple[int, int] | None,
+        expected: str,
+        deadline: float | None,
+    ) -> None:
+        bound = time.monotonic() + _bounded(_MASTER_START_SECONDS, deadline)
+        while time.monotonic() < bound:
+            if process.returncode is not None:
+                break
+            keys = self._watch.keys
+            if keys and keys != {expected}:
+                raise UpstreamUnavailable(_IDENTITY_CHANGED)
+            ready = _owned_socket(self.upstream_path)
+            if ready is not None and ready != stale and keys == {expected}:
+                self._verified = expected
+                return
+            await asyncio.sleep(_POLL_SECONDS)
+        if process.returncode is None:
+            listening = _owned_socket(self.upstream_path) not in {None, stale}
+            # Listening, but it never named the consented key (a host certificate, a line this
+            # OpenSSH does not print): never trusted.
+            raise UpstreamUnavailable(_IDENTITY_CHANGED if listening else _UNREACHABLE)
+        if self._stderr_task is not None:
             await asyncio.gather(self._stderr_task, return_exceptions=True)
-            reason = classify_ssh_failure(process.returncode, b"".join(self._stderr))
-            self._process = None
-            raise UpstreamUnavailable(reason)
+        raise UpstreamUnavailable(classify_ssh_failure(process.returncode, b"".join(self._stderr)))
 
-    async def run_remote(self, *arguments: str) -> int:
-        """Run one fixed remote command over the master; its exit status (output discarded)."""
+    async def run_remote(self, *arguments: str, expected: str | None) -> int:
+        """Run one fixed remote command over the verified master; its exit status.
 
-        await self.ensure()
-        code, _stdout, _stderr = await run_ssh(
+        Its output is discarded; a command that connected on its own (the master had just gone)
+        and verified another host key is ``remote_identity_changed``.
+        """
+
+        await self.ensure(expected=expected)
+        code, _stdout, stderr = await run_ssh(
             remote_argv(self.executable(), self._root, self._record, *arguments),
             seconds=_REMOTE_COMMAND_SECONDS,
         )
+        require_host_key(stderr, expected)
         return 255 if code is None else code
 
     async def _stop_process(self) -> None:
         process = self._process
         self._process = None
+        self._verified = None
         if process is not None and process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
@@ -681,13 +1168,14 @@ class RemotePeerIdentity:
 class SshControlStream:
     """One direct-style ``ssh -W`` child whose standard input and output carry the frames."""
 
-    __slots__ = ("_closed", "_peer", "_process", "_stderr", "_stderr_task")
+    __slots__ = ("_closed", "_peer", "_process", "_stderr", "_stderr_task", "_watch")
 
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self._process = process
         self._peer = RemotePeerIdentity()
         self._closed = False
         self._stderr = bytearray()
+        self._watch = _LineWatch()
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
     @classmethod
@@ -715,13 +1203,44 @@ class SshControlStream:
 
     async def _drain_stderr(self) -> None:
         reader = self._process.stderr
-        if reader is None:
+        try:
+            if reader is None:
+                return
+            with contextlib.suppress(Exception):
+                while chunk := await reader.read(4_096):
+                    self._watch.feed(chunk)
+                    room = _STDERR_TAIL_BYTES - len(self._stderr)
+                    if room > 0:
+                        self._stderr.extend(chunk[:room])
+        finally:
+            self._watch.finish()
+
+    async def verify(self, expected: str | None, *, deadline: float | None = None) -> None:
+        """Return once this stream may carry a hello: it rode the verified master, or it made a
+        connection of its own whose ``Server host key`` line named exactly ``expected``.
+
+        ``remote_identity_changed`` for another key; the phase it ended with when it ended first;
+        ``remote_unreachable`` when OpenSSH said neither within the bound. Raises
+        ``UpstreamUnavailable``; nothing has been written to the stream.
+        """
+
+        try:
+            async with asyncio.timeout(_bounded(_MASTER_START_SECONDS, deadline)):
+                await self._watch.settled.wait()
+        except TimeoutError:
+            raise UpstreamUnavailable(_UNREACHABLE) from None
+        keys = self._watch.keys
+        if keys:
+            if keys != {expected}:
+                raise UpstreamUnavailable(_IDENTITY_CHANGED)
             return
-        with contextlib.suppress(Exception):
-            while chunk := await reader.read(4_096):
-                room = _STDERR_TAIL_BYTES - len(self._stderr)
-                if room > 0:
-                    self._stderr.extend(chunk[:room])
+        if self._watch.muxed:
+            return
+        phase: str | None = None
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(_bounded(_EXIT_WAIT_SECONDS, deadline)):
+                phase = await self.failure_phase()
+        raise UpstreamUnavailable(phase or _UNREACHABLE)
 
     async def receive(self, max_bytes: int = _MAX_RECEIVE_BYTES) -> bytes:
         if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_RECEIVE_BYTES:
@@ -758,11 +1277,16 @@ class SshControlStream:
                 writer.close()
 
     async def _wait_exit(self, seconds: float) -> int | None:
-        try:
+        """``ssh``'s exit status once it exited, or ``None`` while it still runs past ``seconds``.
+
+        What is left on its output is read and dropped (a wait also waits for its pipes, and an
+        unread one would never reach its end).
+        """
+
+        with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(seconds):
-                return await self._process.wait()
-        except TimeoutError:
-            return None
+                await asyncio.gather(_discard(self._process.stdout), self._process.wait())
+        return self._process.returncode
 
     async def failure_phase(self) -> str | None:
         """Why this stream ended, once ``ssh`` exited (bounded); ``None`` when it ended cleanly.
@@ -788,14 +1312,40 @@ class SshControlStream:
         if writer is not None:
             with contextlib.suppress(Exception):
                 writer.close()
-        if self._process.returncode is None:
-            # Only the child this stream spawned is signalled, by its own pid (AGENTS.md hazard 2).
-            # The shared master is a separate process and stays up for the next stream.
-            with contextlib.suppress(ProcessLookupError):
-                self._process.terminate()
-            if await self._wait_exit(_TERMINATE_WAIT_SECONDS) is None:
+        try:
+            if self._process.returncode is None:
+                # Only the child this stream spawned is signalled, by its own pid (AGENTS.md
+                # hazard 2). The shared master is a separate process and stays up.
                 with contextlib.suppress(ProcessLookupError):
-                    self._process.kill()
-                await self._wait_exit(_TERMINATE_WAIT_SECONDS)
+                    self._process.terminate()
+                if await self._wait_exit(_TERMINATE_WAIT_SECONDS) is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        self._process.kill()
+                    await self._wait_exit(_TERMINATE_WAIT_SECONDS)
+        except BaseException:
+            # The caller's deadline cancelled the close (``service.client`` bounds it): the child
+            # is killed now and a task of its own waits for it, so it ends and is reaped whatever
+            # the caller does next; this stream is closed either way.
+            with contextlib.suppress(ProcessLookupError):
+                self._process.kill()
+            _finish_later(self._process, self._stderr_task)
+            raise
         self._stderr_task.cancel()
         await asyncio.gather(self._stderr_task, return_exceptions=True)
+
+
+# The waits a cancelled close left behind, held until each child ended (a task needs a reference).
+_FINISHING: set[asyncio.Task[None]] = set()
+
+
+def _finish_later(process: asyncio.subprocess.Process, stderr: asyncio.Task[None]) -> None:
+    async def finish() -> None:
+        try:
+            await _kill_and_reap(process)
+        finally:
+            stderr.cancel()
+            await asyncio.gather(stderr, return_exceptions=True)
+
+    task = asyncio.get_running_loop().create_task(finish())
+    _FINISHING.add(task)
+    task.add_done_callback(_FINISHING.discard)
