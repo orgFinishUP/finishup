@@ -306,14 +306,16 @@ class RestControlStream:
     async def aclose(self) -> None:
         if self._state == "closed":
             return
-        sending = self._may_send() and self._state != "closing"
+        first = self._state != "closing"
         self._state = "closing"
         self._worker.cancel()
         tasks = tuple(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(self._worker, *tasks, return_exceptions=True)
-        if sending:
+        # Asked after the cancellations were awaited, right before the DELETEs: a logout, a
+        # lapse or zero-network meanwhile sends nothing more under the key this stream holds.
+        if first and self._may_send():
             await self._courtesy()
         self._state = "closed"
         self._outbound.put_nowait(b"")

@@ -607,7 +607,12 @@ Design v2 sections 2.1, 2.3 and 8.2. `client.ssh_discovery` (never on a hook's p
   and when a client left `state/profile-refresh-requested` (`service.client` leaves that marker
   when the server refuses a hello or request with `server_profile_changed`); at most once every 30
   seconds. A narrowing adjusts quietly (decision 10); anything else makes the next connection
-  refuse until the owner agrees again.
+  refuse until the owner agrees again. A fetched profile is recorded only while what it was fetched
+  under still holds (`server_profile.FetchBasis`, read before the key: the target's identity and
+  its credential generation): a `login`, `logout` or `remove` while a refresh was in flight
+  (`server_authorization_changed`) records nothing, so a profile answered to one key never becomes
+  another key's, and `server use` likewise records no consent to a profile fetched before such a
+  change (layer-5 review, second round).
 
 ### 18. Transport outages on every surface; request ids across servers (layer 4)
 
@@ -746,7 +751,10 @@ the direct style, the helper's refresh, a `login` check) compares that identity 
 envelope's before any byte is sent, so a CA file replaced since is `remote_identity_changed` and
 nothing (no key, no claim) reaches a server only the new CA trusts until the owner agrees again
 (`finishup server use NAME`, layer-5 review). The helper's refresh also asks, before each of its
-requests, that it is not stopping, not zero-network and that gate steps 2 to 4 still pass. The
+requests (so after every await: the key read, discovery), that it is not stopping, its target's stop
+epoch has not moved, not zero-network, that gate steps 2 to 4 still pass and that the credential
+generation has not moved since it began: a `logout` meanwhile sends nothing more with the key it
+read (layer-5 review, second round). The
 consent's principal is the key's id and principal, so another key is another identity and asks
 again (decision 23).
 

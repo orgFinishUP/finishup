@@ -103,6 +103,7 @@ __all__ = [
     "bind_prebuilt_check",
     "bump_credential_generation",
     "consent_digest",
+    "credential_generation",
     "credential_generation_path",
     "gate",
     "identity_digest",
@@ -166,6 +167,17 @@ def credential_generation_path(root: Path) -> Path:
     """``<target root>/config/credential-generation``."""
 
     return root / "config" / CREDENTIAL_GENERATION_NAME
+
+
+def credential_generation(root: Path) -> object:
+    """The identity of the target's credential generation now (``_stamp``); compared with one read
+    earlier, a difference means the owner logged in, out or removed meanwhile. One that cannot be
+    read equals nothing, not even itself read again. Never raises."""
+
+    try:
+        return _stamp(credential_generation_path(root))
+    except OSError:
+        return object()
 
 
 def read_generation(root: Path, *, selection_bound: bool) -> AuthorizationGeneration:

@@ -29,7 +29,10 @@ profile and compares it with the consented one (``consent_envelope.compare``):
   missing, unreadable or inconsistent): ``server_profile_changed``. Only the owner agrees again,
   on the trusted console.
 
-``refresh_profile`` records a newly fetched profile; on a narrowing it adjusts the stored consent
+``refresh_profile`` records a newly fetched profile only while what it was fetched under still
+holds (``FetchBasis``, read before the key was: the target's identity and its credential
+generation), so a fetch made with a key the owner has since replaced, logged out or removed is
+never recorded for the key stored now; on a narrowing it adjusts the stored consent
 down to it (stricter: a later widening, even back to what the owner once confirmed, asks again)
 and keeps the notice ``server status`` shows (``server_profile_narrowed``); on the same offer under
 a new revision it records only the revision. It changes only the consent of the record as stored
@@ -98,12 +101,14 @@ __all__ = [
     "ENVELOPE_NAME",
     "PROFILE_SOURCES",
     "ConsentVerdict",
+    "FetchBasis",
     "FetchedProfile",
     "ProfileSource",
     "consent_verdict",
     "consented_endpoint_identity",
     "consented_host_key",
     "endpoint_origin",
+    "fetch_basis",
     "forget_cached_profile",
     "read_cached_profile",
     "read_consented_envelope",
@@ -132,6 +137,33 @@ class FetchedProfile:
     document: bytes
     identity_type: str
     identity: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FetchBasis:
+    """What a profile fetch was made under, read before its key was read: the target's identity
+    (``authorization.identity_digest``) and its credential generation."""
+
+    identity: str
+    credential: object
+
+
+def fetch_basis(record: ServerTarget) -> FetchBasis:
+    """The basis a fetch for ``record`` starts from now (read it before the key). Never raises
+    for an unreadable generation: it then equals no later one."""
+
+    from finishup.client.authorization import credential_generation, identity_digest
+
+    return FetchBasis(identity_digest(record), credential_generation(target_root(record.target_id)))
+
+
+def _basis_holds(stored: ServerTarget, basis: FetchBasis) -> bool:
+    from finishup.client.authorization import credential_generation, identity_digest
+
+    return (
+        identity_digest(stored) == basis.identity
+        and credential_generation(target_root(stored.target_id)) == basis.credential
+    )
 
 
 class ProfileSource(Protocol):
@@ -571,17 +603,23 @@ def record_consent(
     envelope: ConsentEnvelope,
     *,
     now: str | None = None,
+    basis: FetchBasis | None = None,
 ) -> ServerTarget:
     """Record the owner's typed consent to ``envelope`` (built by ``consent_envelope_for``).
 
     Writes the profile cache, then the consented envelope, then the record (``/2``) with a fresh
     authorization of the current disclosure; returns the record as written. The caller holds the
     registry lock, read the record again under it (SRV-12), and asked on the trusted console.
+    With ``basis`` (read before the profile was fetched), nothing is recorded once the target or
+    its credential generation changed meanwhile (``TargetError("server_authorization_changed")``):
+    a consent to a profile answered to one key is never recorded for another.
     """
 
     stamp = now or _now()
     cached = _cached_from(fetched, stamp)
     root = target_root(record.target_id)
+    if basis is not None and not _basis_holds(record, basis):
+        raise TargetError("server_authorization_changed")
     _write(_cache_path(root), _encode_cache(cached))
     _write(_envelope_path(root), canonical_bytes(envelope) + b"\n")
     consented = replace(
@@ -608,7 +646,11 @@ def forget_cached_profile(root: Path) -> None:
 
 
 def refresh_profile(
-    record: ServerTarget, fetched: FetchedProfile, *, now: str | None = None
+    record: ServerTarget,
+    fetched: FetchedProfile,
+    *,
+    now: str | None = None,
+    basis: FetchBasis | None = None,
 ) -> ConsentVerdict:
     """Record a newly fetched profile and adjust the consent to it where that is quiet.
 
@@ -618,6 +660,11 @@ def refresh_profile(
     The profile is cached last when it narrows the consent, after the reduced consent is
     committed, and first otherwise (see the module text). The caller holds the registry lock.
     Returns the verdict.
+
+    With ``basis`` (a background fetch: the helper's refresh), nothing is recorded unless the
+    target is still the one it was fetched for and its credential generation has not moved since
+    (a login, logout or remove meanwhile): ``TargetError("server_authorization_changed")``, and
+    the profile answered to another key never becomes this one's.
     """
 
     stamp = now or _now()
@@ -626,6 +673,8 @@ def refresh_profile(
     stored = read_target(root)
     if stored is None or stored.target_id != record.target_id:
         raise TargetError("target_unknown")
+    if basis is not None and not _basis_holds(stored, basis):
+        raise TargetError("server_authorization_changed")
     consent = stored.consent
     try:
         consented = None if consent is None else read_consented_envelope(root, consent)

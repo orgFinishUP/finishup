@@ -14633,8 +14633,12 @@ discovery runs it on the server; server-host scope): starts this root's service 
 prints the verified profile.
 
 **Client.** `client.server_profile`: `consent_verdict(record)` (the gate's step 5),
-`consent_envelope_for`, `record_consent`, `refresh_profile`, `PROFILE_SOURCES` (empty in layer 3;
-`ssh` from layer 4), `styles_offered(record)` (layer 4).
+`consent_envelope_for`, `record_consent(..., basis=None)`, `refresh_profile(..., basis=None)`,
+`PROFILE_SOURCES` (empty in layer 3; `ssh` from layer 4), `styles_offered(record)` (layer 4).
+`FetchBasis(identity, credential)` and `fetch_basis(record)` (layer 5): read before a fetch reads
+its key; with a `basis`, `refresh_profile` and `record_consent` record nothing once the target's
+identity or its credential generation (`authorization.credential_generation(root)`) moved since
+(`TargetError("server_authorization_changed")`): the helper's refresh and `server use` pass one.
 `server status --json` gains `target.consent` (`{level, profile_revision, state: current | changed |
 level_unavailable, adjusted_at, coverage_reduced}`; `null` for a local target or one never
 consented); the owner display shows `server_profile_narrowed` while a narrowing adjusted the

@@ -1826,9 +1826,12 @@ def _use_remote(
 ) -> TargetSwitch:
     """``use_target`` for a remote target of an open kind (see there)."""
 
-    from finishup.client.server_profile import consent_envelope_for, record_consent
+    from finishup.client.server_profile import consent_envelope_for, fetch_basis, record_consent
 
     check_remote_hop()
+    # Read before the profile is fetched (and its key read): a login or logout while the owner is
+    # asked means the profile answered another key, so nothing is recorded (C2).
+    basis = fetch_basis(record)
     if authorize is None:
         # On the owner's terminal an unknown host key may be asked about (RE-11); the terminal
         # interface passes its own confirmation and never lets OpenSSH ask on its screen.
@@ -1853,10 +1856,19 @@ def _use_remote(
             consented, _profile = consent_envelope_for(stored, fetched, level="L1", retention=None)
             if consented != envelope:
                 raise ServerCommandRefused("server_profile_changed")
-            stored = record_consent(stored, fetched, consented)
+            stored = record_consent(stored, fetched, consented, basis=basis)
             previous = _selected_remote()
             write_selection(stored)
     except TargetError as error:
+        if error.reason == "server_authorization_changed":
+            raise ServerCommandRefused(
+                "server_profile_changed",
+                message=(
+                    f"the API key or record of {record.name} changed while you were asked (a "
+                    "login, logout or another change), so nothing was changed; run 'finishup "
+                    f"server use {record.name}' again"
+                ),
+            ) from None
         raise ServerCommandRefused(error.reason) from None
     return _leave(stored, previous)
 

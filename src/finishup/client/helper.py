@@ -631,17 +631,19 @@ type Refresher = Callable[[ServerTarget], Awaitable[None]]
 
 
 async def _refresh_over_ssh(record: ServerTarget) -> None:
-    """Fetch the server's profile over OpenSSH and record it under the registry lock."""
+    """Fetch the server's profile over OpenSSH and record it under the registry lock, only while
+    what it was fetched under still holds (``server_profile.FetchBasis``)."""
 
-    from finishup.client.server_profile import refresh_profile
+    from finishup.client.server_profile import fetch_basis, refresh_profile
     from finishup.client.ssh_discovery import fetch_profile_async
     from finishup.client.targets import registry_lock
 
+    basis = fetch_basis(record)
     fetched: FetchedProfile = await fetch_profile_async(record)
 
     def record_it() -> None:
         with registry_lock():
-            refresh_profile(record, fetched)
+            refresh_profile(record, fetched, basis=basis)
 
     await asyncio.to_thread(record_it)
 
@@ -650,23 +652,38 @@ async def _refresh_over_rest(
     record: ServerTarget, *, may_send: Callable[[], bool] | None = None
 ) -> None:
     """Fetch an HTTPS server's profile (``GET /v1/server``) and record it under the registry
-    lock (ADR-053): over the consented trust only, asking ``may_send`` before each request."""
+    lock (ADR-053): over the consented trust only, asking ``may_send`` before each request.
 
+    The credential generation is read before the key: every request asks that it has not moved
+    since (a ``server login``, ``logout`` or ``remove`` meanwhile: the key read may be the old
+    one, and nothing more is sent with it), and the profile is recorded only while it still has
+    not, for the target it was fetched for (``FetchBasis``): never a profile answered to another
+    key than the one stored now."""
+
+    from finishup.client.authorization import credential_generation
     from finishup.client.rest_client import RestUnavailable
     from finishup.client.rest_discovery import fetch_profile_async
-    from finishup.client.server_profile import refresh_profile
-    from finishup.client.targets import registry_lock
+    from finishup.client.server_profile import fetch_basis, refresh_profile
+    from finishup.client.targets import registry_lock, target_root
+
+    basis = fetch_basis(record)
+    root = target_root(record.target_id)
+
+    def allowed() -> bool:
+        if credential_generation(root) != basis.credential:
+            return False
+        return may_send is None or may_send()
 
     try:
         fetched: FetchedProfile = await fetch_profile_async(
-            record, consented=True, may_send=may_send
+            record, consented=True, may_send=allowed
         )
     except RestUnavailable as error:
         raise UpstreamUnavailable(error.reason) from None
 
     def record_it() -> None:
         with registry_lock():
-            refresh_profile(record, fetched)
+            refresh_profile(record, fetched, basis=basis)
 
     await asyncio.to_thread(record_it)
 
@@ -1251,10 +1268,14 @@ class Helper:
         )
 
     def _may_refresh_send(self) -> bool:
-        """Asked before each request of a REST profile refresh: not stopping, not zero-network,
-        and gate steps 2 to 4 (``_may_refresh``) still pass."""
+        """Asked before each request of a REST profile refresh: not stopping (nor the target's
+        stop epoch moved, which the next tick would see), not zero-network, and gate steps 2 to 4
+        (``_may_refresh``) still pass. The refresh itself also asks that the credential
+        generation has not moved since it began (``_refresh_over_rest``)."""
 
         if self._stop.is_set() or self._zero_network():
+            return False
+        if read_helper_epoch(self._root) != self._epoch:
             return False
         return self._may_refresh()
 

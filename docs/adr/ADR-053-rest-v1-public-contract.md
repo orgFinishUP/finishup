@@ -416,7 +416,10 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   repository-bound authorization.
 - **Close (A-STOP-DELETE).** Courtesy `DELETE`s for the agent and for calls still running, bounded
   at one second in all, and never sent once nothing may be sent (this computer is zero-network, or
-  the admission lapsed); the server ends an agent whose polls stop and forgets answers on its own.
+  the admission lapsed: a `logout` or `login` moves the credential generation); that is asked after
+  the close awaited its running requests' cancellation, right before the `DELETE`s, so a logout
+  landing meanwhile sends nothing under the key the stream holds; the server ends an agent whose
+  polls stop and forgets answers on its own.
 
 Nothing in the mapping logs or raises a host, URL, path or body. "Identical fault vectors" are
 tested over direct REST, relay REST and SSH control alike.

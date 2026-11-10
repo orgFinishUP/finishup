@@ -416,3 +416,88 @@ async def test_the_rest_profile_refresh_asks_before_each_of_its_requests(lab: _L
         )
     assert asked == [True, False]
     assert lab.backend.sessions == []
+
+
+# --- review fixes, second round -------------------------------------------------------------------
+
+
+async def test_a_refresh_fetched_before_a_login_never_records_its_profile_for_the_new_key(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2: the owner's login lands while the helper's refresh is fetching with the previous key;
+    the profile it fetched is never recorded for the key stored now (it would restore the
+    previous key's consent eligibility), and a refresh with nothing changed still records."""
+
+    from finishup.client import helper as helper_module
+    from finishup.client import rest_discovery
+    from finishup.client.server_profile import forget_cached_profile, read_cached_profile
+    from finishup.client.targets import TargetError
+
+    original = rest_discovery.fetch_profile_async
+    login = {"now": True}
+
+    async def fetched_then_login(record: ServerTarget, **options: Any) -> Any:
+        fetched = await original(record, **options)
+        if login["now"]:
+            # What 'server login' does first, under the registry lock: the previous key's
+            # profile is forgotten and the credential generation moves.
+            with targets.registry_lock():
+                forget_cached_profile(lab.root)
+                assert bump_credential_generation(lab.root)
+        return fetched
+
+    monkeypatch.setattr(rest_discovery, "fetch_profile_async", fetched_then_login)
+    refresh = helper_module._refresh_over_rest  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(TargetError) as changed:
+        await refresh(lab.record, may_send=lambda: True)
+    assert changed.value.reason == "server_authorization_changed"
+    assert read_cached_profile(lab.root) is None
+    login["now"] = False
+    await refresh(lab.record, may_send=lambda: True)
+    assert read_cached_profile(lab.root) is not None
+
+
+async def test_the_refresh_sends_nothing_with_the_old_key_once_the_owner_logged_out(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: a logout (the credential generation moving) between the refresh's requests withholds
+    every later one: the profile request is never sent with the key read before it."""
+
+    from finishup.client import helper as helper_module
+    from finishup.client import rest_discovery
+    from finishup.client.ssh_transport import UpstreamUnavailable
+
+    profiles: list[int] = []
+    original_profile = ScriptedRestBackend.profile
+
+    async def counted(self: ScriptedRestBackend) -> Any:
+        profiles.append(1)
+        return await original_profile(self)
+
+    monkeypatch.setattr(ScriptedRestBackend, "profile", counted)
+    original_discover = rest_discovery.discover
+
+    async def discover_then_logout(transport: RestTransport) -> Any:
+        discovery = await original_discover(transport)
+        assert bump_credential_generation(lab.root)  # 'server logout' lands now
+        return discovery
+
+    monkeypatch.setattr(rest_discovery, "discover", discover_then_logout)
+    with pytest.raises(UpstreamUnavailable):
+        await helper_module._refresh_over_rest(  # pyright: ignore[reportPrivateUsage]
+            lab.record, may_send=lambda: True
+        )
+    assert profiles == []
+
+
+async def test_the_refresh_asks_the_stop_epoch_before_each_request(lab: _Lab) -> None:
+    """B2: a stop (``server logout``, ``disconnect``, ...) moves the target's stop epoch; the
+    refresh asks it before each request, before the helper's next tick sees it."""
+
+    from finishup.client import helper_status
+
+    helper = Helper(lab.root, lab.record)
+    may_send = helper._may_refresh_send  # pyright: ignore[reportPrivateUsage]
+    assert may_send()
+    assert helper_status._move_helper_epoch(lab.root)  # pyright: ignore[reportPrivateUsage]
+    assert not may_send()

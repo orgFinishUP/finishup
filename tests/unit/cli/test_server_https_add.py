@@ -606,3 +606,34 @@ def test_a_login_refused_before_anything_changed_still_says_nothing_was_stored(
     assert read_cached_profile(root) == cached
     assert credential_generation_path(root).read_bytes() == generation
     assert runtime.stops == []
+
+
+def test_server_use_never_records_a_consent_to_a_profile_another_key_answered(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2: a login that lands while the owner is asked (after the profile was fetched with the
+    previous key) means that profile answered another key: nothing is recorded or selected."""
+
+    remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web", b"web")
+    assert (
+        _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file())).exit_code
+        == 0
+    )
+    record, root = _added()
+    before = targets.read_target(root)
+    original = server_cli._fetch_profile  # pyright: ignore[reportPrivateUsage]
+
+    def fetched_then_login(target: ServerTarget) -> Any:
+        fetched = original(target)
+        from finishup.client.authorization import bump_credential_generation
+
+        assert bump_credential_generation(root)  # 'server login' elsewhere, meanwhile
+        return fetched
+
+    monkeypatch.setattr(server_cli, "_fetch_profile", fetched_then_login)
+    refused = _invoke("use", "web")
+    assert refused.exit_code != 0
+    assert "changed while you were asked" in refused.stderr
+    assert targets.read_target(root) == before
+    assert targets.read_selected_target_id() != record.target_id

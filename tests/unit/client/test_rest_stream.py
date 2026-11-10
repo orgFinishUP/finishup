@@ -641,3 +641,37 @@ async def test_a_cancel_refused_before_admission_is_sent_again_whatever_the_answ
     assert cast(Mapping[str, Any], result["body"])["code"] == "request_cancelled"
     assert deletes == [f"/v1/operations/{call.rpc_id}"] * 2
     await stream.aclose()
+
+
+# --- review fixes, second round -------------------------------------------------------------------
+
+
+async def test_close_asks_again_after_it_awaited_the_cancellations() -> None:
+    """B2: a logout (here: the stream's authorization refusing) that lands while the close awaits
+    its running requests' cancellation sends no courtesy DELETE under the key the stream holds."""
+
+    from finishup.rest.contract import operation_pending_document
+
+    sending = {"now": True}
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        if path == "/v1/session":
+            return _session_answer()
+        if method == "POST":
+            return RestAnswer(202, {}, operation_pending_document(headers["finishup-operation-id"]))
+        if method == "GET":
+            try:
+                await asyncio.Event().wait()  # the poll stays under way until the close
+            finally:
+                sending["now"] = False  # the owner's logout lands while it is cancelled
+        return RestAnswer(204, {}, b"")
+
+    transport = _Scripted(script)
+    stream = RestControlStream(transport, may_send=lambda: sending["now"])
+    await _open(stream)
+    await stream.send_all(encode_control_frame(_call()))
+    await _until(lambda: any(path.startswith("/v1/operations/") for _m, path, _h in transport.sent))
+    assert sending["now"]
+    await stream.aclose()
+    assert not sending["now"]
+    assert [path for method, path, _headers in transport.sent if method == "DELETE"] == []
