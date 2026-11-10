@@ -134,6 +134,9 @@ from finishup.ports.workspace_agent import (
     CaptureMetadataArguments,
     CheckPolicyRead,
     ClassifyUndeclaredReferencesArguments,
+    CodeSyncPrepareArguments,
+    CodeSyncPrepared,
+    CodeSyncReadArguments,
     CountChangeLinesArguments,
     InspectArguments,
     ListBeneathArguments,
@@ -342,6 +345,26 @@ def _reached_through_fence(
     return True
 
 
+# Level L2's sync (ADR-054): declared only by an agent given a responder (the helper's).
+_CODE_SYNC_OPERATIONS: Final[frozenset[str]] = frozenset(
+    {WorkspaceOperation.CODE_SYNC_PREPARE.value, WorkspaceOperation.CODE_SYNC_READ.value}
+)
+
+
+class CodeSyncRefused(Exception):
+    """A closed reply reason from a code-sync responder (``client.code_sync``)."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _CodeSync(Protocol):
+    def prepare(self, arguments: CodeSyncPrepareArguments) -> CodeSyncPrepared: ...
+
+    def read(self, arguments: CodeSyncReadArguments) -> bytes: ...
+
+
 class _OwnAuthorization(Protocol):
     """Whether this agent's own connection may go on (``service.client.AuthorizationCheck``)."""
 
@@ -371,6 +394,7 @@ class WorkspaceAgentHandler:
     __slots__ = (
         "_capture",
         "_check_policy_trust",
+        "_code_sync",
         "_declaration",
         "_held_roots",
         "_inspect",
@@ -401,6 +425,7 @@ class WorkspaceAgentHandler:
         held_roots: Callable[[], tuple[str, ...]] | None = None,
         own_authorization: _OwnAuthorization | None = None,
         role: Literal["connection", "background"] = "connection",
+        code_sync: _CodeSync | None = None,
     ) -> None:
         """``workspace`` is the locator the connection's claim was computed from; never the
         filesystem root, which no claim names (``workspace_locator_path_invalid``).
@@ -440,6 +465,10 @@ class WorkspaceAgentHandler:
 
         ``role`` is declared in the hello (ADR-052, design v2 section 8.5): ``connection`` for the
         agent of the connection in front of the workspace, ``background`` for the helper's.
+
+        ``code_sync`` (level L2, ADR-054) answers the two code-sync operations; only a
+        ``background`` agent may have one (the helper's), and only an agent with one declares them,
+        whatever ``operations`` lists: no other agent ever offers to sync.
         """
 
         if type(workspace) is not WorkspaceLocator:
@@ -449,9 +478,16 @@ class WorkspaceAgentHandler:
         directories = client_protected_directories() if protected is None else tuple(protected)
         if any(type(item) is not str or not item.startswith("/") for item in directories):
             raise ValueError("workspace_agent_protected_invalid")
+        if code_sync is not None and role != "background":
+            raise ValueError("workspace_agent_code_sync_role_invalid")
+        syncing = frozenset() if code_sync is None else _CODE_SYNC_OPERATIONS
         offered = tuple(
             sorted(
-                set(WORKSPACE_OPERATION_NAMES if operations is None else operations),
+                (
+                    set(WORKSPACE_OPERATION_NAMES if operations is None else operations)
+                    - _CODE_SYNC_OPERATIONS
+                )
+                | syncing,
                 key=str.encode,
             )
         )
@@ -483,6 +519,7 @@ class WorkspaceAgentHandler:
         # this connection's own authorization (ADR-052).
         self._held_roots = held_roots
         self._own_authorization = own_authorization
+        self._code_sync = code_sync
         self._opened: OrderedDict[str, LocalWorkspaceHandle] = OrderedDict()
         self._opened_guard = threading.Lock()
         self._table: dict[WorkspaceOperation, Callable[[Any, _Call], object]] = {
@@ -504,6 +541,8 @@ class WorkspaceAgentHandler:
             WorkspaceOperation.LIST_CHANGED_PATHS: self._list_changed_paths,
             WorkspaceOperation.INSPECT: self._inspect_paths,
             WorkspaceOperation.RUN_APPROVED_CHECK: self._run_approved_check,
+            WorkspaceOperation.CODE_SYNC_PREPARE: self._code_sync_prepare,
+            WorkspaceOperation.CODE_SYNC_READ: self._code_sync_read,
         }
 
     @property
@@ -1238,6 +1277,26 @@ class WorkspaceAgentHandler:
         from finishup.client.observation_outbox import check_policy_trusted
 
         return check_policy_trusted(self._root, policy_digest)
+
+    def _code_sync_prepare(self, arguments: CodeSyncPrepareArguments, call: _Call) -> object:
+        self._workspace(arguments.workspace, call)
+        responder = self._code_sync
+        if responder is None:
+            raise _Outcome("operation_not_declared")
+        try:
+            return responder.prepare(arguments)
+        except CodeSyncRefused as refused:
+            raise _Outcome(refused.reason) from None
+
+    def _code_sync_read(self, arguments: CodeSyncReadArguments, call: _Call) -> object:
+        self._workspace(arguments.workspace, call)
+        responder = self._code_sync
+        if responder is None:
+            raise _Outcome("operation_not_declared")
+        try:
+            return responder.read(arguments)
+        except CodeSyncRefused as refused:
+            raise _Outcome(refused.reason) from None
 
     def _run_approved_check(self, arguments: RunApprovedCheckArguments, call: _Call) -> object:
         """Run one argv only when the policy the owner trusted on this client approves exactly it.

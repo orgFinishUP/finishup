@@ -289,7 +289,10 @@ def test_the_declaration_offers_the_catalog_and_the_frame_bound(
     repository: Path, protected: Path
 ) -> None:
     handler = _handler(repository, protected)
-    assert handler.declaration.operations == WORKSPACE_OPERATION_NAMES
+    # Every operation but level L2's sync, which only the helper's background agent offers.
+    assert handler.declaration.operations == tuple(
+        name for name in WORKSPACE_OPERATION_NAMES if not name.startswith("code_sync_")
+    )
     assert handler.declaration.max_reply_bytes == 6_291_456
     narrowed = _handler(repository, protected, operations=("read_task_base", "capture"))
     assert narrowed.declaration.operations == ("capture", "read_task_base")

@@ -965,7 +965,11 @@ def export_snapshot(
     """
 
     gate()
-    root = request.root
+    # Every listing is made from the worktree's top level (the locator may name a folder in it).
+    top = _git(request.root, "rev-parse", "--show-toplevel").rstrip(b"\n")
+    if not top.startswith(b"/"):
+        raise ExportRefused("code_export_root_unavailable")
+    root = Path(os.fsdecode(top))
     base_commit, object_format = _resolve_base(root, request.base_commit)
     try:
         root_fd = os.open(root, _OPEN_DIRECTORY)

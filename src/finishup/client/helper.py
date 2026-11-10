@@ -599,6 +599,7 @@ async def open_helper_agent(
             target=record,
             authorization=admission,
             role="background",
+            code_sync=True,
         )
     except (RepositoryIdentityError, TargetError, ValueError, OSError):
         return None
