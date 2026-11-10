@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives import keywrap
 from tests.builders.server_copy import Snapshot, held_lookup, snapshot_objects
 
+from finishup.protocol import server_copy
 from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
@@ -270,9 +271,18 @@ def test_hostile_or_broken_uploads_are_refused(tmp_path: Path) -> None:
 
 def test_quotas_bound_a_copy_and_a_principal(tmp_path: Path) -> None:
     snap = snapshot_objects(BASE, CURRENT)
-    tight = StoreLimits(max_file_bytes=65_536, max_repo_bytes=10)
+    # A checkout over the cap whose pack the copy's quota still holds: too large, not over quota.
+    large = snapshot_objects(BASE, {**CURRENT, "big.bin": os.urandom(8_192)})
+    large_verified = verify_snapshot_bundle(
+        large.bundle(), have=lambda _o: None, limits=BundleLimits(max_file_bytes=65_536)
+    )
+    cap = large_verified.tree_bytes - 1
+    assert 4 * cap >= large_verified.new_bytes
+    tight = StoreLimits(max_file_bytes=65_536, max_repo_bytes=cap)
     with pytest.raises(CodeStoreError, match="code_copy_too_large"):
-        _upload(_store(tmp_path / "a", limits=tight), snap.bundle(), _manifest(snap, snap.bundle()))
+        _upload(
+            _store(tmp_path / "a", limits=tight), large.bundle(), _manifest(large, large.bundle())
+        )
     verified = verify_snapshot_bundle(
         snap.bundle(), have=lambda _o: None, limits=BundleLimits(max_file_bytes=65_536)
     )
@@ -291,6 +301,48 @@ def test_quotas_bound_a_copy_and_a_principal(tmp_path: Path) -> None:
     assert 0 < admitted < 40
     # Another principal has its own quota.
     _upload(store, snap.bundle(), _manifest(snap, snap.bundle()), principal="bob")
+
+
+def test_a_pack_inflating_past_the_quota_left_is_refused_before_it_is_inflated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A4/B4: many distinct, highly compressible blobs in a tiny bundle.
+    hostile = snapshot_objects(
+        BASE, {f"f{number}.txt": bytes([65 + number]) * 60_000 for number in range(26)}
+    )
+    bundle = hostile.bundle()
+    assert len(bundle) < 16_384
+    manifest = _manifest(hostile, bundle)
+    snap = snapshot_objects(BASE, CURRENT)
+    snap_manifest = _manifest(snap, snap.bundle())
+    inflated: list[int] = []
+    real = server_copy._inflate  # pyright: ignore[reportPrivateUsage]
+
+    def counting(view: memoryview, position: int, size: int) -> tuple[bytes, int]:
+        inflated.append(size)
+        return real(view, position, size)
+
+    monkeypatch.setattr(server_copy, "_inflate", counting)
+    limits = StoreLimits(max_file_bytes=65_536, max_repo_bytes=65_536)  # copy quota 256 KiB
+    store = _store(tmp_path, limits=limits)
+    with pytest.raises(CodeStoreError, match="code_copy_over_quota"):
+        _upload(store, bundle, manifest)
+    assert sum(inflated) <= limits.copy_quota
+    assert len(inflated) < len(hostile.objects)
+    assert store.have("alice", "repo-1") == ()
+    # The principal's quota left bounds it too: alice's other copies used most of it.
+    fit = sum(len(item.data) for item in snap.objects.values())
+    principal = StoreLimits(max_file_bytes=65_536, max_repo_bytes=fit // 4 + 1)
+    assert principal.copy_quota >= fit and principal.principal_quota < 5 * fit
+    shared = _store(tmp_path / "principal", limits=principal)
+    for number in range(4):
+        _upload(shared, snap.bundle(), snap_manifest, repository=f"r{number}")
+    inflated.clear()
+    with pytest.raises(CodeStoreError, match="code_copy_over_quota"):
+        _upload(shared, snap.bundle(), snap_manifest, repository="r4")
+    assert len(inflated) < len(snap.objects)
+    # Bob's budget is his own.
+    _upload(shared, snap.bundle(), snap_manifest, principal="bob")
 
 
 def test_one_principal_never_reaches_another_s_copy(tmp_path: Path) -> None:

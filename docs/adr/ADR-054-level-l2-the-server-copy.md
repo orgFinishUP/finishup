@@ -125,7 +125,11 @@ so the two cannot disagree. It refuses deltas, tags, a second ref, bad ids, trai
 unreachable or missing objects, any other commit shape, unsorted, duplicate or case-colliding tree
 entries, `.git` aliases (by case, trailing dots or spaces, HFS+ ignorable code points, `git~1`,
 NTFS streams), `.gitmodules`, `.gitattributes`, `.gitignore` or `.mailmap` as links, unknown
-modes, links over 4 KiB or holding NUL, trees deeper than 128 and sizes over the caps.
+modes, links over 4 KiB or holding NUL, trees deeper than 128 and sizes over the caps. A pack
+whose objects together inflate past the receiver's budget is refused before the object that
+passes it is inflated (`pack_over_budget`): the store's budget is what the copy's and the
+principal's quotas still allow, so a small pack of many compressible objects never allocates
+more than the quota would refuse afterwards (`code_copy_over_quota`).
 
 The snapshot manifest, `yoetz.code-snapshot/1`, travels with the bundle: the snapshot and base
 commits and their trees, the original base commit and object format (provenance), the export id,

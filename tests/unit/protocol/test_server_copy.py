@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from tests.builders.server_copy import git, git_bytes, held_lookup, snapshot_objects
 
+from finishup.protocol import server_copy
 from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
@@ -270,6 +271,44 @@ def test_a_pack_that_does_not_verify_is_refused() -> None:
     lying[-20:] = hashlib.sha1(bytes(lying[:-20]), usedforsecurity=False).digest()
     with pytest.raises(CopyError, match="pack_object_size_mismatch"):
         read_pack(bytes(lying), LIMITS)
+
+
+def test_a_pack_past_its_inflated_budget_is_refused_before_inflating_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each object is under the per-object cap; together they pass the budget (A4/B4).
+    blobs = [GitObject("blob", bytes([65 + number]) * 1_000) for number in range(4)]
+    pack = write_pack(blobs)
+    assert len(pack) < 200  # compressed: tiny on the wire
+    inflated: list[int] = []
+    real = server_copy._inflate  # pyright: ignore[reportPrivateUsage]
+
+    def counting(view: memoryview, position: int, size: int) -> tuple[bytes, int]:
+        inflated.append(size)
+        return real(view, position, size)
+
+    monkeypatch.setattr(server_copy, "_inflate", counting)
+    with pytest.raises(CopyError, match="pack_over_budget"):
+        read_pack(pack, BundleLimits(max_file_bytes=1_000, max_inflated_bytes=2_999))
+    # The third object would pass the budget: it is never inflated.
+    assert inflated == [1_000, 1_000]
+    inflated.clear()
+    assert len(read_pack(pack, BundleLimits(max_file_bytes=1_000, max_inflated_bytes=4_000))) == 4
+    assert sum(inflated) == 4_000
+    # Trees and commits count too, and the whole bundle is verified under the same budget.
+    snap = snapshot_objects(BASE, CURRENT)
+    total = sum(len(item.data) for item in snap.objects.values())
+    verified = verify_snapshot_bundle(
+        snap.bundle(), have=_nothing, limits=replace(LIMITS, max_inflated_bytes=total)
+    )
+    assert verified.new_bytes == total
+    with pytest.raises(CopyError, match="pack_over_budget"):
+        verify_snapshot_bundle(
+            snap.bundle(), have=_nothing, limits=replace(LIMITS, max_inflated_bytes=total - 1)
+        )
+    for invalid in (-1, True, 1.5):
+        with pytest.raises(CopyError, match="limits_invalid"):
+            BundleLimits(max_file_bytes=1, max_inflated_bytes=invalid)  # type: ignore[arg-type]
 
 
 def test_every_truncation_of_a_valid_bundle_is_a_closed_refusal() -> None:

@@ -22,9 +22,10 @@ plaintext a server owner already copied out of a running service; the docs say s
 chunks in order; ``commit`` decrypts the staged bundle, checks its digest, verifies it with the
 same verifier the client's audit ran (``protocol.server_copy.verify_snapshot_bundle``) against the
 objects this copy holds, checks the manifest against what was verified and against the revision and
-claim the service names, applies the quotas, writes the objects, then the manifest, then the index,
-and the copy record last (each to a temporary file, fsynced, renamed). A crash before the last rename
-leaves the previous snapshot in force.
+claim the service names, applies the quotas (what they still allow is also the budget the pack's
+objects may inflate to, checked before each is inflated), writes the objects, then the manifest,
+then the index, and the copy record last (each to a temporary file, fsynced, renamed). A crash
+before the last rename leaves the previous snapshot in force.
 
 **Forget (§4.3, U20, §8.7).** ``forget`` first advances the copy's **epoch** in the tombstone record
 (fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), then
@@ -658,6 +659,16 @@ class CodeStore:
             kind, size, files, tree = entry
             return Held(cast(str, kind), cast(int, size), cast(int, files), cast(str | None, tree))
 
+        # What the copy's and the principal's quotas still allow bounds the bytes the pack may
+        # inflate to, checked before each object is inflated (a hostile pack never allocates
+        # more than the quota it would be refused for afterwards).
+        budget = max(
+            0,
+            min(
+                self._limits.copy_quota - cast(int, record["stored_bytes"]),
+                self._limits.principal_quota - self._principal_bytes(upload.principal),
+            ),
+        )
         try:
             verified = verify_snapshot_bundle(
                 bundle,
@@ -665,9 +676,12 @@ class CodeStore:
                 limits=BundleLimits(
                     max_file_bytes=self._limits.max_file_bytes,
                     max_bundle_bytes=self._limits.max_bundle_bytes,
+                    max_inflated_bytes=budget,
                 ),
             )
         except CopyError as error:
+            if error.reason == "pack_over_budget":
+                raise CodeStoreError("code_copy_over_quota") from error
             raise CodeStoreError("code_bundle_invalid") from error
         if (
             verified.snapshot != manifest.snapshot

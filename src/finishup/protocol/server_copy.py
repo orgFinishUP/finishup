@@ -383,16 +383,29 @@ def write_pack(objects: Sequence[GitObject]) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class BundleLimits:
-    """Caps a bundle is verified under (from the server profile's ``code_sync``)."""
+    """Caps a bundle is verified under (from the server profile's ``code_sync``).
+
+    ``max_inflated_bytes`` bounds the inflated bytes of all the pack's objects together. Each
+    object's declared size is added before that object is inflated, and the pack is refused
+    (``pack_over_budget``) as soon as the sum passes the budget. Without it, a pack under
+    ``max_bundle_bytes`` holding many distinct, highly compressible objects could allocate
+    gigabytes. A receiver of a bundle it did not build passes a budget (the store passes what the
+    copy's and the principal's quotas still allow); ``None`` keeps only the per-object caps (a
+    sender auditing the bundle it just built from its own bytes).
+    """
 
     max_file_bytes: int
     max_bundle_bytes: int = 67_108_864
     max_objects: int = 200_000
+    max_inflated_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for value in (self.max_file_bytes, self.max_bundle_bytes, self.max_objects):
             if type(value) is not int or value < 1:
                 raise CopyError("limits_invalid")
+        budget = self.max_inflated_bytes
+        if budget is not None and (type(budget) is not int or budget < 0):
+            raise CopyError("limits_invalid")
 
 
 def _inflate(view: memoryview, position: int, size: int) -> tuple[bytes, int]:
@@ -421,7 +434,8 @@ def _inflate(view: memoryview, position: int, size: int) -> tuple[bytes, int]:
 
 def read_pack(data: bytes, limits: BundleLimits) -> dict[str, GitObject]:
     """Every object of a pack v2 of whole objects, by id; refuses deltas, tags, duplicates,
-    oversized objects and a trailer or count that does not verify."""
+    oversized objects, a pack whose objects together inflate past the budget (checked before
+    each object is inflated) and a trailer or count that does not verify."""
 
     if len(data) < 32 or data[:4] != b"PACK":
         raise CopyError("pack_invalid")
@@ -433,6 +447,8 @@ def read_pack(data: bytes, limits: BundleLimits) -> dict[str, GitObject]:
     view = memoryview(data)
     position = 12
     objects: dict[str, GitObject] = {}
+    budget = limits.max_inflated_bytes
+    inflated = 0
     for _ in range(count):
         if position >= len(data) - 20:
             raise CopyError("pack_truncated")
@@ -456,6 +472,10 @@ def read_pack(data: bytes, limits: BundleLimits) -> dict[str, GitObject]:
         cap = limits.max_file_bytes if kind == "blob" else _MAX_META_OBJECT_BYTES
         if size > cap:
             raise CopyError("pack_object_too_large")
+        # The declared size bounds what ``_inflate`` may allocate (it refuses any other size).
+        inflated += size
+        if budget is not None and inflated > budget:
+            raise CopyError("pack_over_budget")
         content, position = _inflate(view, position, size)
         item = GitObject(kind, content)
         if item.oid in objects:
