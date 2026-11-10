@@ -355,6 +355,8 @@ _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
         ),
         OutsideInputsRead((), (0, 2)),
         OutsideInputsRead(()),
+        # ADR-052 O7: values a held repository's fence kept unread, counted.
+        OutsideInputsRead((), (1,), (), 3),
     ),
     WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS: (
         OutsideSnapshotsRead(
@@ -368,6 +370,7 @@ _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
             (1,),
         ),
         OutsideSnapshotsRead(()),
+        OutsideSnapshotsRead((), (), (0,), 4_096),
     ),
     WorkspaceOperation.READ_DECLARED_TEST: (b"def test_x():\n    assert True\n", None),
     WorkspaceOperation.READ_TEXT_BENEATH: ((b"abc\x00\xff", 5), (b"", 2_000_000), None),
@@ -589,6 +592,45 @@ def test_a_wrong_typed_task_input_field_is_a_refused_result(name: str, value: ob
     with pytest.raises(WorkspaceCodecError) as refused:
         spec.decode_result(encoded)
     assert refused.value.reason == "result_invalid"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [WorkspaceOperation.READ_OUTSIDE_INPUTS, WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS],
+)
+@pytest.mark.parametrize("fenced", [-1, 4_097, True, "1", 1.0, None, "missing"])
+def test_an_outside_read_needs_its_fenced_count_within_bounds(
+    operation: WorkspaceOperation, fenced: object
+) -> None:
+    """ADR-052 O7: ``fenced`` is required on the wire (control 2.10.0 is unreleased and changes
+    in lockstep, so no older agent's answer is admitted without it) and bounded by the call's
+    value bound; anything else is an untrusted reply refused as ``result_invalid``."""
+
+    spec = WORKSPACE_OPERATION_CATALOG[operation]
+    value = (
+        OutsideInputsRead((), (), (), 2)
+        if operation is WorkspaceOperation.READ_OUTSIDE_INPUTS
+        else OutsideSnapshotsRead((), (), (), 2)
+    )
+    encoded = cast(dict[str, Any], strict_json_parse(canonical_encode(spec.encode_result(value))))
+    assert encoded["fenced"] == 2
+    assert spec.decode_result(encoded) == value
+    if fenced == "missing":
+        del encoded["fenced"]
+    else:
+        encoded["fenced"] = fenced
+    with pytest.raises(WorkspaceCodecError) as refused:
+        spec.decode_result(encoded)
+    assert refused.value.reason == "result_invalid"
+    # The service side never sends one either.
+    if type(fenced) is int:
+        bad = (
+            OutsideInputsRead((), (), (), fenced)
+            if operation is WorkspaceOperation.READ_OUTSIDE_INPUTS
+            else OutsideSnapshotsRead((), (), (), fenced)
+        )
+        with pytest.raises(WorkspaceCodecError):
+            spec.encode_result(bad)
 
 
 def test_the_approved_check_timeout_is_the_exact_float() -> None:

@@ -781,11 +781,17 @@ class OutsideInputsRead:
     input was admitted to the agent. Reported only for a value the local outside-input candidate
     rule would look at, outside the claimed workspace and FinishUP's own directories; never which
     folder, never a path the server did not send.
+
+    ``fenced`` is how many of the call's ``values`` the agent left unread because they reached a
+    repository this client's owner holds from the server (ADR-052 O7; ``client.repository_hold``):
+    a count only, never which value or which repository. Required on the wire (control 2.10.0,
+    unreleased, changes in lockstep), at most the call's value bound.
     """
 
     inputs: tuple[TaskInputFile, ...] = field(repr=False)
     unlisted: tuple[int, ...] = ()
     listed: tuple[int, ...] = ()
+    fenced: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,11 +804,13 @@ class OutsideSnapshotsRead:
     not anything is there now and whether or not a local read would read it, since the server
     would send its copy, not the file (ADR-051 decision 5). Never narrowed by this machine's
     files, it tells the server no more than ``listed`` does, beside the mode; empty in ``local``
-    mode. A task-start snapshot simply keeps no copy of such a value."""
+    mode. A task-start snapshot simply keeps no copy of such a value. ``fenced`` is as for
+    ``OutsideInputsRead``."""
 
     reads: tuple[OutsideSnapshotRead, ...] = field(repr=False)
     unlisted: tuple[int, ...] = ()
     listed: tuple[int, ...] = ()
+    fenced: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1643,10 +1651,18 @@ def _decode_unlisted(value: object) -> tuple[int, ...]:
     )
 
 
+def _fenced_valid(value: object) -> int:
+    """How many of a call's ``values`` reached a held repository's fence (ADR-052 O7): an
+    integer from zero to the argument bound."""
+
+    return _int(value, 0, _MAX_PATH_LIST)
+
+
 def _encode_outside_read(value: OutsideInputsRead) -> JsonValue:
     if type(value) is not OutsideInputsRead:
         raise _fail()
     return {
+        "fenced": _fenced_valid(value.fenced),
         "inputs": _encode_task_inputs(value.inputs),
         "listed": list(_unlisted_valid(value.listed)),
         "unlisted": list(_unlisted_valid(value.unlisted)),
@@ -1654,11 +1670,12 @@ def _encode_outside_read(value: OutsideInputsRead) -> JsonValue:
 
 
 def _decode_outside_read(value: object) -> OutsideInputsRead:
-    fields_ = _object(value, frozenset({"inputs", "listed", "unlisted"}))
+    fields_ = _object(value, frozenset({"fenced", "inputs", "listed", "unlisted"}))
     return OutsideInputsRead(
         _decode_task_inputs(fields_["inputs"]),
         _decode_unlisted(fields_["unlisted"]),
         _decode_unlisted(fields_["listed"]),
+        _fenced_valid(fields_["fenced"]),
     )
 
 
@@ -1718,6 +1735,7 @@ def _encode_snapshots_read(value: OutsideSnapshotsRead) -> JsonValue:
     if type(value) is not OutsideSnapshotsRead:
         raise _fail()
     return {
+        "fenced": _fenced_valid(value.fenced),
         "listed": list(_unlisted_valid(value.listed)),
         "reads": _encode_snapshot_reads(value.reads),
         "unlisted": list(_unlisted_valid(value.unlisted)),
@@ -1725,11 +1743,12 @@ def _encode_snapshots_read(value: OutsideSnapshotsRead) -> JsonValue:
 
 
 def _decode_snapshots_read(value: object) -> OutsideSnapshotsRead:
-    fields_ = _object(value, frozenset({"listed", "reads", "unlisted"}))
+    fields_ = _object(value, frozenset({"fenced", "listed", "reads", "unlisted"}))
     return OutsideSnapshotsRead(
         _decode_snapshot_reads(fields_["reads"]),
         _decode_unlisted(fields_["unlisted"]),
         _decode_unlisted(fields_["listed"]),
+        _fenced_valid(fields_["fenced"]),
     )
 
 

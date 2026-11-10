@@ -375,11 +375,14 @@ class _OwnAuthorization(Protocol):
 class _Call:
     """What one call may use: the session's workspace handle, the call's own deadline, and the
     directories it never reads (FinishUP's own, then the held repositories', read once per call).
+    ``held`` is the held repositories' part of ``fence`` alone: the outside reads count the
+    values that reached it (``fenced``, ADR-052 O7).
     """
 
     handle: str | None
     deadline: float
     fence: tuple[str, ...] = ()
+    held: tuple[str, ...] = ()
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
@@ -597,10 +600,12 @@ class WorkspaceAgentHandler:
             arguments = spec.decode_arguments(call.arguments)
         except WorkspaceCodecError:
             raise _Outcome("arguments_invalid") from None
+        held = self._held()
         context = _Call(
             handle if workspace_handle_valid(handle) else None,
             time.monotonic() + call.deadline_ms / 1_000,
-            self._fence(),
+            (*self._protected, *held),
+            held,
         )
         value = self._table[spec.operation](arguments, context)
         try:
@@ -621,8 +626,9 @@ class WorkspaceAgentHandler:
         except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
             return False
 
-    def _fence(self) -> tuple[str, ...]:
-        """FinishUP's own directories, then every other held repository's recorded worktrees.
+    def _held(self) -> tuple[str, ...]:
+        """Every other held repository's recorded worktrees, fenced after FinishUP's own
+        directories.
 
         Read once per call. A held worktree that is, contains or lies inside the claimed
         workspace is left out: fencing it would silently empty the workspace's own reads, and a
@@ -632,15 +638,15 @@ class WorkspaceAgentHandler:
 
         reader = self._held_roots
         if reader is None:
-            return self._protected
+            return ()
         try:
             found = reader()
         except Exception:  # noqa: BLE001 - unknown is not held: nothing more is fenced
-            return self._protected
+            return ()
         if type(found) is not tuple:
-            return self._protected
+            return ()
         root = self._root.rstrip("/") + "/"
-        held = tuple(
+        return tuple(
             path
             for path in cast(tuple[object, ...], found)
             if type(path) is str
@@ -649,7 +655,36 @@ class WorkspaceAgentHandler:
             and not self._inside_claimed(path)
             and not root.startswith(path.rstrip("/") + "/")
         )
-        return (*self._protected, *held) if held else self._protected
+
+    def _fenced_count(self, roots: Sequence[str], values: Sequence[str], call: _Call) -> int:
+        """How many of the server's ``values`` an outside read left unread because they reached
+        a held repository's fence (ADR-052 O7): an absolute value the local outside-input
+        candidate rule would look at, outside the claimed worktree and at or beneath a root the
+        read walks or a listed folder, that lies in a held worktree by its spelling or reaches one
+        through a symlinked or bind-mounted component. A count only: never which value or which
+        repository, and nothing inside a held worktree is examined to tell it.
+        """
+
+        if not call.held:
+            return 0
+        identities = _fence_identities(call.held)
+        every = (*roots, *self._outside().folders)
+        count = 0
+        for value in values:
+            if not value.startswith("/") or "\x00" in value:
+                continue
+            path = posixpath.normpath(value)
+            if (
+                self._inside_claimed(path)
+                or not _outside_candidate(path)
+                or not folder_covers(path, every)
+            ):
+                continue
+            if _folded_within(path, call.held) or (
+                identities is not None and _reached_through_fence(path, call.held, identities)
+            ):
+                count += 1
+        return count
 
     def _workspace(self, named: str, call: _Call) -> str:
         """The claimed root, when ``named`` is this connection's own workspace handle."""
@@ -1022,7 +1057,8 @@ class WorkspaceAgentHandler:
         inputs = read_outside_inputs(
             roots, values, limit=arguments.limit, excluded=excluded, space_cut=arguments.space_cut
         )
-        return OutsideInputsRead(inputs, unlisted, listed)
+        fenced = self._fenced_count(arguments.roots, arguments.values, call)
+        return OutsideInputsRead(inputs, unlisted, listed, fenced)
 
     def _snapshot_outside_inputs(
         self, arguments: SnapshotOutsideInputsArguments, call: _Call
@@ -1042,7 +1078,8 @@ class WorkspaceAgentHandler:
             seconds=min(arguments.budget_ms / 1_000, call.remaining()),
             excluded=excluded,
         )
-        return OutsideSnapshotsRead(reads, unlisted, listed)
+        fenced = self._fenced_count(arguments.roots, arguments.values, call)
+        return OutsideSnapshotsRead(reads, unlisted, listed, fenced)
 
     def _read_declared_test(self, arguments: ReadDeclaredTestArguments, call: _Call) -> object:
         """One declared test file, read as a local service reads it in ``local`` mode, or within
