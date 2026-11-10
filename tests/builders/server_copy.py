@@ -1,0 +1,155 @@
+"""Builders for the server copy (level L2): git helpers and synthetic snapshots.
+
+``git`` runs the real Git with no system or global configuration, in a fixed locale.
+``snapshot_objects`` builds a base commit and a snapshot commit (the two synthetic shapes of
+``protocol.server_copy``) from plain ``{path: content}`` maps, the way the exporter does, so a
+test can write, tamper with and verify bundles without a repository.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from finishup.protocol.server_copy import (
+    MODE_EXECUTABLE,
+    MODE_GITLINK,
+    MODE_LINK,
+    MODE_REGULAR,
+    MODE_TREE,
+    GitObject,
+    Held,
+    TreeEntry,
+    encode_commit,
+    encode_tree,
+    write_bundle,
+    write_pack,
+)
+
+__all__ = ["Snapshot", "git", "git_bytes", "held_lookup", "snapshot_objects"]
+
+
+def git_bytes(repository: Path, *arguments: str, stdin: bytes | None = None) -> bytes:
+    """Run ``git`` in ``repository`` with no ambient configuration; its standard output."""
+
+    completed = subprocess.run(  # noqa: S603 - fixed argv in tests
+        ("git", *arguments),
+        cwd=repository,
+        input=stdin,
+        capture_output=True,
+        check=True,
+        env={
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": os.fspath(repository),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": os.environ.get("PATH", os.defpath),
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.invalid",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        },
+    )
+    return completed.stdout
+
+
+def git(repository: Path, *arguments: str) -> str:
+    """``git_bytes`` decoded as UTF-8 and stripped."""
+
+    return git_bytes(repository, *arguments).decode("utf-8").strip()
+
+
+# A file's value: bytes (a regular file), ("x", bytes) executable, ("link", target), ("gitlink", id).
+type FileValue = bytes | tuple[str, bytes | str]
+
+
+def _tree(files: Mapping[str, FileValue], objects: dict[str, GitObject]) -> str:
+    children: dict[str, dict[str, FileValue]] = {}
+    entries: list[TreeEntry] = []
+    for path, value in files.items():
+        head, _, rest = path.partition("/")
+        if rest:
+            children.setdefault(head, {})[rest] = value
+            continue
+        if isinstance(value, bytes):
+            blob = GitObject("blob", value)
+            objects[blob.oid] = blob
+            entries.append(TreeEntry(MODE_REGULAR, head.encode(), blob.oid))
+            continue
+        kind, payload = value
+        if kind == "gitlink":
+            entries.append(TreeEntry(MODE_GITLINK, head.encode(), str(payload)))
+            continue
+        data = payload if isinstance(payload, bytes) else payload.encode()
+        blob = GitObject("blob", data)
+        objects[blob.oid] = blob
+        mode = MODE_EXECUTABLE if kind == "x" else MODE_LINK
+        entries.append(TreeEntry(mode, head.encode(), blob.oid))
+    for name, below in children.items():
+        entries.append(TreeEntry(MODE_TREE, name.encode(), _tree(below, objects)))
+    tree = GitObject("tree", encode_tree(entries))
+    objects[tree.oid] = tree
+    return tree.oid
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """A base and a snapshot commit with every object they reach."""
+
+    base: str
+    snapshot: str
+    base_tree: str
+    tree: str
+    objects: dict[str, GitObject]
+
+    def bundle(
+        self,
+        *,
+        omit: frozenset[str] = frozenset(),
+        extra: tuple[GitObject, ...] = (),
+        prerequisites: tuple[str, ...] = (),
+        ref_number: int = 1,
+    ) -> bytes:
+        """The snapshot as a ``git-bundle-1`` bundle (``omit`` left out, ``extra`` added)."""
+
+        sent = [item for oid, item in self.objects.items() if oid not in omit]
+        return write_bundle(prerequisites, self.snapshot, ref_number, write_pack((*sent, *extra)))
+
+
+def snapshot_objects(base: Mapping[str, FileValue], current: Mapping[str, FileValue]) -> Snapshot:
+    """The synthetic base and snapshot commits of ``base`` and ``current`` file maps."""
+
+    objects: dict[str, GitObject] = {}
+    base_tree = _tree(base, objects)
+    tree = _tree(current, objects)
+    base_commit = GitObject("commit", encode_commit(base_tree, None))
+    objects[base_commit.oid] = base_commit
+    snapshot = GitObject("commit", encode_commit(tree, base_commit.oid))
+    objects[snapshot.oid] = snapshot
+    return Snapshot(base_commit.oid, snapshot.oid, base_tree, tree, objects)
+
+
+def held_lookup(
+    objects: Mapping[str, GitObject], trees: Mapping[str, tuple[int, int]]
+) -> Callable[[str], Held | None]:
+    """A ``have`` callback over ``objects`` already admitted (with tree ``aggregates``)."""
+
+    from finishup.protocol.server_copy import decode_commit
+
+    def have(oid: str) -> Held | None:
+        item = objects.get(oid)
+        if item is None:
+            return None
+        if item.kind == "blob":
+            return Held("blob", len(item.data))
+        if item.kind == "tree":
+            size, files = trees[oid]
+            return Held("tree", size, files)
+        tree, _parent = decode_commit(item.data)
+        return Held("commit", tree=tree)
+
+    return have
