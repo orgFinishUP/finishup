@@ -631,10 +631,16 @@ class CodeStore:
                     if _HEX40.match(snapshot):
                         _remove_file(folder / "snapshots" / f"{snapshot}.enc")
         keep = _index_name(committed)
-        for path in folder.iterdir():
-            if path.name.startswith("index.") and path.name.endswith(".enc") and path.name != keep:
-                _remove_file(path)
-        _drop_manifests(folder, record)
+        stale = [
+            path
+            for path in folder.iterdir()
+            if path.name.startswith("index.") and path.name.endswith(".enc") and path.name != keep
+        ]
+        for path in stale:
+            _remove_file(path)
+        dropped = _drop_manifests(folder, record)
+        if data is None and not stale and not dropped:
+            return True
         try:
             for below in (folder / "objects", folder / "snapshots", folder):
                 if below.is_dir():
@@ -1508,19 +1514,20 @@ def _window(snapshots: list[str], record: Mapping[str, JsonValue]) -> list[str]:
     return [item for item in snapshots if item in recent or item in pinned]
 
 
-def _drop_manifests(folder: Path, record: Mapping[str, JsonValue]) -> None:
+def _drop_manifests(folder: Path, record: Mapping[str, JsonValue]) -> int:
     """Remove the manifests of the snapshots the record no longer names (best effort: they are
-    unread from then on, and the next admission or start tries again)."""
+    unread from then on, and the next admission or start tries again); how many it found."""
 
     named = {f"{item}.enc" for item in cast(list[str], record.get("snapshots", []))}
     below = folder / "snapshots"
     try:
         found = [path for path in below.iterdir() if path.name.endswith(".enc")]
     except OSError:
-        return
-    for path in found:
-        if path.name not in named:
-            _remove_file(path)
+        return 0
+    dropped = [path for path in found if path.name not in named]
+    for path in dropped:
+        _remove_file(path)
+    return len(dropped)
 
 
 def _generation(record: Mapping[str, JsonValue] | None) -> int:
