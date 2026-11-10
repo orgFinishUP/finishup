@@ -342,8 +342,9 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _USAGE,
     ),
     "server_level_unavailable": (
-        "that server requires more of this computer than this release can agree to (it keeps a "
-        "copy of the code, level L2, which arrives in a later release), so nothing was changed",
+        "that server does not offer the level or retention asked for, or it requires more than "
+        "the level chosen (level L2, a copy of your code kept there, is offered only when the "
+        "server's owner turns it on, with the retentions they allow), so nothing was changed",
         _USAGE,
     ),
     "style_invalid": ("give --style relay or --style direct", _USAGE),

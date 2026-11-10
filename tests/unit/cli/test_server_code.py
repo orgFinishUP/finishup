@@ -267,7 +267,8 @@ def _allowed(record: targets.ServerTarget) -> tuple[tuple[str, str], ...]:
 def test_allow_list_shows_paths_and_short_digests_never_contents(
     remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret = b"aws_secret = AKIAABCDEFGHIJKLMNOP\n"
+    # Built at run time so this file itself holds no credential-shaped literal.
+    secret = b"aws_secret = " + b"AKIA" + b"ABCDEFGHIJKLMNOP" + b"\n"
     (repository / "aws.ini").write_bytes(secret)
     empty = _RUNNER.invoke(app, ["server", "code", "allow", "list"])
     assert empty.exit_code == 0, empty.output
