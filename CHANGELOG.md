@@ -196,7 +196,8 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **Use a FinishUP server over HTTPS, with an API key.** `finishup server add NAME
   https://HOST[:PORT][/BASE]` (or `--port PORT` for one on this computer) first asks the server
   what it is, without your key, after checking its certificate against this computer's system
-  store, a CA you give (`--ca-file`) or a certificate fingerprint (`--tls-pin sha256:…`); then it
+  store, a CA you give (`--ca-file`: PEM certificates, or OpenSSL's trusted certificates with their
+  trust settings) or a certificate fingerprint (`--tls-pin sha256:…`); then it
   asks for the API key on your own terminal (hidden; or `--key-file` reads it once from a file only
   you can read), checks it with the server, shows what the server offers and asks you to type the
   name. A key the server refuses adds nothing. The key is kept in your system's credential store,
@@ -208,15 +209,17 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **`finishup server login NAME` and `finishup server logout NAME`** (now in help). `login` checks
   a new key with the server before it keeps it (one the server does not answer about is kept "not
   verified yet", and nothing is sent to that server until the key is checked with `server use`),
-  ends every connection made with the old key and stops the helper; a new key asks you to agree
-  again with `server use`. `logout` deletes the key on this computer and stops the
-  helper, sending nothing.
+  ends every connection made with the old key before it stores the new one (so even a login that
+  fails part way never lets the new key work under your earlier agreement) and stops the helper; a
+  new key asks you to agree again with `server use`. `logout` deletes the key on this computer and
+  stops the helper, sending nothing, not even a last request with the old key.
 - **The same helper and styles as SSH.** By default (relay) FinishUP's helper keeps one HTTPS
   connection and is the only program that reads the API key; `finishup server set NAME --style
   direct` has each program (hooks, FinishUP's tools, commands) read the key and connect itself.
   `server status` shows the style, whether a key is stored and the helper's last phase. Every
   request (a retry and a wait for an answer included) is checked against your current agreement,
-  zero-network and a repository you held first, and never outlives the call's own deadline.
+  zero-network and the repository it carries (held or kept by you), and never outlives the call's
+  own deadline. FinishUP's helper never starts a server's service its owner stopped.
 - **Serve a FinishUP over HTTPS.** `finishup service rest run --listen HOST:PORT --tls-cert F
   --tls-key F` (or `--behind-proxy` on loopback behind your own TLS proxy) serves this computer's
   FinishUP to others, in the foreground, under your own supervisor. By default it runs as a
