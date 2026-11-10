@@ -47,7 +47,12 @@ from finishup.ports.workspace_agent import (
 )
 from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.code_checkout import CopyCheckouts
-from finishup.service.code_copy import CODE_COPY_KEK_MAC_DOMAIN, CodeCopies, VaultCopyKeyring
+from finishup.service.code_copy import (
+    CODE_COPY_KEK_MAC_DOMAIN,
+    COPY_PRINCIPAL,
+    CodeCopies,
+    VaultCopyKeyring,
+)
 from finishup.service.code_store import CodeStore, StoreLimits
 from finishup.service.workspace_hub import WorkspaceAgentHub
 from finishup.service.workspace_routing import (
@@ -518,6 +523,27 @@ def test_task_close_retention_expires_once_no_pinned_task_is_open(tmp_path: Path
     with evidence_task_scope(TASK):
         routed.read_task_base(HANDLE)
     assert copies.expire_now().copies == 0
+
+
+def test_a_task_close_copy_due_before_the_service_was_ready_expires_once_it_can_tell(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    _hub, copies, routed = _service(tmp_path, root)
+    with evidence_task_scope(TASK):
+        routed.read_task_base(HANDLE)
+    # The service starts (and locks) before it can say which tasks are closed: nothing expires.
+    assert copies.expire_now().copies == 0
+    assert copies.store.copies(COPY_PRINCIPAL)
+    # Once ready, the predicate is attached: the copy whose every task closed goes at once.
+    copies.attach_task_closed(lambda _task: True).join(timeout=10)
+    assert copies.store.copies(COPY_PRINCIPAL) == ()
+    assert {item.reason for item in copies.store.pending_erasures()} == {"expired"}
+    # A predicate that says open (or cannot say) keeps a copy.
+    with evidence_task_scope(TASK):
+        routed.read_task_base(HANDLE)
+    copies.attach_task_closed(lambda _task: False).join(timeout=10)
+    assert copies.store.copies(COPY_PRINCIPAL)
 
 
 def test_a_pending_erasure_is_cleared_only_once_its_task_says_so(tmp_path: Path) -> None:

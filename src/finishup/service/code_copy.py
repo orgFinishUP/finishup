@@ -603,10 +603,21 @@ class CodeCopies:
 
     # --- expiry, forget and erasure (plan D14-D15) -------------------------------------------
 
-    def attach_task_closed(self, closed: Callable[[str], bool]) -> None:
-        """Whether a task's work is no longer open (``task_close`` retention); unknown = open."""
+    def attach_task_closed(self, closed: Callable[[str], bool]) -> threading.Thread:
+        """Whether a task's work is no longer open (``task_close`` retention); unknown = open.
+
+        Attached once the service is ready, after the expiry its start ran could tell no task
+        closed: an expiry runs again now, off the caller's thread (the predicate asks the
+        service loop), so a ``task_close`` copy due while the service was down or locked goes at
+        once rather than at the next ten-minute run. The thread is returned for tests to join.
+        """
 
         self._task_closed = closed
+        thread = threading.Thread(
+            target=self.expire_now, name="finishup-code-copy-expiry-ready", daemon=True
+        )
+        thread.start()
+        return thread
 
     def attach_erasure(self, erase: Callable[[PendingErasure], bool]) -> None:
         """The callable that records in a forgotten task's records that its content was
