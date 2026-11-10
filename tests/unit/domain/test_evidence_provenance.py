@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from finishup.domain.evidence_provenance import (
@@ -80,19 +82,24 @@ def test_invalid_values_are_refused(build: object) -> None:
 
 
 @pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda wire: wire.update(schema="yoetz.evidence-provenance/2"),
-        lambda wire: wire.pop("fenced_reads"),
-        lambda wire: wire.update(extra=1),
-        lambda wire: wire["reads"].pop("client_check"),
-        lambda wire: wire.update(snapshot={"synced_at": _AT}),
-        lambda wire: wire.update(content_forgotten={"at": _AT, "reason": "owner", "x": 1}),
-    ],
+    "case",
+    ["schema", "no_fenced", "extra", "token_missing", "snapshot_open", "marker_open"],
 )
-def test_decoder_refuses_anything_but_the_canonical_form(mutate: object) -> None:
-    wire = EvidenceProvenance({"server_copy_read": 1}).to_json()
-    wire["reads"] = dict(wire["reads"])  # pyright: ignore[reportArgumentType]
-    mutate(wire)  # pyright: ignore[reportCallIssue]
+def test_decoder_refuses_anything_but_the_canonical_form(case: str) -> None:
+    wire: dict[str, object] = dict(EvidenceProvenance({"server_copy_read": 1}).to_json())
+    reads: dict[str, object] = dict(cast("dict[str, object]", wire["reads"]))
+    wire["reads"] = reads
+    if case == "schema":
+        wire["schema"] = "yoetz.evidence-provenance/2"
+    elif case == "no_fenced":
+        del wire["fenced_reads"]
+    elif case == "extra":
+        wire["extra"] = 1
+    elif case == "token_missing":
+        del reads["client_check"]
+    elif case == "snapshot_open":
+        wire["snapshot"] = {"synced_at": _AT}
+    else:
+        wire["content_forgotten"] = {"at": _AT, "reason": "owner", "x": 1}
     with pytest.raises(ValueError, match="evidence_provenance_invalid"):
         evidence_provenance_from_json(wire)

@@ -122,9 +122,10 @@ class EvidenceProvenance:
     content_forgotten: ContentForgotten | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reads, Mapping):
+        given = cast(object, self.reads)
+        if not isinstance(given, Mapping):
             raise _invalid()
-        reads = cast(Mapping[object, object], self.reads)
+        reads = cast(Mapping[object, object], given)
         if any(token not in EVIDENCE_PROVENANCE_TOKENS for token in reads):
             raise _invalid()
         frozen = {
@@ -159,7 +160,7 @@ class EvidenceProvenance:
     def plus(self, other: EvidenceProvenance) -> EvidenceProvenance:
         """Both accounts together: counts add; the later snapshot and marker win."""
 
-        reads = {
+        reads: dict[EvidenceToken, int] = {
             token: self.count(token) + other.count(token) for token in EVIDENCE_PROVENANCE_TOKENS
         }
         snapshot = self.snapshot

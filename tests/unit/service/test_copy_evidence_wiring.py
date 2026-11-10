@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -177,7 +177,7 @@ def _pending() -> PendingErasure:
     )
 
 
-def _with_loop(work: Any) -> Any:  # noqa: ANN401 - the work's own result
+def _with_loop(work: Callable[[asyncio.AbstractEventLoop], bool]) -> bool:
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()

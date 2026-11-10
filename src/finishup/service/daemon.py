@@ -5690,7 +5690,7 @@ def _copy_erasure(application: object, loop: asyncio.AbstractEventLoop) -> Calla
                     cast(Any, application),
                     cast(str, getattr(pending, "task_id")),
                     forget_id=cast(str, getattr(pending, "forget_id")),
-                    reason=cast(Any, getattr(pending, "reason")),
+                    reason=getattr(pending, "reason"),
                     provenance=getattr(pending, "account"),
                 ),
                 loop,
