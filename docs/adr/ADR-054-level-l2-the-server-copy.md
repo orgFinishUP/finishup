@@ -246,7 +246,11 @@ Its refusals are closed reply reasons: refused `code_copy_not_consented`, `repos
 `zero_network_remote_selected`; unavailable `code_copy_too_large`, `code_export_failed` and
 `code_sync_unknown` (no bundle prepared under that id, or its time passed). A prepared bundle is
 kept in the helper's memory for two minutes, shared by every agent of that worktree in the helper
-process. Only after every check passes does the responder compute the subject-state commitment
+process, and bound to what admitted it (the revision named, the export policy's digest, the
+retention): before every chunk leaves, the five checks run again on the records as they are then
+and the policy is computed again, and a refusal or any change (`server code level L1`, an exclusion
+added, an allowed content removed, a new consent, the hold, zero network) drops the bundle and
+refuses that chunk; the puller records it as a refused sync and admits nothing. Only after every check passes does the responder compute the subject-state commitment
 (decision 13) and build the bundle.
 
 On the server, `service.code_copy.CodeCopies` pulls in the worker thread of the read it precedes:

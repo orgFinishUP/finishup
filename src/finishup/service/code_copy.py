@@ -406,7 +406,12 @@ class CodeCopies:
                 worktree=claim.worktree or "",
             )
         except WorkspaceAgentUnavailable as exc:
-            return SyncOutcome("unavailable", exc.agent_reason or exc.reason)
+            # A chunk the helper refuses (the owner narrowed what may leave since the prepare,
+            # ``client.code_sync``) is a refusal as at the prepare: nothing of it is admitted.
+            chunk_kind: Literal["refused", "unavailable"] = (
+                "refused" if exc.refused else "unavailable"
+            )
+            return SyncOutcome(chunk_kind, exc.agent_reason or exc.reason)
         except CodeStoreError as error:
             return SyncOutcome("refused", error.reason)
         self._pin(claim, task_id, manifest.snapshot, now)

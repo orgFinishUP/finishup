@@ -56,6 +56,7 @@ class FakeHub:
         self.prepared = prepared
         self.calls: list[str] = []
         self.refusal: WorkspaceAgentUnavailable | None = None
+        self.chunk_refusal: WorkspaceAgentUnavailable | None = None
         self.gate: threading.Event | None = None
         self.code_copies: object = None
 
@@ -79,6 +80,8 @@ class FakeHub:
             return self.prepared
         if operation is WorkspaceOperation.CODE_SYNC_READ:
             assert isinstance(arguments, CodeSyncReadArguments)
+            if self.chunk_refusal is not None and arguments.offset > 0:
+                raise self.chunk_refusal
             return self.bundle[arguments.offset : arguments.offset + arguments.length]
         assert isinstance(arguments, WorkspaceOnlyArguments)
         return TaskChangeBase("sha1", "d" * 40)
@@ -163,6 +166,27 @@ def test_a_helper_refusal_stores_nothing_and_is_named(tmp_path: Path) -> None:
     assert store.copies("claim") == () and hub.calls == ["code_sync_prepare"]
     hub.refusal = WorkspaceAgentUnavailable("operation_not_declared")
     assert copies.sync_blocking(HANDLE, purpose="check").reason == "operation_not_declared"
+
+
+def test_a_chunk_the_helper_refuses_after_the_prepare_is_a_refusal_and_admits_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: the owner narrowed what may leave after the prepare; the helper refuses the chunk."""
+
+    from finishup.service import code_copy
+
+    monkeypatch.setattr(code_copy, "MAX_CODE_SYNC_CHUNK_BYTES", 64)
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    assert hub.prepared.size > 64
+    hub.chunk_refusal = WorkspaceAgentUnavailable("agent_refused", "code_copy_not_consented")
+    outcome = copies.sync_blocking(HANDLE, purpose="check", task_id="tsk_narrowed")
+    assert (outcome.outcome, outcome.reason) == ("refused", "code_copy_not_consented")
+    assert store.copies("claim") == () and hub.calls.count("code_sync_read") == 2
+    assert copies.git_view(HANDLE, purpose="check", base=None, task_id="tsk_narrowed") == (
+        None,
+        None,
+    )
 
 
 def test_a_snapshot_for_another_worktree_or_revision_is_refused(tmp_path: Path) -> None:

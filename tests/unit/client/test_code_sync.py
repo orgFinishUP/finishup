@@ -259,6 +259,74 @@ def test_a_base_the_server_names_is_exported_only_when_this_computer_chose_it(
     assert export_folder(record.target_id, key).is_dir()
 
 
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("owner_l1", "code_copy_not_consented"),
+        ("exclusion_added", "code_copy_not_consented"),
+        ("held", "repository_egress_held"),
+        ("zero_network", "zero_network_remote_selected"),
+    ],
+)
+def test_a_narrowing_after_prepare_stops_the_next_chunk_and_drops_the_bundle(
+    l2_target: tuple[ServerTarget, dict[str, Any]],
+    repository: Path,
+    change: str,
+    reason: str,
+) -> None:
+    """C1: what admitted a prepared bundle is checked again before every chunk leaves."""
+
+    record, document = l2_target
+    key = _key(repository)
+    responder = _responder(record, repository)
+    with release_l2():
+        prepared = responder.prepare(_arguments(document))
+    assert prepared.sync_id is not None and prepared.size > 10
+    first = responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 0, 10))
+    assert len(first) == 10
+    if change == "owner_l1":
+        with registry_lock():
+            update_settings(
+                target_root(record.target_id),
+                record.target_id,
+                key,
+                lambda settings: type(settings)(level="L1"),
+            )
+    elif change == "exclusion_added":
+        with registry_lock():
+            update_settings(
+                target_root(record.target_id),
+                record.target_id,
+                key,
+                lambda settings: type(settings)(exclude=("app.py",)),
+            )
+    elif change == "held":
+        record_repository_report(key, str(repository), no_network=True)
+    else:
+        record_reported_policy(zero_network=True)
+    with release_l2(), pytest.raises(CodeSyncRefused) as raised:
+        responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 10, 10))
+    assert raised.value.reason == reason
+    # Dropped: no later chunk of it leaves, whatever changes back.
+    with release_l2(), pytest.raises(CodeSyncRefused, match="code_sync_unknown"):
+        responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 10, 10))
+
+
+def test_a_bundle_whose_admission_still_holds_is_read_to_its_end(
+    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
+) -> None:
+    record, document = l2_target
+    responder = _responder(record, repository)
+    with release_l2():
+        prepared = responder.prepare(_arguments(document))
+        assert prepared.sync_id is not None
+        chunks = [
+            responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, offset, 64))
+            for offset in range(0, prepared.size, 64)
+        ]
+    assert len(b"".join(chunks)) == prepared.size
+
+
 # --- the sync fence ``server remove`` raises while it forgets (E2) -------------------------------------
 
 

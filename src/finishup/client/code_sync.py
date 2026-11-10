@@ -23,6 +23,14 @@ Before all of them, and before every chunk ``read`` returns, the target's sync f
 nothing is exported or sent (``server_authorization_changed``) and a bundle already prepared is
 dropped.
 
+A prepared bundle is bound to what admitted it: the consented revision the server named, the
+export policy (its digest: the envelope's caps and exclusions, the owner's per-repository list
+and allowed contents) and the retention. Before every chunk ``read`` returns, every check above
+runs again on the records as they are then, and the policy and retention are computed again: a
+refusal, or any change (``server code level L1``, an exclusion added, an allowed content removed,
+a new consent), drops the bundle and refuses the chunk, so nothing more of it leaves after the
+owner narrowed what may.
+
 Only then does it run the sanitized exporter (``client.code_export``) with the policy the owner
 consented to (the envelope's caps and exclusions, the owner's per-repository list and allowed
 contents) and keep the bundle in this process's memory for ``read`` (one per worktree, two minutes).
@@ -104,6 +112,9 @@ class _Prepared:
     sync_id: str
     bundle: bytes = field(repr=False)
     expires: float
+    # What admitted it (the module text): checked again before every chunk leaves.
+    arguments: CodeSyncPrepareArguments
+    binding: tuple[str, str, int | None]
 
 
 # The helper may run several background agents for one worktree (one per registration), and the
@@ -263,7 +274,11 @@ class CodeSyncResponder:
             sync_id = secrets.token_hex(16)
             with _SHARED_LOCK:
                 _PREPARED[self._key] = _Prepared(
-                    sync_id, prepared.bundle, self._clock() + _PREPARED_SECONDS
+                    sync_id,
+                    prepared.bundle,
+                    self._clock() + _PREPARED_SECONDS,
+                    arguments,
+                    (policy.digest(), kind, days),
                 )
             database.remember_sent(prepared.manifest.snapshot, prepared.ref_number)
             return CodeSyncPrepared(
@@ -285,7 +300,28 @@ class CodeSyncResponder:
                 or arguments.offset >= len(prepared.bundle)
             ):
                 raise CodeSyncRefused("code_sync_unknown")
+        # Everything that admitted the bundle, again, on the records as they are now (the module
+        # text): a refusal or any change drops it, and this chunk does not leave.
+        try:
+            record = self._admitted(prepared.arguments)
+            policy, kind, days = self._policy(record)
+            if (policy.digest(), kind, days) != prepared.binding:
+                raise CodeSyncRefused(_NOT_CONSENTED)
+        except CodeSyncRefused:
+            self._drop(prepared)
+            raise
+        except Exception:  # noqa: BLE001 - a check that cannot be made sends nothing
+            self._drop(prepared)
+            raise CodeSyncRefused("server_authorization_changed") from None
+        with _SHARED_LOCK:
+            if _PREPARED.get(self._key) is not prepared:
+                raise CodeSyncRefused("code_sync_unknown")
             return prepared.bundle[arguments.offset : arguments.offset + arguments.length]
+
+    def _drop(self, prepared: _Prepared) -> None:
+        with _SHARED_LOCK:
+            if _PREPARED.get(self._key) is prepared:
+                _PREPARED.pop(self._key, None)
 
     def forget_local(self) -> None:
         """Delete this repository's export database (the copy was forgotten, or L2 → L1)."""
