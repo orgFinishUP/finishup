@@ -171,7 +171,10 @@ pattern; files over `max_file_bytes`; known secret content (decision 3) unless t
 those exact bytes; a Git LFS file whose bytes are not its pointer; case-fold collisions; nested
 repositories — each named in its completeness list — and unsafe or non-UTF-8 names, special files
 and multiply-linked files, which are counted. A link is sent as its target text, a submodule as a
-gitlink, an LFS file as its pointer. A sanitized base or current tree over `max_repo_bytes` is
+gitlink, an LFS file as its pointer. A file is an LFS file when the attributes Git reads mark it
+(`.gitattributes`, `.git/info/attributes`, and the `core.attributesFile` the owner's configuration
+names, includes followed, else `$XDG_CONFIG_HOME/git/attributes`), or when its index entry or its
+base blob is an LFS pointer, whatever the attributes say. A sanitized base or current tree over `max_repo_bytes` is
 refused (`code_copy_too_large`) before any object is written: no partial copy is sent.
 
 The exclusion patterns start from `domain.code_exclusions.ALWAYS_EXCLUDED`: ADR-031's credential

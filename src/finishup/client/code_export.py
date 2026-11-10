@@ -546,7 +546,8 @@ def _git(root: Path, *arguments: str, stdin: bytes | None = None, check: bool = 
 
 
 def _owner_git_file(root: Path, key: str, default: str) -> str | None:
-    """The file the owner's own Git uses for ``key`` (``core.excludesFile``) in this repository.
+    """The file the owner's own Git uses for ``key`` (``core.excludesFile``,
+    ``core.attributesFile``) in this repository.
 
     Resolved as Git resolves it in the repository: the repository's and the owner's global
     configuration (``GIT_CONFIG_GLOBAL``, ``~/.gitconfig``, ``$XDG_CONFIG_HOME/git/config``), includes
@@ -741,7 +742,17 @@ class _Admission:
 
 
 class _Exporter:
-    __slots__ = ("counts", "database", "lfs", "policy", "root", "root_fd")
+    __slots__ = (
+        "base_pointers",
+        "checked",
+        "counts",
+        "database",
+        "lfs",
+        "pointers",
+        "policy",
+        "root",
+        "root_fd",
+    )
 
     def __init__(
         self, root: Path, root_fd: int, policy: ExportPolicy, database: ExportDatabase
@@ -752,6 +763,11 @@ class _Exporter:
         self.database = database
         self.lfs: frozenset[bytes] = frozenset()
         self.counts: dict[str, int] = dict.fromkeys(COMPLETENESS_COUNTS, 0)
+        # LFS pointers recognized by their bytes, whatever the attributes say: blob id → pointer,
+        # the blob ids already looked at, and the base paths whose blob is a pointer.
+        self.pointers: dict[str, bytes] = {}
+        self.checked: set[str] = set()
+        self.base_pointers: set[bytes] = set()
 
     # Each path goes through the same checks, in the same order, on both sides.
     def _name_refusal(self, path: bytes, mode: bytes) -> str | None:
@@ -837,18 +853,57 @@ class _Exporter:
             else:
                 readable.append((path, mode, oid))
         contents = self._cat_blobs([oid for _path, _mode, oid in readable])
+        self.checked.update(contents)
         for path, mode, oid in readable:
             data = contents[oid]
-            if path in self.lfs and _lfs_pointer(data) is None:
+            if _lfs_pointer(data) is not None:
+                self.pointers[oid] = data
+            pointer = mode != MODE_LINK and oid in self.pointers
+            if pointer:
+                self.base_pointers.add(path)
+            if path in self.lfs and not pointer:
                 admission.held[path] = "lfs_content"
                 continue
-            if path in self.lfs:
+            if path in self.lfs or pointer:
                 self.counts["lfs_pointers"] += 1
             if mode == MODE_LINK and (len(data) > _MAX_LINK_BYTES or b"\x00" in data):
                 admission.held[path] = "special"
                 continue
             self.admit(admission, path, mode, data)
         return admission
+
+    def find_pointers(self, oids: Iterable[str]) -> None:
+        """Look at the blobs ``oids`` not yet seen and keep those that are LFS pointers: only
+        blobs no larger than a pointer are read (``git cat-file --batch-check`` first)."""
+
+        unseen = sorted({oid for oid in oids if oid not in self.checked})
+        if not unseen:
+            return
+        self.checked.update(unseen)
+        output = _git(
+            self.root,
+            "cat-file",
+            "--batch-check",
+            stdin=b"".join(o.encode() + b"\n" for o in unseen),
+        )
+        small: list[str] = []
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[1] == b"blob" and fields[2].isdigit():
+                if int(fields[2]) <= _MAX_LFS_POINTER_BYTES:
+                    small.append(fields[0].decode("ascii"))
+        for oid, data in self._cat_blobs(small).items():
+            if _lfs_pointer(data) is not None:
+                self.pointers[oid] = data
+
+    def _is_lfs(self, path: bytes, index_oid: str | None) -> bool:
+        """An LFS file by its attributes, or by a pointer in its index entry or in the base."""
+
+        return (
+            path in self.lfs
+            or path in self.base_pointers
+            or (index_oid is not None and index_oid in self.pointers)
+        )
 
     def _cat_blobs(self, oids: list[str]) -> dict[str, bytes]:
         if not oids:
@@ -895,6 +950,13 @@ class _Exporter:
         self, index: Mapping[bytes, tuple[bytes, str]], untracked: Iterable[bytes]
     ) -> _Admission:
         admission = _Admission()
+        # Which index entries are LFS pointers (admitted names only; nothing else is read).
+        self.find_pointers(
+            oid
+            for path, (mode, oid) in index.items()
+            if mode in {MODE_REGULAR, MODE_EXECUTABLE}
+            and self._name_refusal(path, MODE_REGULAR) is None
+        )
         for path, (mode, oid) in sorted(index.items()):
             if mode == MODE_GITLINK:
                 self.admit_gitlink(admission, path, oid)
@@ -941,7 +1003,7 @@ class _Exporter:
             self.admit(admission, path, MODE_LINK, read.data)
             return
         mode = MODE_EXECUTABLE if read.executable else MODE_REGULAR
-        if path in self.lfs:
+        if self._is_lfs(path, index_oid):
             self._admit_lfs(admission, path, mode, read, index_oid)
             return
         if read.over:
@@ -960,7 +1022,7 @@ class _Exporter:
             self.admit(admission, path, mode, read.data)
             return
         if index_oid is not None:
-            pointer = self._cat_blobs([index_oid]).get(index_oid, b"")
+            pointer = self.pointers.get(index_oid, b"")
             named = _lfs_pointer(pointer)
             if named is not None and _hash_file_beneath(self.root_fd, path) == named.decode():
                 self.counts["lfs_pointers"] += 1
@@ -972,8 +1034,19 @@ class _Exporter:
         listed = sorted(set(paths))
         if not listed:
             return
+        # The attributes file the owner's own Git configuration names (``core.attributesFile``,
+        # else ``$XDG_CONFIG_HOME/git/attributes``) beside ``.gitattributes`` and
+        # ``.git/info/attributes``.
+        attributes = _owner_git_file(self.root, "core.attributesFile", "attributes")
+        config = () if attributes is None else ("-c", f"core.attributesFile={attributes}")
         output = _git(
-            self.root, "check-attr", "-z", "--stdin", "filter", stdin=b"\x00".join(listed) + b"\x00"
+            self.root,
+            *config,
+            "check-attr",
+            "-z",
+            "--stdin",
+            "filter",
+            stdin=b"\x00".join(listed) + b"\x00",
         )
         fields = output.split(b"\x00")
         found: set[bytes] = set()

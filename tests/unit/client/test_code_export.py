@@ -528,6 +528,78 @@ def test_lfs_files_are_sent_as_their_pointers_only(tmp_path: Path) -> None:
     assert "asset.bin" in edited.manifest.lists["lfs_content"]
 
 
+def _pointer(content: bytes) -> bytes:
+    return (
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:"
+        + hashlib.sha256(content).hexdigest().encode()
+        + b"\nsize "
+        + str(len(content)).encode()
+        + b"\n"
+    )
+
+
+@pytest.mark.parametrize("source", ["included", "xdg", "info"])
+def test_lfs_attributes_from_every_source_git_reads_hold_the_content(
+    tmp_path: Path, isolated_home: Path, source: str
+) -> None:
+    root = _repository(tmp_path, {"a.txt": b"a\n"})
+    rule = "*.bin filter=lfs diff=lfs merge=lfs -text\n"
+    if source == "included":
+        (isolated_home / ".gitconfig").write_text("[include]\n\tpath = ~/.gitconfig-extra\n")
+        (isolated_home / ".gitconfig-extra").write_text("[core]\n\tattributesFile = ~/attrs\n")
+        (isolated_home / "attrs").write_text(rule)
+    elif source == "xdg":
+        (isolated_home / ".config" / "git").mkdir(parents=True)
+        (isolated_home / ".config" / "git" / "attributes").write_text(rule)
+    else:
+        (root / ".git" / "info").mkdir(exist_ok=True)
+        (root / ".git" / "info" / "attributes").write_text(rule)
+    (root / "model.bin").write_bytes(b"smudged large file content\n")
+    assert "filter: lfs" in _owner_git(isolated_home, root, "check-attr", "filter", "model.bin")
+    prepared = _export(root, tmp_path)
+    assert set(_tree_of(prepared, tmp_path)) == {"a.txt"}
+    assert prepared.manifest.lists["lfs_content"] == ("model.bin",)
+
+
+def test_lfs_pointers_are_recognized_without_any_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No .gitattributes anywhere: the pointers in the base and the index alone mark the files.
+    committed, staged, edited = b"committed payload\n" * 8, b"staged payload\n" * 8, b"e\n" * 8
+    root = _repository(tmp_path, {"a.txt": b"a\n"})
+    for name, content in (("asset.dat", committed), ("old.dat", committed), ("edit.dat", edited)):
+        blob = git_bytes(root, "hash-object", "-w", "--stdin", stdin=_pointer(content))
+        git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob.decode().strip()},{name}")
+    git(root, "commit", "-q", "-m", "pointers")
+    blob = git_bytes(root, "hash-object", "-w", "--stdin", stdin=_pointer(staged)).decode().strip()
+    git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob},staged.dat")
+    git(root, "rm", "-q", "--cached", "old.dat")  # untracked now; only the base has its pointer
+    (root / "asset.dat").write_bytes(committed)  # smudged, as git-lfs leaves them
+    (root / "staged.dat").write_bytes(staged)
+    (root / "old.dat").write_bytes(committed)
+    (root / "edit.dat").write_bytes(b"edited, so no pointer names it\n")
+    # A staged blob larger than any pointer is never read to look for one.
+    (root / "large.txt").write_bytes(b"l" * 4_096)
+    git(root, "add", "large.txt")
+    large = git(root, "rev-parse", ":large.txt")
+    requested: list[str] = []
+    cat = code_export._Exporter._cat_blobs  # pyright: ignore[reportPrivateUsage]
+
+    def spy(self: object, oids: list[str]) -> dict[str, bytes]:
+        requested.extend(oids)
+        return cat(self, oids)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(code_export._Exporter, "_cat_blobs", spy)  # pyright: ignore[reportPrivateUsage]
+    prepared = _export(root, tmp_path)
+    assert large not in requested and blob in requested
+    tree = _tree_of(prepared, tmp_path)
+    assert set(tree) == {"a.txt", "asset.dat", "large.txt", "staged.dat"}
+    assert _content(tmp_path, "asset.dat") == _pointer(committed)
+    assert _content(tmp_path, "staged.dat") == _pointer(staged)
+    assert prepared.manifest.lists["lfs_content"] == ("edit.dat", "old.dat")
+    assert prepared.manifest.counts["lfs_pointers"] >= 2
+
+
 def test_names_that_are_not_safe_tree_entries_are_counted_not_sent(tmp_path: Path) -> None:
     root = _repository(tmp_path, {"a.txt": b"a\n"})
     (root / os.fsdecode(b"\xff-latin.txt")).write_bytes(b"x\n")
