@@ -129,15 +129,6 @@ def test_no_agent_but_one_given_a_responder_ever_declares_the_sync(repository: P
 # --- the gate runs before anything is read (FR-7) ---------------------------------------------------
 
 
-def test_nothing_is_built_while_level_l2_is_unreleased(
-    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
-) -> None:
-    record, document = l2_target
-    responder = _responder(record, repository)
-    assert _refused(responder, _arguments(document)) == "code_copy_not_consented"
-    assert not export_folder(record.target_id, _key(repository)).exists()
-
-
 @pytest.mark.parametrize(
     ("condition", "reason"),
     [

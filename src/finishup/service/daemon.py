@@ -5914,8 +5914,8 @@ async def _production_composition(
         observation_gate = asyncio.Lock()
         # One hub: the daemon registers agent connections, the ready application calls them.
         workspace_hub = WorkspaceAgentHub()
-        # Level L2 (ADR-054): the offer ``[server.code_copy]`` makes, honoured only while L2 is
-        # released; a service whose profile offers L2 keeps copies, and none otherwise.
+        # Level L2 (ADR-054): the offer ``[server.code_copy]`` makes; a service whose profile
+        # offers L2 keeps copies, and none otherwise.
         profile_source = ServerProfileSource.load(config, paths.state, code_copy_offer(config))
         _attach_code_copies(workspace_hub, profile_source, paths.state, vault)
         ready_application_factory = (

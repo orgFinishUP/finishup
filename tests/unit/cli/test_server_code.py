@@ -131,14 +131,6 @@ def test_l1_stays_the_default_and_its_disclosure_is_unchanged(remote: targets.Se
     assert raised.value.reason == "usage"
 
 
-def test_l2_is_refused_before_any_console_while_it_is_unreleased(
-    remote: targets.ServerTarget,
-) -> None:
-    with pytest.raises(ServerCommandRefused) as raised:
-        _offer(remote, LevelChoice(level="L2"))
-    assert raised.value.reason == "server_level_unavailable"
-
-
 def test_l2_is_refused_when_the_server_does_not_offer_it(remote: targets.ServerTarget) -> None:
     with release_l2(), pytest.raises(ServerCommandRefused) as raised:
         _offer(remote, LevelChoice(level="L2"), profile_document())
@@ -191,18 +183,23 @@ def test_server_use_keeps_the_level_and_retention_already_agreed(
             stored, fetched(stored, _L2_DOCUMENT), None, stored=stored
         )
     assert (envelope.level, envelope.retention) == ("L2", Retention("days", 7))
-    # Without L2 released, 'use' falls back to L1 rather than ask for an unavailable level.
+    # A server that no longer offers L2: 'use' never narrows on its own; the owner chooses L1.
+    with pytest.raises(ServerCommandRefused) as raised:
+        server_cli._consent_offer(  # pyright: ignore[reportPrivateUsage]
+            stored, fetched(stored, profile_document()), None, stored=stored
+        )
+    assert raised.value.reason == "server_level_unavailable"
     envelope, _lines = server_cli._consent_offer(  # pyright: ignore[reportPrivateUsage]
-        stored, fetched(stored, _L2_DOCUMENT), None, stored=stored
+        stored, fetched(stored, profile_document()), LevelChoice(level="L1"), stored=stored
     )
     assert envelope.level == "L1"
 
 
-def test_the_level_options_are_hidden_and_refused_for_a_server_on_this_computer(home: Path) -> None:
+def test_the_level_options_are_shown_and_refused_for_a_server_on_this_computer(home: Path) -> None:
     del home
     shown = _RUNNER.invoke(app, ["server", "add", "--help"])
-    assert "--level" not in shown.output and "--retention" not in shown.output
-    assert "code" not in _RUNNER.invoke(app, ["server", "--help"]).output.split("Commands")[-1]
+    assert "--level" in shown.output and "--retention" in shown.output
+    assert "code" in _RUNNER.invoke(app, ["server", "--help"]).output.split("Commands")[-1]
     refused = _RUNNER.invoke(app, ["server", "add", "here", "--local", "--level", "L2"])
     assert refused.exit_code != 0
     assert "--level and --retention apply to a server elsewhere" in refused.output
@@ -632,12 +629,12 @@ def test_remove_with_no_console_and_no_flag_removes_and_warns_as_before(
     assert "far" not in _names()
 
 
-def test_remove_flags_are_hidden_refused_together_and_need_copies_to_ask(
+def test_remove_flags_are_shown_refused_together_and_need_copies_to_ask(
     far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del repository
     shown = _RUNNER.invoke(app, ["server", "remove", "--help"])
-    assert "--forget-copies" not in shown.output and "--keep-copies" not in shown.output
+    assert "--forget-copies" in shown.output and "--keep-copies" in shown.output
     both = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies", "--keep-copies"])
     assert both.exit_code == 2
     assert "give --forget-copies or --keep-copies, not both" in both.output

@@ -167,15 +167,13 @@ def held_lookup(
 
 @contextmanager
 def release_l2() -> Generator[None]:
-    """Turn the unreleased level L2 on for the duration of a test (``l2_released``)."""
+    """Marks a test's level-L2 part. Level L2 is released (``L2_RELEASED``), so it changes
+    nothing; it fails the test if the release is ever withdrawn without its tests."""
 
-    from finishup.protocol.server_copy import enable_unreleased_l2
+    from finishup.protocol.server_copy import l2_released
 
-    enable_unreleased_l2(True)
-    try:
-        yield
-    finally:
-        enable_unreleased_l2(False)
+    assert l2_released(), "level L2 is not released: these tests need it"
+    yield
 
 
 def manifest_for(

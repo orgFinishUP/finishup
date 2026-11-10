@@ -191,6 +191,7 @@ def test_the_help_offers_servers_on_this_computer_over_ssh_and_over_https(home: 
         "logout",
         "folders",
         "repositories",
+        "code",
     }
     words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words

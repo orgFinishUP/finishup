@@ -1,13 +1,13 @@
 """The helper's answer to the server's code-sync calls (level L2; design v2 §4.2, Q6, FR-7; ADR-054).
 
 Only the target's helper builds one of these, for a background agent of a repository the owner
-agreed to keep a copy of, and only while level L2 is released: a hook, an MCP bridge or a CLI
+agreed to keep a copy of: a hook, an MCP bridge or a CLI
 command never declares the two operations, so the server never asks them (the hub sends an
 operation only to an agent that declares it).
 
 ``prepare`` checks, in this order and **before anything is read for the export** (FR-7):
 
-1. level L2 is released in this process;
+1. level L2 is released (``protocol.server_copy.l2_released``);
 2. the connection's own admission still holds (``own_authorization``: generations, credential,
    the consent's identity, the repository's hold as admitted);
 3. the gate again on the record as it is now (``client.authorization.gate``): zero network, the

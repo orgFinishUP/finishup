@@ -85,7 +85,6 @@ from finishup.client.targets import (
 from finishup.config.installation import format_rfc3339_ms
 from finishup.config.paths import PathSafetyError
 from finishup.protocol.canonical import JsonValue, canonical_encode
-from finishup.protocol.server_copy import L2_RELEASED
 
 if TYPE_CHECKING:
     from finishup.cli.trusted_console import TrustedForegroundConsole
@@ -1085,7 +1084,7 @@ def _consent_offer(
 
     Refused before any console: a profile this release cannot read or understand
     (``server_profile_changed``), one requiring more than the level chosen, or a level or
-    retention it does not offer (``server_level_unavailable``; L2 also while it is unreleased).
+    retention it does not offer (``server_level_unavailable``).
     """
 
     from finishup.client.server_profile import consent_envelope_for
@@ -1109,13 +1108,12 @@ def _warn_open_sessions() -> None:
     typer.echo(OPEN_SESSIONS_LINE)
 
 
-# Level L2 (ADR-054): hidden while it is unreleased, so help is as before.
+# Level L2 (ADR-054): the level and, at L2, the retention among those the server offers.
 _LEVEL_OPTION = Annotated[
     str | None,
     typer.Option(
         "--level",
         help="L1 (the default) or L2: whether the server also keeps a copy of your code.",
-        hidden=not L2_RELEASED,
     ),
 ]
 _RETENTION_OPTION = Annotated[
@@ -1123,7 +1121,6 @@ _RETENTION_OPTION = Annotated[
     typer.Option(
         "--retention",
         help="L2: how long it keeps a copy (task_close, until_forgotten, days:N) among its options.",
-        hidden=not L2_RELEASED,
     ),
 ]
 
@@ -2789,7 +2786,6 @@ def server_remove(
             "--forget-copies",
             help="L2: first forget every copy of code this computer sent it; if one is not "
             "forgotten, nothing is removed.",
-            hidden=not L2_RELEASED,
         ),
     ] = False,
     keep_copies: Annotated[
@@ -2797,7 +2793,6 @@ def server_remove(
         typer.Option(
             "--keep-copies",
             help="L2: remove it and leave the copies of code this computer sent it there.",
-            hidden=not L2_RELEASED,
         ),
     ] = False,
 ) -> None:

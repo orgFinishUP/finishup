@@ -1,8 +1,8 @@
 """The server's store of repository copies, encrypted at rest (level L2; design v2 §4.3, §8.7, Q4, Q7).
 
 A FinishUP server that keeps a copy of a client's repository keeps it here, under its state
-directory, and nowhere else. Nothing reaches this store while level L2 is unreleased
-(``protocol.server_copy.L2_RELEASED``).
+directory, and nowhere else. Nothing reaches this store unless the server's owner enabled a
+code-copy offer (``[server.code_copy]``) and a client's owner consented at level L2.
 
 **Ownership (Q7).** One copy per (principal, repository): the principal the session was admitted
 as (an API key's principal, or the owner for SSH) and the repository commitment the service keyed

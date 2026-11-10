@@ -1,9 +1,8 @@
 """``finishup server code``: what a server keeps of your code, and how to make it keep less (L2).
 
 Level L2 (ADR-054). The group acts on the selected server elsewhere and on the repository of a
-folder (the current one by default). It is hidden while level L2 is unreleased
-(``protocol.server_copy.L2_RELEASED``); its commands still answer, and those that reach the server
-are refused there, since no server keeps copies yet.
+folder (the current one by default). A server that keeps no copies (its owner's
+``[server.code_copy]`` table makes no offer) refuses the commands that reach it.
 
 * ``list`` asks the server what it keeps of this repository; ``forget`` deletes it there (and this
   computer's export folder for it) and prints exactly what the server deleted. Forget is the only
@@ -42,7 +41,6 @@ from finishup.cli.server import (
     repository_here,
     server_app,
 )
-from finishup.protocol.server_copy import L2_RELEASED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,7 +63,7 @@ allow_app = typer.Typer(
     no_args_is_help=True,
 )
 code_app.add_typer(allow_app, name="allow")
-server_app.add_typer(code_app, name="code", hidden=not L2_RELEASED)
+server_app.add_typer(code_app, name="code")
 
 _JSON_OPTION = Annotated[bool, typer.Option("--json", help="Print JSON.")]
 _MAX_ALLOW_BYTES: Final = 1 << 30

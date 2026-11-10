@@ -26,10 +26,13 @@ identities, the digest of the exclusion policy that produced it, its completenes
 out, and why), the client's subject-state commitment, the consented profile revision and when it
 was synced (design v2 §8.6).
 
-``L2_RELEASED`` is the release's switch for level L2: while it is false no server offers L2, no
-client agrees to it, no helper syncs and no service keeps a copy (design v2 §8.3: L2 stays
-unavailable until sync consent, the hold, encrypted storage, forget, provenance and receipts all
-exist). An architecture test pins it.
+``L2_RELEASED`` is the release's switch for level L2. It is true: every protection design v2
+§8.3 requires before a copy of code may leave a client exists (sync consent, the hold checked
+before a bundle is built, encrypted storage, forget with the erasure of derived excerpts,
+per-evidence provenance and the receipts that state it), and
+``tests/unit/architecture/test_level_l2_released.py`` names each one and the tests that hold it.
+A server still offers L2 only when its owner's ``[server.code_copy]`` table enables an offer, and
+a client sends a copy only after its owner consented at L2 on the trusted console.
 
 The module is pure: the standard library and ``protocol.canonical`` only.
 """
@@ -78,7 +81,6 @@ __all__ = [
     "component_refusal",
     "decode_commit",
     "decode_tree",
-    "enable_unreleased_l2",
     "encode_commit",
     "encode_tree",
     "folded_name",
@@ -97,27 +99,15 @@ __all__ = [
     "write_pack",
 ]
 
-# Level L2 stays unavailable in this release (see the module text). The commit that sets it to
-# True must be the last code commit of the layer that completes every protection design v2 §8.3
-# names; ``tests/unit/architecture`` pins the value.
-L2_RELEASED: Final = False
-# While L2 is unreleased, only a test (``tests/builders/server_copy.release_l2``) or a harness that
-# runs FinishUP in its own process may turn it on, by calling ``enable_unreleased_l2``: nothing a
-# user can set (no flag, no variable, no file) reaches it.
-_ENABLED_IN_THIS_PROCESS: list[bool] = [False]
+# Level L2 is released (see the module text); ``tests/unit/architecture`` pins the value and the
+# protections it rests on. Nothing a user can set changes it.
+L2_RELEASED: Final = True
 
 
 def l2_released() -> bool:
-    """Whether level L2 is available in this process (see ``L2_RELEASED``)."""
+    """Whether level L2 is available in this release (``L2_RELEASED``)."""
 
-    return L2_RELEASED or _ENABLED_IN_THIS_PROCESS[0]
-
-
-def enable_unreleased_l2(enabled: bool = True) -> None:
-    """Turn the unreleased level L2 on (or off again) in this process only; for tests and the
-    real-network harness of the layer that builds it, never called by FinishUP itself."""
-
-    _ENABLED_IN_THIS_PROCESS[0] = bool(enabled)
+    return L2_RELEASED
 
 
 CODE_SYNC_METHOD: Final = "git-bundle-1"

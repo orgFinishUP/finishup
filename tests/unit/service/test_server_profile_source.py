@@ -315,15 +315,6 @@ _OFFER = CodeCopyOffer(
 )
 
 
-def test_a_code_copy_offer_changes_nothing_while_level_l2_is_unreleased(state: Path) -> None:
-    source = ServerProfileSource.load(FinishUpConfig(), state, _OFFER)
-    profile = source.profile(_STATUS, _MANIFEST)
-    assert profile.levels.offered == ("L1",)
-    assert (profile.code_sync, profile.retention, profile.exclusions) == (None, None, None)
-    assert not source.keeps_copies
-    assert offer_digest(FinishUpConfig(), _OFFER) == offer_digest(FinishUpConfig())
-
-
 def test_a_released_code_copy_offer_states_l2_its_caps_retention_and_every_exclusion(
     state: Path,
 ) -> None:
@@ -442,17 +433,6 @@ def test_a_released_table_offers_l2_with_exactly_its_terms(state: Path) -> None:
     assert source.revision.revision == plain.revision.revision + 1
 
 
-def test_an_enabled_table_offers_nothing_while_l2_is_unreleased(state: Path) -> None:
-    config = _configured(_TABLE)
-    plain = ServerProfileSource.load(FinishUpConfig(), state)
-
-    source = ServerProfileSource.load(config, state, code_copy_offer(config))
-
-    assert not source.keeps_copies
-    assert source.revision == plain.revision
-    assert source.document(_STATUS, _MANIFEST) == plain.document(_STATUS, _MANIFEST)
-
-
 class _Listener:
     def __init__(self) -> None:
         self._closed = asyncio.Event()
@@ -503,7 +483,7 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.anyio
-async def test_the_service_takes_its_l2_offer_from_its_config_only_while_l2_is_released(
+async def test_the_service_takes_its_l2_offer_from_its_config_only_when_the_table_enables_it(
     tmp_path: Path,
 ) -> None:
     enabled = _configured(_TABLE)
@@ -518,16 +498,12 @@ async def test_the_service_takes_its_l2_offer_from_its_config_only_while_l2_is_r
             await _close(composed)
 
     digests: dict[str, str] = {}
-    for name, config, released in (
-        ("plain", FinishUpConfig(), True),
-        ("absent", _configured("[server]\n"), True),
-        ("disabled", _configured(_DISABLED), True),
-        ("unreleased", enabled, False),
+    for name, config in (
+        ("plain", FinishUpConfig()),
+        ("absent", _configured("[server]\n")),
+        ("disabled", _configured(_DISABLED)),
     ):
-        if released:
-            with release_l2():
-                composed = await _composed(tmp_path / name, config)
-        else:
+        with release_l2():
             composed = await _composed(tmp_path / name, config)
         try:
             source = composed.server_profile
