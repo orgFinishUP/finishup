@@ -328,6 +328,43 @@ def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_r
     assert spawns == ([] if running else [record.target_id])
 
 
+def test_a_direct_stream_that_does_not_answer_within_the_deadline_names_remote_unreachable(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook's bounded connect in the direct style fails open naming the remote phase (as the
+    relay style does), never a phaseless outage that reads as this computer's service."""
+
+    _record, root = ssh_selected
+    write_connection_style(root, "direct")
+    kept: list[object] = []
+
+    async def open_stream(  # noqa: ANN202
+        _ssh: str,
+        _root: Path,
+        _record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        del expected, deadline
+        client_end, server_end = memory_pair()
+        # The stream opens and the hello leaves, but nothing ever answers.
+        kept.append(server_end)
+        return client_end
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            await connect_service_on_demand(ControlClientKind.CLI, timeout_seconds=0.3)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.reason == "service_unavailable"
+    assert error.phase == "remote_unreachable"
+
+
 def test_the_holder_of_a_remote_root_is_its_helper_and_moves_with_its_status(
     ssh_selected: tuple[targets.ServerTarget, Path],
 ) -> None:

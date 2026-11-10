@@ -2725,6 +2725,17 @@ async def _reach_remote(
             request_profile_refresh(root)
             if style == "direct":
                 _start_helper_to_refresh(root, admission.target_id)
+        if error.reason == "service_unavailable" and error.phase is None:
+            # A server elsewhere's outage always names its phase (design v2 section 8.9: hooks
+            # fail open with the reason): a direct stream that did not answer within the
+            # deadline is ``remote_unreachable``, as through the helper, never the local
+            # service's hint.
+            raise ControlError(
+                "service_unavailable",
+                retryable=True,
+                phase="remote_unreachable",
+                correlation_id=error.correlation_id,
+            ) from error
         raise
 
 
