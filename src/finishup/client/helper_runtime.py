@@ -19,7 +19,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-from finishup.client.target_runtime import LocalTargetRuntime, ProbeResult, TargetRuntimeError
+from finishup.client.target_runtime import (
+    LocalTargetRuntime,
+    ProbeResult,
+    TargetRuntimeError,
+    time_new_connections,
+)
 from finishup.client.targets import ServerTarget, TargetError, read_target
 
 __all__ = [
@@ -170,3 +175,7 @@ class SshTargetRuntime:
     def probe(self, root: Path | None) -> ProbeResult:
         _record(root)
         return LocalTargetRuntime().probe(root)
+
+    def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+        _record(root)
+        return time_new_connections(root, count)

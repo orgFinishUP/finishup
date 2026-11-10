@@ -297,6 +297,11 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **A server that does not answer in time is named.** In the direct style, a hook or command whose
   server elsewhere did not answer within its time now names `remote_unreachable`, as the relay
   style does, instead of reading as this computer's own service being down.
+- **`finishup server test` measures what the startup gate measures.** It now times a new
+  connection and one status in five fresh FinishUP processes and compares the slowest with the
+  required startup gate's 0.65 s. It used to compare one status round trip on an open connection
+  with 200 ms, and so said "within the hook budgets" on a 100 ms network where the gate itself
+  needed 0.67 s.
 - **Tested for real on Linux.** Every combination of server kind, edge, connection style and level
   passed end to end, as did an upgrade over a running helper, bridge and service; Claude Code and
   the Cursor agent started FinishUP's MCP server and Codex listed it. On a network with a 100 ms

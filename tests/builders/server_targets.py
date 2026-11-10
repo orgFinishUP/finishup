@@ -95,7 +95,8 @@ class StandInRuntime:
     """A runtime registered for the remote kinds by ``remote_runtime``; records every call.
 
     ``probe_result`` is what each probe answers; ``ready_error`` and ``stop_error``, when set,
-    are raised by ``ensure_ready`` and ``stop``.
+    are raised by ``ensure_ready`` and ``stop``; ``new_connection_times`` is what
+    ``time_new_connections`` answers (``new_connection_error``, when set, is raised instead).
     """
 
     def __init__(self) -> None:
@@ -103,6 +104,8 @@ class StandInRuntime:
         self.probe_result = ProbeResult("unavailable", reason="remote_unreachable")
         self.ready_error: Exception | None = None
         self.stop_error: Exception | None = None
+        self.new_connection_times: tuple[int, ...] = (40, 40, 40, 40, 40)
+        self.new_connection_error: Exception | None = None
 
     def ensure_ready(self, root: Path | None) -> None:
         self.calls.append(("ensure_ready", root))
@@ -117,6 +120,12 @@ class StandInRuntime:
     def probe(self, root: Path | None) -> ProbeResult:
         self.calls.append(("probe", root))
         return self.probe_result
+
+    def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+        self.calls.append(("time_new_connections", root))
+        if self.new_connection_error is not None:
+            raise self.new_connection_error
+        return self.new_connection_times[:count]
 
     @property
     def stops(self) -> list[Path | None]:

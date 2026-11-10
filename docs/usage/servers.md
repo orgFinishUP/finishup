@@ -184,8 +184,11 @@ finishup server test lab
 
 `list` shows every server and which one is in use. `status` shows which setting chose the server
 in use, its kind, its state (for example ready, locked or not running), its FinishUP release and
-its vault mode. `test` connects, measures the round trip and warns when it is slow enough that a startup
-check required by your agent setup would likely time out.
+its vault mode. `test` connects, measures the round trip of a status call, then times a new
+connection and one status in five fresh FinishUP processes, the way the startup check required by
+some agent setups makes them, and warns when the slowest of those exceeds that check's 0.65 s.
+A task's own status asks the server for a little more than this test's, so a result close to
+0.65 s may still be too slow.
 
 For an SSH or HTTPS server, `status` also shows how this computer reaches it and what FinishUP's
 helper last did, for example:

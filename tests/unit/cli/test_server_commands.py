@@ -26,7 +26,7 @@ from typing import Final, cast
 import pytest
 from typer.testing import CliRunner, Result
 
-from builders.server_targets import ambient_home, remote_runtime
+from builders.server_targets import StandInRuntime, ambient_home, remote_runtime
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.cli import trusted_console
@@ -1926,8 +1926,14 @@ def _ready_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=5, samples=5
         )
 
+    def timed(_self: object, _root: Path | None, count: int) -> tuple[int, ...]:
+        return (40,) * count
+
     remote_runtime(monkeypatch).probe_result = ready(None, None)
     monkeypatch.setattr("finishup.client.target_runtime.LocalTargetRuntime.probe", ready)
+    monkeypatch.setattr(
+        "finishup.client.target_runtime.LocalTargetRuntime.time_new_connections", timed
+    )
 
 
 @pytest.mark.parametrize("selected", ["lab", None])
@@ -2014,3 +2020,80 @@ def test_server_status_and_test_say_a_refused_key_was_an_answer(
     document = _status_json("lab")
     probe = cast(dict[str, JsonValue], document["probe"])
     assert (probe["outcome"], probe["reason"]) == ("unavailable", "remote_auth_failed")
+
+
+def _ready_lab(monkeypatch: pytest.MonkeyPatch, *, round_trip_ms: int) -> StandInRuntime:
+    from finishup.client.target_runtime import ProbeResult
+
+    with targets.registry_lock():
+        targets.new_remote_target(
+            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+        )
+    runtime = remote_runtime(monkeypatch)
+    runtime.probe_result = ProbeResult(
+        "ready",
+        service_state="ready",
+        service_version="0.3.0",
+        round_trip_p95_ms=round_trip_ms,
+        samples=10,
+    )
+    return runtime
+
+
+def test_server_test_warns_when_a_new_connection_misses_the_startup_gate(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design v2 section 8.9: a warm status round trip of 120 ms said "within the hook budgets"
+    while the startup gate's own connection and status took 673 ms; what is compared with the
+    gate's bound is now what the gate times, a new process's connection and status."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    runtime.new_connection_times = (540, 610, 702, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Round trip p95: 120 ms over 10 status calls" in tested.stdout
+    assert (
+        "New connection and status: 702 ms at the slowest of 5 new processes "
+        "(the required startup gate allows 650 ms)."
+    ) in tested.stdout
+    assert (
+        "Warning: 702 ms is above the 650 ms the required startup gate allows for a connection "
+        "and a status; agent tools would likely be denied."
+    ) in tested.stdout
+    assert "Within" not in tested.stdout
+    roots = [root for call, root in runtime.calls if call == "time_new_connections"]
+    lab = targets.find_target("lab")
+    assert lab is not None
+    assert roots == [targets.target_root(lab.target_id)]
+
+
+def test_server_test_says_a_new_connection_fits_the_gate_with_what_it_did_not_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _ready_lab(monkeypatch, round_trip_ms=320)
+    runtime.new_connection_times = (450, 470, 650, 430, 440)  # the bound itself still fits
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "650 ms at the slowest of 5 new processes" in tested.stdout
+    assert (
+        "Within the startup gate's 650 ms for a new connection and status; a task's status asks "
+        "the server for more than this one."
+    ) in tested.stdout
+    assert "Warning" not in tested.stdout  # the warm round trip alone (320 ms) decides nothing
+
+
+def test_server_test_names_a_new_connection_that_did_not_answer(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "A new connection did not answer a status call (service_unavailable, phase timeout)."
+        in tested.stderr
+    )
+    assert "Within" not in tested.stdout
+

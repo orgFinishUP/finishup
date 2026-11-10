@@ -54,9 +54,12 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, NoReturn, cast
 import typer
 
 from finishup import __version__
+from finishup.cli.startup_gate_probe import STARTUP_GATE_SECONDS
 from finishup.client.authorization import bump_credential_generation
 from finishup.client.target_runtime import (
+    NEW_CONNECTION_SAMPLES,
     ProbeResult,
+    TargetRuntime,
     TargetRuntimeError,
     runtime_for,
 )
@@ -123,9 +126,6 @@ server_app = typer.Typer(
 
 _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _EXPLICIT_SOURCES: Final = frozenset({"environment", "runtime_pin", "environment_and_pin"})
-# p95 status round trip above which a required-mode startup gate (0.65 s for connect + status)
-# would likely deny on a cold hook (design section 8).
-_STARTUP_GATE_RISK_MS: Final = 200
 _USAGE: Final = 2
 _UNSAFE: Final = 20
 _UNAVAILABLE: Final = 20
@@ -2148,9 +2148,13 @@ def _resolve(name: str | None) -> tuple[ServerTarget | None, Path | None, bool]:
     return record, target_root(record.target_id), False
 
 
-def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+def _runtime(record: ServerTarget | None) -> TargetRuntime:
     kind: TargetKind = "local" if record is None else record.kind
-    return runtime_for(kind).probe(root)
+    return runtime_for(kind)
+
+
+def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+    return _runtime(record).probe(root)
 
 
 def build_status_document(
@@ -2747,7 +2751,7 @@ def server_test(
 ) -> None:
     """Probe a target and compare its round trip with the hook and startup-gate budgets."""
 
-    record, _root, _everyday = _resolve(name)
+    record, root, _everyday = _resolve(name)
     # These lines never show the zero-network item (``status`` and ``list`` do), so this
     # computer's service is not asked for its policy, nor for this folder's repository.
     document = build_status_document(name, zero_network=lambda: None, repository_here=False)
@@ -2772,14 +2776,34 @@ def server_test(
             err=True,
         )
         raise typer.Exit(_UNAVAILABLE)
-    p95 = probe["round_trip_p95_ms"]
-    if isinstance(p95, int) and p95 > _STARTUP_GATE_RISK_MS:
+    # What the required startup gate times (design v2 section 8.9): a new process's connection
+    # and a status, after its imports. The round trip above is one warm status only; a new
+    # connection adds its handshake's round trips (and, relayed, the server's new channel) and
+    # the process's own schema work, so only this is compared with the gate's bound.
+    try:
+        times = _runtime(record).time_new_connections(root, NEW_CONNECTION_SAMPLES)
+    except TargetRuntimeError as error:
+        phase = "" if error.phase is None else f", phase {error.phase}"
         typer.echo(
-            f"Warning: {p95} ms p95 is above {_STARTUP_GATE_RISK_MS} ms; with the required "
-            "startup gate (0.65 s for connect and status) agent tools would likely be denied."
+            f"A new connection did not answer a status call ({error.reason}{phase}).", err=True
+        )
+        raise typer.Exit(_UNAVAILABLE) from None
+    bound = round(STARTUP_GATE_SECONDS * 1000)
+    slowest = max(times)
+    typer.echo(
+        f"New connection and status: {slowest} ms at the slowest of {len(times)} new processes "
+        f"(the required startup gate allows {bound} ms)."
+    )
+    if slowest > bound:
+        typer.echo(
+            f"Warning: {slowest} ms is above the {bound} ms the required startup gate allows for "
+            "a connection and a status; agent tools would likely be denied."
         )
     else:
-        typer.echo("Within the hook budgets (0.65 s startup gate, 1.0 s hook connect).")
+        typer.echo(
+            f"Within the startup gate's {bound} ms for a new connection and status; a task's "
+            "status asks the server for more than this one."
+        )
 
 
 @server_app.command("remove")

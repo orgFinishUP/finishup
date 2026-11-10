@@ -175,7 +175,7 @@ def test_the_gate_table_shows_the_split_and_this_computers_speed(tmp_path: Path)
             "failures": 0,
         },
         "cold_connect": {"p50": 2500},
-        "server_test": {"round_trip_p95_ms": 120},
+        "server_test": {"round_trip_p95_ms": 120, "new_connection_slowest_ms": 702, "warned": True},
         "cpu_calibration_ms": 78.3,
     }
     style["gate"] = wan_gate.gate(style)
@@ -188,6 +188,13 @@ def test_the_gate_table_shows_the_split_and_this_computers_speed(tmp_path: Path)
     table = wan_gate.render([path])
     assert "| 100 ms | netns | abc1234-dirty | x | 550 / 600 | 320 / 230 | 1500 |" in table
     assert "| 841, 78 | pass |" in table
+    assert "| 120; new 702 (warned) |" in table
+
+
+def test_the_new_connection_line_server_test_prints_is_read() -> None:
+    line = "New connection and status: 702 ms at the slowest of 5 new processes (the required"
+    found = wan_gate.NEW_CONNECTION_LINE.search("Round trip p95: 120 ms\n" + line)
+    assert found is not None and found.group(1, 2) == ("702", "5")
 
 
 def test_the_calibration_is_a_number_of_milliseconds() -> None:

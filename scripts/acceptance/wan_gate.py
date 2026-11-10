@@ -31,7 +31,8 @@ a claim-bound task was started:
   served (the helper it started keeps starting);
 * ``cold_connect`` / ``cold_process`` — how long a cold connection takes to be served at all (no
   budget); reported, never gated: a cold start may fail open once;
-* ``server test`` — the warm status round trip p95 it reports (it warns above 200 ms).
+* ``server test`` — the warm status round trip p95 it reports, and the slowest of its new
+  processes' connection and status, which it compares with the startup gate's 650 ms.
 
 Every number is reported; a style that misses a budget says so (a failed gate is a result, not an
 error). ``render`` turns result files into the markdown table the runbook keeps.
@@ -43,6 +44,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shlex
 import statistics
 import subprocess
@@ -80,6 +82,7 @@ STYLES = (
 # 3.2 s pass budget. ``cold_connect`` (no budget: how long a cold helper takes to serve at all) is
 # reported, never gated: a cold start is allowed to fail open once.
 BUDGETS_MS = {"warm_connect_status": 650, "hook_cold_connect": 1150, "warm_process": 3200}
+NEW_CONNECTION_LINE = re.compile(r"New connection and status: (\d+) ms at the slowest of (\d+)")
 HOOK_START_BUDGET_S = 1.0
 
 PROBE = r"""
@@ -291,9 +294,13 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
     tested = client.fu("server", "test", name, timeout=120)
     document = json_of(client.fu("server", "status", name, "--json").stdout)
     probe_doc = document.get("probe") or {}
+    measured = NEW_CONNECTION_LINE.search(tested.stdout)
     out["server_test"] = {
         "exit": tested.returncode,
         "round_trip_p95_ms": probe_doc.get("round_trip_p95_ms"),
+        # What it compares with the startup gate's bound: a new process's connection and status.
+        "new_connection_slowest_ms": int(measured.group(1)) if measured else None,
+        "warned": "Warning:" in tested.stdout,
         "last_line": (tested.stdout.strip().splitlines() or [""])[-1],
     }
     out["gate"] = gate(out)
@@ -360,6 +367,17 @@ def in_namespace(args: argparse.Namespace) -> int:
     ).returncode
 
 
+def _server_test_cell(tested: dict[str, Any]) -> str:
+    """The status round trip p95 and, when it said one, the slowest new connection and status
+    (with whether it warned)."""
+
+    cell = str(tested.get("round_trip_p95_ms"))
+    slowest = tested.get("new_connection_slowest_ms")
+    if isinstance(slowest, int):
+        cell += f"; new {slowest}{' (warned)' if tested.get('warned') else ''}"
+    return cell
+
+
 def _ms(value: object) -> str:
     return f"{value:.0f}" if isinstance(value, (int, float)) else "–"
 
@@ -370,7 +388,8 @@ def render(paths: list[Path]) -> str:
     rows = [
         "| RTT | Mode | Commit | Style | warm connect+status p50/p95 (≤650) | connect / status p50 | "
         "warm process p95 (≤3200) | hook cold connect p50/p95 (≤1150), served / failed open as | "
-        "cold served p50 | `server test` p95 | import p50, CPU calibration | Gate |",
+        "cold served p50 | `server test` round trip p95; new connection slowest | "
+        "import p50, CPU calibration | Gate |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for path in paths:
@@ -396,7 +415,7 @@ def render(paths: list[Path]) -> str:
                 f"{hook['p50']:.0f} / {hook['p95']:.0f}, {hook['served_within_budget']}/{hook['n']}"
                 f" served{', failed open: ' + phases if phases else ''}; next call served "
                 f"{hook['next_call_served']}/{hook['n']} | {cold['p50']:.0f} | "
-                f"{result['server_test']['round_trip_p95_ms']} | "
+                f"{_server_test_cell(result['server_test'])} | "
                 f"{_ms(imported)}, {_ms(result.get('cpu_calibration_ms'))} | "
                 f"{'pass' if result['gate']['pass'] else 'fail'} |"
             )

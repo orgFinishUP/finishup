@@ -872,8 +872,13 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    startup gate's warm connect and status exceeds 650 ms at p95 for the SSH styles and for direct
    HTTPS (relay HTTPS meets it); the cold hook path ends within its budget and fails open naming
    `remote_unreachable` in every style. The budget on a WAN, or fewer round trips on the
-   claim-bound connect, is an owner decision; `server test` warns only above a 200 ms round trip,
-   which is too lax for that path.
+   claim-bound connect, is an owner decision. `server test` compares what the gate times with the
+   gate's 650 ms: a new connection and one status in each of five new processes
+   (`client.connection_timing`, after the imports; never this folder's claim), the slowest of
+   them. It used to compare one warm status round trip with 200 ms, which missed the connection's
+   own round trips and a new process's schema work and said "within the hook budgets" where the
+   gate took 673 ms. What it still leaves out, and says it leaves out, is the server's extra work
+   on a task's status (about 50 to 150 ms on the test box).
 
 ## Honest limits
 

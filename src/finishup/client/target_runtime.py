@@ -24,6 +24,7 @@ from typing import Final, Literal, Protocol
 from finishup.client.targets import TargetKind
 
 __all__ = [
+    "NEW_CONNECTION_SAMPLES",
     "PROBE_SAMPLES",
     "LocalTargetRuntime",
     "ProbeOutcome",
@@ -32,13 +33,18 @@ __all__ = [
     "TargetRuntimeError",
     "register_target_runtime",
     "runtime_for",
+    "time_new_connections",
 ]
 
 type ProbeOutcome = Literal["ready", "reachable", "not_running", "unavailable"]
 
 # Status round trips a probe times, for the p95 that ``server test`` compares with hook budgets.
 PROBE_SAMPLES: Final = 10
+# New processes ``server test`` times one connection and one status in, as the startup gate does.
+NEW_CONNECTION_SAMPLES: Final = 5
 _PROBE_CONNECT_SECONDS: Final = 5.0
+# One new process: its interpreter, its imports and its bounded connection and status.
+_NEW_CONNECTION_PROCESS_SECONDS: Final = 30.0
 _START_SECONDS: Final = 30.0
 _TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 
@@ -92,6 +98,70 @@ class TargetRuntime(Protocol):
     def stop(self, root: Path | None) -> None: ...
 
     def probe(self, root: Path | None) -> ProbeResult: ...
+
+    def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]: ...
+
+
+def time_new_connections(root: Path | None, count: int) -> tuple[int, ...]:
+    """Milliseconds of one new connection and one status in each of ``count`` new processes.
+
+    Each process (``client.connection_timing``) resolves ``root`` as its selection, passes the
+    shared gate and times its connection and a status after its imports, as the required startup
+    gate does in its own process: a connection this process already made would time neither its
+    schema parsing nor, through a helper, the server's new channel. They run one after another.
+    ``TargetRuntimeError`` with the closed reason (and phase) a process named, or
+    ``service_unavailable`` (phase ``timeout``) for one that did not end within its bound.
+    """
+
+    import json
+    import subprocess
+    import sys
+
+    target = _timing_target(root)
+    times: list[int] = []
+    for _sample in range(count):
+        try:
+            done = subprocess.run(  # noqa: S603 - this interpreter, a fixed module, a closed token
+                [sys.executable, "-m", "finishup.client.connection_timing", target],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_NEW_CONNECTION_PROCESS_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise TargetRuntimeError("service_unavailable", phase="timeout") from None
+        lines = done.stdout.decode("utf-8", "replace").strip().splitlines()
+        try:
+            answer = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            answer = None
+        if isinstance(answer, dict) and type(answer.get("ms")) is int and answer["ms"] >= 0:
+            times.append(answer["ms"])
+            continue
+        reason = answer.get("error") if isinstance(answer, dict) else None
+        phase = answer.get("phase") if isinstance(answer, dict) else None
+        if not isinstance(reason, str) or not _TOKEN.match(reason):
+            raise TargetRuntimeError("service_unavailable")
+        if not isinstance(phase, str) or not _TOKEN.match(phase):
+            phase = None
+        raise TargetRuntimeError(reason, phase=phase)
+    return tuple(times)
+
+
+def _timing_target(root: Path | None) -> str:
+    """The closed argument naming ``root`` to a new process: ``local`` (the everyday server), a
+    target's id, or ``own`` (a root that is no target: the one this process's environment
+    selects, which the new process inherits)."""
+
+    if root is None:
+        return "local"
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except (TargetError, OSError, ValueError):
+        record = None
+    return "own" if record is None else record.target_id
 
 
 def _p95(samples: list[float]) -> int:
@@ -197,6 +267,9 @@ class LocalTargetRuntime:
 
         with selection_override(root):
             return anyio.run(probe)
+
+    def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+        return time_new_connections(root, count)
 
 
 def _ssh_runtime() -> TargetRuntime:
