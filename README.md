@@ -185,8 +185,8 @@ policy you approve during setup is the privacy grant for the project folder setu
 other repository needs its own grant (run `finishup --privacy` from it) before its tasks can use
 AI-powered review, and until then its tasks run local checks only (an installation that already
 sent work before 0.3 may carry its earlier permission forward when a task first starts there). A
-repository whose own policy allows no network use is also held from FinishUP servers elsewhere,
-once they arrive, until you allow it; see [FinishUP servers](docs/usage/servers.md).
+repository whose own policy allows no network use is also held from FinishUP servers elsewhere
+(over SSH or HTTPS) until you allow it; see [FinishUP servers](docs/usage/servers.md).
 
 AI-powered review is a separate explicit decision. When you choose it, the CLI lists the privacy
 options with **Assisted review** as the default. It is marked recommended only for a provider route

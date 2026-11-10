@@ -3,16 +3,16 @@
 By default FinishUP runs one service on your own computer, and your agents, the `finishup`
 command and the terminal interface all use it. A **server** lets them use a different FinishUP
 service instead: a **named local server** on this computer, with its own tasks, settings and
-vault, or **your own FinishUP server on another machine, over SSH**.
+vault, **your own FinishUP server on another machine, over SSH**, or **a FinishUP server over
+HTTPS**, on the web or on a port of this computer, that you reach with an API key.
 
 Nothing changes until you add a server and choose to use it. Without one, FinishUP behaves exactly
 as it always has.
 
 This release connects to FinishUP servers on this computer (the everyday server and the named
-local servers you add) and to FinishUP servers on another machine over SSH. Servers on the web
-(over HTTPS) and on a port of this computer arrive in a later release; until then `finishup server
-add` refuses them before it asks you anything or connects anywhere, and nothing is added (see
-[Troubleshooting](#troubleshooting)).
+local servers you add), to FinishUP servers on another machine over SSH, and to FinishUP servers
+over HTTPS (on the web, or on a port of this computer). To let other computers use a FinishUP you
+run, see [Serve this computer over HTTPS](#serve-this-computer-over-https).
 
 ## Add a server
 
@@ -23,8 +23,8 @@ finishup server add lab --local
 A name is up to 16 lowercase letters, digits and hyphens, starting with a letter or digit. `local`
 is reserved: it always means the everyday FinishUP on this computer. FinishUP shows a server's
 name where you manage servers yourself: the `finishup server` commands (`add`, `use`, `list`,
-`status`, `test`, `connect`, `disconnect`, `set` and `remove`) and `/server` in the terminal
-interface.
+`status`, `test`, `connect`, `disconnect`, `set`, `login`, `logout` and `remove`) and `/server` in
+the terminal interface.
 Error codes, logs and receipts name a server only by a short id such as `t_1a2b3c4d`.
 
 A named local server is a second FinishUP on this computer, with its own tasks, vault, privacy
@@ -78,6 +78,68 @@ The server is then added but not in use; `finishup server use lab` chooses it. F
 agreement to the host key OpenSSH verified: if the server's key changes, FinishUP does not connect
 until you have checked the new key and agreed again.
 
+## Add an HTTPS server
+
+```text
+finishup server add web https://finishup.example.com
+finishup server add web https://finishup.example.com:8443/team --ca-file /path/to/ca.pem
+finishup server add port --port 8443 --tls-pin sha256:<64 hex digits>
+finishup server add web https://finishup.example.com --key-file /path/to/web.key
+```
+
+The address is `https://host[:port][/path]`; the port is 443 unless you give one. Plain `http://`
+is refused. `--port PORT` (or `https://127.0.0.1:PORT`, `https://[::1]:PORT`) is a FinishUP server
+on a port of this computer; it is still treated as a server elsewhere, because a port on this
+computer can forward anywhere. Run the command in your own terminal: you type the server's API key
+there, and you confirm what the server may receive by typing its name.
+
+Before you add one, you need from the server's owner:
+
+- **An API key** for you (it starts with `fuk_`), made on the server with
+  `finishup service api-key create` (see [Serve this computer over
+  HTTPS](#serve-this-computer-over-https)). Its scope decides what you can do there: `agent` covers
+  your agents' everyday work, `operator` adds support commands.
+- **How to trust its certificate.** By default FinishUP trusts a certificate your computer's
+  system store trusts. For a server with its own certificate authority, give that authority's
+  certificate with `--ca-file`; for a self-signed certificate, give its fingerprint with
+  `--tls-pin sha256:…`: the SHA-256 of the certificate in DER form, as 64 lowercase hex digits
+  after `sha256:` (for example from `openssl x509 -in server.pem -outform der | sha256sum`). Give
+  at most one of them.
+- **The same FinishUP release on the server.** A server whose HTTPS interface differs from this
+  release's is refused (`remote_incompatible`) before your key is asked for.
+
+What `server add` does, in order:
+
+1. It asks the server what it is, over HTTPS but without your key, after checking its certificate
+   the way you chose. If the address is not a FinishUP server it can work with, it stops there and
+   never asks for your key.
+2. It asks for the API key on your terminal (`API key for this server (input hidden):`), unless
+   `--key-file` names a file that holds it. That file must be readable by you alone; FinishUP reads
+   it once and never changes it.
+3. It asks the server, with that key, what it offers. A key the server refuses adds nothing.
+4. It shows what the server would receive and keep, and what it says about its AI-powered review,
+   asks what the server may read outside your projects on this computer (`local` or `listed`;
+   `--outside-reads` answers it up front), and asks you to type the server's name.
+
+Only then is the server added, with your agreement and its key. The key is kept in your system's
+credential store, or, where there is none, in a file only you can read; it is never shown again,
+and never in a command line, a setting, a log or anything your agents see. FinishUP binds your
+agreement to the way you chose to trust the server's certificate and to the key: if either changes,
+FinishUP does not connect until you agree again.
+
+### The official FinishUP service
+
+```text
+finishup server add official
+```
+
+`server add official` adds the official FinishUP service this release names, with its address
+filled in. This release names none yet, so it refuses (`official_endpoint_unavailable`) and adds
+nothing; add a server by its address instead. A server's own claim to be official never counts.
+Once one exists, you still agree to it as to any server; it is not asked what it may read outside
+your projects and reads there what FinishUP on this computer would, until you choose otherwise with
+`finishup server folders mode official listed`.
+
 ## Use a server
 
 ```text
@@ -89,9 +151,10 @@ finishup server use local
 FinishUP tools, the `finishup` command and the terminal interface. `use local` goes back to the
 everyday FinishUP on this computer.
 
-For a server on another machine, `use` asks the server again what it offers, shows it and asks you
-to type the name each time; OpenSSH may ask about the host key, as at `add`. After `add` and
-`use`, FinishUP says whether the project you are in is held for that server (see
+For a server elsewhere, `use` asks the server again what it offers, shows it and asks you to type
+the name each time; for an SSH server OpenSSH may ask about the host key, as at `add`, and an HTTPS
+server is asked with the key you stored. After `add` and `use`, FinishUP says whether the project
+you are in is held for that server (see
 [Servers elsewhere and your privacy policy](#servers-elsewhere-and-your-privacy-policy)).
 
 Restart agent sessions that are already open. An open session's FinishUP tools keep the server
@@ -117,40 +180,65 @@ in use, its kind, its state (for example ready, locked or not running), its Fini
 its vault mode. `test` connects, measures the round trip and warns when it is slow enough that a startup
 check required by your agent setup would likely time out.
 
-For an SSH server, `status` also shows how this computer reaches it and what FinishUP's helper
-last did, for example:
+For an SSH or HTTPS server, `status` also shows how this computer reaches it and what FinishUP's
+helper last did, for example:
 
 ```text
 Connection: relay (this computer's FinishUP helper keeps one SSH connection for every program here).
 Helper: running; last ready.
 ```
 
-A server that another FinishUP release added for HTTPS or a port shows in `list` and `status` as
-not available in this release. FinishUP does not use it: choosing it is refused, and the server in
-use stays as it was. `finishup server remove NAME` removes it.
+For an HTTPS server it also says whether an API key is stored (`API key: keyring`, `file` or
+`none`), never the key itself.
 
-## How this computer reaches an SSH server
+## How this computer reaches a server elsewhere
 
-FinishUP runs one small background **helper** per SSH server on this computer. It starts when
-something first needs the server and stops by itself 15 minutes after the last program used it.
-It also answers the server's questions about your project while the server is still working on
+FinishUP runs one small background **helper** per SSH or HTTPS server on this computer. It starts
+when something first needs the server and stops by itself 15 minutes after the last program used
+it. It also answers the server's questions about your project while the server is still working on
 it (for example during a review), and delivers what your agents' hooks captured for observation.
 
 There are two ways for your programs to reach the server:
 
-- **relay** (the default): the helper keeps one SSH connection, and every program here goes
-  through it.
-- **direct** (advanced): each program here (hooks, FinishUP tools, commands) opens its own SSH
-  channel, through one OpenSSH connection that stays open for 15 minutes; the helper still answers
-  the server's background work.
+- **relay** (the default): the helper keeps one connection, and every program here goes through
+  it. For an HTTPS server the helper is the only program that reads its API key.
+- **direct** (advanced): each program here (hooks, FinishUP tools, commands) connects to the server
+  itself: over SSH, its own channel through one OpenSSH connection that stays open for 15 minutes;
+  over HTTPS, its own connection, **so each of those programs reads the API key**. The helper still
+  answers the server's background work.
 
 ```text
 finishup server set lab --style direct
 finishup server set lab --style relay
 ```
 
-You can choose only a way the server offers. Changing it stops the helper and the SSH connection
-first; restart open agent sessions afterwards.
+You can choose only a way the server offers. Changing it stops the helper (and, for SSH, the SSH
+connection) first; restart open agent sessions afterwards.
+
+## Log in and out of an HTTPS server
+
+```text
+finishup server login web
+finishup server login web --key-file /path/to/new.key
+finishup server logout web
+```
+
+`login` stores a new API key for an HTTPS server, for example when its owner gave you a new one.
+You type it on your own terminal, or `--key-file` names a file only you can read. FinishUP asks the
+server about the key before it keeps it:
+
+- a key the server refuses, a server whose certificate no longer matches the trust you chose, or a
+  server FinishUP cannot work with: nothing is stored, and FinishUP says why;
+- a server that does not answer: the key is stored, "not verified yet", and checked on the first
+  connection (`finishup server test NAME` checks it once the server is up).
+
+Storing a key ends every connection made with the old one, the helper's included. A new key is a
+new identity at the server, so FinishUP then asks you to agree again with `finishup server use
+NAME` before it connects.
+
+`logout` deletes the stored key on this computer and stops the helper; it sends nothing. Until you
+log in again, requests to that server are refused (`remote_auth_failed`). `login` and `logout` do
+not apply to an SSH server, which uses your OpenSSH keys.
 
 ## Connect and disconnect
 
@@ -164,9 +252,10 @@ computer (`local`, a named local server, or no name while this computer's own se
 `connect` starts its FinishUP service and `disconnect` stops it, as `finishup service stop` does,
 including any check or review it was still running; it starts again on demand.
 
-For an SSH server, `connect` checks that you may use it and connects (starting the helper), and
-`disconnect` stops this computer's helper and its SSH connection. The server's own FinishUP keeps
-running; stop it on the server if you want to. The next use connects again.
+For an SSH or HTTPS server, `connect` checks that you may use it and connects (starting the
+helper), and `disconnect` stops this computer's helper (and, for SSH, its SSH connection). The
+server's own FinishUP keeps running; stop it on the server if you want to. The next use connects
+again.
 
 ## Remove a server
 
@@ -183,8 +272,9 @@ the service does not stop in time, `remove` keeps the server and asks you to run
 switch back to the everyday server stays, and `remove` says so. An agent session that was still
 using the removed server stops reaching FinishUP and says so until you restart it.
 
-For an SSH server, `remove` stops this computer's helper and SSH connection and removes what
-FinishUP kept on this computer for it; nothing on the server is deleted, and its tasks stay there.
+For an SSH or HTTPS server, `remove` stops this computer's helper (and SSH connection) and removes
+what FinishUP kept on this computer for it, an HTTPS server's API key included; nothing on the
+server is deleted, and its tasks stay there.
 
 If adding or removing a server was interrupted, or something changed a server's folder while
 `remove` deleted it (`remove` then says so), `list` may name a leftover folder (`t_` and eight
@@ -197,13 +287,15 @@ The header shows which server is in use when it is not the everyday one, and `/s
 servers and switches between them. Adding a server there offers a server on this computer and
 prints the `finishup server add NAME --local` command for you to run in your shell; add an SSH
 server with `finishup server add NAME ssh://…` in your shell too, where OpenSSH can ask about its
-host key. Choosing an SSH server in `/server` asks you to agree there, but OpenSSH cannot ask
-about an unknown host key on that screen: add or use the server once in your shell first.
-Removing a server happens in your shell.
+host key, and an HTTPS server with `finishup server add NAME https://…`, where you type its API
+key. Choosing an SSH or HTTPS server in `/server` asks you to agree there, but OpenSSH cannot ask
+about an unknown host key on that screen: add or use an SSH server once in your shell first.
+Removing a server, and logging in or out, happen in your shell.
 
 ## Servers elsewhere and your privacy policy
 
-These rules apply to every server elsewhere; in this release that means an SSH server.
+These rules apply to every server elsewhere: an SSH server, or an HTTPS server on the web or on a
+port of this computer.
 
 - **A project whose privacy policy here allows no network use is held.** While a server elsewhere
   is selected, FinishUP sends nothing it reads or claims for such a project to that server until
@@ -216,9 +308,10 @@ These rules apply to every server elsewhere; in this release that means an SSH s
   since when, and up to eight folders of each project). It starts keeping this only when you first
   add a server elsewhere, so there is nothing from before then; removing your last server
   elsewhere deletes it.
-- **A connection ends when what it was made under changes.** Choosing another server or removing
-  the server ends any open connection to it within about a second, the helper's included; a
-  request already under way may finish. The next request is made under your current choice.
+- **A connection ends when what it was made under changes.** Choosing another server, removing
+  the server, or logging in or out of it ends any open connection to it within about a second, the
+  helper's included; a request already under way may finish. The next request is made under your
+  current choice.
 - **No network while this computer's policy forbids it.** While this computer's privacy policy
   allows no network use, FinishUP refuses to add, choose or reach a server elsewhere, and the
   helper stops.
@@ -227,17 +320,83 @@ These rules apply to every server elsewhere; in this release that means an SSH s
   reads and its hooks capture. A project inside another project follows the outer project's
   policy.
 
+## Serve this computer over HTTPS
+
+To let your other computers use the FinishUP on this one over HTTPS, give each of them an API key
+and run FinishUP's HTTPS server here. Both are commands for this computer's own terminal.
+
+```text
+finishup service api-key create --label laptop --scope agent
+finishup service api-key create --label ci --scope agent --output-file ci.key --expires-in-days 90
+finishup service rest run --listen 0.0.0.0:8443 --tls-cert cert.pem --tls-key key.pem
+```
+
+**API keys.** `api-key create` makes a key and shows it once, on your terminal, or writes it to a
+new file only you can read (`--output-file`; an existing file is never overwritten). FinishUP keeps
+only a salted hash of it, so a lost key cannot be shown again: make a new one. A key that could not
+be shown or written is revoked at once.
+
+- `--scope agent` covers what your agents and their hooks do (starting tasks, publishing work,
+  checks, responses, status and receipts). `--scope operator` also allows support commands such as
+  `project`, `review`, importing a Codex transcript, observation status, locking the service, and
+  reading, proposing or tightening the privacy policy. Some things are never done over HTTPS
+  whatever the scope: stopping the service, backup, restore, migration, host integration, pausing,
+  resuming or revoking observation, unlocking the vault and approving a privacy change.
+- `finishup service api-key list` shows each key's id, label, scope and whether it is active,
+  revoked or expired, never the key.
+- `finishup service api-key revoke KEY_ID` revokes one: its next request fails, and its open
+  connections end.
+- `finishup service api-key create --rotate KEY_ID` makes a replacement that keeps the old key's
+  label, scope and the tasks its computer started; log that computer in with it (`finishup server
+  login NAME` there), then revoke the old key.
+
+Each key keeps its projects apart: the same project used through two different keys, or over HTTPS
+and over SSH, becomes two separate sets of tasks here. Keys are not a wall between people yet:
+anyone holding a key of this server can read a task whose id they know. Give keys only to
+computers you trust as you trust this one.
+
+**Running the server.** `service rest run` runs in the foreground until you press Ctrl-C or stop
+it; run it under a supervisor of your own to keep it running. It needs a certificate and its key
+(`--tls-cert`, `--tls-key`; the key file must be readable by you alone) and speaks TLS 1.2 or later.
+There are two ways to run it:
+
+- **gateway** (the default): a separate program of your user, without your vault, that passes each
+  request to this computer's FinishUP service and starts the service when a request needs it.
+- **native** (`--edge native`): the service itself listens, so the program that holds your vault is
+  on the network. Choose it only after your own security review. Stop the running service first
+  (`finishup service stop`); a passphrase vault is then unlocked with `finishup service unlock` on
+  this computer, as usual.
+
+Behind a reverse proxy that handles TLS on this computer, use `--behind-proxy` instead of the
+certificate: FinishUP then serves plain HTTP on a loopback address only (for example `--listen
+127.0.0.1:8080`). FinishUP writes one line per request to `rest-audit.jsonl` in its log folder
+(what was asked and how it ended, never what was sent, a key or an address), and keeps it small.
+
+| You see | What it means | What to do |
+|---|---|---|
+| `rest_tls_required` | Neither a certificate nor `--behind-proxy` was given. | Give `--tls-cert` and `--tls-key`, or `--behind-proxy` on a loopback address. |
+| `rest_tls_unusable` | The certificate and key could not be loaded together, or the key file can be read by others. | Check the pair, and make the key file readable by you alone (`chmod 600`). |
+| `rest_proxy_not_loopback` | `--behind-proxy` was given with an address other than loopback. | Listen on `127.0.0.1` or `[::1]` behind your proxy. |
+| `rest_listen_invalid` | `--listen` is not `HOST:PORT` with an IP address or `localhost`. | For example `--listen 0.0.0.0:8443`; port 0 picks a free one. |
+| `rest_listener_unavailable` | That address could not be used (in use, or not this computer's). | Choose another port or address. |
+| `service_already_running` | `--edge native` runs the service itself, and it is already running. | Stop it first (`finishup service stop`), or use the default gateway beside it. |
+| `api_key_output_exists` | `--output-file` names a file that already exists. | Choose a new path; a key is never written over a file. |
+| `trusted_console_required` | A key is shown only on your own terminal, and the command ran without one; no key was made. | Run the command in your own terminal, or pass `--output-file`. |
+| `api_key_not_shown`, `api_key_output_failed` | The new key could not be shown, or written to the file, so it was revoked at once and nobody can use it. | Run the command again in your own terminal, or with a new `--output-file` path. |
+| `api_keys_damaged`, `api_keys_unsafe` | FinishUP's file of API keys is damaged, or can be read by others. | Fix its permissions, or move it aside and make new keys. |
+
 ## Not supported yet
 
-- Servers on the web (HTTPS) and on a port of this computer, and signing in to a server with a key
-  (`finishup server login`).
 - Keeping a copy of your code on the server; a server elsewhere reads your code only through
   FinishUP on this computer.
-- Adding an SSH server from the terminal interface (use your shell).
+- Adding an SSH or HTTPS server from the terminal interface (use your shell).
+- Signing in to an HTTPS server with anything other than an API key (for example OAuth).
+- An official FinishUP service: this release names none.
 - An SSH host certificate in place of a host key: FinishUP refuses such a server
   (`remote_identity_changed`).
-- SSH servers have been tried on Linux. macOS, and Windows through WSL 2, have not been tested yet
-  as either end of an SSH server.
+- SSH and HTTPS servers have been tried on Linux. macOS, and Windows through WSL 2, have not been
+  tested yet as either end of an SSH or HTTPS server; on macOS a Python from python.org may need
+  its certificates installed before FinishUP trusts a server through the system store.
 
 ## Troubleshooting
 
@@ -250,15 +409,17 @@ now).
 
 | You see | What it means | What to do |
 |---|---|---|
-| `remote_kind_unavailable` | You gave `finishup server add` a web address (`https://…`), a port (`--port`) or an address that is not `ssh://…`, or chose a server another FinishUP release added for the web or a port. This release connects to FinishUP servers on this computer and over SSH. Nothing was added or sent, and the server in use did not change. | Use the everyday server (`finishup server use local`), add a named local server with `finishup server add NAME --local`, or an SSH server with `finishup server add NAME ssh://[user@]host[:port]`. Servers on the web and on a port arrive in a later release. |
+| `remote_kind_unavailable` | You gave `finishup server add` an address this release cannot use (for example `http://…`). Nothing was added or sent, and the server in use did not change. | Add a named local server with `finishup server add NAME --local`, an SSH server with `finishup server add NAME ssh://[user@]host[:port]`, or an HTTPS server with `finishup server add NAME https://host[:port]` (or `--port PORT` on this computer). |
+| `official_endpoint_unavailable` | `finishup server add official` was used, but this release names no official FinishUP service yet. Nothing was added. | Add a server by its address: `finishup server add NAME https://HOST`. |
+| `credential_not_applicable` | `finishup server login`, `logout` or `--key-file` was used for an SSH server, which uses your OpenSSH keys, not an API key. | Load your SSH key in your SSH agent (`ssh-add`) instead. |
 | `remote_launcher_not_found` | `server add` found no FinishUP on the server at the usual install paths. Nothing was added. | Install the same FinishUP release on the server, or give its full path with `--remote-launcher`. |
 | `remote_host_key_unconfirmed` | OpenSSH asked you to confirm the server's host key and you declined or did not answer. Nothing was added. | Check the fingerprint with the server's own, then run `finishup server add` again and answer yes. |
-| `trusted_console_required` | Adding or choosing a server elsewhere needs your own terminal: the command ran without one (for example from an agent's shell), or OpenSSH would have had to ask about a host key where it cannot. | Run the command yourself in your own terminal. |
-| `remote_identity_changed` | The server's SSH host key is not the one this computer knows (or it uses a host certificate), so FinishUP did not connect and sent nothing. | Check the server's key another way. If it really changed, update it with OpenSSH's own tools (for example `ssh-keygen -R`) and agree again with `finishup server use NAME`, or remove the server and add it again. Never turn off host key checking. |
-| `remote_auth_failed` | The server refused the SSH keys OpenSSH offered. | Load your key in your SSH agent (`ssh-add`), or check that it is authorized for that account on the server, then repeat the request. |
-| `remote_unreachable` | FinishUP could not reach the server over SSH, or the connection ended. | Check the address and your network; `finishup server test NAME` shows whether it answers now. |
-| `remote_service_not_running` | The server answered over SSH, but its FinishUP service is not running and could not be started. | Start it on the server (`finishup service start` there), then repeat the request. |
-| `remote_incompatible` | The server runs another FinishUP release than this computer. Nothing was recorded there. | Install the same FinishUP release on both machines. |
+| `trusted_console_required` | Adding or choosing a server elsewhere, or typing an API key, needs your own terminal: the command ran without one (for example from an agent's shell), or OpenSSH would have had to ask about a host key where it cannot. | Run the command yourself in your own terminal (or give an HTTPS key with `--key-file`). |
+| `remote_identity_changed` | The server's SSH host key is not the one this computer knows (or it uses a host certificate), or an HTTPS server's certificate does not match the trust you chose (the system store, `--ca-file` or `--tls-pin`), so FinishUP did not connect and sent nothing. | Check the server's key or certificate another way. For SSH, if it really changed, update it with OpenSSH's own tools (for example `ssh-keygen -R`) and agree again with `finishup server use NAME`; for HTTPS, remove the server and add it again with the right trust. Never turn off host key or certificate checking. |
+| `remote_auth_failed` | The server refused the SSH keys OpenSSH offered, or an HTTPS server refused this computer's API key (unknown, revoked or expired), or no API key is stored for it (after `server logout`), or the system's credential store did not answer in time. | For SSH, load your key in your SSH agent (`ssh-add`), or check that it is authorized for that account on the server. For HTTPS, ask the server's owner for a valid key and run `finishup server login NAME`; unlock your system's credential store if it is locked. Then repeat the request. |
+| `remote_unreachable` | FinishUP could not reach the server over SSH or HTTPS, or the connection ended. | Check the address and your network; `finishup server test NAME` shows whether it answers now. |
+| `remote_service_not_running` | The server answered, but its FinishUP service is not running and could not be started (for HTTPS, its HTTPS server answered but could not reach the service). | Start it on the server (`finishup service start` there), then repeat the request. |
+| `remote_incompatible` | The server runs another FinishUP release than this computer, or, over HTTPS, it does not serve this release's HTTPS interface or is not a FinishUP server at all. Nothing was recorded there, and `server add` never asked for your key. | Install the same FinishUP release on both machines, and check the address. |
 | `style_unavailable` | `finishup server set NAME --style` named a way the server does not offer. Nothing was changed. | `finishup server status NAME` shows the server; keep the current way. |
 | `target_still_connected` | This computer's helper for that server did not stop in time, so nothing was changed or removed. | Run the same command again. |
 | `selection_overridden` | An isolation setting or a pinned test copy decides which FinishUP is used, so `server use` cannot. | Unset `FINISHUP_ISOLATED_ROOT`, or run the command from your everyday installation. |
@@ -266,8 +427,8 @@ now).
 | `selection_invalid` | The saved server choice is damaged, or names a server whose folder on this computer is missing or unsafe. `finishup server` commands say this instead of `isolation_root_invalid`. | Run `finishup server use local`; it clears the choice even when it cannot be read. |
 | `repository_egress_held` | A server elsewhere is selected and this project's privacy policy on this computer allows no network use, so FinishUP refused the connection before anything from it was sent. | Decide once: allow it from your own terminal in that project, or keep it on this computer so FinishUP does not ask again. |
 | `repository_egress_kept` | You chose to keep this project on this computer for the selected server elsewhere. | Nothing to do; FinishUP does not ask again. |
-| `server_authorization_changed` | Something a connection to a server elsewhere was allowed under changed while it was open (the server choice, the server's record or key, this computer's privacy policy, or a project's hold), so FinishUP stopped sending over it. What that server already received stays there. A request that was already on its way may or may not have been recorded there; FinishUP does not send it again, since your current choice may be another server. | Later requests use your current choice, or say what refuses it now. If that request was a change, check whether it was recorded before you make it again. |
-| `server_profile_changed` | What that server offers or needs (for example whether its AI-powered review sends what it reads to a model provider) changed since you agreed to use it, or FinishUP could not confirm it, so that server did no work for this request. Another request already on its way over the same connection ends with `server_authorization_changed`: it may or may not have been recorded there. | Agree again in your own terminal with `finishup server use NAME`, or go back with `finishup server use local`. |
+| `server_authorization_changed` | Something a connection to a server elsewhere was allowed under changed while it was open (the server choice, the server's record or key, a `server login` or `logout`, this computer's privacy policy, or a project's hold), so FinishUP stopped sending over it. What that server already received stays there. A request that was already on its way may or may not have been recorded there; FinishUP does not send it again, since your current choice may be another server. | Later requests use your current choice, or say what refuses it now. If that request was a change, check whether it was recorded before you make it again. |
+| `server_profile_changed` | What that server offers or needs (for example whether its AI-powered review sends what it reads to a model provider) changed since you agreed to use it, you logged in with a new API key, or FinishUP could not confirm it, so that server did no work for this request. Another request already on its way over the same connection ends with `server_authorization_changed`: it may or may not have been recorded there. | Agree again in your own terminal with `finishup server use NAME`, or go back with `finishup server use local`. |
 | `server_level_unavailable` | That server requires more of this computer than you agreed to (for example keeping a copy of your code), so nothing was sent for this project. | `finishup server use NAME` shows what it requires; or use another server. |
-| `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server that another FinishUP release added for the web or a port, or whose record on this computer cannot be read; or a command that runs only where the server lives (setup, for example) ran while a server elsewhere is in use. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |
+| `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server whose record on this computer cannot be read; or a command that runs only where the server lives (setup, for example) ran while a server elsewhere is in use. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |
 | `workspace_binding_conflict` | A request named the project in a form its connection cannot use, such as a `client:` handle sent to a FinishUP on this computer. | Name the project by its folder path through FinishUP's own tools; a hand-written client must not send a `client:` handle to a server on this computer. |

@@ -4651,6 +4651,21 @@ tells the kind from the argument's prefix alone (`ssh://`; `--port`, `https://12
 `https://[::1]:` for `local_port`; any other `https://`; anything else refused as a closed kind)
 before anything else. The SSH names are in *SSH servers and the helper (ADR-052, layer 4)*.
 
+**Layer 5 status** (ADR-051, "Built in layer 5, and not yet built"; ADR-053; ADR-052 decisions 20
+to 23). `https` and `local_port` are open too (`OPEN_REMOTE_KINDS == {"ssh", "https",
+"local_port"}`): `finishup server add NAME https://HOST[:PORT][/BASE]` and `--port PORT` run
+discovery without a key, the key and its check, then the consent; `server use`, `server login`,
+`server logout`, `server set --style` and the helper runtime act for both kinds; `server login`
+and `server logout` are shown in help, as are `--port`, `--ca-file`, `--tls-pin` and
+`--key-file`. The layer-1 rules in the list below now apply only to an address that names none of
+the open kinds (`http://`, another scheme), refused `remote_kind_unavailable` with the text "this
+release connects to FinishUP servers on this computer (the everyday server and named local
+servers, 'finishup server add NAME --local'), over SSH ('finishup server add NAME
+ssh://[user@]host[:port]') and over HTTPS ('finishup server add NAME https://host[:port]', or
+--port PORT on this computer); that address names none of them; nothing was added"; no record of
+an open kind shows as not available in this release. The REST names are in *HTTPS servers and
+REST v1 (ADR-053, layer 5)*.
+
 - `finishup server add NAME https://…|--port N` (a kind closed in this release) refuses
   `remote_kind_unavailable` before any trusted-console prompt, zero-network check, probe, dial,
   key prompt or write; the kind is told by the address prefix alone, and nothing touches the
@@ -4724,21 +4739,21 @@ never inside a repository, with exact field sets.
 |---|---|---|
 | `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | The key set is exact per kind (`client.targets._FIELDS_BY_KIND`); every listed key is present, a nullable one as JSON `null`, and no other key is admitted. Every kind: `schema`, `target_id` (`t_` + 8 lowercase hex, the folder's own name), `name`, `kind`, `created_at` (RFC 3339, milliseconds). `local`: those five only. `https` and `local_port`: also `base_url` (normalized; loopback only for `local_port`), `ca_file` (absolute path or `null`), `tls_pin` (`sha256:<64 hex>` or `null`; at most one of `ca_file` and `tls_pin` is set, and both `null` means the system certificate store) and `credential` (`keyring`, `file` or `null` while no key is stored). `ssh`: also `user` (or `null`), `host`, `port` (22 when the address names none), `remote_root`, `remote_endpoint` (the endpoint the server's own launcher reported at SSH discovery, layer 4; else `<remote_root>/run/control.sock`, derived) and `remote_launcher` (`--remote-launcher`, or the one discovery found), the last three absolute paths or `null`. Every remote kind also has `claim_salt` (base64 of 32 random bytes), `authorized_at` and `disclosure_version` (an integer of at least 1), never `null`. |
 | `yoetz.server-selection/1` | `<ambient config dir>/server-selection.json` | `schema`, `target_id`. Absent means the ambient service. |
-| `yoetz.credential-generation/1` | `<target root>/config/credential-generation` (layer 2, ADR-052) | `schema`, `generation` (32 lowercase hex, random), canonical JSON and a newline. Written only by the owner's own commands on the target's key (`server logout`, `server remove`; `server login` once it stores a key), never by a token refresh; a change ends every connection admitted under the previous one (`server_authorization_changed`). Holds no secret. |
+| `yoetz.credential-generation/1` | `<target root>/config/credential-generation` (layer 2, ADR-052) | `schema`, `generation` (32 lowercase hex, random), canonical JSON and a newline. Written only by the owner's own commands on the target's key (`server logout`, `server remove`; `server login`, which stores a key from layer 5), never by a token refresh; a change ends every connection admitted under the previous one (`server_authorization_changed`). Holds no secret. |
 | `yoetz.server-target/2` | `<ambient state dir>/servers/t_<8 hex>/target.json` (layer 3, ADR-052) | A remote record the owner consented to under a server profile: the `/1` key set of its kind plus `consent`, an exact object: `level` (`L1`; `L2` from layer 6), `profile_digest` (`sha256:<64 hex>`), `profile_revision` (`{issuer: 32 hex, revision: integer ≥ 1}`), `retention` (`null` at L1, else `{kind, days}`), `envelope_digest` (the digest of `config/consent-envelope.json`) and `adjusted` (`null`, or `{at, coverage_reduced}` once a narrowed profile adjusted it). Local records stay `/1`; a `/1` remote record still reads and is refused `target_reauthorization_required` (`DISCLOSURE_VERSION` 3). |
 | `yoetz.consent-envelope/1` | `<target root>/config/consent-envelope.json` (layer 3) | The consented envelope (`protocol.consent_envelope` canonical form) and a newline; written only by the owner's consent on the trusted console and by a narrowing adjustment; bound to `target.json` by `consent.envelope_digest`. |
 | `yoetz.server-profile-cache/1` | `<target root>/state/server-profile.json` (layer 3) | `schema`, `fetched_at`, `endpoint` (`{identity_type, identity}`: what the transport observed, never what the server says) and `profile` (a `server-profile` 1.0.0 document); written by whoever fetches a profile (`server add`/`use` here, the helper from layer 4); hooks only read it. |
 | `yoetz.helper-registration/1` | `<target root>/state/registrations/<claim hex>-<worktree hex>-<registrant>.json` (layer 3) | `schema`, `target_id`, `registrant` (16 hex), `source` (`cli`, `hook`, `mcp_bridge`, `mcp_roots`, `registered_project`, `ui`), `claim` (`{identity_kind, digest, worktree}`), `worktree` (absolute, never sent), `repository_key`, `grant` (`{identity_digest, consent_digest, credential_generation}`), `server_profile` (the revision triple), `selection_bound` (the registering connection followed the selection file, rather than a root pinned on purpose), `registered_at`, `expires_at` (a 15-minute lease). At most 64 per target; written and pruned under the registry lock. See *Server profiles and consent*. |
-| `yoetz.helper-status/1` | `<target root>/state/helper-status.json` (SSH targets, layer 4, ADR-052 decision 13) | `generation` (integer ≥ 1; moves on every change of phase or reason and with every new helper process), `phase` (`starting\|ready\|unavailable\|stopped`), `reason` (`null`; for `unavailable` a member of `REMOTE_CONNECTION_PHASES`; for `stopped` `idle_timeout`, `stop_requested`, `helper_failed`, `target_removed` or `zero_network_remote_selected`), `correlation_id`, `pid`, `started_at`, `style` (`relay\|direct`). Written by the helper only, atomically, never creating a removed target's folder; read by clients (the phase of a connection the helper closed, the bridge's availability latch) and `server status`. |
-| `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets, layer 4) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper and the master stopped. |
-| `helper.lock` | `<target root>/state/helper.lock` (SSH targets, layer 4) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest; a client stops or replaces a helper only by that stamped pid. |
-| `profile-refresh-requested` | `<target root>/state/profile-refresh-requested` (SSH targets, layer 4) | An empty marker a client leaves when the server refused its hello or request with `server_profile_changed`; the helper takes it and fetches the profile (at most once per 30 seconds). |
-| `helper.stderr` | `<target root>/log/helper.stderr` (SSH targets, layer 4) | The helper process's standard error (owner-only, `0600`, appended), made only beneath an existing target folder: what the interpreter itself prints, such as an unexpected failure. OpenSSH's diagnostics go to the helper through a pipe and only choose a closed reason; they are not written there. |
+| `yoetz.helper-status/1` | `<target root>/state/helper-status.json` (SSH targets from layer 4, HTTPS and port targets from layer 5; ADR-052 decision 13) | `generation` (integer ≥ 1; moves on every change of phase or reason and with every new helper process), `phase` (`starting\|ready\|unavailable\|stopped`), `reason` (`null`; for `unavailable` a member of `REMOTE_CONNECTION_PHASES`; for `stopped` `idle_timeout`, `stop_requested`, `helper_failed`, `target_removed` or `zero_network_remote_selected`), `correlation_id`, `pid`, `started_at`, `style` (`relay\|direct`). Written by the helper only, atomically, never creating a removed target's folder; read by clients (the phase of a connection the helper closed, the bridge's availability latch) and `server status`. |
+| `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets from layer 4, HTTPS and port targets from layer 5) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper (and, for SSH, the master) stopped. |
+| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest; a client stops or replaces a helper only by that stamped pid. |
+| `profile-refresh-requested` | `<target root>/state/profile-refresh-requested` (SSH targets from layer 4, HTTPS and port targets from layer 5) | An empty marker a client leaves when the server refused its hello or request with `server_profile_changed`; the helper takes it and fetches the profile (at most once per 30 seconds). |
+| `helper.stderr` | `<target root>/log/helper.stderr` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper process's standard error (owner-only, `0600`, appended), made only beneath an existing target folder: what the interpreter itself prints, such as an unexpected failure. OpenSSH's diagnostics go to the helper through a pipe and only choose a closed reason; they are not written there. |
 | `yoetz.server-profile-revision/1` | `<service state dir>/server-profile-revision.json` (server side, layer 3) | `schema`, `issuer` (32 hex, random), `revision` (integer ≥ 1), `profile_digest`; advanced at service start when the offer's digest changes; one that cannot be read is replaced under a new issuer. |
 | `yoetz.everyday-repository-policy/1` | `<ambient state dir>/servers/everyday-repositories.json` (layer 2, ADR-051 decision 8) | `schema` and `repositories`: per repository `key` (`sha256:` over the shared repository identity), `no_network`, `no_network_since` (the start of the current no-network stretch, or `null`), `reported_at` and up to 8 `worktrees`; at most 256 entries and 256 KiB (the writer keeps the reader's bound), permitted ones evicted first; an update that still would not fit is not written and is recorded in `yoetz.everyday-repository-overflow/1`. Written only while a remote target record exists (`targets.remote_target_recorded`, O3); deleted when the last one is removed. Never sent to a server. |
 | `yoetz.everyday-repository-overflow/1` | `<ambient state dir>/servers/everyday-repositories-overflow.json` (layer 2) | `schema` and `overflowed_at`: when an update of the repository reports last did not fit their 256 KiB bound; removed by the next update that fits and with the reports. `server repositories list` names it. Never sent to a server. |
 | `yoetz.server-repositories/1` | `<target root>/config/repositories.json` (remote kinds only, layer 2) | `schema`, `target_id` (the root's own) and `repositories`: per repository `key`, `choice` (`send`, with its `disclosure_version`, or `keep`), the `no_network_since` it was made in, `decided_at` and the `worktree` it was made from; at most 64. Written by `server repositories add` (trusted console), `keep`, and `remove [--all]`; never sent to a server. |
-| `yoetz.server-folders/1` | `<target root>/config/folders.json` (remote kinds only) | `schema`, `target_id` (the root's own), `folders` (sorted, unique, at most 32 absolute paths that pass `admitted_input_root_valid` and neither are nor hold the home directory), and `mode` (`local\|listed`) once the owner chose one (at `server add`, or with `server folders mode`). Every remote kind has the same two modes and no default: no `mode` means `listed` (`not_chosen`), except an HTTPS target whose exact hostname is in `client.server_folders.OFFICIAL_ENDPOINT_HOSTS` and that trusts the system certificate store, which is `local` (`official_endpoint`). An absent record means no folder and no mode; one that cannot be read means `listed` with no folder. In both modes the folders also admit task inputs for that target's claim-bound sessions, whatever the server's own input-root policy names (maintainer decision 2026-11-07). Written only by `server add` and `server folders add`/`remove`/`mode`, never sent to a server. |
+| `yoetz.server-folders/1` | `<target root>/config/folders.json` (remote kinds only) | `schema`, `target_id` (the root's own), `folders` (sorted, unique, at most 32 absolute paths that pass `admitted_input_root_valid` and neither are nor hold the home directory), and `mode` (`local\|listed`) once the owner chose one (at `server add`, or with `server folders mode`). Every remote kind has the same two modes and no default: no `mode` means `listed` (`not_chosen`), except an `https` target whose base URL matches an origin in `client.server_folders.OFFICIAL_ENDPOINT_ORIGINS` (scheme, host, port and path prefix; layer 5 replaced layer 1's hostname list `OFFICIAL_ENDPOINT_HOSTS`) and that trusts the system certificate store, which is `local` (`official_endpoint`). An absent record means no folder and no mode; one that cannot be read means `listed` with no folder. In both modes the folders also admit task inputs for that target's claim-bound sessions, whatever the server's own input-root policy names (maintainer decision 2026-11-07). Written only by `server add` and `server folders add`/`remove`/`mode`, never sent to a server. |
 
 A target name matches `[a-z0-9][a-z0-9-]{0,15}` and `local` is reserved. The name appears in
 `target.json` and in owner-facing output on this computer: the `finishup server` commands (`add`,
@@ -4808,13 +4823,10 @@ that mode lets the server read, a rule-breaking server included) before the type
 extra prompt. An official endpoint (`server_folders.official_address`) is not asked, sees no such
 notice, and is left unrecorded, `local`. The answer is
 written with `set_mode` under the registry lock that creates the target; where it cannot be,
-the target is still added and `add` says it is `listed` until the owner chooses. For a remote
-kind (layer 1 offers none) the terminal interface's `/server` add flow asks the same question
-(`OUTSIDE_READ_QUESTION`, the same lines)
-and prints `finishup server add NAME … --outside-reads MODE`; while `OFFICIAL_ENDPOINT_HOSTS` is
-not empty it also offers an official FinishUP service (`add:official`), asks it nothing and
-prints `finishup server add NAME https://HOST` for each reviewed host, without
-`--outside-reads`. `server folders mode NAME local`
+the target is still added and `add` says it is `listed` until the owner chooses. The terminal
+interface's `/server` add flow offers only a server on this computer (since layer 1), so it asks
+no outside-read question and offers no official service; `finishup server add official` is the
+official preset (layer 5, *HTTPS servers and REST v1*). `server folders mode NAME local`
 records `local` only after the typed name on the trusted console, unless the owner already chose
 `local`, and even for an official endpoint, which is `local` unrecorded; without the console an
 official endpoint is left unrecorded (it says so and exits 0) and any other target is
@@ -4887,8 +4899,10 @@ remote runtimes arrive with the background helper (layer 4) and REST (layer 5). 
 `SshTargetRuntime` for `ssh` (`ensure_ready`: the shared gate, then a connection as any client
 makes one; `stop`: the helper by its stamped pid and `ssh -O exit` for the master,
 `target_still_connected` when the helper does not stop; `probe`: status round trips over the real
-transport); `https` and `local_port` keep the layer-1 answer. The server-host commands `finishup
-service start` and `finishup service endpoint --json` are added.
+transport); `https` and `local_port` keep the layer-1 answer until layer 5 registers the same
+runtime for both (`ensure_ready` through the helper or the direct REST dial; `stop` the helper,
+with no master to end). The server-host commands `finishup service start` and `finishup service
+endpoint --json` are added.
 
 **Command scope.** `cli/command_scope.py` labels every Typer and terminal-interface command `any`,
 `server_host` or `client_only`. `require_server_host()` refuses a `server_host` command while the
@@ -5074,7 +5088,10 @@ still removes the target and names, on stderr, the entry left there (service and
 credential never appears in argv, the environment, `target.json`, a registration, a log, hook
 output, an MCP frame or JSON output. In layer 1 `server login` refuses `remote_kind_unavailable`,
 so no key is stored; `server logout` and `server remove` still delete one another build stored,
-without touching the network.
+without touching the network. From layer 5 `server add` of an HTTPS or port target and `server
+login` store a key the server accepted (or, for `login`, one it did not answer about, "not
+verified yet"), and `logout` also moves the credential generation and stops the helper (*HTTPS
+servers and REST v1*).
 
 **Control envelopes 2.10.0.** All four control envelopes move together. The wire is shared and
 complete in layer 1, where no FinishUP client sends a claim or declares a workspace agent outside
@@ -5428,8 +5445,10 @@ claim-bound read fails `hub_unavailable`, a typed gap and never a local read.
 
 **Composition flag.** `ServiceComposition.refuse_workspace_locators: bool = False`. A network
 server edge that admits only claims sets it; the daemon then closes any hello that names a
-`workspace_locator`. Local clients keep naming their path. Nothing sets it in layer 1; the gateway
-and native edges arrive with REST (layer 5).
+`workspace_locator`. Local clients keep naming their path. Nothing sets it in layer 1, and the REST
+edges of layer 5 do not need it: REST names no path at all (the client's mapping never sends a
+hello that names a locator, a start needs a claim, and a `workspace_ref` must be a `client:`
+handle).
 
 **Agent loss in results.** A read that ends `WorkspaceAgentUnavailable` fires the gap of what it
 would have read. The check-time change records one of two reasons, each with its own fixed sentence
@@ -5735,8 +5754,8 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 | `server_authorization_changed` | layer 2: a connection admitted to a server elsewhere ends because what it was authorized under changed — the selection no longer names its target, the target's record was replaced or removed, the credential generation changed, or (for an open connection, whatever the gate now refuses) this computer's policy or the repository's hold changed (ADR-052); FinishUP stopped sending over it and what the server received stays there | continuation `server_connection_renew`: a request already sent over that connection may be recorded there and is never resent (no replay across targets), so its outcome is unknown; later requests run under the current selection or name the refusal now in force |
 | `server_profile_changed` | layer 3: the consent step (ADR-052 decision 10): what the selected server elsewhere offers or needs (its profile, as last fetched) is wider than, or not comparable with, what the owner consented to; or its revision is another issuer's, its endpoint identity changed, or a consent record is missing, unreadable or inconsistent; or the server refused the revision a hello or request named (control error code `server_profile_changed`). Refused before that server did any work for it: by this client before anything was sent, or by the server before it keyed the claim, registered an agent or did the request's work; every other call already sent over a connection the server refused ends as `server_authorization_changed` (its outcome is unknown, it is never resent) | continuation `remote_reconsent`: only the owner agrees again, with `finishup server use NAME` in their own terminal; agents never do |
 | `server_level_unavailable` | layer 3: the server requires a level of use above the one the owner agreed to (never a silent upgrade); refused before anything was sent | continuation `server_level_decision_required`: only the owner decides (`finishup server use NAME` shows what it requires, or `finishup server use local`) |
-| `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored). From layer 4 the same for `https://…`, `--port N` and their records only (and any address that is not `ssh://`), and `server login` for every kind | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): this release connects to servers on this computer and over SSH; HTTPS and port servers arrive later, so nothing was added, selected or sent; the owner runs `finishup server use local`, then the request is repeated |
-| `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: the owner runs `finishup server use local`, or, for an SSH server (layer 4), `finishup server use NAME` on their own terminal to agree to the current disclosure, then starts a new session; an HTTPS or port server can be authorized again only by a later release (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
+| `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored). From layer 4 the same for `https://…`, `--port N` and their records only (and any address that is not `ssh://`), and `server login` for every kind. From layer 5 only an address that names none of the open kinds (`http://`, another scheme) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): nothing was added, selected or sent; the owner runs `finishup server use local`, then the request is repeated |
+| `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: the owner runs `finishup server use local`, or, for an SSH server (layer 4), `finishup server use NAME` on their own terminal to agree to the current disclosure, then starts a new session; in layer 4 an HTTPS or port server could be authorized again only by a later release, and from layer 5 `finishup server use NAME` agrees again for it too (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
 | `zero_network_remote_selected` | a connection would be opened to a remote target while this computer last reported a zero-network policy (`targets.require_current_authorization`, before the disclosure check; ADR-051 decision 8, 2026-11-07); also the CLI's refusal of a privacy change that would leave both in force | the owner runs `finishup server use local`, then restarts open sessions (and makes the refused change again) |
 
 The remote connection phases ride as `phase` on a retryable `service_unavailable`
@@ -5766,7 +5785,8 @@ unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`,
 **Shared authorization (layer 2, ADR-052).**
 
 - `client.authorization` (hook-safe): `OPEN_REMOTE_KINDS` (empty in layers 2 and 3; exactly
-  `{"ssh"}` from layer 4; an architecture test pins it), `AUTHORIZATION_REFUSALS`, `gate(record, *,
+  `{"ssh"}` in layer 4; `{"ssh", "https", "local_port"}` from layer 5; an architecture test pins
+  it), `AUTHORIZATION_REFUSALS`, `gate(record, *,
   repository_key=None)` (raises `TargetError` in the order zero-network, disclosure, open kind,
   consent, hold), `authorize_active_root() -> ConnectionAuthorization | None` (None for a local
   root), `authorize_target(record) -> ConnectionAuthorization` (layer 4: pinned to the target's own
@@ -5809,9 +5829,9 @@ unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`,
 connection, no network protocol and no server edge. Server profiles and their consent binding arrive
 in layer 3; the background helper (one per server, for the relay and direct connection styles) with
 SSH targets in layer 4 (built: *SSH servers and the helper*); REST, its gateway and native server
-edges, discovery with the official endpoint preset and the conformance kit in layer 5; the L2
-server copy in layer 6. The REST layer will enforce API key scopes (`agent`, `operator`; ADR-051
-decision 9) on both server edges.
+edges, API key scopes (`agent`, `operator`; ADR-051 decision 9), discovery with the official
+origin preset and the conformance kit in layer 5 (built: *HTTPS servers and REST v1*); the L2
+server copy in layer 6.
 
 ### Several-agent setup batches (issue #1119)
 
@@ -14646,10 +14666,11 @@ hook's path.
 - `finishup server add NAME ssh://[user@]host[:port] [--remote-root ABS] [--remote-launcher ABS]
   [--outside-reads local|listed]` (`client_only`; the address, `--remote-root`,
   `--remote-launcher` and `--outside-reads` are shown in help; `--port`, `--ca-file`, `--tls-pin`
-  stay hidden). Order: the selection in force, the name, the address and options (remote paths
-  absolute, SRV-11; `--ca-file`/`--tls-pin` with SSH is `target_tls_invalid`), the name not taken,
-  zero-network (SRV-3), SSH discovery, then the consent on the trusted console. It prints "Asking
-  the server over SSH where its FinishUP service listens and what it offers." before discovery;
+  stay hidden in layer 4 and are shown from layer 5). Order: the selection in force, the name,
+  the address and options (remote paths absolute, SRV-11; `--ca-file`/`--tls-pin` with SSH is
+  `target_tls_invalid`), the name not taken, zero-network (SRV-3), SSH discovery, then the
+  consent on the trusted console. It prints "Asking the server over SSH where its FinishUP service
+  listens and what it offers." before discovery;
   when OpenSSH will ask about an unknown host key, "This computer does not know the server's SSH
   host key yet, so OpenSSH asks you to confirm it here: compare the fingerprint with the server's
   own before you answer yes."; after the add, a warning when the endpoint is session-bound
@@ -14664,7 +14685,8 @@ hook's path.
   server's last profile does not offer), `target_still_connected` (the helper did not stop).
 - `finishup server connect|disconnect|test NAME` for an SSH target go through `SshTargetRuntime`
   (INTERFACES *Commands and the runtime seam*). `server logout` refuses an SSH target
-  (`credential_not_applicable`); `server login` stays refused for every kind.
+  (`credential_not_applicable`); in layer 4 `server login` stays refused for every kind (from
+  layer 5 it acts for HTTPS and port targets and refuses SSH, `credential_not_applicable`).
 - `finishup helper run --target <t_ id>` (hidden, `client_only`, started by clients; `--idle-seconds`
   is a hidden test option): exit 0, 2 (`helper_target_invalid: give the id of an SSH server target
   on this computer; an isolation variable or runtime pin naming another root also refuses`) or 20
@@ -14742,20 +14764,240 @@ refresh marker. `service_holder_identity()` of a remote root is the helper (pid 
 socket that is not the service's own (the master's forward).
 
 **`server-target-status` 1.0.0** (amended in place, unreleased): `target.connection` is `null` for
-a target that is not SSH, else `{style: relay|direct, styles_offered: [relay|direct] (at most 2),
-helper: {running: bool, phase: starting|ready|unavailable|stopped, reason: token|null, generation:
-integer ≥ 1} | null}` (`helper` null until a helper recorded a status). Text
-(`cli.server.connection_lines`): "Connection: relay (this computer's FinishUP helper keeps one SSH
-connection for every program here)." or "Connection: direct (each program here opens its own SSH
-channel through a shared OpenSSH master).", then "Helper: running|not running; last
-<phase>[, <reason>].". `server list` and `server status` mark only `https` and `local_port`
-records "not available in this release".
+a target that is not SSH (from layer 5: not SSH, HTTPS or port), else `{style: relay|direct,
+styles_offered: [relay|direct] (at most 2), helper: {running: bool, phase:
+starting|ready|unavailable|stopped, reason: token|null, generation: integer ≥ 1} | null}`
+(`helper` null until a helper recorded a status). Text (`cli.server.connection_lines`):
+"Connection: relay (this computer's FinishUP helper keeps one SSH connection for every program
+here)." or "Connection: direct (each program here opens its own SSH channel through a shared
+OpenSSH master).", then "Helper: running|not running; last <phase>[, <reason>].". In layer 4
+`server list` and `server status` mark only `https` and `local_port` records "not available in
+this release"; from layer 5 no record of an open kind is marked.
 
 **MCP bridge.** After registering a claim-bound workspace it starts the helper in the direct style
 (`helper_runtime.ensure_helper_for_direct_style`). `_SENT_REQUEST_TARGETS` (at most 4,096 request
 ids, oldest forgotten first) maps each request id it sent to a target id or `None` (this
 computer); a request id already sent to another one is refused `server_authorization_changed`
 before it is sent.
+
+## HTTPS servers and REST v1 (ADR-053, layer 5)
+
+[ADR-053](adr/ADR-053-rest-v1-public-contract.md) owns these names; ADR-052 decisions 20 to 23 own
+how the authorization crosses REST, and ADR-051 (*Built in layer 5*, decisions 3, 5, 7, 9 and 10,
+*Topology*) the client's commands. With no HTTPS or port target recorded, nothing here runs or is
+imported on a hook's path, and no listener starts unless a server's owner runs `finishup service
+rest run`.
+
+**Modules.** `finishup.rest` (SHARED in the cut-line map; importing it is inert): `rest.contract`
+(the wire contract both sides share, standard library and `finishup.protocol` only; the only part
+a client imports), `rest.contract_models` (the schema contracts the generator reads, never
+imported at runtime), `rest.api_keys` (`ApiKeyStore`, `ApiKeyRecord`, `ApiKeyError`,
+`MAX_API_KEYS` 256), `rest.backend` (`RestBackend`, `BackendRefusal`, `AgentHandle`), `rest.app`
+(`RestApp`, `UnauthenticatedBudget`, `MAX_PENDING_OPERATIONS_PER_KEY` 32, `MAX_AGENTS_PER_KEY`
+16), `rest.listener` (`RestListener`, `ListenerError`, `parse_listen`, `MAX_TCP_CONNECTIONS` 256,
+`MAX_TCP_CONNECTIONS_PER_PEER` 64, `REQUEST_HEAD_SECONDS` 10, `REQUEST_BODY_SECONDS` 120) and
+`rest.audit` (`RestAudit`, `FileAuditSink`, `AUDIT_FILE_NAME`, `AUDIT_ROTATE_BYTES` 8 MiB).
+`finishup.gateway` (side GATEWAY: SHARED modules and `service.client` only):
+`gateway.backend.ControlSocketBackend` and `gateway.run.serve_gateway`. `service.rest_native`
+(SERVER): `NativeBackend` and `NativeRestEdge` (`run_service(rest_edge=…)`). Client side:
+`client.rest_client` (`RestTransport`, `RestUnavailable`, `load_key`, `observed_identity`,
+`MAX_RESPONSE_BYTES`), `client.rest_stream.RestControlStream`, `client.rest_discovery`
+(`discover`, `check_discovery`, `fetch_profile`, `fetch_profile_async`, `check_key`, `KeyCheck`,
+`RestProfileSource`) and `client.helper.RestUpstream`. CLI: `cli.rest_server` (`api_key_app`,
+`rest_app`).
+
+**Routes** (relative to the target's base URL, its path prefix included; canonical JSON bodies and
+answers, `cache-control: no-store`, never a redirect):
+
+| Route | Auth | Answer |
+|---|---|---|
+| `GET /.well-known/finishup` | none | `rest-discovery` 1.0.0 |
+| `GET /v1/server` | key | `server-profile` 1.0.0 with the caller's `key: {id, scope, principal}` and `edges: ["rest-1"]` |
+| `GET /v1/session` | key, revision | `rest-session` 1.0.0 |
+| `POST /v1/{method}` | key, revision | the control-result body byte for byte, `finishup-outcome: ok\|error`; `202` with `rest-operation` and `location: /v1/operations/{id}` while running after `wait_ms` (at most 25,000; default 25,000) |
+| `GET /v1/operations/{id}` | key, revision | a long-poll of that operation |
+| `DELETE /v1/operations/{id}` | key | `204` (cancel) |
+| `POST /v1/agents` | key, revision, claim | `201` `rest-agent` 1.0.0 (body `rest-agent-declaration` 1.0.0) |
+| `GET /v1/agents/{id}/work` | key, revision | `rest-agent-work` 1.0.0 |
+| `POST /v1/agents/{id}/replies` | key, revision | `202` |
+| `DELETE /v1/agents/{id}` | key | `204` |
+
+**Headers** (`rest.contract.HEADER_*`, lowercase). Request: `authorization: Bearer
+fuk_<12 hex>_<43 base64url>` (`API_KEY_PREFIX` `fuk_`); `finishup-api-manifest` (every `/v1`
+request); `finishup-server-profile` = `<issuer 32 hex>.<revision>.<sha256:64 hex>` (every `/v1`
+request but `GET /v1/server` and the two `DELETE` routes); `finishup-workspace-claim` =
+`<git_common_root|directory>:sha256:<hex>:sha256:<hex>`; `finishup-client-kind` (a
+`ControlClientKind`; absent is `cli`); `finishup-service-instance`, `finishup-service-generation`;
+`finishup-operation-id` (`rpc_<uuid4>`, idempotent per key); `finishup-deadline-ms`;
+`finishup-route-profile`; `finishup-host-profile` (`generic|codex|claude|cursor`). Response:
+`finishup-outcome`, `finishup-operation-id`, `finishup-service-instance`,
+`finishup-service-generation`, `finishup-workspace-handle`, `location`.
+
+**Order of checks** on every request (first refusal wins): `Origin` present; the unauthenticated
+budget (per peer 20, refilled 5 per second; in total 200, refilled 50 per second; discovery and
+every request no key authenticated); the key; the API manifest; the revision (before any work);
+the scope (an out-of-scope call answers the control `method_forbidden` result, never dispatched;
+`observation_ingest` only with a claim); the claim, namespaced by the key's principal
+(`rest.contract.claim_for_principal`, domain `yoetz/claim-principal/v1`); the per-key caps. A start
+needs a claim and a `workspace_ref` must be a `client:` handle. Operation answers are kept 120
+seconds (`OPERATION_RESULT_SECONDS`; at most 64 per key, 1,024 and 64 MiB in all); an id whose
+answer was dropped stays spent 900 seconds (`SPENT_OPERATION_SECONDS`).
+
+**`rest-error` 1.0.0** (`{schema_version, reason}`; `rest.contract.REST_ERROR_STATUS`):
+
+| Reason | Status | When |
+|---|---|---|
+| `frame_invalid` | 400 | a body this route refuses (a `workspace_ref` that is not a `client:` handle included) |
+| `header_invalid` | 400 | a FinishUP header absent where required, or malformed (the API manifest, the revision, the claim) |
+| `api_key_invalid` | 401 | no key, a malformed key or an unknown one |
+| `api_key_revoked` | 401 | a revoked key |
+| `api_key_expired` | 401 | an expired key |
+| `origin_forbidden` | 403 | an `Origin` header |
+| `workspace_claim_required` | 403 | a start, or an agent, without a claim |
+| `route_unknown` | 404 | no such route |
+| `operation_unknown` | 404 | no such operation for this key, or its answer is gone |
+| `agent_unknown` | 404 | no such agent for this key (lease ended, service restarted, key revoked) |
+| `method_not_allowed` | 405 | another HTTP method on a known route |
+| `server_profile_changed` | 409 | the consented revision is not the one the service issues now; no work done |
+| `api_manifest_unsupported` | 412 | the client's API manifest is not one this server serves |
+| `frame_too_large` | 413 | a body over its bound |
+| `operation_limit` | 429 | 32 operations already pending for this key |
+| `agent_limit` | 429 | 16 agents already registered for this key |
+| `rate_limited` | 429 | over the unauthenticated budget |
+| `internal_failure` | 500 | the edge failed; nothing names why |
+| `service_unavailable` | 503 | the service could not be reached or started |
+| `server_keys_unusable` | 503 | the server's key file is damaged or unsafe |
+| `workspace_agent_unavailable` | 503 | an agent cannot be registered now (the service cannot key the claim, for example while its vault is locked) |
+
+**Documents** (`schemas/service/rest-*-1.0.0.schema.json`, generated from `rest.contract_models`,
+artifact role `network-control`; golden vectors with rejections in
+`fixtures/service/rest.case.json`; `rest.contract` is the runtime parser):
+
+- `rest-discovery`: `schema_version`, `product` (`finishup`), `rest_majors` (1 to 8; `["1"]`),
+  `api_manifests` (1 to 16 `sha256:` digests), `auth` (1 to 8 tokens; `["api_key"]`),
+  `profile_endpoint` (`/v1/server`), `official` (a claim only; `false` in the core). The client
+  reads at most 4,096 bytes (`MAX_DISCOVERY_BYTES`).
+- `rest-session`: `schema_version`, `status` (`service-status` 1.0.0), `workspace_binding`
+  (`none|client_claim`), `workspace_handle` (`client:<16 hex>` or `null`), `server_profile`
+  (`{issuer, revision, profile_digest}`).
+- `rest-operation`: `schema_version`, `operation_id`, `state` (`pending`).
+- `rest-agent-declaration`: `schema_version`, `operations` (1 to 64), `max_reply_bytes` (at most
+  6,291,456), `role` (`connection|background`).
+- `rest-agent`: `schema_version`, `agent_id` (`agt_<32 hex>`), `workspace_handle`, `lease_ms`
+  (60,000 issued, `AGENT_LEASE_MS`).
+- `rest-agent-work`: `schema_version`, `calls` (at most 64 `workspace_call` frames, oldest first).
+- `rest-error`: above.
+
+The receipt's version slice (`service.ready_composition`) leaves the `rest-*` family out; the
+version manifest lists all of them.
+
+**The REST API manifest** (`rest.contract.current_api_manifest`, `api_manifest_digest`): `sha256`
+over `API_MANIFEST_DOMAIN` (`yoetz/rest-api-manifest/v1` NUL) and the canonical list of `[path,
+sha256]` of the transitive `$ref` closure of `REST_ROOT_SCHEMAS` (control-request and
+control-result 2.10.0, the seven `rest-*`, `server-profile`, `service-status`), read from the
+packaged schema manifest. The core serves exactly its own;
+`fixtures/service/rest-api-manifests.case.json` records, per REST contract version, its digest
+and its frozen request and response vectors (a test pins this release's entry).
+
+**Scopes** (`rest.contract.AGENT_SCOPE_METHODS`, `OPERATOR_SCOPE_METHODS`, `method_allowed`;
+ADR-051 decision 9): `agent` = `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
+`service_status`, `observation_ingest` (with a claim, `CLAIM_BOUND_ONLY_METHODS`); `operator` adds
+`project`, `review`, `import_codex_jsonl`, `observation_status`, `privacy_get_setup`,
+`privacy_get_effective`, `privacy_pending_list`, `privacy_receipts_list`, `privacy_receipts_get`,
+`privacy_propose_policy`, `privacy_tighten_policy` and `service_lock`. No other method is reachable
+over REST.
+
+**Server records.**
+
+| Record | Location | Fields |
+|---|---|---|
+| `yoetz.rest-api-keys/1` | `<state dir>/rest/api-keys.json` (server side; lock `.api-keys.lock` beside it) | `schema`, `keys`: per key `key_id` (12 hex), `label` (1 to 48 letters, digits, spaces, `.`, `_`, `-`; shown only in `api-key list`), `scope` (`agent\|operator`), `principal` (`p_<16 hex>`), `created_at`, `expires_at` (or `null`), `revoked_at` (or `null`), `salt` (base64 of 16 random bytes), `hash` (`sha256:` over salt and secret, compared in constant time). Owner-only canonical JSON and a newline, at most 256 keys and 256 KiB, written under an exclusive `flock` and renamed into place; re-read by a running edge when it changes. Never holds a key. |
+| `rest-audit.jsonl` | `<log dir>/rest-audit.jsonl`, rotated to `rest-audit.jsonl.1` at 8 MiB | One owner-only canonical JSON line per answered request: `at`, `edge`, `event` (`rest_request`, `rest_call` or `rest_refusal`), `route`, `status` or the closed `reason`, `key_id` once a key authenticated, and for a call `control_method`, `outcome` and `duration_ms`; an unauthenticated refusal at most once per reason per 60 seconds, with a `suppressed` count. Never a body, a header value, a key, a label, a path, a host or an address. |
+
+**CLI, server host** (`server_host` in `cli.command_scope`: `service api-key`, `service rest`):
+
+- `finishup service api-key create (--label L --scope agent|operator | --rotate KEY_ID)
+  [--expires-in-days N] [--output-file F]`: prints "Created API key KEY_ID (scope SCOPE)." after
+  showing the key once on the trusted console, or writing it to a new 0600 file `F`; with
+  `--rotate` it adds "Log its clients in with the new key ('finishup server login NAME' there),
+  then run 'finishup service api-key revoke OLD_ID'.". `list [--json]` (`{"keys":[{created_at,
+  expires_at, key_id, label, principal, revoked_at, scope, state}]}`, `state`
+  `active|revoked|expired`; never a secret); `revoke KEY_ID` ("Revoked API key KEY_ID." or "… was
+  already revoked."). Refusals (exit 2 unless noted): `api_keys_damaged` (20), `api_keys_unsafe`
+  (20), `api_key_unknown`, `api_key_label_invalid`, `api_key_scope_invalid`,
+  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit`, `api_key_output_exists`,
+  `trusted_console_required`, `api_key_not_shown` (the key was revoked) and
+  `api_key_output_failed` (20; the key was revoked).
+- `finishup service rest run --listen HOST:PORT (--tls-cert F --tls-key F | --behind-proxy)
+  [--edge gateway|native]`: foreground; prints "Serving REST v1 (EDGE edge) on SCHEME port PORT;
+  stop it with Ctrl-C." on stderr, and a line naming `finishup service api-key create` while no key
+  exists. Refusals: `rest_edge_invalid`, `rest_listen_invalid`, `rest_tls_required`,
+  `rest_tls_unusable`, `rest_proxy_not_loopback` (exit 2), `rest_listener_unavailable` and
+  `service_already_running` (native edge only; exit 20), and `api_keys_damaged` or
+  `api_keys_unsafe` before anything listens.
+
+**CLI, client** (`client_only`; ADR-051 decisions 3, 5 and 7, ADR-053 decision 12):
+
+- `finishup server add NAME https://HOST[:PORT][/BASE] [--ca-file F | --tls-pin sha256:HEX]
+  [--key-file F] [--outside-reads local|listed]` and `server add NAME --port PORT [...]`. It
+  prints "Asking the server at that address what it is (over HTTPS, without a key)." before
+  discovery and asks "API key for this server (input hidden): " on the trusted console unless
+  `--key-file` gives the key. `--key-file` with SSH is `credential_not_applicable`. A transport
+  failure prints its remote phase as the reason.
+- `finishup server add official`: `official_endpoint_unavailable` ("this release names no official
+  FinishUP service yet, so nothing was added; add a server by its address with 'finishup server add
+  NAME https://HOST'", exit 2) while `OFFICIAL_ENDPOINT_ORIGINS` is empty.
+- `finishup server login NAME [--key-file F]`: "Stored the API key for NAME (ID) in the platform
+  credential store|an owner-only file; the server accepted it." or "…, not verified yet: the
+  server did not answer (PHASE). It is checked on the first connection; run 'finishup server test
+  NAME' once the server is up."; then, for a key that is a new identity, "This key is a different
+  identity at that server than the one you agreed to, so FinishUP asks you again before it
+  connects: run 'finishup server use NAME' here." A refused key, a changed identity or another
+  contract prints its phase with a sentence saying nothing was stored. `credential_not_applicable`
+  ("only HTTPS targets take an API key; SSH targets use your OpenSSH keys and agent") for SSH.
+- `finishup server logout NAME`: "Deleted the API key for ID." or "No API key was stored for ID.".
+  Both `login` and `logout` stop the helper and print, on stderr, "The connection this computer
+  keeps for ID with the earlier|deleted key did not stop in time; run 'finishup server disconnect
+  NAME'." when it does not stop.
+- `finishup server set NAME --style relay|direct` for an HTTPS or port target prints "… is now
+  reached in the relay style: this computer's FinishUP helper keeps one HTTPS connection to it for
+  every program here and is the only program that reads its API key (the default)." or "… direct
+  style: each program here (hooks, the MCP server, commands) reads its API key and opens its own
+  HTTPS connection to it; FinishUP's helper still answers that server's background work.".
+
+**Official origins** (`client.server_folders`): `OfficialOrigin(host, port=443, path_prefix="",
+scheme="https")` with `url()` and `matches(base_url)`; `OFFICIAL_ENDPOINT_ORIGINS`, a tuple of
+them (empty; replaces `OFFICIAL_ENDPOINT_HOSTS`); `official_address(kind, base_url, *, ca_file,
+tls_pin)` (an `https` target matching an origin with neither `ca_file` nor `tls_pin`);
+`official_preset_url()` (the first origin's URL, or `None`); `official_endpoint(record)`.
+
+**Client transport.** `RestTransport.for_target(record, key=…)`: httpx with no proxy variables and
+no redirects; TLS by `tls_pin` (the leaf's DER `sha256` checked after the handshake, before any
+request byte), `ca_file` (that CA only, host name checked) or the system store; answers bounded by
+`MAX_RESPONSE_BYTES` (the largest control frame plus 64 KiB). `load_key(target_id, *, seconds=10)`
+reads the key in a worker thread; no key, or no answer in time, is `remote_auth_failed`.
+`observed_identity(record)` is the endpoint identity recorded with a fetched profile:
+`("tls_pin", pin)`, `("tls_ca_file", "sha256:<hex of the CA file>")` or `("tls_system_ca", None)`.
+Failure phases (`RestUnavailable.reason`): `remote_identity_changed`, `remote_unreachable`,
+`remote_auth_failed`, `remote_incompatible`, `remote_service_not_running`. `RestControlStream`
+states `await_hello`, `opening`, `open`, `ended`, `closing`, `closed`; `failure_phase()` names
+why a stream ended (`server_profile_changed` or one of the five). `service.client._REST_KINDS` =
+`{https, local_port}`: the direct style dials a `RestControlStream` in place of the local
+endpoint; the relay style dials the helper's `<troot>/run/control.sock` as for SSH.
+`styles_offered`: edge `rest-1` → `relay`, `direct`. `PROFILE_SOURCES["https"]` and
+`["local_port"]` are `RestProfileSource`. The helper's runtime (`SshTargetRuntime`) is registered
+for both kinds.
+
+**`server-target-status` 1.0.0**: `target.connection` is filled for HTTPS and port targets too;
+text "Connection: relay (this computer's FinishUP helper keeps one HTTPS connection and reads the
+API key)." or "Connection: direct (each program here reads the API key and opens its own HTTPS
+connection).", then the helper line. `target.credential` is `keyring`, `file` or `none` for these
+targets (`not_applicable` for others), shown as "API key: …".
+
+**Conformance kit** (`tests/conformance/rest/`): `FINISHUP_REST_URL`, `FINISHUP_REST_KEY`
+(`operator`), `FINISHUP_REST_AGENT_KEY` (optional `agent`), `FINISHUP_REST_CA_FILE` or
+`FINISHUP_REST_TLS_PIN`; without a URL it provisions its own server root and runs both edges over
+real TLS (see the [test-instances runbook](runbooks/test-instances.md)).
 
 ## Lossless result delivery (issue #1139)
 

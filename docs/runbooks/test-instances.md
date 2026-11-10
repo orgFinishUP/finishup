@@ -160,8 +160,8 @@ for everyday work cannot redirect a test run, and `finishup server use` run thro
 launcher or under an exported root refuses with `selection_overridden`. `finishup server status`
 names the source that decided the root.
 
-HTTPS and port servers arrive in a later release; until then `finishup server add` refuses them
-with `remote_kind_unavailable`. SSH servers are open (layer 4; see the next section). A named local
+SSH servers are open (layer 4) and HTTPS and port servers too (layer 5); see the next two sections.
+A named local
 server is itself an isolated root, so a process tree can also be pointed at it explicitly with
 `FINISHUP_ISOLATED_ROOT`, which always wins over the selection. Never point an instance at the
 everyday install's directories, and stop only the processes you started (`finishup server
@@ -208,6 +208,53 @@ resolved through `PATH`: register it with the absolute launcher you tested (issu
 you started with `finishup server disconnect NAME` (the helper by its stamped pid, the master
 with `ssh -O exit`) and `finishup server remove NAME`, then the `sshd` by its PID; remove the
 private folders last.
+
+### Testing an HTTPS server (ADR-053, layer 5)
+
+Start with the REST conformance kit, which provisions everything itself: without
+`FINISHUP_REST_URL`, `tests/conformance/rest/` makes, in a fresh 0700 folder beneath the real home,
+a throwaway CA, an isolated server root of this checkout with a passphrase vault, an `operator`
+and an `agent` key, and runs `finishup service rest run` with `--edge gateway` and then `--edge
+native` on free loopback ports, so every case runs against both edges over real TLS. It stops
+every process it started by its own PID (the root's service with `finishup service stop`) and
+removes the folder. It spawns real services, so run it from a short checkout path with both root
+variables unset:
+
+```text
+env -u FINISHUP_ISOLATED_ROOT -u YOETZ_ISOLATED_ROOT uv run pytest tests/conformance/rest
+```
+
+PR CI does not run it (a follow-up). Pointed at another server it reads `FINISHUP_REST_URL`,
+`FINISHUP_REST_KEY` (an `operator` key), optionally `FINISHUP_REST_AGENT_KEY`, and
+`FINISHUP_REST_CA_FILE` or `FINISHUP_REST_TLS_PIN`; give it a throwaway key on a test server, never
+one of the owner's.
+
+By hand, an HTTPS test needs the same separation as the SSH one, without `sshd`:
+
+1. **A throwaway CA and server certificate** in a fresh owner-only (0700) folder beneath the real
+   home, not `/tmp` (for example `~/.yz-rest-<tag>`): a certificate for `localhost` and
+   `127.0.0.1` signed by that CA, its key at 0600. Never reuse a real certificate or key.
+2. **A server root with its own keys.** A provisioned test instance, or `FINISHUP_ISOLATED_ROOT`
+   naming a fresh root, set up through that root's own commands. Its API keys live beneath that
+   root's state (`rest/api-keys.json`): make one with `finishup service api-key create --label test
+   --scope operator --output-file <folder>/test.key` under that root. Run `finishup service rest
+   run --listen 127.0.0.1:<free port> --tls-cert <folder>/server.pem --tls-key <folder>/server.key`
+   from that instance's absolute launcher, in the foreground, and stop it by the PID you started.
+   For `--edge native`, stop that root's service first, and unlock a passphrase vault on a
+   pseudo-terminal once it runs.
+3. **A client home** exactly as in step 3 of the SSH test: an ambient installation with private
+   XDG folders, both isolation variables unset and an unpinned launcher. Export
+   `PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring` for the client processes, so the key
+   lands in the owner-only file beneath the private client state and never in the account's own
+   credential store. Add the server with `finishup server add NAME https://localhost:<port>
+   --ca-file <folder>/ca.pem --key-file <folder>/test.key` (an `https` target) or `finishup server
+   add NAME --port <port> --tls-pin sha256:<hex>` (a `local_port` target); the key file must be
+   0600, and the add asks for the typed name on a terminal (drive it through a pseudo-terminal).
+
+Stop what you started with `finishup server disconnect NAME` and `finishup server remove NAME` on
+the client, then the edge by its PID and the server root's service with its own `finishup service
+stop`; remove the private folders last. macOS (its system store, the XDG variables it ignores)
+and WSL 2 are untested here (gap, owner: layer 7).
 
 ## Concurrency
 

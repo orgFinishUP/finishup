@@ -1914,6 +1914,10 @@ kept up to date in layer 1; the rest is the contract the layers that open a remo
 **Layer 4 takes the hop for SSH servers** (ADR-052): over OpenSSH only, through the target's helper
 (relay) or a direct `ssh -W` stream, after the shared gate, the consent to the server's profile and
 the repository hold; no other channel or endpoint is added, and HTTPS and port servers stay closed.
+**Layer 5 takes it for HTTPS and port servers** ([ADR-053](ADR-053-rest-v1-public-contract.md)):
+over REST v1 only, through the same helper (relay) or each process's own REST connection
+(direct), after the same gate, consent and hold; the one request made before authentication is
+the bounded discovery of `server add`, which carries no credential and no task content.
 
 - **A distinct hop, outside the five channels.** Traffic between a FinishUP client and the
   owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one

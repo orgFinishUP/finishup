@@ -111,13 +111,12 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   report names a root the choice decided as `selection` (isolation report 1.1.0). See
   [FinishUP servers](docs/usage/servers.md) and
   [ADR-051](docs/adr/ADR-051-client-server-cut-and-server-targets.md).
-- **Servers on the web or on a port are not in this release.** `finishup server add` refuses
-  HTTPS (`https://…`) and port (`--port`) servers with `remote_kind_unavailable` before it asks
-  anything or connects anywhere, and nothing is added; a server another FinishUP build recorded for
-  one of them is listed as not available and cannot be chosen. They arrive in a later release, in
-  the layers ADR-051's unified model describes (levels, connection styles and server edges; the
-  server offers, the client decides). Servers on another machine over SSH are in this release (see
-  *SSH servers* below).
+- **Servers elsewhere arrive in layers.** ADR-051's unified model (levels, connection styles and
+  server edges; the server offers, the client decides) opens servers on another machine over SSH
+  and servers over HTTPS, on the web or on a port of this computer, in this release (see *SSH
+  servers* and *HTTPS servers* below). `finishup server add` refuses only an address that names
+  none of them (`http://…`, another scheme) with `remote_kind_unavailable`, before it asks
+  anything or connects anywhere.
 - **Groundwork that changes nothing you see yet.** Control envelopes move to 2.10.0 (workspace
   claims, the workspace-agent declaration, and its call and reply frames), with the eighteen bounded
   workspace-agent operations, the service's workspace hub and routing, client attestation of hook
@@ -137,7 +136,7 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   is held from such a server until you allow it from your own terminal, or keep it on this
   computer (`repository_egress_held`, `repository_egress_kept`). FinishUP starts recording what
   this computer's policy says of each project only once you add a server elsewhere, so nothing
-  changes for you until then. In this release that means an SSH server.
+  changes for you until then. In this release that means an SSH or HTTPS server.
 - **A server states what it offers, and your consent is bound to it** (ADR-052). A FinishUP server
   now describes what it offers a computer that uses it (the level of use, and whether its
   AI-powered review may send what it reads to a model provider, naming each provider, the fallback
@@ -147,7 +146,7 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   agreed to, ask again on your own terminal whenever the server asks for more, and quietly follow
   it when it asks for less (`finishup server status` says so). Errors name
   `server_profile_changed` and `server_level_unavailable`. Nothing changes for you until you add an
-  SSH server.
+  SSH or HTTPS server.
 
 ### SSH servers (#1308)
 
@@ -182,13 +181,54 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   `remote_service_not_running`, `remote_incompatible`) with the fix, in the CLI, FinishUP's tools,
   hooks, the terminal interface and the menu; FinishUP never falls back to a service on this
   computer.
-- **Commands that work with a server elsewhere.** `finishup` workflow commands to an SSH server
-  answer the server's reads of your project while they run, and leave a 15-minute registration so
-  the helper answers what the server goes on with. FinishUP's tools never resend a request to a
-  different server from the one it was first sent to.
-- **Not in this release:** HTTPS and port servers, `server login`, a copy of your code on the
-  server, adding an SSH server from the terminal interface, SSH host certificates. SSH servers were
-  tested on Linux; macOS and Windows through WSL 2 are not tested yet.
+- **Commands that work with a server elsewhere.** `finishup` workflow commands to an SSH or HTTPS
+  server answer the server's reads of your project while they run, and leave a 15-minute
+  registration so the helper answers what the server goes on with. FinishUP's tools never resend a
+  request to a different server from the one it was first sent to.
+- **Not in this release:** a copy of your code on the server, adding an SSH server from the
+  terminal interface, SSH host certificates. SSH servers were tested on Linux; macOS and Windows
+  through WSL 2 are not tested yet.
+
+### HTTPS servers (#1308)
+
+- **Use a FinishUP server over HTTPS, with an API key.** `finishup server add NAME
+  https://HOST[:PORT][/BASE]` (or `--port PORT` for one on this computer) first asks the server
+  what it is, without your key, after checking its certificate against this computer's system
+  store, a CA you give (`--ca-file`) or a certificate fingerprint (`--tls-pin sha256:…`); then it
+  asks for the API key on your own terminal (hidden; or `--key-file` reads it once from a file only
+  you can read), checks it with the server, shows what the server offers and asks you to type the
+  name. A key the server refuses adds nothing. The key is kept in your system's credential store,
+  or in a file only you can read, and never shown again. Your agreement is bound to the trust you
+  chose and to the key. See [FinishUP servers](docs/usage/servers.md) and
+  [ADR-053](docs/adr/ADR-053-rest-v1-public-contract.md).
+- **`finishup server login NAME` and `finishup server logout NAME`** (now in help). `login` checks
+  a new key with the server before it keeps it (one the server does not answer about is kept "not
+  verified yet"), ends every connection made with the old key and stops the helper; a new key asks
+  you to agree again with `server use`. `logout` deletes the key on this computer and stops the
+  helper, sending nothing.
+- **The same helper and styles as SSH.** By default (relay) FinishUP's helper keeps one HTTPS
+  connection and is the only program that reads the API key; `finishup server set NAME --style
+  direct` has each program (hooks, FinishUP's tools, commands) read the key and connect itself.
+  `server status` shows the style, whether a key is stored and the helper's last phase.
+- **Serve a FinishUP over HTTPS.** `finishup service rest run --listen HOST:PORT --tls-cert F
+  --tls-key F` (or `--behind-proxy` on loopback behind your own TLS proxy) serves this computer's
+  FinishUP to others, in the foreground, under your own supervisor. By default it runs as a
+  separate program without your vault that passes each request to the service; `--edge native`
+  makes the service listen itself (your own security review). `finishup service api-key
+  create|list|revoke` manages the keys: shown once (or written to a new owner-only file), kept only
+  as salted hashes, with an `agent` or `operator` scope; `--rotate` makes a replacement that keeps
+  the old key's tasks. Each request is logged in `rest-audit.jsonl` without its content.
+- **One public HTTPS interface, REST v1, with a compatibility check.** Every request names the
+  version of FinishUP's HTTPS interface the client speaks; a server that does not serve it is
+  refused as `remote_incompatible` before any work, and a server built by someone else can prove
+  it speaks the interface with the conformance kit. Seven new schemas (`rest-error`,
+  `rest-discovery`, `rest-session`, `rest-operation`, `rest-agent`, `rest-agent-declaration`,
+  `rest-agent-work`, all 1.0.0).
+- **`finishup server add official`** fills in the address of the official FinishUP service this
+  release names. None exists yet, so it refuses with `official_endpoint_unavailable`.
+- **Not in this release:** adding an HTTPS server from the terminal interface (use your shell),
+  signing in with anything but an API key, an official FinishUP service. HTTPS servers were tested
+  on Linux; macOS and Windows through WSL 2 are not tested yet.
 
 ### Added
 
