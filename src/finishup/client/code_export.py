@@ -10,9 +10,9 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
 2. The **base** (the original commit the task started from, ``HEAD`` by default) is listed with
    ``git ls-tree`` and its blobs read with ``git cat-file``; the **current tree** is every
    git-visible file: tracked (``git ls-files --stage``) and untracked-not-ignored
-   (``--exclude-standard`` plus the owner's own global ignore file), read from the worktree
-   without following any link (each directory opened with ``O_NOFOLLOW``, the file's type
-   checked on its open descriptor). Deleted files are absent.
+   (``--exclude-standard`` with the ignore file the owner's own Git configuration names, at Git's
+   own precedence), read from the worktree without following any link (each directory opened
+   with ``O_NOFOLLOW``, the file's type checked on its open descriptor). Deleted files are absent.
 3. Each path is admitted or held out, and held-out paths leave **both** trees (so nothing held
    out reads as deleted). Its name is checked first, so an excluded or unsafe path is never read,
    batched into ``cat-file`` or hashed: always-excluded, server and owner patterns
@@ -545,37 +545,56 @@ def _git(root: Path, *arguments: str, stdin: bytes | None = None, check: bool = 
     return completed.stdout if completed.returncode == 0 else b""
 
 
-def _global_excludes() -> str | None:
-    """The owner's own global Git ignore file, so a file ignored everywhere stays out."""
+def _owner_git_file(root: Path, key: str, default: str) -> str | None:
+    """The file the owner's own Git uses for ``key`` (``core.excludesFile``) in this repository.
+
+    Resolved as Git resolves it in the repository: the repository's and the owner's global
+    configuration (``GIT_CONFIG_GLOBAL``, ``~/.gitconfig``, ``$XDG_CONFIG_HOME/git/config``), includes
+    followed, the repository's value first, ``~`` expanded and a relative path read from the top
+    level; unset, Git's default ``$XDG_CONFIG_HOME/git/<default>`` (``~/.config`` when that is unset).
+    None when that is not a regular file. Only this one value is read, and the listing carries it as
+    ``-c <key>=<file>``, so the file keeps Git's own precedence (below every ``.gitignore`` and
+    ``.git/info/exclude``) and no other global setting reaches the export. A configuration Git cannot
+    read refuses the export rather than guessing which files the owner ignores.
+    """
 
     home = os.environ.get("HOME") or os.path.expanduser("~")
     xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-    candidate: str | None = None
     executable = shutil.which("git", path=os.defpath)
-    if executable is not None:
-        try:
-            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                (executable, "config", "--global", "--path", "--get", "core.excludesFile"),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=10,
-                env={
-                    "GIT_CONFIG_NOSYSTEM": "1",
-                    "HOME": home,
-                    "XDG_CONFIG_HOME": xdg,
-                    "LANG": "C",
-                    "LC_ALL": "C",
-                    "PATH": os.defpath,
-                },
-                cwd=home if os.path.isdir(home) else "/",
-                check=False,
-            )
-            if completed.returncode == 0 and len(completed.stdout) <= 4_096:
-                candidate = os.fsdecode(completed.stdout.rstrip(b"\n")) or None
-        except (OSError, subprocess.SubprocessError):
-            candidate = None
-    if candidate is None:
-        candidate = os.path.join(xdg, "git", "ignore")
+    if executable is None:
+        raise ExportRefused("code_export_git_unavailable")
+    environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": home,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": os.defpath,
+        "XDG_CONFIG_HOME": xdg,
+    }
+    if os.environ.get("GIT_CONFIG_GLOBAL"):
+        environment["GIT_CONFIG_GLOBAL"] = os.environ["GIT_CONFIG_GLOBAL"]
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            (executable, "config", "--includes", "--path", "--get", key),
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+            env=environment,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ExportRefused("code_export_git_failed") from None
+    # 1 is "not set"; anything else but a value is a configuration Git cannot read.
+    if completed.returncode not in {0, 1} or len(completed.stdout) > _MAX_ROOT_BYTES:
+        raise ExportRefused("code_export_git_failed")
+    value = os.fsdecode(completed.stdout.rstrip(b"\n")) if completed.returncode == 0 else ""
+    if not value:
+        candidate = os.path.join(xdg, "git", default)
+    else:
+        candidate = value if os.path.isabs(value) else os.path.join(root, value)
     if not os.path.isabs(candidate) or any(mark in candidate for mark in "\0\n\r"):
         return None
     try:
@@ -863,11 +882,13 @@ class _Exporter:
             if len(fields) != 3:
                 raise ExportRefused("code_export_git_failed")
             index.setdefault(path, (fields[0], fields[1].decode("ascii")))
-        arguments = ["ls-files", "-z", "--others", "--exclude-standard"]
-        excludes = _global_excludes()
-        if excludes is not None:
-            arguments.append(f"--exclude-from={excludes}")
-        untracked = [path for path in _nul_split(_git(self.root, *arguments)) if path not in index]
+        # The owner's ignore file at its own precedence (``core.excludesFile``, never a
+        # command-line ``--exclude-from``, which would let a global ``!name`` re-include a file
+        # the repository ignores).
+        excludes = _owner_git_file(self.root, "core.excludesFile", "ignore")
+        config = () if excludes is None else ("-c", f"core.excludesFile={excludes}")
+        listed = _git(self.root, *config, "ls-files", "-z", "--others", "--exclude-standard")
+        untracked = [path for path in _nul_split(listed) if path not in index]
         return index, untracked
 
     def current(

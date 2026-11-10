@@ -160,9 +160,11 @@ which a level-L2 task's receipt counts (decision 14).
 `client.code_export` is the sanitized exporter, and only the helper runs it (decision 4). Its gate
 runs first (FR-7): a refusal raises before any file is read or any object written. The **base** is
 the original commit, listed with `git ls-tree` and read with `git cat-file`; the **current tree**
-is every git-visible file, tracked or untracked but not ignored (the owner's own global ignore file
-included), read from the worktree without following links (`O_NOFOLLOW` for each directory, the
-type checked on the open descriptor).
+is every git-visible file, tracked or untracked but not ignored (the ignore file the owner's own Git
+configuration names — `core.excludesFile` from the repository's or the global configuration,
+includes followed, else `$XDG_CONFIG_HOME/git/ignore` — at Git's own precedence; a configuration Git
+cannot read refuses the export), read from the worktree without following links (`O_NOFOLLOW` for
+each directory, the type checked on the open descriptor).
 
 Held out of **both** trees, so that nothing held out reads as deleted: paths matching an exclusion
 pattern; files over `max_file_bytes`; known secret content (decision 3) unless the owner allowed

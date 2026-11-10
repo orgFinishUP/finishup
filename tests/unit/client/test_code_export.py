@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -39,8 +40,22 @@ def isolated_home(
 
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", os.fspath(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(home / ".config"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     return home
+
+
+def _owner_git(home: Path, root: Path, *arguments: str) -> str:
+    """``git`` as the owner runs it: their own global configuration in ``home``."""
+
+    completed = subprocess.run(  # noqa: S603 - fixed argv in tests
+        ("git", *arguments),
+        cwd=root,
+        capture_output=True,
+        check=False,
+        env={"HOME": os.fspath(home), "PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
+    )
+    return completed.stdout.decode()
 
 
 def _request(root: Path, **changes: object) -> ExportRequest:
@@ -343,6 +358,59 @@ def test_an_excluded_worktree_file_is_never_opened_hashed_or_looked_up(
     assert hashed == [] and blob not in looked_up
     assert prepared.manifest.lists["excluded"] == ("local.pem", "private/asset.bin")
     assert prepared.manifest.counts["unrepresentable"] == 1
+
+
+def test_an_ignore_file_named_through_a_global_include_keeps_its_files_out(
+    tmp_path: Path, isolated_home: Path
+) -> None:
+    (isolated_home / ".gitconfig").write_text("[include]\n\tpath = ~/.gitconfig-extra\n")
+    (isolated_home / ".gitconfig-extra").write_text("[core]\n\texcludesFile = ~/ignored-here\n")
+    (isolated_home / "ignored-here").write_text("private.dump\n")
+    root = _repository(tmp_path, {"a.txt": b"a\n"})
+    (root / "private.dump").write_bytes(b"owner-only data\n")
+    assert _owner_git(isolated_home, root, "check-ignore", "private.dump").strip() == "private.dump"
+    assert set(_tree_of(_export(root, tmp_path), tmp_path)) == {"a.txt"}
+
+
+def test_the_owner_s_ignore_file_keeps_git_s_precedence(
+    tmp_path: Path, isolated_home: Path
+) -> None:
+    # A global "!name" never re-includes a file the repository's own .gitignore ignores.
+    (isolated_home / ".config" / "git").mkdir(parents=True)
+    (isolated_home / ".config" / "git" / "ignore").write_text("*.cache\n!private.dump\n")
+    root = _repository(tmp_path, {".gitignore": b"*.dump\n", "a.txt": b"a\n"})
+    (root / "private.dump").write_bytes(b"owner-only data\n")
+    (root / "build.cache").write_bytes(b"ignored everywhere\n")
+    (root / "kept.txt").write_bytes(b"kept\n")
+    ignored = _owner_git(isolated_home, root, "status", "--porcelain", "--ignored")
+    assert "!! private.dump" in ignored and "!! build.cache" in ignored
+    tree = _tree_of(_export(root, tmp_path), tmp_path)
+    assert set(tree) == {".gitignore", "a.txt", "kept.txt"}
+
+
+def test_a_repository_s_own_ignore_file_wins_over_the_global_one(
+    tmp_path: Path, isolated_home: Path
+) -> None:
+    (isolated_home / ".gitconfig").write_text("[core]\n\texcludesFile = ~/global-ignore\n")
+    (isolated_home / "global-ignore").write_text("global.tmp\n")
+    root = _repository(tmp_path, {"a.txt": b"a\n"})
+    (root / ".git" / "local-ignore").write_text("local.tmp\n")
+    git(root, "config", "core.excludesFile", ".git/local-ignore")
+    (root / "local.tmp").write_bytes(b"l\n")
+    (root / "global.tmp").write_bytes(b"g\n")
+    tree = _tree_of(_export(root, tmp_path), tmp_path)
+    assert set(tree) == {"a.txt", "global.tmp"}
+
+
+def test_a_git_configuration_that_cannot_be_read_refuses_the_export(
+    tmp_path: Path, isolated_home: Path
+) -> None:
+    root = _repository(tmp_path, {"a.txt": b"a\n"})
+    (isolated_home / ".gitconfig").write_text("[core\nbroken")
+    database = ExportDatabase(tmp_path / "export")
+    with pytest.raises(ExportRefused, match="code_export_git_failed"):
+        export_snapshot(_request(root), POLICY, database, gate=_open)
+    assert [p for p in (tmp_path / "export" / "objects").rglob("*") if p.is_file()] == []
 
 
 def test_caps_hold_a_large_file_and_refuse_an_oversized_copy(tmp_path: Path) -> None:
