@@ -368,6 +368,14 @@ class CodeStore:
 
         return (self._copy_folder(copy_key) / "copy.json").is_file()
 
+    def holds_folder(self, name: str) -> bool:
+        """Whether the copy folder ``name`` (a copy key's first 32 hex) holds a copy: how a
+        checkout found on disk is known to belong to a copy that is still kept."""
+
+        if len(name) != 32 or not _HEX64.match(name * 2):
+            return False
+        return (self._root / "copies" / name / "copy.json").is_file()
+
     @staticmethod
     def repository_id(repository: str) -> str:
         """The digest a copy's record names ``repository`` by."""

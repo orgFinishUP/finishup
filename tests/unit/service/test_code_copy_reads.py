@@ -595,3 +595,45 @@ def test_a_write_beneath_the_checkout_never_goes_through_a_link_left_in_its_way(
     assert list(outside.iterdir()) == []
     assert not (checkout / "dir").is_symlink()
     assert (checkout / "dir" / "x.py").read_bytes() == b"x\n"
+
+
+def test_a_checkout_left_by_a_failed_removal_keeps_the_forget_incomplete_until_it_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkout is plaintext: a removal that fails is never swallowed into a success. Its
+    folder stays the obligation, found on disk by every later orphan sweep, and the forget says
+    it is not complete until it is gone (a retry of the forget, an expiry run, or a start)."""
+
+    from finishup.service import code_checkout
+
+    root = _repository(tmp_path, {"a.py": b"a = 1\n"})
+    _hub, copies, routed = _service(tmp_path, root)
+    with evidence_task_scope(TASK):
+        routed.read_task_base(HANDLE)
+    checkouts_root = tmp_path / "state" / "code-copies" / "checkouts"
+    (checkout,) = list(checkouts_root.iterdir())
+    real_rmtree = code_checkout.shutil.rmtree
+    failing = {"on": True}
+
+    def rmtree(path: object, *args: object, **kwargs: object) -> None:
+        if failing["on"] and os.fspath(checkouts_root) in os.fspath(path):  # type: ignore[arg-type]
+            raise PermissionError("busy")
+        real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(code_checkout.shutil, "rmtree", rmtree)
+    report = copies.forget(COMMITMENT)
+    assert report.copies == 1 and not report.complete
+    assert report.to_json()["complete"] is False
+    assert checkout.exists() and (checkout / "a.py").exists()
+    # A retry of the forget finds nothing more to delete in the store, and still is not
+    # complete while the plaintext is there; an expiry run tries again too.
+    again = copies.forget(COMMITMENT)
+    assert again.copies == 0 and not again.complete
+    copies.expire_now()
+    assert checkout.exists()
+    # A fresh service (its tracking state gone) still finds the folder on disk and says so.
+    assert copies.checkouts is not None and copies.checkouts.sweep() == 1
+    failing["on"] = False
+    copies.expire_now()
+    assert not checkout.exists()
+    assert copies.forget(COMMITMENT).complete

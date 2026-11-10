@@ -452,7 +452,9 @@ base and an index built in the adapters' isolated git environment; links stay li
 are empty directories. It is updated in place, rewriting only changed paths, so unchanged files
 keep their `stat` identity and the task-start untracked baseline stays valid; a per-copy lock
 serialises its readers. The service's own local adapters read it unchanged. It is removed at
-service start, on forget and on expiry. Each read is attributed to its task by
+service start, on forget and on expiry; a removal that fails leaves its folder on disk as the
+obligation, tried again by the orphan sweep after every forget and every expiry run (and at start),
+and the forget that asked is not `complete` until it is gone. Each read is attributed to its task by
 `evidence_task_scope`, entered by every check, the task-start base record, the semantic case
 evaluation and the observation-verification workers.
 

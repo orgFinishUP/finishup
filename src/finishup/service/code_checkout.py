@@ -18,7 +18,9 @@ working directory: this module materializes one snapshot of one copy into it.
 * **One reader at a time per copy**: ``checkout`` holds the copy's lock while the caller reads.
 * **Plaintext while in use.** The copy store keeps every object encrypted; the checkout is the
   plaintext a read needs. It is removed when the service starts (``sweep``), when its copy is
-  forgotten or expires (``discard`` / ``discard_orphans``), and never survives the copy. A rebuilt
+  forgotten or expires (``discard`` / ``discard_orphans``), and never survives the copy: a removal
+  that fails leaves the folder on disk, where every later orphan sweep (after each forget and
+  expiry run) finds it again, and the forget that asked for it says it is not complete. A rebuilt
   checkout has new ``stat`` identities, so after a service restart untracked files that predate a
   task read as additions (an honest limit: more change is shown, never less).
 """
@@ -107,7 +109,10 @@ def _private_directory(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
-def _remove(path: Path) -> None:
+def _remove(path: Path) -> bool:
+    """Remove ``path`` (never through a link); True once nothing of it is left. A failure is
+    never swallowed into a success: the caller keeps the obligation (see ``discard_orphans``)."""
+
     try:
         if path.is_symlink() or not path.is_dir():
             path.unlink(missing_ok=True)
@@ -115,6 +120,28 @@ def _remove(path: Path) -> None:
             shutil.rmtree(path)
     except OSError:
         pass
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make the removal of entries of ``path`` durable (a power loss never brings them back)."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 class CopyCheckouts:
@@ -133,34 +160,55 @@ class CopyCheckouts:
     def root(self) -> Path:
         return self._root
 
-    def sweep(self) -> None:
-        """Remove every checkout (service start: nothing of a previous run is trusted)."""
+    def sweep(self) -> int:
+        """Remove every checkout (service start: nothing of a previous run is trusted); how many
+        could not be removed (they stay on disk, so ``discard_orphans`` tries them again)."""
 
         with self._lock:
             self._states.clear()
             if self._root.is_symlink():
                 self._root.unlink()
+            left = 0
             if self._root.is_dir():
-                shutil.rmtree(self._root, ignore_errors=True)
+                for entry in self._root.iterdir():
+                    left += 0 if _remove(entry) else 1
+                _fsync_directory(self._root)
             _private_directory(self._root)
+            return left
 
-    def discard(self, copy_key: str) -> None:
-        """Remove one copy's checkout (its copy was forgotten or expired)."""
+    def discard(self, copy_key: str) -> bool:
+        """Remove one copy's checkout (its copy was forgotten or expired); True once it is gone.
+
+        Its folder on disk is the obligation: a removal that fails leaves it there, where
+        ``discard_orphans`` (after each forget and expiry run) and ``sweep`` (at start) find it
+        again, and the forget that asked says it is not complete."""
 
         lock = self._copy_lock(copy_key)
         with lock:
             with self._lock:
                 self._states.pop(copy_key, None)
-            _remove(self._root / copy_key[:32])
+            gone = _remove(self._root / copy_key[:32])
+            if gone:
+                _fsync_directory(self._root)
+            return gone
 
-    def discard_orphans(self) -> None:
-        """Remove the checkout of every copy that is gone (after a forget or an expiry)."""
+    def discard_orphans(self) -> int:
+        """Remove the checkout of every copy that is gone (after a forget or an expiry), found
+        on disk, not only in this process's memory; how many are still left."""
 
         with self._lock:
-            keys = tuple(self._states)
-        for copy_key in keys:
-            if not self._store.holds(copy_key):
-                self.discard(copy_key)
+            keys = {copy_key[:32]: copy_key for copy_key in self._states}
+        try:
+            names = [entry.name for entry in self._root.iterdir()] if self._root.is_dir() else []
+        except OSError:
+            names = []
+        left = 0
+        for name in sorted({*keys, *names}):
+            if self._store.holds_folder(name):
+                continue
+            copy_key = keys.get(name, name)
+            left += 0 if self.discard(copy_key) else 1
+        return left
 
     def _copy_lock(self, copy_key: str) -> threading.Lock:
         with self._lock:
@@ -232,7 +280,9 @@ class CopyCheckouts:
 
     def _fresh(self, copy_key: str) -> _State:
         folder = self._root / copy_key[:32]
-        _remove(folder)
+        if not _remove(folder):
+            # Never a new checkout over what an earlier one left (another snapshot's plaintext).
+            raise CheckoutError("code_checkout_unsafe")
         _private_directory(folder)
         git = folder / ".git"
         _private_directory(git)

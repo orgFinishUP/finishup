@@ -663,7 +663,8 @@ class CodeCopies:
             record_bounded_event_without_raising(
                 component=_COMPONENT, operation="code_copy_expiry", reason="expired"
             )
-            self._after_forget()
+        # Every run, so a checkout whose removal failed earlier is tried again.
+        self._after_forget()
         return report
 
     def start_expiry(self, every_seconds: float = _EXPIRY_SECONDS) -> None:
@@ -688,12 +689,20 @@ class CodeCopies:
 
         self.flush()
         report = self._store.forget(COPY_PRINCIPAL, commitment)
+        # Its checkout is plaintext: not complete while any of it is left (retried by the orphan
+        # sweep after every forget and expiry run, and at start).
+        if self._checkouts is not None and not self._checkouts.discard(
+            self._store.copy_key(COPY_PRINCIPAL, commitment)
+        ):
+            report = replace(report, left=report.left + 1)
         self._after_forget()
         return report
 
     def _after_forget(self) -> None:
-        if self._checkouts is not None:
-            self._checkouts.discard_orphans()
+        if self._checkouts is not None and self._checkouts.discard_orphans():
+            record_bounded_event_without_raising(
+                component=_COMPONENT, operation="code_copy_checkout_cleanup", reason="pending"
+            )
         self._drain_erasures_soon()
 
     def _drain_erasures_soon(self) -> None:
