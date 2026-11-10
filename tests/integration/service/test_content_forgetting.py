@@ -468,3 +468,131 @@ async def test_a_task_that_does_not_exist_is_a_typed_outcome_and_arguments_are_c
             await review.service.app.runtime.release(runtime)
     finally:
         await context.__aexit__(None, None, None)
+
+
+async def _later_content(service: Any, task: str) -> ObjectRef:
+    """A content object a later check publishes after the forget (an L1 capture, say)."""
+
+    from finishup.ports.objects import ObjectMetadata, ObjectSource
+
+    runtime = await _runtime(service, task)
+    try:
+        data = b'{"later": "a check after the forget read this"}'
+        staged = await runtime.objects.stage(
+            ObjectSource(data=data, declared_size=len(data)),
+            ObjectMetadata(
+                ObjectKind.CHANGE_CAPTURE,
+                CHECK_CHANGE_MEDIA_TYPE,
+                runtime.task_id,
+                service.app.clock.now_utc(),
+            ),
+        )
+        return await runtime.objects.finalize(staged)
+    finally:
+        await service.app.runtime.release(runtime)
+
+
+async def test_a_retry_erases_only_the_scope_the_forget_recorded_never_later_content(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3: a later check's content, published after the event, is neither marked nor erased."""
+
+    context, review, _checked = await _checked_review(tmp_path, monkeypatch)
+    try:
+        service, task = review.service, review.started.task_id
+        runtime = await _runtime(service, task)
+        try:
+            before = await _content_objects(runtime)
+            store = cast(EncryptedFilesObjectStore, runtime.objects)
+            paths = [store._path_for(ref.object_id) for ref in before]
+        finally:
+            await service.app.runtime.release(runtime)
+        original = EncryptedFilesObjectStore.erase_published
+        failures = [OSError("simulated crash before the delete")]
+
+        async def erase_once(self: EncryptedFilesObjectStore, ref: ObjectRef) -> bool:
+            if failures:
+                raise failures.pop()
+            return await original(self, ref)
+
+        monkeypatch.setattr(EncryptedFilesObjectStore, "erase_published", erase_once)
+        forget_id = new_forget_id()
+        first = await forget_task_content(
+            service.app, task, forget_id=forget_id, reason="owner", provenance=_ACCOUNT
+        )
+        assert first.outcome == "erasure_incomplete" and all(path.exists() for path in paths)
+        later = await _later_content(service, task)
+        runtime = await _runtime(service, task)
+        try:
+            later_path = cast(EncryptedFilesObjectStore, runtime.objects)._path_for(later.object_id)
+        finally:
+            await service.app.runtime.release(runtime)
+        retry = await forget_task_content(
+            service.app, task, forget_id=forget_id, reason="owner", provenance=_ACCOUNT
+        )
+        assert retry == TaskContentForgetReport("forgotten", len(before), True)
+        assert not any(path.exists() for path in paths)
+        runtime = await _runtime(service, task)
+        try:
+            assert later_path.is_file()
+            assert await _content_objects(runtime) == (later,)
+            ledger = cast(SqliteLedger, runtime.ledger)
+            assert later.object_id not in await ledger.erased_object_ids()
+        finally:
+            await service.app.runtime.release(runtime)
+    finally:
+        await context.__aexit__(None, None, None)
+
+
+async def test_a_forget_interrupted_while_it_records_its_scope_erases_everything_on_the_retry(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3: the scope is recorded before the event, so no interruption leaves it unknown."""
+
+    context, review, _checked = await _checked_review(tmp_path, monkeypatch)
+    try:
+        service, task = review.service, review.started.task_id
+        runtime = await _runtime(service, task)
+        try:
+            before = await _content_objects(runtime)
+            store = cast(EncryptedFilesObjectStore, runtime.objects)
+            paths = [store._path_for(ref.object_id) for ref in before]
+        finally:
+            await service.app.runtime.release(runtime)
+        original = SqliteLedger.record_erased_objects
+        failures = [OSError("simulated crash while the scope is recorded")]
+
+        async def record_once(self: SqliteLedger, refs: tuple[ObjectRef, ...]) -> None:
+            if failures:
+                raise failures.pop()
+            await original(self, refs)
+
+        monkeypatch.setattr(SqliteLedger, "record_erased_objects", record_once)
+        forget_id = new_forget_id()
+        first = await forget_task_content(
+            service.app, task, forget_id=forget_id, reason="owner", provenance=_ACCOUNT
+        )
+        assert first == TaskContentForgetReport("erasure_incomplete", 0, False)
+        runtime = await _runtime(service, task)
+        try:
+            # Nothing is recorded as forgotten yet, so nothing reads as masked or erased.
+            assert (await _projection(runtime)).content_forgotten is None
+        finally:
+            await service.app.runtime.release(runtime)
+        retry = await forget_task_content(
+            service.app, task, forget_id=forget_id, reason="owner", provenance=_ACCOUNT
+        )
+        assert retry == TaskContentForgetReport("forgotten", len(before), False)
+        assert not any(path.exists() for path in paths)
+        runtime = await _runtime(service, task)
+        try:
+            forgotten = [
+                record
+                for record in await _records(runtime)
+                if record.schema.name == "content_forgotten"
+            ]
+            assert len(forgotten) == 1
+        finally:
+            await service.app.runtime.release(runtime)
+    finally:
+        await context.__aexit__(None, None, None)

@@ -565,19 +565,23 @@ When a copy is forgotten (by its owner or on expiry), the service forgets, in ev
 it, the content derived from it (`application.content_forgetting.forget_task_content`, outcomes
 `forgotten`, `task_not_found`, `task_unavailable`, `erasure_incomplete`):
 
-1. It appends one service-written `content_forgotten` 1.0.0 event
+1. It lists the task's standalone content objects (below) and marks them `redacted` in the
+   object inventory: the forget's scope, recorded before the event.
+2. It appends one service-written `content_forgotten` 1.0.0 event
    (`schemas/events/content-forgotten-1.0.0.schema.json`; payload `forget_id` (32 hex), `reason`
    `owner|expired`, `source` `server_copy`, `objects_erased`, and `provenance`, the task's account
    counts and fenced reads). Agents cannot publish it (`event_family_not_admitted`), and a ledger
    in which anyone but the service wrote one is corrupt. Bundle storage version 20 (migration
    0020) admits the family; a bundle at 19, as v0.3.0 wrote it, upgrades.
-2. It then erases the task's standalone content objects: check-change objects (the captured diff
-   and the task inputs inside the root) and the reviewer's semantic-response objects (its judgment
-   with the snippets it quoted), marked `redacted` in the object inventory and deleted. Never an
-   event's payload object: the ledger is hash-chained, so a recorded event stays exactly as
-   written.
+3. It then deletes them: check-change objects (the captured diff and the task inputs inside the
+   root) and the reviewer's semantic-response objects (its judgment with the snippets it quoted).
+   Never an event's payload object: the ledger is hash-chained, so a recorded event stays exactly
+   as written.
 
-It is idempotent by `forget_id`: a retry records nothing new and erases what is left.
+It is idempotent by `forget_id`: a retry records nothing new and deletes what is left of the
+objects the inventory marks `redacted`, never a later check's content (published after the event,
+so neither marked nor masked); a call interrupted before the event records it on the retry, over
+whatever is then on disk.
 `kernel.forgotten_content` masks, in every projection built after the event, the quoted excerpts
 of checks that tested work from before it: finding challenge snippets and check review summaries
 read as absent, and the snippet of each verified row reads as a fixed "forgotten" text (released

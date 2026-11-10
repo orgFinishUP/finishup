@@ -3,11 +3,12 @@
 When a server copy is forgotten (by its owner, or when its retention runs out), the service
 forgets, in every task that read it, the content derived from it. Per task, in this order:
 
-1. record one service-written ``content_forgotten`` event (the forget's id, its closed reason, the
+1. list the task's content objects and mark them erased in its object inventory (``redacted``):
+   this forget's scope, recorded before anything else;
+2. record one service-written ``content_forgotten`` event (the forget's id, its closed reason, the
    source ``server_copy``, how many objects the erasure sets out to delete, and the task's evidence
    account then). From that event on, every projection, result and receipt reads the quoted
    excerpts as absent (``kernel.forgotten_content``); findings and checks stay;
-2. mark the task's standalone content objects erased in its object inventory (``redacted``);
 3. delete their files.
 
 The content objects are the check-time change objects (``vnd.yoetz.check-change+json``: the
@@ -17,9 +18,12 @@ object (the ledger is hash-chained: the event stays exactly as written, its exce
 every view), never the task-start base (paths and metadata only), the task-input snapshot sets
 (copies of files outside the repository that the client sent), the session or receipt records.
 
-Idempotent by ``forget_id``: a second call records nothing new and erases whatever is left, so a
-forget interrupted between the event and the deletes completes on the retry. Every outcome is
-typed; a task that does not exist or cannot be routed is one of them, never an exception.
+Idempotent by ``forget_id``: a second call records nothing new and erases what is left of the
+objects the inventory marks erased, so a forget interrupted between the event and the deletes
+completes on the retry, and never erases the content of a later check (published after the
+event, so neither marked nor masked). A call interrupted before the event records it on the
+retry, over whatever is then on disk. Every outcome is typed; a task that does not exist or
+cannot be routed is one of them, never an exception.
 """
 
 from __future__ import annotations
@@ -149,8 +153,18 @@ async def forget_task_content(
     already = False
     try:
         already = await _recorded(app, runtime, forget_id)
-        plan = await _erasable_objects(runtime)
-        if not already:
+        inventory = await _erasable_objects(runtime)
+        if already:
+            # A retry erases what is left of the scope this forget recorded, never a later
+            # check's content, which the event leaves unmasked.
+            marked = await _erased_ids(runtime)
+            plan = tuple(ref for ref in inventory if ref.object_id in marked)
+        else:
+            plan = inventory
+            recorder = getattr(runtime.ledger, "record_erased_objects", None)
+            if plan and callable(recorder):
+                # The scope, durably, before the event that makes it the forget's own.
+                await cast(Callable[[tuple[ObjectRef, ...]], Awaitable[None]], recorder)(plan)
             await _record_forget(
                 app,
                 runtime,
@@ -162,9 +176,6 @@ async def forget_task_content(
                     provenance=recorded_account,
                 ),
             )
-        recorder = getattr(runtime.ledger, "record_erased_objects", None)
-        if plan and callable(recorder):
-            await cast(Callable[[tuple[ObjectRef, ...]], Awaitable[None]], recorder)(plan)
         eraser = getattr(runtime.objects, "erase_published", None)
         if plan and not callable(eraser):
             _incomplete("object_erasure_unsupported", "object_store")
@@ -203,6 +214,15 @@ async def _recorded(app: Application, runtime: TaskRuntime, forget_id: str) -> b
             ):
                 return True
     return False
+
+
+async def _erased_ids(runtime: TaskRuntime) -> frozenset[str]:
+    """The objects the task's inventory records as erased (``redacted``): every forget's scope."""
+
+    reader = getattr(runtime.ledger, "erased_object_ids", None)
+    if not callable(reader):
+        return frozenset()
+    return await cast(Callable[[], Awaitable[frozenset[str]]], reader)()
 
 
 async def _erasable_objects(runtime: TaskRuntime) -> tuple[ObjectRef, ...]:
