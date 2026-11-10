@@ -422,6 +422,13 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "rest stays fenced there and its deletion is retried; run the same command again later",
         _UNAVAILABLE,
     ),
+    "code_copy_fence_unavailable": (
+        "this computer could not stop sending copies of code to that server while it forgets "
+        "them (its folder for that server could not be written), so the target was not removed "
+        "and nothing more was forgotten; check that folder's owner and permissions, then run "
+        "the same command again",
+        _UNSAFE,
+    ),
     "code_export_unsafe": (
         "this computer's record of the copies it sent that server is not owner-only or is a "
         "link, so which repositories they came from is not known; fix its permissions, or run "
@@ -2832,10 +2839,11 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
+    fence = False
     if record.is_remote and _copies_sent(root):
         # Level L2 (ADR-054): removing the target here leaves what it was sent there, and its
         # claim salt goes with it, so this is the last moment this computer can forget them.
-        _forget_or_keep_copies(record, forget=forget_copies, keep=keep_copies)
+        fence = _forget_or_keep_copies(record, root, forget=forget_copies, keep=keep_copies)
     elif forget_copies:
         typer.echo(
             f"This computer has no record of a copy of code it sent to {record.name}; nothing "
@@ -2843,6 +2851,9 @@ def server_remove(
         )
     key_left = cleared = finished = reports_removed = False
     try:
+        if fence:
+            # Still fenced while its helper is stopped and its folder deleted (with the fence).
+            _renew_fence(root)
         with registry_lock():
             # The selection goes first, so a new hook or command can no longer dial the target
             # while its connection is stopped (as ``use_target`` does).
@@ -2871,6 +2882,11 @@ def server_remove(
         typer.echo(f"{error.reason_code}: the target folder is unsafe to remove", err=True)
         raise typer.Exit(_UNSAFE) from None
     finally:
+        if fence and not finished:
+            # The target stays, so does its way back to sending copies at level L2.
+            from finishup.client.code_sync_fence import lower_fence
+
+            lower_fence(root)
         if cleared and not finished:
             # A remove that did not finish keeps the switch it already made (SRV-2): say so.
             _say_using_everyday()
@@ -2952,7 +2968,18 @@ def _ask_forget_first(record: ServerTarget) -> bool | None:
     return answer == b"yes"
 
 
-def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) -> None:
+def _renew_fence(root: Path) -> None:
+    """Raise or renew the target's L2 sync fence (``client.code_sync_fence``), or refuse."""
+
+    from finishup.client.code_sync_fence import CodeSyncFenceError, raise_fence
+
+    try:
+        raise_fence(root)
+    except CodeSyncFenceError:
+        raise ServerCommandRefused("code_copy_fence_unavailable") from None
+
+
+def _forget_or_keep_copies(record: ServerTarget, root: Path, *, forget: bool, keep: bool) -> bool:
     """Before ``server remove`` changes anything: forget the copies sent, or say they stay.
 
     ``--forget-copies`` (or yes on the trusted console) forgets every repository as ``server
@@ -2960,6 +2987,12 @@ def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) ->
     was not forgotten, so the owner can retry. ``--keep-copies`` (or no) and a run with no
     trusted console and no flag remove it and say the copies stay: never silent, and never a
     forget nobody asked for.
+
+    Forgetting first raises the target's L2 sync fence before the repositories are listed and
+    renews it before each one (``client.code_sync_fence``), so no check can make its helper sync
+    a repository again, under its new epoch, while the others are forgotten; a fence that cannot
+    be raised refuses the remove before anything is forgotten. Returns whether the fence is up:
+    the caller keeps it through the removal, and lowers it when the target stays.
     """
 
     choice: bool | None
@@ -2971,18 +3004,24 @@ def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) ->
         choice = _ask_forget_first(record)
     if choice:
         from finishup.cli.server_code import forget_every_copy, forget_lines
+        from finishup.client.code_sync_fence import lower_fence
 
-        outcomes = forget_every_copy(record)
-        for line in forget_lines(record, outcomes):
-            typer.echo(line)
-        if not all(outcome.forgotten for outcome in outcomes):
-            raise ServerCommandRefused(
-                "code_copy_forget_incomplete",
-                message="not every copy on that server was forgotten (each line above says why "
-                "and what to do), so the target was not removed; run the same command again "
-                "once they are, or pass --keep-copies to remove it and leave them there",
-            )
-        return
+        _renew_fence(root)
+        try:
+            outcomes = forget_every_copy(record, renew=lambda: _renew_fence(root))
+            for line in forget_lines(record, outcomes):
+                typer.echo(line)
+            if not all(outcome.forgotten for outcome in outcomes):
+                raise ServerCommandRefused(
+                    "code_copy_forget_incomplete",
+                    message="not every copy on that server was forgotten (each line above says "
+                    "why and what to do), so the target was not removed; run the same command "
+                    "again once they are, or pass --keep-copies to remove it and leave them there",
+                )
+        except BaseException:
+            lower_fence(root)
+            raise
+        return True
     typer.echo(_copies_stay_line(record), err=True)
     if choice is None:
         typer.echo(
@@ -2991,6 +3030,7 @@ def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) ->
             "terminal.",
             err=True,
         )
+    return False
 
 
 def _stop_for_remove(record: ServerTarget, root: Path) -> None:

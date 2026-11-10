@@ -335,7 +335,9 @@ class ForgetOutcome:
         }
 
 
-def forget_every_copy(record: ServerTarget) -> tuple[ForgetOutcome, ...]:
+def forget_every_copy(
+    record: ServerTarget, *, renew: Callable[[], None] | None = None
+) -> tuple[ForgetOutcome, ...]:
     """Forget on ``record``'s server every repository this computer's export records name.
 
     The server's ``code_copy`` acts on the claimed repository only (ADR-054 decision 5), so each
@@ -343,7 +345,9 @@ def forget_every_copy(record: ServerTarget) -> tuple[ForgetOutcome, ...]:
     folder here going too. A record that cannot be read, names no folder, or whose folder is gone,
     holds no repository or another one, or that the server did not forget, is returned with its
     closed reason: never skipped. Each is asked of ``record``'s own root (``_server_answer``),
-    whether or not it is selected (``server remove`` of a target that is not).
+    whether or not it is selected (``server remove`` of a target that is not). ``renew``, when
+    given, runs before each repository (``server remove`` renews its sync fence there); it
+    refuses by raising, which stops the forget at that repository.
     """
 
     from finishup.client.code_export import ExportRefused, export_records
@@ -353,9 +357,12 @@ def forget_every_copy(record: ServerTarget) -> tuple[ForgetOutcome, ...]:
         records = export_records(exports_folder(record.target_id))
     except ExportRefused as error:
         raise ServerCommandRefused(error.reason) from None
-    return tuple(
-        _forget_one(record, position, item) for position, item in enumerate(records, start=1)
-    )
+    outcomes: list[ForgetOutcome] = []
+    for position, item in enumerate(records, start=1):
+        if renew is not None:
+            renew()
+        outcomes.append(_forget_one(record, position, item))
+    return tuple(outcomes)
 
 
 def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> ForgetOutcome:

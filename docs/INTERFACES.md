@@ -15260,7 +15260,13 @@ short id with `export_record_unreadable`, `repository_folder_unknown`, `reposito
 `code_copy_forget_incomplete` unless every one was forgotten; its JSON is `{action: forget_all,
 repositories: [{position, copy, folder, outcome: forgotten|not_forgotten, reason, answer}],
 forgotten, not_forgotten}`. `code_export_unsafe`: the export records are not owner-only or are
-links. A command that reaches a server that keeps no copies, and `server use` of a target consented
+links. `server remove --forget-copies` (or `yes`) raises the target's L2 sync fence
+(`<target root>/state/code-sync-fence`, a 10-minute lease) before it lists the repositories and
+keeps it through the removal; the helper refuses code sync under it (`server_authorization_changed`);
+a fence that cannot be written is `code_copy_fence_unavailable`. Every `server code` command is
+refused `selection_overridden` under an isolation root or a runtime pin, and connects through the
+root of the target it read, refused `server_authorization_changed` unless admitted for that record
+as read. A command that reaches a server that keeps no copies, and `server use` of a target consented
 at L2 whose server no longer offers L2, are refused `server_level_unavailable`. The L2 disclosure is
 this release's own text; the L1 text and `DISCLOSURE_VERSION` (3) are unchanged.
 

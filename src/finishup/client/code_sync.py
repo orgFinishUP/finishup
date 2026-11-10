@@ -18,6 +18,11 @@ operation only to an agent that declares it).
 5. the repository is not kept at L1 by the owner's per-repository choice, and that record can be
    read (fail closed).
 
+Before all of them, and before every chunk ``read`` returns, the target's sync fence
+(``client.code_sync_fence``) is asked: while ``server remove`` forgets the target's copies,
+nothing is exported or sent (``server_authorization_changed``) and a bundle already prepared is
+dropped.
+
 Only then does it run the sanitized exporter (``client.code_export``) with the policy the owner
 consented to (the envelope's caps and exclusions, the owner's per-repository list and allowed
 contents) and keep the bundle in this process's memory for ``read`` (one per worktree, two minutes).
@@ -43,6 +48,7 @@ from finishup.client.code_export import (
     ExportRequest,
     export_snapshot,
 )
+from finishup.client.code_sync_fence import fenced
 from finishup.client.targets import ServerTarget, TargetError, read_target, target_root
 from finishup.client.workspace_agent import CodeSyncRefused
 from finishup.ports.workspace_agent import (
@@ -146,6 +152,9 @@ class CodeSyncResponder:
 
         if not l2_released():
             raise CodeSyncRefused(_NOT_CONSENTED)
+        if fenced(target_root(self._target_id)):
+            # ``server remove`` is forgetting this target's copies (``client.code_sync_fence``).
+            raise CodeSyncRefused("server_authorization_changed")
         if self._check is not None:
             refusal = self._check.refusal()
             if refusal is not None:
@@ -262,6 +271,11 @@ class CodeSyncResponder:
             )
 
     def read(self, arguments: CodeSyncReadArguments) -> bytes:
+        if fenced(target_root(self._target_id)):
+            # Nothing more leaves while ``server remove`` forgets this target's copies.
+            with _SHARED_LOCK:
+                _PREPARED.pop(self._key, None)
+            raise CodeSyncRefused("server_authorization_changed")
         with _SHARED_LOCK:
             prepared = _PREPARED.get(self._key)
             if (

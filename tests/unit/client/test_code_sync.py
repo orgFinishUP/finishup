@@ -231,3 +231,78 @@ def test_a_bundle_prepared_by_one_agent_is_read_through_another_of_the_same_work
     with release_l2():
         again = second.prepare(_arguments(document))
     assert not again.unchanged and export_folder(record.target_id, _key(repository)).is_dir()
+
+
+# --- the sync fence ``server remove`` raises while it forgets (E2) -------------------------------------
+
+
+def test_the_fence_refuses_a_prepare_before_any_export_and_drops_a_prepared_bundle(
+    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
+) -> None:
+    from finishup.client.code_sync_fence import lower_fence, raise_fence
+
+    record, document = l2_target
+    root = target_root(record.target_id)
+    key = _key(repository)
+    responder = _responder(record, repository)
+    raise_fence(root)
+    with release_l2():
+        assert _refused(responder, _arguments(document)) == "server_authorization_changed"
+    assert not export_folder(record.target_id, key).exists()
+    lower_fence(root)
+    with release_l2():
+        prepared = responder.prepare(_arguments(document))
+    assert prepared.sync_id is not None
+    # A bundle prepared before the fence went up leaves no further chunk, and is dropped.
+    raise_fence(root)
+    with pytest.raises(CodeSyncRefused, match="server_authorization_changed"):
+        responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 0, 10))
+    lower_fence(root)
+    with pytest.raises(CodeSyncRefused, match="code_sync_unknown"):
+        responder.read(CodeSyncReadArguments(_HANDLE, prepared.sync_id, 0, 10))
+
+
+def test_a_fence_holds_for_its_lease_and_fails_closed(tmp_path: Path) -> None:
+    import os
+
+    from finishup.client.code_sync_fence import (
+        FENCE_SECONDS,
+        CodeSyncFenceError,
+        fence_path,
+        fenced,
+        lower_fence,
+        raise_fence,
+    )
+
+    root = tmp_path / "target"
+    root.mkdir(mode=0o700)
+    assert not fenced(root)
+    raise_fence(root)
+    path = fence_path(root)
+    assert path.is_file() and (path.stat().st_mode & 0o777) == 0o600
+    assert fenced(root)
+    written = path.stat().st_mtime
+    # A remove interrupted before it lowered the fence holds the target only for the lease.
+    assert fenced(root, now=written + FENCE_SECONDS - 1)
+    assert not fenced(root, now=written + FENCE_SECONDS + 1)
+    # A renewal starts the lease again.
+    os.utime(path, (written - FENCE_SECONDS * 2, written - FENCE_SECONDS * 2))
+    assert not fenced(root)
+    raise_fence(root)
+    assert fenced(root)
+    lower_fence(root)
+    assert not fenced(root)
+    lower_fence(root)  # already gone: fine
+    # A fence whose state cannot be read is in force.
+    raise_fence(root)
+    (root / "state").chmod(0o000)
+    try:
+        assert fenced(root)
+    finally:
+        (root / "state").chmod(0o700)
+    # A fence that cannot be written refuses.
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(mode=0o700)
+    (blocked / "state").write_bytes(b"")
+    with pytest.raises(CodeSyncFenceError):
+        raise_fence(blocked)

@@ -284,6 +284,8 @@ leaving findings and checks and a "content forgotten" marker on the receipt.
   export object database.
 - `client/code_sync.py` (CLIENT, helper only): answers the server's two code-sync operations after
   the gate and the consent are checked again.
+- `client/code_sync_fence.py` (CLIENT): the lease-bound fence `server remove` raises so no code is
+  synced to a target while its copies are forgotten.
 - `service/code_store.py` (SERVER): the encrypted copy store (keys under the vault's authority,
   admission, quotas, forget with its tombstone, expiry).
 - `service/code_copy.py` (SERVER): the puller that syncs before the task-base and check reads,

@@ -714,6 +714,114 @@ def test_remove_forget_copies_stops_before_removing_when_a_forget_fails(
     assert "far" not in _names() and console.opened == 0
 
 
+class _Watched:
+    """Records whether ``far``'s L2 sync fence is in force at each step of ``server remove``."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+        from finishup.client import code_export
+        from finishup.client.code_sync_fence import fenced
+
+        self.steps: list[tuple[str, bool]] = []
+        listing = code_export.export_records
+        removing = server_cli._remove_remote  # pyright: ignore[reportPrivateUsage]
+
+        def records(directory: Path) -> object:
+            self.steps.append(("listed", fenced(root)))
+            return listing(directory)
+
+        def remove(record: targets.ServerTarget, at: Path) -> bool:
+            self.steps.append(("removed", fenced(root)))
+            return removing(record, at)
+
+        monkeypatch.setattr(code_export, "export_records", records)
+        monkeypatch.setattr(server_cli, "_remove_remote", remove)
+        self.fenced = fenced
+
+
+class _FencedServer(_Server):
+    def __init__(self, watched: _Watched, root: Path, refuse: dict[str, str] | None = None) -> None:
+        super().__init__(refuse)
+        self.watched = watched
+        self.root = root
+
+    def __call__(
+        self, record: targets.ServerTarget, worktree: str, action: str
+    ) -> dict[str, object]:
+        self.watched.steps.append(("forgot", self.watched.fenced(self.root)))
+        return super().__call__(record, worktree, action)
+
+
+def test_remove_forget_copies_fences_l2_sync_from_the_listing_through_the_removal(
+    far: targets.ServerTarget, repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E2: no check can make far's helper sync a forgotten repository again meanwhile."""
+
+    _sent_from(far, repository)
+    _sent_from(far, _second_repository(tmp_path))
+    root = targets.target_root(far.target_id)
+    watched = _Watched(monkeypatch, root)
+    _server(monkeypatch, _FencedServer(watched, root))
+    _console(monkeypatch, _NoConsole())
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code == 0, result.output
+    assert watched.steps == [
+        ("listed", True),
+        ("forgot", True),
+        ("forgot", True),
+        ("removed", True),
+    ]
+    assert not root.exists() and "far" not in _names()
+
+
+@pytest.mark.parametrize("failure", ["forget", "removal"])
+def test_a_remove_that_does_not_happen_lowers_the_fence_again(
+    far: targets.ServerTarget,
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from finishup.client.code_sync_fence import fenced
+
+    _sent_from(far, repository)
+    root = targets.target_root(far.target_id)
+    watched = _Watched(monkeypatch, root)
+    top = os.path.realpath(repository)
+    refuse = {top: "remote_unreachable"} if failure == "forget" else None
+    _server(monkeypatch, _FencedServer(watched, root, refuse))
+    _console(monkeypatch, _NoConsole())
+    if failure == "removal":
+
+        def still_connected(_record: targets.ServerTarget, _root: Path) -> bool:
+            raise ServerCommandRefused("target_still_connected")
+
+        monkeypatch.setattr(server_cli, "_remove_remote", still_connected)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code != 0, result.output
+    assert ("forgot", True) in watched.steps
+    # The target stays, and so does its way back to sending copies at level L2.
+    assert "far" in _names() and root.exists() and not fenced(root)
+
+
+def test_a_fence_that_cannot_be_raised_refuses_the_remove_before_anything_is_forgotten(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client import code_sync_fence
+
+    folder = _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    _console(monkeypatch, _NoConsole())
+
+    def unwritable(_root: Path) -> None:
+        raise code_sync_fence.CodeSyncFenceError
+
+    monkeypatch.setattr(code_sync_fence, "raise_fence", unwritable)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code != 0, result.output
+    assert result.stderr.startswith("code_copy_fence_unavailable:")
+    assert "the target was not removed" in result.stderr
+    assert server.asked == [] and folder.exists() and "far" in _names()
+
+
 def test_remove_keep_copies_removes_without_a_question_or_a_forget(
     far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

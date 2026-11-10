@@ -348,7 +348,17 @@ and stops before anything is removed if one is not forgotten (`code_copy_forget_
 is removed. `--forget-copies` and `--keep-copies` (not both) answer without the console; with no
 console and no flag it removes as before and prints the warning naming `--forget-copies`.
 Removing a target deletes its claim salt, so this computer can never forget those copies
-afterwards: they stay until they expire or the server's owner deletes them.
+afterwards: they stay until they expire or the server's owner deletes them. So forgetting first
+raises the target's L2 sync fence (`<target root>/state/code-sync-fence`, owner-only, a
+10-minute lease renewed before each repository and before the removal) before the repositories
+are listed: while it holds, the helper refuses `code_sync_prepare` and every further
+`code_sync_read` (`server_authorization_changed`), so a running check cannot sync a repository
+already forgotten under its new epoch while the next one is forgotten. A remove that does not
+happen lowers it; an interrupted one holds the target for the lease at most; one that cannot raise
+it is refused `code_copy_fence_unavailable` before anything is forgotten. Every `server code`
+connection is made through the root of the target the command read (`selection_override`) and
+refused `server_authorization_changed` unless its admission is that record as read; every `server
+code` command is refused `selection_overridden` under an isolation root or a runtime pin.
 
 ### 8. Expiry
 
