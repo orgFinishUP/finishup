@@ -263,6 +263,62 @@ def test_the_choices_are_refused_without_a_server_elsewhere(home: Path, reposito
     assert result.exit_code != 0
 
 
+_EVERY_CODE_COMMAND: tuple[tuple[str, ...], ...] = (
+    ("list",),
+    ("list", "--json"),
+    ("forget",),
+    ("forget", "--all"),
+    ("exclude", "add", "logs/"),
+    ("exclude", "remove", "data/"),
+    ("exclude", "list"),
+    ("allow", "add", "aws.ini"),
+    ("allow", "list"),
+    ("allow", "remove", "aws.ini"),
+    ("level", "L1"),
+    ("level", "default"),
+)
+
+
+@pytest.mark.parametrize("source", ["variable", "pin"])
+@pytest.mark.parametrize("arguments", _EVERY_CODE_COMMAND, ids=" ".join)
+def test_an_isolation_root_or_a_runtime_pin_refuses_every_code_command_before_it_acts(
+    remote: targets.ServerTarget,
+    repository: Path,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+    source: str,
+) -> None:
+    """E5: a process an isolation variable or a pinned launcher points elsewhere never acts on
+    the everyday selection's target: no server asked, no console opened, nothing written."""
+
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+    (repository / "aws.ini").write_bytes(b"key\n")
+    assert _RUNNER.invoke(app, ["server", "code", "exclude", "add", "data/"]).exit_code == 0
+    assert _RUNNER.invoke(app, ["server", "code", "level", "L1"]).exit_code == 0
+    folder = _sent_from(remote, repository)
+    before = _settings(remote)
+    server = _server(monkeypatch, _Server())
+    console = _Console(b"lab", b"lab")
+    _console(monkeypatch, console)
+    if source == "variable":
+        explicit = home / "explicit"
+        explicit.mkdir(mode=0o700)
+        monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(explicit))
+    else:
+
+        def pinned(**_kwargs: object) -> object:
+            return object()
+
+        monkeypatch.setattr("finishup.config.paths.read_runtime_pin", pinned)
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code == 2, result.output
+    assert result.stderr.startswith("selection_overridden:")
+    assert server.asked == [] and console.opened == 0
+    assert _settings(remote) == before and folder.exists()
+
+
 # --- allow: add, list and remove ----------------------------------------------------------------------
 
 

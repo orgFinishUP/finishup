@@ -2,7 +2,10 @@
 
 Level L2 (ADR-054). The group acts on the selected server elsewhere and on the repository of a
 folder (the current one by default). A server that keeps no copies (its owner's
-``[server.code_copy]`` table makes no offer) refuses the commands that reach it.
+``[server.code_copy]`` table makes no offer) refuses the commands that reach it. Like every
+``finishup server`` command that uses the selection, each one is refused with
+``selection_overridden`` while an isolation root or a runtime pin decides this process's root,
+before any lookup, prompt or write.
 
 * ``list`` asks the server what it keeps of this repository; ``forget`` deletes it there (and this
   computer's export folder for it) and prints exactly what the server deleted. Forget is the only
@@ -38,6 +41,7 @@ from finishup.cli.server import (
     ServerCommandRefused,
     _cli,  # pyright: ignore[reportPrivateUsage]
     _repository_target,  # pyright: ignore[reportPrivateUsage]
+    _require_no_explicit_source,  # pyright: ignore[reportPrivateUsage]
     repository_here,
     server_app,
 )
@@ -80,6 +84,12 @@ def _field(value: object, key: str) -> object:
 
 
 def _selected() -> ServerTarget:
+    """The selected server elsewhere, refused while an isolation root or a runtime pin decides
+    this process's root (``selection_overridden``): such a process never reads, changes or acts
+    on the everyday selection's target. Every command of the group asks this first, before any
+    lookup, prompt or write."""
+
+    _require_no_explicit_source()
     return _repository_target(None)
 
 
