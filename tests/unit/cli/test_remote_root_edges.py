@@ -96,3 +96,47 @@ def test_stop_the_service_asks_nothing_while_the_server_in_use_is_refused(
     open_remote_kinds(monkeypatch, "ssh")
     question = menu._stop_question()  # pyright: ignore[reportPrivateUsage]
     assert question is not None and record.target_id in question and "local" not in question
+
+
+@pytest.mark.parametrize("kept", [False, True])
+def test_stop_the_service_asks_nothing_while_the_current_repository_is_held(
+    lab: tuple[ServerTarget, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    kept: bool,
+) -> None:
+    """C3: the stop's own connection claims the current repository; held or kept from the
+    selected server, it is refused, so the menu names that before it asks."""
+
+    import asyncio
+    import subprocess
+    from datetime import UTC, datetime
+
+    from finishup.adapters.workspace_root import canonical_workspace_root
+    from finishup.client.everyday_policy import record_repository_report
+    from finishup.client.repository_hold import add_kept, repository_key
+    from finishup.ports.control import WorkspaceLocator
+
+    record, root = lab
+    open_remote_kinds(monkeypatch, "ssh")
+    with targets.registry_lock():
+        targets.write_selection(record)
+    reset_selection_memo()
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(("git", "init", "-q", str(worktree)), check=True)  # noqa: S607
+    monkeypatch.chdir(worktree)
+    # Not held yet: the question names the server elsewhere.
+    question = menu._stop_question()  # pyright: ignore[reportPrivateUsage]
+    assert question is not None and record.target_id in question
+    key = repository_key(asyncio.run(canonical_workspace_root(WorkspaceLocator(str(worktree)))))
+    since = datetime(2026, 11, 9, 9, 30, tzinfo=UTC)
+    record_repository_report(key, str(worktree), no_network=True, now=since)
+    if kept:
+        with targets.registry_lock():
+            assert add_kept(root, record.target_id, key, str(worktree), "2026-11-09T09:30:00.000Z")
+    capsys.readouterr()
+    assert menu._stop_question() is None  # pyright: ignore[reportPrivateUsage]
+    phase = "repository_egress_kept" if kept else "repository_egress_held"
+    assert capsys.readouterr().err.startswith(f"service_unavailable: {phase}: ")

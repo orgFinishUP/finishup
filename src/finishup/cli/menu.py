@@ -765,10 +765,10 @@ def _service_menu() -> None:
 def _stop_question() -> str | None:
     """The question before stopping the service this process uses; ``None`` when it is refused.
 
-    A server elsewhere the shared gate refuses now is named, with its way back, before any
-    question (L1's known edge: the menu asked first and only then found the connection refused);
-    one it admits is named by its generated id, since stopping it stops that server for every
-    client that uses it.
+    A server elsewhere the shared gate refuses now, or that the current repository is held from
+    or kept away from, is named, with its way back, before any question (L1's known edge: the
+    menu asked first and only then found the connection refused); one it admits is named by its
+    generated id, since stopping it stops that server for every client that uses it.
     """
 
     from finishup.client.targets import (
@@ -790,7 +790,7 @@ def _stop_question() -> str | None:
         return "Stop the local service now?"
     from finishup.client.authorization import preflight_refusal
 
-    phase = preflight_refusal()
+    phase = preflight_refusal() or _repository_hold()
     if phase is not None or record is None:
         typer.echo(
             _control_guidance(
@@ -805,6 +805,35 @@ def _stop_question() -> str | None:
         f"Stop the FinishUP service of the selected server {record.target_id} ({record.kind}) "
         "now? It stops that server for every client that uses it"
     )
+
+
+def _repository_hold() -> str | None:
+    """The hold the stop's own connection would be refused with, for this process's workspace.
+
+    The stop connects as every CLI command does (``build_service_client``: the current
+    repository claimed, its hold decided before the claim), so a repository held from the selected
+    server elsewhere, or kept on this computer, refuses it; that is named before the question,
+    not after the owner answered it. File and Git reads only, never a dial.
+    """
+
+    import asyncio
+
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.cli.bootstrap import resolve_cli_workspace_locator
+    from finishup.client.remote_binding import binding_for_active_root
+    from finishup.client.targets import TargetError
+
+    locator = resolve_cli_workspace_locator()
+    if locator is None:
+        return None
+    try:
+        asyncio.run(binding_for_active_root(locator, serve_workspace=False))
+    except RepositoryIdentityError:
+        # Not a repository FinishUP can name: the connection claims no workspace.
+        return None
+    except TargetError as error:
+        return error.reason
+    return None
 
 
 def run_menu() -> int:
