@@ -132,6 +132,7 @@ __all__ = [
     "CLIENT_ATTESTED_WORKSPACE_LINE",
     "EVIDENCE_PROVENANCE_UNREADABLE_LINE",
     "EVIDENCE_READS_PREFIX",
+    "SERVER_COPY_CONNECTION_LINE",
     "SERVER_COPY_NONE_COUNTED_LINE",
     "SERVER_COPY_WORKSPACE_LINE",
     "evidence_provenance_lines",
@@ -556,6 +557,14 @@ SERVER_COPY_WORKSPACE_LINE: Final = (
     "Workspace evidence was read by the server from its copy of the repository, synced from the "
     "client machine; the FinishUP workspace agent on the client machine answered the rest over "
     "the connection."
+)
+# What a connection to a server whose target was consented at level L2 says beside its status and
+# receipts, where no task account says more (``client.attribution``): the server reads from its
+# copy where it has one. Never the L1 sentence that the server did not read the repository itself.
+SERVER_COPY_CONNECTION_LINE: Final = (
+    "Workspace evidence is read by the server from its copy of the repository, synced from the "
+    "client machine, where it has one; the FinishUP workspace agent on the client machine answers "
+    "the rest over the connection."
 )
 # The same account with no read from the copy counted, only that copy's content-forgotten marker:
 # it says what the account counts, never that the server did not read the repository.

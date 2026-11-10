@@ -49,6 +49,8 @@ from finishup.client.attribution import (
     attribution_lines,
     connection_attribution,
     coverage_hook_observed,
+    evidence_provenance_section,
+    shows_server_copy_section,
 )
 from finishup.client.workspace_ref import start_request_for_connection
 from finishup.config.env import EnvNameConflictError, read_env
@@ -1602,23 +1604,35 @@ def _attributed_text(
     receipt_page: bool = False,
     provenance_unknown: bool = False,
     hook_observed: bool = False,
+    server_copy: object = None,
 ) -> str:
     """``text`` followed by a claim-bound connection's provenance lines (ADR-051), unchanged for
     any other connection. A line the text already carries is not repeated, and a page of a paged
     receipt, or a receipt whose ``workspace_provenance`` says it is unknown, names only the
     producing service (``attribution_lines``). A receipt with hook-observed evidence also gets
-    the fixed client-attested observation line (decision 12)."""
+    the fixed client-attested observation line (decision 12).
 
+    ``server_copy`` is a receipt's ``evidence_provenance`` member (ADR-054): unless ``text``
+    already carries the service's server-copy section, the same fixed lines rendered from the
+    member follow it, whatever the connection, and the connection then names only the producing
+    service."""
+
+    extra: tuple[str, ...] = ()
+    if server_copy is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_section(server_copy, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
     lines = attribution_lines(
         attribution,
         shown=text,
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy is not None,
     )
-    if not lines:
+    if not lines and not extra:
         return text
-    return "\n".join((text, *lines) if text else lines)
+    return "\n".join((text, *extra, *lines) if text else (*extra, *lines))
 
 
 def result_from_public_model(
@@ -1638,7 +1652,9 @@ def result_from_public_model(
     "Workspace evidence" section is on at most one page. So does a receipt whose
     ``workspace_provenance`` member says the provenance is unknown (decision D4); that member is
     in the canonical text and, paged, on the first page. The structured result never carries
-    the connection's lines.
+    the connection's lines. A receipt whose ``evidence_provenance`` member carries a level-L2
+    account (ADR-054) gets the fixed server-copy lines rendered from it when its text does not
+    already hold them (a JSON receipt), and names only the producing service.
     """
 
     wire = public_model_to_wire(result)
@@ -1647,6 +1663,8 @@ def result_from_public_model(
     )
     # ADR-051 decision D4: every receipt format, JSON included, says when its provenance is unknown.
     provenance_unknown = "receipt_id" in wire and "workspace_provenance" in wire
+    # ADR-054: and, for a level-L2 task, where each kind of evidence was read.
+    server_copy = wire.get("evidence_provenance") if "receipt_id" in wire else None
     coverage = wire.get("coverage") if "receipt_id" in wire else None
     hook_observed = isinstance(coverage, Mapping) and coverage_hook_observed(
         cast(Mapping[str, object], coverage).get("publication_channels")
@@ -1657,6 +1675,7 @@ def result_from_public_model(
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy,
     )
     # The service budgets canonical text plus structured content. A small result's prose can
     # repeat several fields more often: fall back to that complete canonical text if needed.
@@ -1670,6 +1689,7 @@ def result_from_public_model(
             receipt_page=receipt_page,
             provenance_unknown=provenance_unknown,
             hook_observed=hook_observed,
+            server_copy=server_copy,
         )
         if mcp_delivery_bytes(wire, text=canonical) < rendered_bytes:
             rendered = canonical

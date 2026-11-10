@@ -19,6 +19,7 @@ from finishup.domain.bounded_text import (
 )
 from finishup.domain.closure import PREPARATION_REMEDIATIONS
 from finishup.domain.decision_status import find_status_line
+from finishup.domain.evidence_provenance import evidence_provenance_from_json
 from finishup.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from finishup.domain.receipt_closing import safe_closing_prompt
 from finishup.domain.receipts import (
@@ -34,6 +35,7 @@ from finishup.domain.receipts import (
     UNRESOLVED_VERIFICATION_GAP,
     UNRESOLVED_VERIFICATION_LIMITATION,
     check_time_change_gap_sentence,
+    evidence_provenance_lines,
     historical_gaps_from_wire,
     kept_back_from_wire,
     limitations_name_coordinator_failure,
@@ -3120,6 +3122,37 @@ def _workspace_provenance_parts(source: Mapping[str, object]) -> list[Part]:
     return [_req(line) for line in workspace_provenance_unknown_lines(reason)]
 
 
+def _evidence_provenance_parts(source: Mapping[str, object]) -> list[Part]:
+    """ADR-054: a level-L2 receipt's fixed server-copy lines, required, from its
+    ``evidence_provenance`` member.
+
+    Only the exact form of a level-L2 account is admitted; the lines rendered are the domain's own
+    fixed words for it (``evidence_provenance_lines``), the hook-observation line included when
+    the receipt's coverage names hook-observed evidence.
+    """
+
+    member = source.get("evidence_provenance")
+    if not isinstance(member, Mapping):
+        return []
+    coverage = source.get("coverage")
+    channels = (
+        cast(Mapping[str, object], coverage).get("publication_channels")
+        if isinstance(coverage, Mapping)
+        else None
+    )
+    hook_observed = isinstance(channels, (list, tuple)) and "hook_observed" in cast(
+        Sequence[object], channels
+    )
+    try:
+        account = evidence_provenance_from_json(cast(Mapping[str, object], member))
+        if not account.level_l2:
+            return []
+        lines = evidence_provenance_lines(account, hook_observed=hook_observed)
+    except ValueError:
+        return []
+    return [_req(line) for line in lines]
+
+
 def summary_for_receipt(envelope: object) -> str:
     """Compose the receipt text: conclusion, frontier, limitation count and pairing first.
 
@@ -3147,6 +3180,7 @@ def summary_for_receipt(envelope: object) -> str:
     parts: list[Part | None] = [
         _req(f"Receipt conclusion: {conclusion};"),
         *_workspace_provenance_parts(source),
+        *_evidence_provenance_parts(source),
         # ADR-051 decision 5: how many files listed mode kept back, then the owner's two ways
         # out. An MCP receipt, paged or not, reaches the agent as its canonical JSON, which
         # carries the number in the gap itself; this summary stands in only when that copy cannot

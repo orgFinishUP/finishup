@@ -23,7 +23,12 @@ from finishup.adapters.control.unix_socket import (
     LocalControlTransportError,
     connect_control,
 )
-from finishup.client.attribution import CONNECTION_TRANSPORTS, ConnectionTransport
+from finishup.client.attribution import (
+    CONNECTION_LEVELS,
+    CONNECTION_TRANSPORTS,
+    ConnectionLevel,
+    ConnectionTransport,
+)
 from finishup.config.env import canonical_env_name
 from finishup.config.paths import (
     ISOLATED_ROOT_ENV_NAMES,
@@ -1207,6 +1212,7 @@ class ServiceClient(ControlClientPort):
         "_authorization",
         "_client_kind",
         "_closed",
+        "_consent_level",
         "_failure",
         "_last_project_request",
         "_pending",
@@ -1250,6 +1256,9 @@ class ServiceClient(ControlClientPort):
         self._stream = stream
         self._session = session
         self._transport: ConnectionTransport = transport
+        # The level the owner consented to for a server elsewhere (ADR-054); None when local or
+        # when the target records no consent. Set once the connection is admitted and made.
+        self._consent_level: ConnectionLevel | None = None
         self._client_kind = client_kind
         self._pid = os.getpid()
         self._closed = False
@@ -1406,6 +1415,16 @@ class ServiceClient(ControlClientPort):
         """
 
         return self._transport
+
+    @property
+    def consent_level(self) -> ConnectionLevel | None:
+        """The level this connection's server target was consented at (``L1`` or ``L2``,
+        ADR-054), read from the target record the connection was admitted under; None for a
+        local connection or a target that records no consent. Human renderings of a claim-bound
+        connection say, for ``L2``, that the server reads from its copy where it has one
+        (``finishup.client.attribution``)."""
+
+        return self._consent_level
 
     @property
     def last_project_request(self) -> PreparedProjectRequest | None:
@@ -2533,6 +2552,8 @@ class _RemoteAdmission:
     workspace_binding: ClientWorkspaceBinding | None
     target_id: str = ""
     kind: str = ""
+    # The level the target record's consent names (ADR-054), or None when it records none.
+    level: ConnectionLevel | None = None
 
 
 async def _admit_remote(
@@ -2570,6 +2591,10 @@ async def _admit_remote(
         return None
     if record is None or not record.is_remote:
         return None
+    consent = record.consent
+    level: ConnectionLevel | None = (
+        consent.level if consent is not None and consent.level in CONNECTION_LEVELS else None
+    )
     from finishup.client.authorization import authorize_active_root
 
     try:
@@ -2587,9 +2612,9 @@ async def _admit_remote(
             check = bind_prebuilt_check(authorization, workspace_binding.authorization)
         except TargetError as error:
             raise _remote_target_refusal(error) from None
-        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind)
+        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind, level)
     if workspace_locator is None:
-        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
     from finishup.adapters.workspace_binding import canonical_workspace_locator
     from finishup.adapters.workspace_root import RepositoryIdentityError
     from finishup.client.remote_binding import binding_for_active_root
@@ -2604,15 +2629,37 @@ async def _admit_remote(
             workspace_locator, serve_workspace=serve_workspace, authorization=authorization
         )
     except RepositoryIdentityError:
-        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
     except TargetError as error:
         raise _remote_target_refusal(error) from None
     if binding is None or binding.authorization is None:
-        return _RemoteAdmission(authorization, binding, record.target_id, record.kind)
-    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, binding, record.target_id, record.kind, level)
+    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind, level)
 
 
 async def _connect_remote(
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """Reach an admitted server elsewhere (``_reach_remote``), the connection carrying the level
+    its target was consented at (``ServiceClient.consent_level``, ADR-054)."""
+
+    client = await _reach_remote(
+        admission,
+        client_kind,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        deadline=deadline,
+    )
+    client._consent_level = admission.level  # pyright: ignore[reportPrivateUsage]
+    return client
+
+
+async def _reach_remote(
     admission: _RemoteAdmission,
     client_kind: ControlClientKind,
     *,
