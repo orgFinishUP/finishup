@@ -675,3 +675,31 @@ async def test_close_asks_again_after_it_awaited_the_cancellations() -> None:
     await stream.aclose()
     assert not sending["now"]
     assert [path for method, path, _headers in transport.sent if method == "DELETE"] == []
+
+
+async def test_a_request_that_ignores_its_bound_still_ends_at_the_calls_deadline() -> None:
+    """B5: the call's deadline is enforced around each request and its retries as a whole, not
+    only handed to the request: a POST whose transport never honours its bound (a connect, a TLS
+    handshake or an upload that stalls) still ends the call ``request_timeout`` at the deadline."""
+
+    stalled = asyncio.Event()
+
+    async def script(method: str, path: str, headers: Mapping[str, str]) -> RestAnswer:
+        del headers
+        if path == "/v1/session":
+            return _session_answer()
+        if method == "POST":
+            stalled.set()
+            await asyncio.Event().wait()  # never answers, whatever bound it was given
+        raise RestUnavailable("remote_unreachable")
+
+    transport = _Scripted(script)
+    stream = RestControlStream(transport)
+    await _open(stream)
+    call = replace(_call(), deadline_ms=300)
+    await stream.send_all(encode_control_frame(call))
+    result = await _result_of(stream)
+    assert stalled.is_set()
+    assert cast(Mapping[str, Any], result["body"])["code"] == "request_timeout"
+    assert len([method for method, _p, _h in transport.sent if method == "POST"]) == 1
+    await stream.aclose()

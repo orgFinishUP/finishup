@@ -82,6 +82,9 @@ CONNECT_SECONDS: Final = 5.0
 # A long-poll answers within ``MAX_WAIT_MS``; the read bound leaves room for the network.
 _POLL_READ_SECONDS: Final = MAX_WAIT_MS / 1000 + 10.0
 _REQUEST_READ_SECONDS: Final = 30.0
+# A request given no deadline of its own still ends: its connect and read bounds, and this much
+# for sending its body and receiving an answer in many small pieces.
+_TRANSFER_SECONDS: Final = 30.0
 _REASONS: Final = frozenset(
     {
         "remote_auth_failed",
@@ -484,9 +487,12 @@ class RestTransport:
     ) -> RestAnswer:
         """One request; its answer bounded to ``limit`` bytes.
 
-        ``poll`` gives a long-poll its longer read bound; ``seconds``, when given, bounds the
-        connect and the read further (a caller's remaining deadline). Raises ``RestUnavailable``
-        for a transport failure, a redirect or an answer past the bound; a ``rest-error`` refusal
+        ``poll`` gives a long-poll its longer read bound. ``seconds``, when given, is one absolute
+        bound for the whole request (a caller's remaining deadline): the connect, the TLS
+        handshake, sending the body and every piece of the answer together, never each phase on
+        its own; without it the request still ends within its connect and read bounds plus
+        ``_TRANSFER_SECONDS``. Raises ``RestUnavailable`` for a transport failure, a bound passed
+        (``remote_unreachable``), a redirect or an answer past the bound; a ``rest-error`` refusal
         is an answer.
         """
 
@@ -494,10 +500,36 @@ class RestTransport:
             raise RestUnavailable("remote_unreachable")
         read = _POLL_READ_SECONDS if poll else _REQUEST_READ_SECONDS
         connect = CONNECT_SECONDS
+        total = connect + read + _TRANSFER_SECONDS
         if seconds is not None:
             read = max(0.001, min(read, seconds))
             connect = max(0.001, min(connect, seconds))
-        timeout = httpx.Timeout(connect, read=read)
+            total = max(0.001, seconds)
+        try:
+            async with asyncio.timeout(total):
+                return await self._exchange(
+                    method,
+                    path,
+                    headers=headers,
+                    content=content,
+                    params=params,
+                    limit=limit,
+                    timeout=httpx.Timeout(connect, read=read),
+                )
+        except TimeoutError:
+            raise RestUnavailable("remote_unreachable") from None
+
+    async def _exchange(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: Mapping[str, str] | None,
+        content: bytes | None,
+        params: Mapping[str, str] | None,
+        limit: int,
+        timeout: httpx.Timeout,
+    ) -> RestAnswer:
         try:
             async with self._client.stream(
                 method,

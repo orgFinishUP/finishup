@@ -348,3 +348,56 @@ async def test_the_identity_is_the_bytes_the_tls_context_holds(
         finally:
             await transport.aclose()
         assert load_trust(record).identity == "sha256:" + hashlib.sha256(other_ca).hexdigest()
+
+
+# --- review fixes, second round -------------------------------------------------------------------
+
+
+def _trickle_stream() -> Any:
+    import httpx
+
+    class _Trickle(httpx.AsyncByteStream):
+        """An answer whose body never ends, each piece arriving at once: no single read ever
+        waits long, so only a bound on the whole request ends it."""
+
+        def __init__(self) -> None:
+            self.pieces = 0
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            while True:
+                await asyncio.sleep(0)  # yields to the loop; no time passes on purpose
+                self.pieces += 1
+                yield b" "
+
+    return _Trickle()
+
+
+async def test_a_request_given_seconds_ends_within_them_whatever_each_read_takes() -> None:
+    """B5: ``seconds`` is one absolute bound for the whole request (connect, send, every piece of
+    the answer), never a bound per phase: an answer that keeps arriving in small pieces, each at
+    once, is cut off as unreachable when the seconds are up."""
+
+    import httpx
+
+    trickle = _trickle_stream()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, stream=trickle)
+
+    transport = RestTransport(
+        "https://trickle.test", key=None, transport=httpx.MockTransport(handler)
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        with pytest.raises(RestUnavailable) as ended:
+            async with asyncio.timeout(20):  # the test's own bound, far past the request's
+                await transport.request(
+                    "GET", "/v1/server", headers=transport.headers(authenticated=False), seconds=0.3
+                )
+    finally:
+        await transport.aclose()
+    assert ended.value.reason == "remote_unreachable"
+    assert loop.time() - started < 10
+    assert trickle.pieces > 0  # the answer was arriving all along

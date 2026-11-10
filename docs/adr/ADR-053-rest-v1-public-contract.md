@@ -398,8 +398,12 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
 - **Deadlines.** A call's `deadline_ms` is one absolute deadline for all it sends and waits for:
   each request's own bound, each wait between retries and each long-poll's `wait_ms` end with it,
   and no `POST` is sent again after it (the call's result is then `request_timeout`, outcome
-  unknown). The caller's own deadline (a hook's, ADR-052 decision 19) still spans the whole
-  connection.
+  unknown). A request's bound is absolute too: the connect, the TLS handshake, sending the body and
+  every piece of the answer together, never a bound per phase (a request given none still ends
+  within its connect and read bounds plus 30 seconds), and the call's requests and retries run
+  under one outer timeout at the deadline, whatever a transport does with its own bound (layer-5
+  review, second round). The caller's own deadline (a hook's, ADR-052 decision 19) still spans
+  the whole connection.
 - **Authorization before every request.** The stream asks its `may_send` (the direct style: the
   connection's repository-bound admission) and every check `bind` added before each request, the
   agent's registration, every retry and every poll included; once one refuses, nothing more is

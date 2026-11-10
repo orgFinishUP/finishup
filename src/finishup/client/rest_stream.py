@@ -418,10 +418,26 @@ class RestControlStream:
 
         The stream's authorization is asked before every attempt (``_Withheld``). With a
         ``deadline`` (the loop's clock), no attempt starts after it, each attempt is bounded by
-        what is left of it (``send`` receives the seconds left), and a wait between attempts never
-        outlasts it (``_DeadlinePassed``).
+        what is left of it (``send`` receives the seconds left), a wait between attempts never
+        outlasts it, and the whole of it (every attempt, every wait) runs under that one absolute
+        deadline, whatever ``send`` does with its bound (``_DeadlinePassed``).
         """
 
+        if deadline is None:
+            return await self._attempts(send, attempts=attempts, deadline=None)
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await self._attempts(send, attempts=attempts, deadline=deadline)
+        except TimeoutError:
+            raise _DeadlinePassed from None
+
+    async def _attempts(
+        self,
+        send: Callable[[float | None], Awaitable[RestAnswer]],
+        *,
+        attempts: int,
+        deadline: float | None,
+    ) -> RestAnswer:
         loop = asyncio.get_running_loop()
         delay = _RETRY_FIRST_SECONDS
         last: RestUnavailable | None = None
