@@ -161,11 +161,6 @@ class CopyCheckouts:
         for copy_key in keys:
             if not self._store.holds(copy_key):
                 self.discard(copy_key)
-        if self._root.is_dir():
-            known = {key[:32] for key in self._states}
-            for entry in self._root.iterdir():
-                if entry.name not in known:
-                    _remove(entry)
 
     def _copy_lock(self, copy_key: str) -> threading.Lock:
         with self._lock:
