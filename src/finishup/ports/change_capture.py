@@ -65,6 +65,7 @@ __all__ = [
     "current_check_workspace_source",
     "current_evidence_task",
     "evidence_task_of",
+    "evidence_bindings",
     "decode_check_change",
     "decode_task_change_base",
     "drop_space_cut_words",
@@ -1115,6 +1116,9 @@ def current_check_workspace_source() -> CheckWorkspaceSource | None:
 
 
 _EVIDENCE_TASK: ContextVar[str | None] = ContextVar("evidence_task", default=None)
+_EVIDENCE_BINDINGS: ContextVar[dict[object, object] | None] = ContextVar(
+    "evidence_bindings", default=None
+)
 
 
 @contextmanager
@@ -1126,15 +1130,32 @@ def evidence_task_scope(task_id: str | None) -> Generator[None]:
     that see only a workspace, so the caller that holds the task's runtime names the task here;
     ``asyncio.to_thread`` copies the scope into the worker thread. ``None`` names no task: its
     reads are pinned and counted under no task. Only the task's id crosses; nothing else.
+
+    Each scope is one evidence job (a check, a review, a verification worker) and starts with
+    its own empty bindings (``evidence_bindings``): what its reads are bound to stays fixed for
+    the job, whatever another job of the same task does meanwhile.
     """
 
     if task_id is not None and (type(task_id) is not str or not 1 <= len(task_id) <= 128):
         raise TypeError("evidence_task_invalid")
     token = _EVIDENCE_TASK.set(task_id)
+    bindings = _EVIDENCE_BINDINGS.set({})
     try:
         yield
     finally:
+        _EVIDENCE_BINDINGS.reset(bindings)
         _EVIDENCE_TASK.reset(token)
+
+
+def evidence_bindings() -> dict[object, object] | None:
+    """The current evidence job's bindings (``evidence_task_scope``), or None outside a scope.
+
+    Shared by every worker thread the job's reads run in (the scope's own mapping, copied by
+    reference); level L2 keeps there the snapshot a job's reads were first served from, so a
+    review keeps reading the snapshot it started with (design v2 section 8.6).
+    """
+
+    return _EVIDENCE_BINDINGS.get()
 
 
 def evidence_task_of(runtime: object) -> str | None:

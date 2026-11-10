@@ -477,15 +477,19 @@ evaluation and the observation-verification workers.
 
 ### 13. Pins, the subject-state commitment and `code_snapshot_mismatch`
 
-Every sync for a task pins the task to that snapshot in the copy record (`pins`, plaintext task ids
-with ids and counts only); later reviewer reads of the task read that snapshot, and the
-`task_close` expiry reads the pinned tasks (decision 8). A copy keeps its 64 newest snapshots and,
-past them, every snapshot a pin still names; one leaves only once no pin names it (its manifest
-goes with it). The client fills the manifest's
-`subject_state` with the same subject-state digest its agent computes for an approved check, or
-`null` when it cannot be captured. An approved check of a task the copy serves syncs first
-(purpose `check`); a run whose subject-state digest differs from the pinned snapshot's is `stale`
-/ `subject_state_mismatch` and records the bounded event `code_snapshot_mismatch`; never a pass.
+Every sync for a task's evidence boundary (its base, a check's capture) pins the task to that
+snapshot in the copy record (`pins`, plaintext task ids with ids and counts only); later reviewer
+reads of the task read that snapshot, and the `task_close` expiry reads the pinned tasks (decision
+8). A copy keeps its 64 newest snapshots and, past them, every snapshot a pin still names; one
+leaves only once no pin names it (its manifest goes with it). Each evidence job (a check, a review, a verification worker: one `evidence_task_scope`) keeps
+the snapshot its reads were first served from for its whole run, so a review keeps reading the
+snapshot it started with even when another check of the task moves the pin meanwhile. The client
+fills the manifest's `subject_state` with the same subject-state digest its agent computes for an
+approved check, or `null` when it cannot be captured. An approved check of a task the copy serves
+is its own evidence job: it syncs first (purpose `check`) **without** moving the task's pin, and
+is compared with the snapshot that sync named, fixed before it runs (the task's pinned snapshot
+when the sync names none); a run whose subject-state digest differs is `stale` /
+`subject_state_mismatch` and records the bounded event `code_snapshot_mismatch`; never a pass.
 
 ### 14. Per-evidence provenance, the receipts and O7
 

@@ -55,7 +55,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from cryptography.hazmat.primitives import keywrap
 
@@ -67,6 +67,7 @@ from finishup.domain.evidence_provenance import (
     EvidenceToken,
 )
 from finishup.observability.logging import record_bounded_event_without_raising
+from finishup.ports.change_capture import evidence_bindings
 from finishup.ports.workspace_agent import (
     MAX_CODE_SYNC_CHUNK_BYTES,
     CodeSyncPrepareArguments,
@@ -461,11 +462,13 @@ class CodeCopies:
         if base is not None and copy_base is None:
             # The task's base came from the client: its git reads stay there (one source).
             self._unserve(commitment, task_id)
+            _bind(commitment, task_id, None)
             return None, None
         view = self._view_for(commitment, outcome, task_id)
         if view is None:
             # From now on the client's agent answers this task's reads, the reviewer's too.
             self._unserve(commitment, task_id)
+            _bind(commitment, task_id, None)
             return None, None
         effective = base
         if base is not None and copy_base is not None:
@@ -473,6 +476,8 @@ class CodeCopies:
                 effective = replace(base, commit=view.manifest.base)
         if task_id is not None:
             self._serve(commitment, task_id, view)
+            # This job's later reads (its review's included) read this snapshot (§8.6).
+            _bind(commitment, task_id, view)
         return view, effective
 
     def _view_for(
@@ -542,18 +547,33 @@ class CodeCopies:
             claim = self._claims.get(handle)
         if claim is None:
             return None
+        bound = _bound(claim.commitment, task_id)
+        if bound is not _UNBOUND:
+            # This evidence job already read (or captured) a snapshot: it keeps reading it, even
+            # if another job of the task moved the task's pin meanwhile (design v2 §8.6).
+            return cast("CopyView | None", bound)
         try:
             entry = self._store.pin_entry(COPY_PRINCIPAL, claim.commitment, task_id)
         except CodeStoreError:
             raise _copy_unavailable() from None
         if entry is None or not entry.served:
+            _bind(claim.commitment, task_id, None, first=True)
             return None
         manifest = self._manifest(claim.commitment, entry.snapshot) if self._serving else None
         if manifest is None:
             raise _copy_unavailable()
         # A reviewer's read reads what its check read: stale when that check was served while
         # the client was offline.
-        return CopyView(claim.commitment, manifest, entry.stale, entry.synced_at)
+        view = CopyView(claim.commitment, manifest, entry.stale, entry.synced_at)
+        _bind(claim.commitment, task_id, view, first=True)
+        return view
+
+    def snapshot_manifest(self, handle: str, snapshot: str) -> SnapshotManifest | None:
+        """The stored manifest of ``snapshot`` in ``handle``'s copy, or None."""
+
+        with self._lock:
+            claim = self._claims.get(handle)
+        return None if claim is None else self._manifest(claim.commitment, snapshot)
 
     def pinned_manifest(self, handle: str, task_id: str | None) -> SnapshotManifest | None:
         """The snapshot ``task_id`` is pinned to in ``handle``'s copy (served or not), or None."""
@@ -760,6 +780,32 @@ class CodeCopies:
 
 def _never_closed(_task_id: str) -> bool:
     return False
+
+
+# What an evidence job's reads are bound to (``ports.change_capture.evidence_bindings``).
+_UNBOUND: Final = object()
+
+
+def _bound(commitment: str, task_id: str) -> object:
+    bindings = evidence_bindings()
+    if bindings is None:
+        return _UNBOUND
+    return bindings.get(("code_copy", commitment, task_id), _UNBOUND)
+
+
+def _bind(commitment: str, task_id: str | None, view: CopyView | None, *, first: bool = False) -> None:
+    """Bind the current evidence job's reads of ``task_id`` to ``view`` (None: the client).
+
+    A sync that serves the job rebinds it; a reviewer read binds only the job's first."""
+
+    bindings = evidence_bindings()
+    if bindings is None or task_id is None:
+        return
+    key = ("code_copy", commitment, task_id)
+    if first:
+        bindings.setdefault(key, view)
+    else:
+        bindings[key] = view
 
 
 def _copy_unavailable() -> WorkspaceAgentUnavailable:

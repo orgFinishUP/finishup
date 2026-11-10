@@ -1123,6 +1123,17 @@ class _RoutedInspect:
         return found
 
 
+@dataclass(frozen=True, slots=True)
+class _CopyJob:
+    """One approved check of a task pinned to a copy: the snapshot it is compared with and that
+    snapshot's subject-state commitment, fixed before the check runs (design v2 §8.6)."""
+
+    copies: CodeCopies
+    task: str
+    snapshot: str
+    subject_state: str | None
+
+
 class RoutedApprovedCheckRunner(ApprovedCheckRunner):
     """An approved check of a client-opened workspace runs on the client, by its agent.
 
@@ -1132,11 +1143,15 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
     policy holds the same approval; its redacted output reaches this runner's output sink.
 
     Level L2 (ADR-054, design v2 §8.6): a check of a task whose evidence the server reads from
-    its copy is pinned to the copy too. The copy is synced first, so the task's pin names the
-    snapshot of the tree the check runs on; a check whose subject state differs from that
-    snapshot's subject-state commitment ran against another subject than the server read, and
-    its result is ``stale`` / ``subject_state_mismatch`` (recorded as ``code_snapshot_mismatch``),
-    never a pass. A client that is offline cannot run it: ``workspace_agent_unavailable``.
+    its copy is bound to the copy too, as its own evidence job. The copy is synced first, without
+    moving the task's pin (a review keeps reading the snapshot its check captured), and the job
+    keeps the snapshot that sync named and its subject-state commitment (``_CopyJob``, fixed
+    before the check runs). A check
+    whose subject state differs from that commitment ran against another subject than the copy
+    holds, and its result is ``stale`` / ``subject_state_mismatch`` (recorded as
+    ``code_snapshot_mismatch``), never a pass. A sync that names no snapshot (refused or failed)
+    leaves the job the task's pinned snapshot as it was when the job began. A client that is
+    offline cannot run it: ``workspace_agent_unavailable``.
     """
 
     def __init__(
@@ -1151,8 +1166,9 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
 
         self._task = task_id
 
-    def _copy_pin(self, workspace: str) -> tuple[CodeCopies, str] | None:
-        """Sync a copy task's copy before its check; the copies and the task, or None."""
+    def _copy_pin(self, workspace: str) -> _CopyJob | None:
+        """Sync a copy task's copy before its check, and fix the snapshot the check is compared
+        with (see the class text); None when the task is not pinned to a copy."""
 
         copies = cast("CodeCopies | None", getattr(self._hub, "code_copies", None))
         task = current_evidence_task() or self._task
@@ -1162,20 +1178,23 @@ class RoutedApprovedCheckRunner(ApprovedCheckRunner):
         if pinned is None:
             return None
         original = None if set(pinned.original_base) == {"0"} else pinned.original_base
-        copies.sync_blocking(workspace, purpose="check", base_commit=original, task_id=task)
-        return copies, task
+        # No task: the sync never moves the task's pin, which its reviews read.
+        outcome = copies.sync_blocking(workspace, purpose="check", base_commit=original)
+        if outcome.outcome in {"synced", "unchanged"} and outcome.snapshot is not None:
+            synced = copies.snapshot_manifest(workspace, outcome.snapshot)
+            subject = None if synced is None else synced.subject_state
+            return _CopyJob(copies, task, outcome.snapshot, subject)
+        return _CopyJob(copies, task, pinned.snapshot, pinned.subject_state)
 
     def _against_copy(
-        self, workspace: str, pin: tuple[CodeCopies, str] | None, result: ApprovedCheckResult
+        self, workspace: str, job: _CopyJob | None, result: ApprovedCheckResult
     ) -> ApprovedCheckResult:
-        if pin is None:
+        if job is None:
             return result
-        copies, task = pin
-        copies.count(workspace, task, "client_check")
+        job.copies.count(workspace, job.task, "client_check")
         if result.status in {ApprovedCheckStatus.REJECTED, ApprovedCheckStatus.STALE}:
             return result
-        manifest = copies.pinned_manifest(workspace, task)
-        if manifest is not None and manifest.subject_state == result.subject_state_digest:
+        if job.subject_state is not None and job.subject_state == result.subject_state_digest:
             return result
         _record_copy("code_snapshot_mismatch")
         return self._result(

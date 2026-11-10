@@ -721,3 +721,126 @@ def test_a_copy_read_gap_has_its_own_check_time_reason() -> None:
     assert check_change._agent_loss_reason(WorkspaceAgentUnavailable("no_agent")) == (  # pyright: ignore[reportPrivateUsage]
         "workspace_agent_unavailable"
     )
+
+
+def _smoke_approval() -> Any:
+    policy = parse_observation_check_policy(
+        b'format = "yoetz.approved-check-policy/1"\n\n[[checks]]\nid = "smoke"\n'
+        b'argv = ["/usr/bin/true"]\ntimeout_seconds = 10\nnetwork = false\n'
+    )
+    (approval,) = policy.checks
+    return approval
+
+
+def _passed(approval: Any, subject: str) -> ApprovedCheckResult:
+    return ApprovedCheckResult(
+        ApprovedCheckStatus.PASSED,
+        ApprovedCheckOutcome.SUCCESS,
+        0,
+        None,
+        0,
+        subject,
+        approval.approval_commitment,
+        approved_check_result_digest(
+            ApprovedCheckStatus.PASSED,
+            ApprovedCheckOutcome.SUCCESS,
+            0,
+            None,
+            0,
+            subject,
+            approval.approval_commitment,
+            5,
+        ),
+        5,
+    )
+
+
+def test_an_approved_check_s_sync_never_moves_the_snapshot_a_review_reads(
+    tmp_path: Path,
+) -> None:
+    # Design v2 §8.6: a review reads the snapshot its check captured. An approved check run
+    # later syncs the copy for itself, but never re-pins the task to the newer snapshot.
+    root = _repository(tmp_path, {"src/a.py": b"captured\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    approval = _smoke_approval()
+    access = RoutedObservationWorkspace(cast(WorkspaceAgentHub, hub), cast(Any, None))
+    handle = access.open(HANDLE)
+    runner = access.runner({approval.approval_commitment: approval})
+    cast(Any, runner).bind_evidence_task(TASK)
+    with evidence_task_scope(TASK):
+        routed.read_task_base(HANDLE)
+    captured = copies.pinned_manifest(HANDLE, TASK)
+    assert captured is not None
+    (root / "src" / "a.py").write_bytes(b"edited after the capture\n")
+    subject = subject_state_digest(root)
+    assert subject is not None
+    hub.run_result = _passed(approval, subject)
+    result = runner.run(ApprovedCheckCommand(handle, approval, subject))
+    # Compared with the snapshot its own sync named (the tree it ran on): a pass.
+    assert result.status is ApprovedCheckStatus.PASSED
+    after = copies.pinned_manifest(HANDLE, TASK)
+    assert after is not None and after.snapshot == captured.snapshot
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), HANDLE)
+    with evidence_task_scope(TASK):
+        text = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+    assert text == (b"captured\n", 9)
+
+
+def test_an_approved_check_is_compared_with_the_snapshot_fixed_before_it_ran(
+    tmp_path: Path,
+) -> None:
+    # Another check of the task re-pins it while the approved check runs on the client: the
+    # approved check is still compared with the snapshot its own sync named, never the new pin.
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    approval = _smoke_approval()
+    access = RoutedObservationWorkspace(cast(WorkspaceAgentHub, hub), cast(Any, None))
+    handle = access.open(HANDLE)
+    runner = access.runner({approval.approval_commitment: approval})
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+    ran_on = subject_state_digest(root)
+    assert ran_on is not None
+    original = hub.call_blocking
+
+    def call(handle_: str, operation: WorkspaceOperation, arguments: object, **kw: Any) -> object:
+        if operation is WorkspaceOperation.RUN_APPROVED_CHECK:
+            (root / "a.py").write_bytes(b"changed during the run\n")
+            with evidence_task_scope(TASK):
+                routed.capture(HANDLE, base)  # the other check: syncs and re-pins the task
+        return original(handle_, operation, arguments, **kw)
+
+    hub.call_blocking = call  # type: ignore[method-assign]
+    hub.run_result = _passed(approval, ran_on)
+    with evidence_task_scope(TASK):
+        result = runner.run(ApprovedCheckCommand(handle, approval, ran_on))
+    moved = copies.pinned_manifest(HANDLE, TASK)
+    assert moved is not None and moved.subject_state != ran_on
+    assert result.status is ApprovedCheckStatus.PASSED
+
+
+def test_a_review_keeps_reading_the_snapshot_it_started_with(tmp_path: Path) -> None:
+    import contextvars
+
+    root = _repository(tmp_path, {"src/a.py": b"first\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), HANDLE)
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+
+    def another_check() -> None:
+        (root / "src" / "a.py").write_bytes(b"second\n")
+        with evidence_task_scope(TASK):
+            routed.capture(HANDLE, base)
+
+    with evidence_task_scope(TASK):  # the review job
+        first = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+        contextvars.Context().run(another_check)  # concurrently, in another job
+        again = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+    assert first == again == (b"first\n", 6)
+    # A new job reads the snapshot the task is pinned to now.
+    with evidence_task_scope(TASK):
+        later = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+    assert later == (b"second\n", 7)
+    assert _client_only(hub) == []
+    assert copies.reader_view(HANDLE, TASK) is not None
