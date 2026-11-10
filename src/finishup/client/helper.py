@@ -1,6 +1,6 @@
-"""``finishup helper run --target <id>``: the one background helper of an SSH server (design v2 §3).
+"""``finishup helper run --target <id>``: the one background helper of a server elsewhere (design v2 §3).
 
-One process per SSH target (``state/helper.lock``), started on demand by a client that needs it,
+One process per remote target (SSH, HTTPS or a port on this computer; ``state/helper.lock``), started on demand by a client that needs it,
 never by ``service run``; it exits 15 minutes after its last client (a relayed connection or a
 served registration) and is stopped by ``server disconnect``, ``remove``, ``use <other>`` and
 ``set --style`` through its stamped pid. Its roles:
@@ -97,6 +97,7 @@ from finishup.service.control_protocol import (
 if TYPE_CHECKING:
     from finishup.client.authorization import ConnectionAuthorization
     from finishup.client.helper_registrations import Registration, ServedWorkspace
+    from finishup.client.rest_client import RestTransport
     from finishup.client.server_profile import FetchedProfile
     from finishup.service.client import ClientWorkspaceBinding, ServiceClient
 
@@ -105,6 +106,7 @@ __all__ = [
     "REFRESH_INTERVAL_SECONDS",
     "Helper",
     "HelperAgent",
+    "RestUpstream",
     "Upstream",
     "run_helper",
 ]
@@ -222,6 +224,95 @@ class SshDirectUpstream:
 
     async def zero_network(self) -> None:
         await exit_master(self._executable(), self._root, self._record)
+
+
+class RestUpstream:
+    """An HTTPS or ``local_port`` server's upstream (ADR-053): REST v1, either style.
+
+    Each stream is a ``client.rest_stream.RestControlStream`` (the frame-to-REST mapping) over one
+    warm ``RestTransport`` (TLS and keep-alive shared by every relayed connection). The key is read
+    off the event loop (A-KEYRING-LOOP) from where the record says it lives now, again whenever
+    the owner's credential generation moved (A-CRED-STALE); nothing is sent while ``may_send``
+    refuses (A-STOP-DELETE). The server's own edge starts its service, so this never does.
+    """
+
+    def __init__(self, root: Path, record: ServerTarget, *, may_send: Callable[[], bool]) -> None:
+        self._root = root
+        self._record = record
+        self._may_send = may_send
+        self._transport: RestTransport | None = None
+        self._credential: object = None
+        self._lock = asyncio.Lock()
+
+    def _credential_stamp(self) -> object:
+        from finishup.client.authorization import credential_generation_path
+
+        try:
+            facts = os.lstat(credential_generation_path(self._root))
+        except OSError:
+            return None
+        return (facts.st_ino, facts.st_size, facts.st_mtime_ns)
+
+    async def ensure(self) -> None:
+        from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
+
+        async with self._lock:
+            stamp = self._credential_stamp()
+            if self._transport is not None and not self._transport.closed:
+                if stamp == self._credential:
+                    return
+                await self._transport.aclose()
+                self._transport = None
+            try:
+                key = await load_key(self._record.target_id)
+                self._transport = RestTransport.for_target(self._record, key=key)
+            except RestUnavailable as error:
+                raise UpstreamUnavailable(error.reason) from None
+            self._credential = stamp
+
+    async def open_stream(self) -> ControlStream:
+        from finishup.client.rest_stream import RestControlStream
+
+        await self.ensure()
+        assert self._transport is not None
+        return RestControlStream(self._transport, may_send=self._may_send)
+
+    async def start_remote_service(self) -> bool:
+        return False
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._transport is not None:
+                await self._transport.aclose()
+                self._transport = None
+
+    async def zero_network(self) -> None:
+        await self.close()
+
+
+async def _stream_failure(stream: ControlStream) -> str | None:
+    """The closed phase an upstream stream names for its own end, if it names one."""
+
+    failure_phase = getattr(stream, "failure_phase", None)
+    if failure_phase is None:
+        return None
+    try:
+        phase = await failure_phase()
+    except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
+        return None
+    return phase if type(phase) is str and phase in _UPSTREAM_PHASES else None
+
+
+_UPSTREAM_PHASES: Final = frozenset(
+    {
+        "remote_auth_failed",
+        "remote_identity_changed",
+        "remote_incompatible",
+        "remote_service_not_running",
+        "remote_unreachable",
+        "server_profile_changed",
+    }
+)
 
 
 class _RelayEnded(Exception):
@@ -463,8 +554,32 @@ async def _refresh_over_ssh(record: ServerTarget) -> None:
     await asyncio.to_thread(record_it)
 
 
+async def _refresh_over_rest(record: ServerTarget) -> None:
+    """Fetch an HTTPS server's profile (``GET /v1/server``) and record it under the registry
+    lock (ADR-053)."""
+
+    from finishup.client.rest_client import RestUnavailable
+    from finishup.client.rest_discovery import fetch_profile_async
+    from finishup.client.server_profile import refresh_profile
+    from finishup.client.targets import registry_lock
+
+    try:
+        fetched: FetchedProfile = await fetch_profile_async(record)
+    except RestUnavailable as error:
+        raise UpstreamUnavailable(error.reason) from None
+
+    def record_it() -> None:
+        with registry_lock():
+            refresh_profile(record, fetched)
+
+    await asyncio.to_thread(record_it)
+
+
+_REST_KINDS: Final = frozenset({"https", "local_port"})
+
+
 class Helper:
-    """One SSH target's helper: relay, background agents, drain, profile refresh, idle exit."""
+    """One remote target's helper: relay, background agents, drain, profile refresh, idle exit."""
 
     def __init__(
         self,
@@ -482,23 +597,26 @@ class Helper:
         clock: Callable[[], float] = time.monotonic,
         ssh: str | None = None,
     ) -> None:
-        if record.kind != "ssh":
-            raise ValueError("target_not_ssh")
+        if record.kind != "ssh" and record.kind not in _REST_KINDS:
+            raise ValueError("target_not_remote")
         self._root = root
         self._record = record
         self._style: ConnectionStyle = style
         if upstream is None:
-            upstream = (
-                SshRelayUpstream(root, record, ssh=ssh)
-                if style == "relay"
-                else SshDirectUpstream(root, record, ssh=ssh)
-            )
+            if record.kind in _REST_KINDS:
+                upstream = RestUpstream(root, record, may_send=self._may_send)
+            elif style == "relay":
+                upstream = SshRelayUpstream(root, record, ssh=ssh)
+            else:
+                upstream = SshDirectUpstream(root, record, ssh=ssh)
         self._upstream = upstream
         self._idle_seconds = idle_seconds
         self._drain_interval = drain_interval
         self._refresh_interval = refresh_interval
         self._agent_opener = agent_opener
-        self._refresher: Refresher = refresher or _refresh_over_ssh
+        self._refresher: Refresher = refresher or (
+            _refresh_over_rest if record.kind in _REST_KINDS else _refresh_over_ssh
+        )
         self._tick = tick or (lambda: asyncio.sleep(min(_TICK_SECONDS, drain_interval)))
         self._clock = clock
         self._status: HelperStatus | None = read_helper_status(root)
@@ -670,8 +788,12 @@ class Helper:
                 first = b""
             if first:
                 return upstream, first
+            named = await _stream_failure(upstream)
             with contextlib.suppress(Exception):
                 await upstream.aclose()
+            if named is not None and named != "remote_service_not_running":
+                # The upstream named why it could not carry the hello (a REST server's refusal).
+                raise UpstreamUnavailable(named)
             # sshd could not reach the server's endpoint: its service is not running.
             now = self._clock()
             if restart and attempt == 0 and now - self._last_restart >= _RESTART_WINDOW_SECONDS:
@@ -1083,9 +1205,9 @@ async def run_helper_process(root: Path, record: ServerTarget, *, idle_seconds: 
 
 
 def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> int:
-    """``finishup helper run --target ID``: serve one SSH target in the foreground.
+    """``finishup helper run --target ID``: serve one remote target in the foreground.
 
-    ``ID`` must name an SSH target in this computer's server registry. An isolation variable or
+    ``ID`` must name an SSH, HTTPS or ``local_port`` target in this computer's server registry. An isolation variable or
     runtime pin naming another root refuses (exit 2): the helper never serves a root its process
     would not resolve. Exit 0 when it stopped (or another helper already serves the target), 20
     when its endpoint could not be bound.
@@ -1097,7 +1219,11 @@ def run_helper(target_id: str, *, idle_seconds: float = HELPER_IDLE_SECONDS) -> 
     try:
         root = target_root(target_id)
         record = read_target(root)
-        if record is None or record.kind != "ssh" or record.target_id != target_id:
+        if (
+            record is None
+            or (record.kind != "ssh" and record.kind not in _REST_KINDS)
+            or record.target_id != target_id
+        ):
             return 2
         explicit = isolated_root()
     except (TargetError, PathSafetyError, ValueError):

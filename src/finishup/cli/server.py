@@ -1903,9 +1903,9 @@ def build_status_document(
 
 
 def _connection_document(record: ServerTarget | None, root: Path | None) -> JsonValue:
-    """How this computer reaches an SSH target (ADR-052): file reads only, never a connection."""
+    """How this computer reaches an SSH or HTTPS target (ADR-052, ADR-053): file reads only."""
 
-    if record is None or root is None or record.kind != "ssh":
+    if record is None or root is None or record.kind not in _STYLE_KINDS:
         return None
     from finishup.client.helper_status import (
         helper_holder,
@@ -1931,22 +1931,26 @@ def _connection_document(record: ServerTarget | None, root: Path | None) -> Json
 
 
 def connection_lines(target: Mapping[str, JsonValue]) -> tuple[str, ...]:
-    """Owner-display lines of how this computer reaches an SSH target."""
+    """Owner-display lines of how this computer reaches an SSH or HTTPS target."""
 
     connection = target.get("connection")
     if not isinstance(connection, Mapping):
         return ()
     found = cast(Mapping[str, JsonValue], connection)
     style = found["style"]
-    lines = [
-        f"Connection: {style} ("
-        + (
+    if target.get("kind") in {"https", "local_port"}:
+        how = (
+            "this computer's FinishUP helper keeps one HTTPS connection and reads the API key"
+            if style == "relay"
+            else "each program here reads the API key and opens its own HTTPS connection"
+        )
+    else:
+        how = (
             "this computer's FinishUP helper keeps one SSH connection for every program here"
             if style == "relay"
             else "each program here opens its own SSH channel through a shared OpenSSH master"
         )
-        + ")."
-    ]
+    lines = [f"Connection: {style} ({how})."]
     helper = found["helper"]
     if isinstance(helper, Mapping):
         state = cast(Mapping[str, JsonValue], helper)
@@ -2783,6 +2787,18 @@ _STYLE_LINES: Final[dict[str, str]] = {
         "that server's background work"
     ),
 }
+# The same choice for a server reached over HTTPS (ADR-053).
+_REST_STYLE_LINES: Final[dict[str, str]] = {
+    "relay": (
+        "this computer's FinishUP helper keeps one HTTPS connection to it for every program here "
+        "and is the only program that reads its API key (the default)"
+    ),
+    "direct": (
+        "each program here (hooks, the MCP server, commands) reads its API key and opens its own "
+        "HTTPS connection to it; FinishUP's helper still answers that server's background work"
+    ),
+}
+_STYLE_KINDS: Final = frozenset({"ssh", "https", "local_port"})
 
 
 @server_app.command("set")
@@ -2797,7 +2813,7 @@ def server_set(
         ),
     ],
 ) -> None:
-    """Change how this computer reaches an SSH server (an advanced option)."""
+    """Change how this computer reaches an SSH or HTTPS server (an advanced option)."""
 
     from finishup.client.helper_status import CONNECTION_STYLES, write_connection_style
     from finishup.client.server_profile import styles_offered
@@ -2805,7 +2821,7 @@ def server_set(
     if style not in CONNECTION_STYLES:
         raise ServerCommandRefused("style_invalid")
     record = _target_or_fail(name)
-    if record.kind != "ssh":
+    if record.kind not in _STYLE_KINDS:
         raise ServerCommandRefused("style_not_applicable")
     if not _open_kind(record.kind):
         raise ServerCommandRefused("remote_kind_unavailable")
@@ -2816,7 +2832,7 @@ def server_set(
     try:
         with registry_lock():
             stored = _stored_record(record)
-            if stored.kind != "ssh":
+            if stored.kind not in _STYLE_KINDS:
                 raise ServerCommandRefused("style_not_applicable")
             # What this client runs for the target ends first, so nothing keeps the old style.
             _stop_for_remove(stored, root)
@@ -2827,7 +2843,7 @@ def server_set(
         raise ServerCommandRefused("target_root_unsafe") from None
     typer.echo(
         f"Server target {record.name} ({record.target_id}) is now reached in the {style} style: "
-        f"{_STYLE_LINES[style]}."
+        f"{(_STYLE_LINES if record.kind == 'ssh' else _REST_STYLE_LINES)[style]}."
     )
     _warn_open_sessions()
 

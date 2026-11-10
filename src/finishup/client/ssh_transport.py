@@ -98,6 +98,8 @@ _REASONS: Final = frozenset(
         "remote_incompatible",
         "remote_service_not_running",
         "remote_unreachable",
+        # A REST upstream's server refused the consented revision (ADR-053): the helper names it.
+        "server_profile_changed",
         "zero_network_remote_selected",
     }
 )

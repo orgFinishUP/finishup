@@ -7,7 +7,7 @@ gate before the dial, the authorization before every frame and on its watch, the
 per-frame check) holds over REST unchanged. Underneath is the one REST client
 (``client.rest_client.RestTransport``).
 
-**States.** ``await_hello`` → ``opening`` → ``open`` → ``closing`` → ``closed``.
+**States.** ``await_hello`` → ``opening`` → ``open`` → (``ended``) → ``closing`` → ``closed``.
 
 * **Hello and claim.** The first client frame must be a ``control-hello``. One naming a
   ``workspace_locator`` is never sent anywhere (a path on this computer never leaves it): the
@@ -217,7 +217,7 @@ class RestControlStream:
         return chunk
 
     async def send_all(self, data: Buffer) -> None:
-        if self._state in {"closing", "closed"}:
+        if self._state in {"ended", "closing", "closed"}:
             raise LocalControlTransportError("transport_failed")
         self._inbound.extend(bytes(data))
         while len(self._inbound) >= 4:
@@ -291,7 +291,9 @@ class RestControlStream:
         if self._failure is None and phase is not None:
             self._failure = phase
         if self._state not in {"closing", "closed"}:
-            self._state = "closed"
+            # Ended, not yet closed: the owner's close still cancels what runs and sends the
+            # bounded courtesy DELETEs.
+            self._state = "ended"
         self._outbound.put_nowait(b"")
 
     def _deliver(self, frame: object) -> None:
@@ -311,7 +313,12 @@ class RestControlStream:
         try:
             while True:
                 frame = await self._frames.get()
-                if frame is None or self._state == "closed":
+                if frame is None:
+                    # The client ended its side: as the service does on a control connection, the
+                    # connection ends (what is still running is cancelled by the close).
+                    self._end(None)
+                    return
+                if self._state in {"ended", "closing", "closed"}:
                     return
                 if self._state == "await_hello":
                     await self._hello(frame)

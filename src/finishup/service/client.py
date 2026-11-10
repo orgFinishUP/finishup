@@ -2566,9 +2566,9 @@ async def _connect_remote(
     leaves the marker that asks the helper to fetch the profile again; never a fetch here.
     """
 
-    if admission.kind != "ssh":
-        # No transport exists for this kind in this release (the gate refuses it first); a test
-        # that opens one in process dials the target root's own endpoint, as layer 3 did.
+    if admission.kind != "ssh" and admission.kind not in _REST_KINDS:
+        # No transport exists for this kind (the gate refuses it first); a test that opens one in
+        # process without a server dials the target root's own endpoint, as layer 3 did.
         return await _connect_service_attempt(
             client_kind,
             workspace_locator=None,
@@ -2584,6 +2584,15 @@ async def _connect_remote(
     root = target_root(admission.target_id)
     style = read_connection_style(root)
     try:
+        if style == "direct" and admission.kind in _REST_KINDS:
+            return await _connect_direct_rest(
+                root,
+                admission,
+                client_kind,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+                deadline=deadline,
+            )
         if style == "direct":
             return await _connect_direct(
                 root,
@@ -2685,6 +2694,72 @@ async def _connect_direct(
             "service_unavailable", retryable=True, phase="remote_service_not_running"
         )
     return await attempt()
+
+
+# The kinds reached over REST v1 (ADR-053): through the target's helper (the relay style, the
+# default) or this process's own REST stream (the direct style). A unit test that opens one of
+# them in process without a server empties this (``builders.server_targets.open_remote_kinds``),
+# so its connection dials the target root's own endpoint as before.
+_REST_KINDS: frozenset[str] = frozenset({"https", "local_port"})
+
+
+async def _connect_direct_rest(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The direct style over HTTPS: this process's own REST stream (ADR-053).
+
+    This process reads the target's API key itself (off its event loop, within the deadline;
+    the disclosure says each dialing process does) and maps its control frames to REST v1
+    (``client.rest_stream``). The admission was checked before this dial and is checked before
+    every frame and on its watch, as for any connection; the stream sends nothing more once it
+    refuses.
+    """
+
+    from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
+    from finishup.client.rest_stream import RestControlStream
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        record = None
+    if record is None or record.target_id != admission.target_id:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="server_authorization_changed"
+        )
+    try:
+        key = await load_key(record.target_id, seconds=min(10.0, _remaining(deadline)))
+    except RestUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+    authorization = admission.authorization
+
+    def may_send() -> bool:
+        return authorization.refusal() is None
+
+    async def dial() -> ControlStream:
+        try:
+            transport = RestTransport.for_target(record, key=key)
+        except RestUnavailable as error:
+            raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+        return RestControlStream(transport, may_send=may_send, owns_transport=True)
+
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=None,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+        workspace_binding=admission.workspace_binding,
+        authorization=authorization,
+        dial=dial,
+        transport="https",
+    )
 
 
 def _helper_failure(root: Path, before: object) -> ControlError | None:

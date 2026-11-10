@@ -164,7 +164,17 @@ class ConsentVerdict:
 
 # The connection styles each server edge offers (design v2 section 1.2): a server reached through
 # its owner-only control socket over SSH offers the relay and the direct style.
-_STYLES_BY_EDGE: Final[dict[str, tuple[str, ...]]] = {"ssh-control": ("relay", "direct")}
+_STYLES_BY_EDGE: Final[dict[str, tuple[str, ...]]] = {
+    "ssh-control": ("relay", "direct"),
+    # REST v1 over HTTPS (ADR-053): the helper's REST upstream, or each process's own stream.
+    "rest-1": ("relay", "direct"),
+}
+# The edge each remote kind reaches the server through: only that edge's styles are offered.
+_EDGE_OF_KIND: Final[dict[str, str]] = {
+    "ssh": "ssh-control",
+    "https": "rest-1",
+    "local_port": "rest-1",
+}
 
 
 def styles_offered(record: ServerTarget) -> tuple[str, ...]:
@@ -178,10 +188,13 @@ def styles_offered(record: ServerTarget) -> tuple[str, ...]:
         cached = read_cached_profile(target_root(record.target_id))
     except Exception:  # noqa: BLE001 - a profile that cannot be read offers nothing
         return ()
-    if cached is None or record.kind != "ssh":
+    edge_of_kind = _EDGE_OF_KIND.get(record.kind)
+    if cached is None or edge_of_kind is None:
         return ()
     offered: list[str] = []
     for edge in cached.profile.edges:
+        if edge != edge_of_kind:
+            continue
         for style in _STYLES_BY_EDGE.get(edge, ()):
             if style not in offered:
                 offered.append(style)

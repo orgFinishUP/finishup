@@ -30,6 +30,8 @@ __all__ = [
 
 _START_SECONDS: Final = 30.0
 _STOP_SECONDS: Final = 5.0
+# The kinds a helper serves: SSH (layer 4), and HTTPS and ``local_port`` over REST (layer 5).
+_HELPER_KINDS: Final = frozenset({"ssh", "https", "local_port"})
 
 
 def _record(root: Path | None) -> tuple[ServerTarget, Path]:
@@ -39,7 +41,7 @@ def _record(root: Path | None) -> tuple[ServerTarget, Path]:
         record = read_target(root)
     except TargetError as error:
         raise TargetRuntimeError(error.reason) from None
-    if record is None or record.kind != "ssh":
+    if record is None or record.kind not in _HELPER_KINDS:
         raise TargetRuntimeError("target_record_invalid")
     return record, root
 
@@ -112,7 +114,9 @@ def register_for_background(client: object, source: str) -> bool:
 
 
 class SshTargetRuntime:
-    """An SSH target: its helper, its OpenSSH master, and the server's service behind them."""
+    """A server elsewhere reached through its helper: SSH (its helper, its OpenSSH master, and the
+    server's service behind them) or HTTPS and ``local_port`` (its helper and its REST upstream;
+    the server's own edge starts its service)."""
 
     __slots__ = ()
 
@@ -152,6 +156,9 @@ class SshTargetRuntime:
         record, target_root = _record(root)
         if not stop_helper(target_root, timeout_seconds=_STOP_SECONDS):
             raise TargetRuntimeError("target_still_connected")
+        if record.kind != "ssh":
+            # An HTTPS or port target has no OpenSSH master: stopping its helper is the stop.
+            return
         try:
             ssh = resolve_ssh()
         except UpstreamUnavailable:
