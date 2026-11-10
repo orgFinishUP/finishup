@@ -134,3 +134,23 @@ def test_resource_integrity_error_exposes_bounded_reason_and_detail() -> None:
     assert str(error) == "support_resource_set_mismatch"
     assert error.reason == "support_resource_set_mismatch"
     assert error.detail == "support/runtime-support.json"
+
+
+def test_a_receipts_version_slice_fits_its_frozen_bound_without_the_rest_documents() -> None:
+    """ADR-053: the seven REST v1 documents raised the request/result versions past the 64 a
+    receipt's frozen version slice holds; they describe no operation a receipt records, so the
+    slice leaves them out and a ready service builds its receipt context."""
+
+    from finishup.protocol.canonical import strict_json_parse
+    from finishup.service.ready_composition import (
+        _receipt_versions,  # pyright: ignore[reportPrivateUsage]
+    )
+    from finishup.version import build_version_manifest, version_manifest_json
+
+    document = strict_json_parse(version_manifest_json(build_version_manifest()))
+    assert len(document["request_result_schema_versions"]) > 64  # type: ignore[arg-type]
+    versions = _receipt_versions(document)  # type: ignore[arg-type]
+    ids = [entry.schema_id for entry in versions.schema_versions]
+    assert len(ids) <= 64
+    assert not [schema_id for schema_id in ids if schema_id.startswith("rest-")]
+    assert "server-profile" in ids

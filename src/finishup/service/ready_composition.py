@@ -3247,6 +3247,10 @@ def _version_json() -> Mapping[str, CanonicalJsonValue]:
     return cast(Mapping[str, CanonicalJsonValue], value)
 
 
+# The REST v1 network documents' schema family (``schemas/service/rest-*``, ADR-053).
+_NETWORK_DOCUMENT_PREFIX: Final = "rest-"
+
+
 def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVersionSlice:
     policies = manifest["policy_versions"]
     schemas = manifest["request_result_schema_versions"]
@@ -3264,6 +3268,10 @@ def _receipt_versions(manifest: Mapping[str, CanonicalJsonValue]) -> ReceiptVers
     for schema_id, schema_version in schemas.items():
         if type(schema_id) is not str or type(schema_version) is not str:
             raise ValueError("version_manifest_invalid")
+        if schema_id.startswith(_NETWORK_DOCUMENT_PREFIX):
+            # The REST v1 network documents (ADR-053) describe no operation a receipt records,
+            # and the receipt's frozen version slice holds at most 64 entries.
+            continue
         schema_versions.append(SchemaVersionEntry(schema_id, schema_version))
     return ReceiptVersionSlice(
         package_name="finishup",
