@@ -14,10 +14,12 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    without following any link (each directory opened with ``O_NOFOLLOW``, the file's type
    checked on its open descriptor). Deleted files are absent.
 3. Each path is admitted or held out, and held-out paths leave **both** trees (so nothing held
-   out reads as deleted): always-excluded, server and owner patterns (``excluded``); not
-   representable as a safe tree entry; over ``max_file_bytes`` (``too_large``); a known secret
-   format in its bytes unless the owner allowed that exact content (``held_for_content``); a
-   Git LFS file whose bytes are not its pointer (``lfs_content``); case-fold collisions
+   out reads as deleted). Its name is checked first, so an excluded or unsafe path is never read,
+   batched into ``cat-file`` or hashed: always-excluded, server and owner patterns
+   (``excluded``); not representable as a safe tree entry. Then its content: over
+   ``max_file_bytes`` (``too_large``); a known secret format in its bytes unless the owner
+   allowed that exact content (``held_for_content``); a Git LFS file whose bytes are not its
+   pointer (``lfs_content``); case-fold collisions
    (``case_collision``); nested repositories that are not submodules; special files, links to
    directories through a path and multiply-linked files (``special``). Symlinks are sent as
    their target text, submodules as gitlinks (commit id only), LFS files as their pointers.
@@ -806,9 +808,12 @@ class _Exporter:
             blobs.append((path, mode, oid, size))
         readable: list[tuple[bytes, bytes, str]] = []
         for path, mode, oid, size in blobs:
-            if size < 0 or size > self.policy.max_file_bytes:
-                refusal = self._name_refusal(path, mode)
-                admission.held[path] = refusal or "too_large"
+            # Names first: an excluded or unsafe path is never read, batched or hashed.
+            refusal = self._name_refusal(path, mode)
+            if refusal is not None:
+                admission.held[path] = refusal
+            elif size < 0 or size > self.policy.max_file_bytes:
+                admission.held[path] = "too_large"
             else:
                 readable.append((path, mode, oid))
         contents = self._cat_blobs([oid for _path, _mode, oid in readable])
@@ -888,6 +893,12 @@ class _Exporter:
         index_mode: bytes | None,
         index_oid: str | None,
     ) -> None:
+        # Names first: an excluded or unsafe path is never opened, read, hashed or looked up in
+        # the index (a link's own name rule is applied by ``admit`` once its mode is known).
+        refusal = self._name_refusal(path, MODE_REGULAR)
+        if refusal is not None:
+            admission.held[path] = refusal
+            return
         read = _read_beneath(self.root_fd, path, self.policy.max_file_bytes)
         if read.kind == "absent":
             return  # deleted: absent from the tree
@@ -895,10 +906,6 @@ class _Exporter:
             admission.held[path] = "nested_repository"
             return
         if read.kind == "special" or (read.kind == "link" and (read.over or b"\x00" in read.data)):
-            refusal = self._name_refusal(path, MODE_REGULAR)
-            if refusal == "excluded":
-                admission.held[path] = refusal
-                return
             admission.held[path] = "special"
             return
         if read.kind == "link":
@@ -916,8 +923,7 @@ class _Exporter:
             self._admit_lfs(admission, path, mode, read, index_oid)
             return
         if read.over:
-            refusal = self._name_refusal(path, mode)
-            admission.held[path] = refusal or "too_large"
+            admission.held[path] = "too_large"
             return
         self.admit(admission, path, mode, read.data)
 
@@ -938,8 +944,7 @@ class _Exporter:
                 self.counts["lfs_pointers"] += 1
                 self.admit(admission, path, mode, pointer)
                 return
-        refusal = self._name_refusal(path, mode)
-        admission.held[path] = refusal or "lfs_content"
+        admission.held[path] = "lfs_content"
 
     def lfs_paths(self, paths: Iterable[bytes]) -> None:
         listed = sorted(set(paths))

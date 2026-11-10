@@ -31,6 +31,18 @@ POLICY = ExportPolicy(
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Each export reads the owner's own Git configuration from a fresh HOME, never the real one."""
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", os.fspath(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(home / ".config"))
+    return home
+
+
 def _request(root: Path, **changes: object) -> ExportRequest:
     values: dict[str, object] = {
         "root": root,
@@ -239,6 +251,98 @@ def test_a_known_secret_is_held_out_until_the_owner_allows_that_exact_content(
         _request(root), allowed, ExportDatabase(tmp_path / "export3"), gate=_open
     )
     assert changed.manifest.lists["held_for_content"] == ("config/aws.ini",)
+
+
+def test_an_excluded_or_unsafe_base_file_is_never_read_from_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unsafe = os.fsdecode(b"\xff-latin.txt")
+    root = _repository(
+        tmp_path,
+        {"a.txt": b"a\n", "certs/big.pem": b"p" * 20_000, "dump/data.sql": b"d" * 20_000},
+    )
+    (root / unsafe).write_bytes(b"u" * 20_000)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "unsafe")
+    excluded = {
+        git(root, "rev-parse", f"HEAD:{name}") for name in ("certs/big.pem", "dump/data.sql")
+    }
+    excluded.add(git(root, "hash-object", unsafe))
+    requested: list[str] = []
+    original = code_export._Exporter._cat_blobs  # pyright: ignore[reportPrivateUsage]
+
+    def spy(self: object, oids: list[str]) -> dict[str, bytes]:
+        requested.extend(oids)
+        return original(self, oids)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(code_export._Exporter, "_cat_blobs", spy)  # pyright: ignore[reportPrivateUsage]
+    # Git's own output bound: the three held-out files alone would exceed it if they were read.
+    monkeypatch.setattr(code_export, "_MAX_GIT_OUTPUT", 16_384)
+    policy = ExportPolicy(
+        server=(),
+        owner=RepositoryCodeSettings(exclude=("dump/",)),
+        max_file_bytes=65_536,
+        max_repo_bytes=1_048_576,
+    )
+    prepared = _export(root, tmp_path, policy)
+    assert set(_tree_of(prepared, tmp_path)) == {"a.txt"}
+    assert not excluded & set(requested)
+    assert prepared.manifest.lists["excluded"] == ("certs/big.pem", "dump/data.sql")
+    assert prepared.manifest.counts["unrepresentable"] == 1
+
+
+def test_an_excluded_worktree_file_is_never_opened_hashed_or_looked_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"private payload\n" * 4
+    pointer = (
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:"
+        + hashlib.sha256(content).hexdigest().encode()
+        + b"\nsize "
+        + str(len(content)).encode()
+        + b"\n"
+    )
+    root = _repository(tmp_path, {".gitattributes": b"*.bin filter=lfs -text\n", "a.txt": b"a\n"})
+    blob = git_bytes(root, "hash-object", "-w", "--stdin", stdin=pointer).decode().strip()
+    git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob},private/asset.bin")
+    git(root, "commit", "-q", "-m", "lfs")
+    (root / "private").mkdir()
+    (root / "private" / "asset.bin").write_bytes(content)
+    (root / "local.pem").write_bytes(b"untracked key\n")
+    (root / os.fsdecode(b"\xfe-untracked.txt")).write_bytes(b"u\n")
+    opened: list[bytes] = []
+    hashed: list[bytes] = []
+    looked_up: list[str] = []
+    read, digest = code_export._read_beneath, code_export._hash_file_beneath  # pyright: ignore[reportPrivateUsage]
+    cat = code_export._Exporter._cat_blobs  # pyright: ignore[reportPrivateUsage]
+
+    def spy_read(root_fd: int, relative: bytes, limit: int) -> object:
+        opened.append(relative)
+        return read(root_fd, relative, limit)
+
+    def spy_hash(root_fd: int, relative: bytes) -> str | None:
+        hashed.append(relative)
+        return digest(root_fd, relative)
+
+    def spy_cat(self: object, oids: list[str]) -> dict[str, bytes]:
+        looked_up.extend(oids)
+        return cat(self, oids)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(code_export, "_read_beneath", spy_read)
+    monkeypatch.setattr(code_export, "_hash_file_beneath", spy_hash)
+    monkeypatch.setattr(code_export._Exporter, "_cat_blobs", spy_cat)  # pyright: ignore[reportPrivateUsage]
+    policy = ExportPolicy(
+        server=("private/",),
+        owner=RepositoryCodeSettings(),
+        max_file_bytes=65_536,
+        max_repo_bytes=1_048_576,
+    )
+    prepared = _export(root, tmp_path, policy)
+    assert set(_tree_of(prepared, tmp_path)) == {".gitattributes", "a.txt"}
+    assert set(opened) == {b".gitattributes", b"a.txt"}
+    assert hashed == [] and blob not in looked_up
+    assert prepared.manifest.lists["excluded"] == ("local.pem", "private/asset.bin")
+    assert prepared.manifest.counts["unrepresentable"] == 1
 
 
 def test_caps_hold_a_large_file_and_refuse_an_oversized_copy(tmp_path: Path) -> None:
