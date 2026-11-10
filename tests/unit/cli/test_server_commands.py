@@ -59,6 +59,16 @@ class _MemoryKeyring:
 @pytest.fixture
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
+        # Every remote kind is open from layer 5 (``test_server_https_add`` covers HTTPS and
+        # ports): these tests keep them closed in process, with no runtime, as the closed kinds'
+        # example (a test that needs one registers a stand-in).
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
+        from finishup.client import target_runtime
+
+        loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+        for kind in ("https", "local_port"):
+            loaders.pop(kind, None)
+        monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
         yield root
 
 
@@ -148,11 +158,11 @@ def test_every_server_command_renders_its_help(home: Path, arguments: tuple[str,
     assert "internal_error" not in result.output
 
 
-def test_the_help_offers_servers_on_this_computer_and_over_ssh(home: Path) -> None:
-    """SSH servers are open in this release (layer 4), HTTPS and port servers are not: ``login``
-    and ``logout`` (API keys) stay hidden from ``server --help``; ``set``, ``folders`` and
-    ``repositories`` are shown; ``add --help`` names the ``ssh://`` address and its options, and
-    no HTTPS or port option. Hidden commands still parse and show their own help."""
+def test_the_help_offers_servers_on_this_computer_over_ssh_and_over_https(home: Path) -> None:
+    """SSH (layer 4), HTTPS and port servers (layer 5) are open in this release: ``login`` and
+    ``logout`` (API keys) are shown in ``server --help``, as are ``set``, ``folders`` and
+    ``repositories``; ``add --help`` names the ``ssh://`` and ``https://`` addresses and their
+    options. Every command shows its own help."""
 
     listing = _invoke("--help")
     assert listing.exit_code == 0, listing.output
@@ -176,12 +186,14 @@ def test_the_help_offers_servers_on_this_computer_and_over_ssh(home: Path) -> No
         "connect",
         "disconnect",
         "set",
+        "login",
+        "logout",
         "folders",
         "repositories",
     }
     words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
-    assert not words & {"login", "logout"}
+    assert {"login", "logout"} <= words
 
     add = _invoke("add", "--help")
     assert add.exit_code == 0, add.output
@@ -189,8 +201,8 @@ def test_the_help_offers_servers_on_this_computer_and_over_ssh(home: Path) -> No
     assert "--local" in add_help
     for ssh in ("ssh://", "--remote-root", "--remote-launcher", "--outside-reads"):
         assert ssh in add_help
-    for closed in ("https://", "--port", "--ca-file", "--tls-pin"):
-        assert closed not in add_help
+    for https in ("https://", "--port", "--ca-file", "--tls-pin", "--key-file"):
+        assert https in add_help
     for hidden in (("login", "--help"), ("logout", "--help"), ("folders", "--help")):
         shown = _invoke(*hidden)
         assert shown.exit_code == 0, (hidden, shown.output)
@@ -1725,7 +1737,9 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     assert "lab.example" not in refused.stderr
     # An SSH server is confirmed again with 'server use NAME' on the owner's terminal; an HTTPS
     # one (refused below while closed) points to a server on this computer.
-    assert "'finishup server use NAME' on your own terminal (an SSH server)" in refused.stderr
+    assert "'finishup server use NAME' on your own terminal (an SSH or HTTPS server)" in (
+        refused.stderr
+    )
     assert "'finishup server use local'" in refused.stderr
     status = _status_json("lab")
     authorization = cast(

@@ -58,6 +58,9 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             "_location",
             everyday_policy._ambient_marker_path,  # pyright: ignore[reportPrivateUsage]
         )
+        # Every remote kind is open from layer 5: HTTPS stays closed in this process as the
+        # example of a remote root this client does not reach (the gate's kind step).
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 

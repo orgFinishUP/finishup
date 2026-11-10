@@ -128,12 +128,13 @@ _USAGE: Final = 2
 _UNSAFE: Final = 20
 _UNAVAILABLE: Final = 20
 
-# HTTPS and port servers are closed in this release: what every surface says when one is asked
-# for. SSH servers are open (ADR-052, layer 4).
+# What every surface says of a server address this release does not connect to. SSH (layer 4),
+# HTTPS and port servers (layer 5, ADR-053) are open.
 REMOTE_KIND_UNAVAILABLE: Final = (
     "this release connects to FinishUP servers on this computer (the everyday server and named "
-    "local servers, 'finishup server add NAME --local') and over SSH ('finishup server add NAME "
-    "ssh://[user@]host[:port]'). HTTPS and port servers arrive in a later release"
+    "local servers, 'finishup server add NAME --local'), over SSH ('finishup server add NAME "
+    "ssh://[user@]host[:port]') and over HTTPS ('finishup server add NAME https://host[:port]', or "
+    "--port PORT on this computer); that address names none of them"
 )
 
 # Remedies are fixed text: no name, host, path, or other owner-typed value is ever echoed.
@@ -278,18 +279,19 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "this FinishUP build has no client runtime for that kind of server target",
         _UNAVAILABLE,
     ),
-    # An SSH target is confirmed again with 'finishup server use NAME' on the owner's terminal;
-    # an HTTPS or port target only in a later release.
+    # A server elsewhere (SSH, HTTPS or a port) is confirmed again with 'finishup server use NAME'
+    # on the owner's terminal.
     "target_reauthorization_required": (
         "this server target was authorized under an older disclosure of what leaves this "
         "computer, so nothing was sent to it; agree to the current one with 'finishup server use "
-        "NAME' on your own terminal (an SSH server), or use a server on this computer ('finishup "
+        "NAME' on your own terminal (an SSH or HTTPS server), or use a server on this computer ('finishup "
         "server use local')",
         _USAGE,
     ),
     "usage": (
-        "give --local for a named local server on this computer, or an ssh://[user@]host[:port] "
-        "address for a server on another machine",
+        "give --local for a named local server on this computer, an ssh://[user@]host[:port] or "
+        "https://host[:port] address for a server elsewhere, or --port PORT for one on this "
+        "computer's HTTPS port",
         _USAGE,
     ),
     "remote_unreachable": (
@@ -965,13 +967,17 @@ def server_add(
     address: Annotated[
         str | None,
         typer.Argument(
-            help="An SSH server: ssh://USER@HOST:PORT (user and port optional; omit with --local)."
+            help="ssh://USER@HOST:PORT (user and port optional) or https://HOST:PORT/BASE (port "
+            "and base optional); omit with --local or --port."
         ),
     ] = None,
     local: Annotated[
         bool, typer.Option("--local", help="A named local server on this computer.")
     ] = False,
-    port: Annotated[int | None, typer.Option("--port", hidden=True)] = None,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="A FinishUP server on this computer's HTTPS port PORT."),
+    ] = None,
     remote_root: Annotated[
         str | None,
         typer.Option(
@@ -986,9 +992,18 @@ def server_add(
             help="SSH: the absolute path of the server's finishup (else the usual install paths).",
         ),
     ] = None,
-    ca_file: Annotated[Path | None, typer.Option("--ca-file", hidden=True)] = None,
-    tls_pin: Annotated[str | None, typer.Option("--tls-pin", hidden=True)] = None,
-    key_file: Annotated[Path | None, typer.Option("--key-file", hidden=True)] = None,
+    ca_file: Annotated[
+        Path | None,
+        typer.Option("--ca-file", help="HTTPS: trust only this CA (PEM) for the server."),
+    ] = None,
+    tls_pin: Annotated[
+        str | None,
+        typer.Option("--tls-pin", help="HTTPS: trust only this certificate (sha256:HEX)."),
+    ] = None,
+    key_file: Annotated[
+        Path | None,
+        typer.Option("--key-file", help="HTTPS: read the API key once from an owner-only file."),
+    ] = None,
     outside_reads: Annotated[
         str | None,
         typer.Option(
@@ -997,7 +1012,12 @@ def server_add(
         ),
     ] = None,
 ) -> None:
-    """Add a server: a named local one on this computer, or an SSH server on another machine."""
+    """Add a server: a named local one on this computer, an SSH server, or an HTTPS server.
+
+    'finishup server add official' adds the official FinishUP service this release names (none
+    yet). An HTTPS server asks for its API key on your terminal (hidden) unless --key-file gives
+    it, and the server is checked before anything is kept.
+    """
 
     if name == "official" and address is None and port is None and not local:
         # The preset (design v2 section 2.4): the URL of the official FinishUP service this
@@ -2763,7 +2783,7 @@ def _remove_leftover(target_id: str) -> None:
     typer.echo(f"Removed the leftover server folder {target_id}.")
 
 
-@server_app.command("login", hidden=True)
+@server_app.command("login")
 @_cli
 def server_login(
     name: Annotated[str, typer.Argument(help="An HTTPS server target.")],
@@ -2889,7 +2909,7 @@ _LOGIN_NOT_STORED: Final[dict[str, str]] = {
 _LOGIN_REFUSED: Final = f"{REMOTE_KIND_UNAVAILABLE}; no key was read or stored"
 
 
-@server_app.command("logout", hidden=True)
+@server_app.command("logout")
 @_cli
 def server_logout(name: Annotated[str, typer.Argument(help="An HTTPS server target.")]) -> None:
     """Delete an HTTPS target's stored API key (this computer only; nothing is sent)."""

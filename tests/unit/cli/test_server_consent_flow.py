@@ -378,8 +378,12 @@ def test_a_target_removed_during_the_confirmation_stays_removed(
     assert targets.read_selected_target_id() is None
 
 
-def test_use_of_a_closed_kind_is_refused_before_anything(home: Path) -> None:
+def test_use_of_a_closed_kind_is_refused_before_anything(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     del home
+    # Every remote kind is open from layer 5: HTTPS is closed in this process as the example.
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
     with targets.registry_lock():
         targets.new_remote_target("lab", "https", base_url="https://lab.example")
 

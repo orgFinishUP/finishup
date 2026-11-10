@@ -41,7 +41,8 @@ broader consent, so a refresh that stops part way can never let the broader offe
 cache, wider than the consent now, which refuses until the next refresh records the profile.
 
 ``PROFILE_SOURCES`` holds SSH (``service profile --json`` on the server, fetched over OpenSSH by
-``server add``, ``server use`` and the target's helper); layer 5 registers HTTPS.
+``server add``, ``server use`` and the target's helper) and HTTPS and ``local_port``
+(``GET /v1/server``, layer 5).
 """
 
 from __future__ import annotations
@@ -143,9 +144,20 @@ def _ssh_source() -> ProfileSource:
     return SshProfileSource()
 
 
+def _rest_source() -> ProfileSource:
+    # Loaded only when a profile is fetched (never on a hook's path, design v2 section 8.9).
+    from finishup.client.rest_discovery import RestProfileSource
+
+    return RestProfileSource()
+
+
 # The profile source of each remote kind: SSH (``service profile --json`` on the server, over
-# OpenSSH); HTTPS and ``local_port`` arrive in layer 5.
-PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {"ssh": _ssh_source}
+# OpenSSH) and, over REST v1 (layer 5, ADR-053), HTTPS and ``local_port`` (``GET /v1/server``).
+PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {
+    "ssh": _ssh_source,
+    "https": _rest_source,
+    "local_port": _rest_source,
+}
 
 
 @dataclass(frozen=True, slots=True)

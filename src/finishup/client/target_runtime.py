@@ -210,6 +210,9 @@ def _ssh_runtime() -> TargetRuntime:
 _RUNTIME_LOADERS: dict[str, Callable[[], TargetRuntime]] = {
     "local": LocalTargetRuntime,
     "ssh": _ssh_runtime,
+    # Layer 5 (ADR-053): HTTPS and port servers run through the same helper runtime.
+    "https": _ssh_runtime,
+    "local_port": _ssh_runtime,
 }
 
 
