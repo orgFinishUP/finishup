@@ -19,7 +19,11 @@ from finishup.domain.bounded_text import (
 )
 from finishup.domain.closure import PREPARATION_REMEDIATIONS
 from finishup.domain.decision_status import find_status_line
-from finishup.domain.evidence_provenance import evidence_provenance_from_json
+from finishup.domain.evidence_provenance import (
+    evidence_provenance_from_json,
+    evidence_provenance_unknown_lines,
+    evidence_provenance_unknown_notice,
+)
 from finishup.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from finishup.domain.receipt_closing import safe_closing_prompt
 from finishup.domain.receipts import (
@@ -3153,6 +3157,26 @@ def _evidence_provenance_parts(source: Mapping[str, object]) -> list[Part]:
     return [_req(line) for line in lines]
 
 
+def _evidence_provenance_unknown_parts(source: Mapping[str, object]) -> list[Part]:
+    """ADR-054: the fixed evidence-unknown lines, required, from a receipt's
+    ``evidence_provenance_unknown`` member (a closed reason with exactly its own notice only)."""
+
+    member = source.get("evidence_provenance_unknown")
+    if not isinstance(member, Mapping):
+        return []
+    fields = cast(Mapping[str, object], member)
+    reason = fields.get("reason")
+    try:
+        if fields.get("status") != "unknown" or fields.get(
+            "notice"
+        ) != evidence_provenance_unknown_notice(reason):
+            return []
+        lines = evidence_provenance_unknown_lines(reason)
+    except ValueError:
+        return []
+    return [_req(line) for line in lines]
+
+
 def summary_for_receipt(envelope: object) -> str:
     """Compose the receipt text: conclusion, frontier, limitation count and pairing first.
 
@@ -3181,6 +3205,7 @@ def summary_for_receipt(envelope: object) -> str:
         _req(f"Receipt conclusion: {conclusion};"),
         *_workspace_provenance_parts(source),
         *_evidence_provenance_parts(source),
+        *_evidence_provenance_unknown_parts(source),
         # ADR-051 decision 5: how many files listed mode kept back, then the owner's two ways
         # out. An MCP receipt, paged or not, reaches the agent as its canonical JSON, which
         # carries the number in the gap itself; this summary stands in only when that copy cannot

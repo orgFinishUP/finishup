@@ -144,3 +144,34 @@ def test_a_status_over_an_l2_connection_says_the_server_reads_from_its_copy() ->
     assert render_human_status(status, attribution=_L1) == "\n".join(
         (local, CLIENT_ATTESTED_WORKSPACE_LINE, _REACHED)
     )
+
+
+def _unknown_section(reason: str, *, hook_observed: bool = False) -> str:
+    from finishup.domain.receipts import evidence_provenance_unknown_section_lines
+
+    return "\n".join(
+        (
+            "Workspace evidence",
+            *evidence_provenance_unknown_section_lines(reason, hook_observed=hook_observed),
+        )
+    )
+
+
+def test_a_json_receipt_whose_account_is_unknown_never_gets_the_l1_sentence() -> None:
+    # ADR-054: the account could not be given (after an L2 -> L1 downgrade the connection is L1):
+    # the JSON receipt says so from its member, and never "the server did not read" it.
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_PROVENANCE_UNKNOWN_REASONS,
+        evidence_provenance_unknown_wire,
+    )
+
+    plain = render_human_receipt(_receipt())
+    for reason in EVIDENCE_PROVENANCE_UNKNOWN_REASONS:
+        wire = cast(dict[str, Any], _receipt_result_wire())
+        wire["evidence_provenance_unknown"] = evidence_provenance_unknown_wire(reason)
+        receipt = ReceiptSuccessModel.model_validate(wire)
+        for attribution in (_L1, _L2):
+            rendered = render_human_receipt(receipt, attribution=attribution)
+            assert rendered == "\n".join((plain, _unknown_section(reason), _REACHED))
+            assert _L1_SENTENCE not in rendered
+            assert SERVER_COPY_CONNECTION_LINE not in rendered

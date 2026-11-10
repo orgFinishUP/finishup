@@ -29,7 +29,12 @@ from finishup.domain.events import (
     encode_payload,
     media_type_for,
 )
-from finishup.domain.evidence_provenance import EvidenceAccountIncomplete, EvidenceProvenance
+from finishup.domain.evidence_provenance import (
+    EvidenceAccountIncomplete,
+    EvidenceProvenance,
+    EvidenceProvenanceUnknownReason,
+    evidence_provenance_unknown_wire,
+)
 from finishup.domain.receipt_closing import closing_prompt, declined_note_count
 from finishup.domain.receipts import (
     ReceiptDocument,
@@ -185,9 +190,13 @@ type EvidenceProvenanceSource = Callable[[str, TaskRuntime], Awaitable[EvidenceP
 
 
 class _EvidenceUnreadable(Enum):
-    """The evidence source failed, or answered something that is not an account (ADR-054)."""
+    """The task's evidence account cannot be given (ADR-054): the source failed or answered
+    something that is not an account (``UNREADABLE``, passing), or the copy served evidence
+    whose counts were lost (``INCOMPLETE``, lasting). The value is the closed reason every
+    receipt format carries in its ``evidence_provenance_unknown`` member."""
 
     UNREADABLE = "evidence_provenance_unreadable"
+    INCOMPLETE = "evidence_provenance_counts_incomplete"
 
 
 class Application(Protocol):
@@ -235,6 +244,9 @@ class ReceiptInternalResult:
     # the server's copy, or that copy's content-forgotten marker). Every format carries it, JSON
     # included, as ``evidence_provenance``; recomputed on every receipt and replay, never stored.
     evidence_provenance: EvidenceProvenance | None = None
+    # ADR-054: the account could not be given (``_EvidenceUnreadable``); every format carries the
+    # closed reason as ``evidence_provenance_unknown``, so no client adds a level-L1 line to it.
+    evidence_provenance_unknown_reason: EvidenceProvenanceUnknownReason | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         versions = {
@@ -307,6 +319,16 @@ class ReceiptInternalResult:
                 {}
                 if self.evidence_provenance is None
                 else {"evidence_provenance": cast(JsonValue, self.evidence_provenance.to_json())}
+            ),
+            **(
+                {}
+                if self.evidence_provenance_unknown_reason is None
+                else {
+                    "evidence_provenance_unknown": cast(
+                        JsonValue,
+                        evidence_provenance_unknown_wire(self.evidence_provenance_unknown_reason),
+                    )
+                }
             ),
         }
 
@@ -605,11 +627,13 @@ def _internal_result(
     ``evidence`` is a claim-bound task's evidence account (ADR-054, design v2 section 8.6). A
     level-L2 account replaces the client-attested block with the server-copy block and is
     carried by the result of every format as ``evidence_provenance``; any other account changes
-    nothing, so an L1 receipt keeps its bytes. ``_EvidenceUnreadable`` (the source failed) ends
-    the text with the evidence-unknown block instead: the receipt never claims more than the
-    server knows, so it says neither that the server did not read the repository itself nor that
-    it read its copy, and no member is carried (there is no account to carry). Only a source
-    that answered None keeps the client-attested block."""
+    nothing, so an L1 receipt keeps its bytes. ``_EvidenceUnreadable`` (the account cannot be
+    given) ends the text with the evidence-unknown block for its reason instead: the receipt never
+    claims more than the server knows, so it says neither that the server did not read the
+    repository itself nor that it read its copy; no account is carried, and the result of every
+    format, JSON included, carries ``evidence_provenance_unknown`` with that reason, so a client
+    rendering a JSON receipt never adds the connection's level-L1 line. Only a source that
+    answered None keeps the client-attested block."""
 
     document_json = cast(JsonValue, receipt_document_to_json(document))
     markdown = request.format is ReceiptFormat.MARKDOWN
@@ -622,6 +646,11 @@ def _internal_result(
         if type(attested_by) is str and type(evidence) is EvidenceProvenance and evidence.level_l2
         else None
     )
+    unknown: EvidenceProvenanceUnknownReason | None = (
+        evidence.value
+        if type(attested_by) is str and isinstance(evidence, _EvidenceUnreadable)
+        else None
+    )
     trailer: str | None = None
     if provenance_reason is not None:
         trailer = workspace_provenance_unknown_block(markdown=markdown, reason=provenance_reason)
@@ -629,9 +658,9 @@ def _internal_result(
         trailer = server_copy_receipt_block(
             attested_by, account, markdown=markdown, hook_observed=hook_observed
         )
-    elif type(attested_by) is str and evidence is _EvidenceUnreadable.UNREADABLE:
+    elif type(attested_by) is str and unknown is not None:
         trailer = evidence_provenance_unknown_receipt_block(
-            attested_by, markdown=markdown, hook_observed=hook_observed
+            attested_by, markdown=markdown, hook_observed=hook_observed, reason=unknown
         )
     elif type(attested_by) is str:
         trailer = client_attested_receipt_block(
@@ -673,6 +702,7 @@ def _internal_result(
         _agent_closing_prompt(document) or None,
         provenance_reason,
         account,
+        unknown,
     )
 
 
@@ -794,6 +824,8 @@ async def _evidence_account(
             reason=reason,
             request_id=request_id,
         )
+        if reason == "evidence_provenance_counts_incomplete":
+            return _EvidenceUnreadable.INCOMPLETE
         return _EvidenceUnreadable.UNREADABLE
     if answer is None:
         return None

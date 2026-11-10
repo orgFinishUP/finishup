@@ -24,7 +24,11 @@ itself; an L1 connection keeps its exact bytes. A receipt whose result carries
 ``evidence_provenance`` (a level-L2 account), or whose service text ends with the server-copy or
 the evidence-unknown section, says per kind of evidence where it was read: the client renders
 that section from the member for a receipt with no service text (``evidence_provenance_section``)
-and names only the producing service beside it. A receipt whose service text carries the
+and names only the producing service beside it. So does a receipt whose result carries
+``evidence_provenance_unknown`` (the account could not be given, every format, JSON included):
+its evidence-unknown section is rendered from that member (``evidence_provenance_unknown_section``)
+and the connection's own line, which at L1 would say the server did not read the repository
+itself, is left out. A receipt whose service text carries the
 client-attested section never gets the connection's L2 line beside it either.
 
 Transport tokens (closed; whoever builds the connection supplies one, ``unix`` by default):
@@ -37,11 +41,14 @@ Transport tokens (closed; whoever builds the connection supplies one, ``unix`` b
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, cast
 
-from finishup.domain.evidence_provenance import evidence_provenance_from_json
+from finishup.domain.evidence_provenance import (
+    evidence_provenance_from_json,
+    evidence_provenance_unknown_notice,
+)
 from finishup.domain.receipts import (
     CLIENT_ATTESTED_OBSERVATION_LINE,
     CLIENT_ATTESTED_WORKSPACE_LINE,
@@ -50,6 +57,7 @@ from finishup.domain.receipts import (
     SERVER_COPY_CONNECTION_LINE,
     WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     evidence_provenance_lines,
+    evidence_provenance_unknown_section_lines,
 )
 from finishup.protocol.errors import ProtocolValueError
 from finishup.protocol.ids import IdKind, validate_id
@@ -64,6 +72,7 @@ __all__ = [
     "connection_attribution",
     "coverage_hook_observed",
     "evidence_provenance_section",
+    "evidence_provenance_unknown_section",
     "shows_server_copy_section",
 ]
 
@@ -173,6 +182,36 @@ def evidence_provenance_section(member: object, *, hook_observed: bool = False) 
     return "\n".join(("Workspace evidence", *lines))
 
 
+def evidence_provenance_unknown_section(
+    member: object, *, hook_observed: bool = False
+) -> str | None:
+    """The "Workspace evidence" section a client renders from a receipt result's
+    ``evidence_provenance_unknown`` member (ADR-054), for a receipt the service sent no text for:
+    the domain's fixed lines for the member's closed reason, under the heading, without the
+    serving service. None for anything but that member's exact form (a closed reason with exactly
+    its own notice): nothing but those fixed words is ever rendered from it. It never says the
+    server did not read the repository itself, nor that it did."""
+
+    dump = getattr(member, "model_dump", None)
+    if callable(dump):
+        member = dump(mode="json", by_alias=True)
+    if not isinstance(member, Mapping):
+        return None
+    fields = cast(Mapping[str, object], member)
+    reason = fields.get("reason")
+    try:
+        if set(fields) != {"status", "reason", "notice"} or fields.get("status") != "unknown":
+            return None
+        if fields.get("notice") != evidence_provenance_unknown_notice(reason):
+            return None
+        lines = evidence_provenance_unknown_section_lines(
+            reason, hook_observed=hook_observed is True
+        )
+    except (ValueError, ProtocolValueError):
+        return None
+    return "\n".join(("Workspace evidence", *lines))
+
+
 def shows_server_copy_section(shown: str) -> bool:
     """Whether ``shown`` already carries a level-L2 "Workspace evidence" section (the service's
     server-copy or evidence-unknown section, or one rendered from the member)."""
@@ -211,9 +250,10 @@ def attribution_lines(
     page or beside an unknown provenance, never twice), so a JSON receipt's rendering says what
     the service's text and markdown trailer says (decision 12).
 
-    ``server_copy`` marks a receipt whose result carries ``evidence_provenance`` (ADR-054); it,
-    like a ``shown`` that carries a level-L2 section, names only the producing service: the
-    section says where each kind of evidence was read, the hook-observation line included. A
+    ``server_copy`` marks a receipt whose result carries ``evidence_provenance`` or
+    ``evidence_provenance_unknown`` (ADR-054); it, like a ``shown`` that carries a level-L2
+    section, names only the producing service: the section says where each kind of evidence was
+    read, or that this is unknown, the hook-observation line included. A
     ``shown`` that carries the service's client-attested section never gets the connection's
     level-L2 line beside it, which would contradict the task's own account.
     """

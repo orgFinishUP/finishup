@@ -13,7 +13,11 @@ from finishup.domain.bounded_text import Part, clip_to_limit, compose_parts
 from finishup.domain.evidence_provenance import (
     EVIDENCE_PROVENANCE_SCHEMA,
     EVIDENCE_PROVENANCE_TOKENS,
+    EVIDENCE_PROVENANCE_UNKNOWN_LINE,
+    EVIDENCE_PROVENANCE_UNREADABLE,
     EvidenceProvenance,
+    EvidenceProvenanceUnknownReason,
+    evidence_provenance_unknown_lines,
 )
 from finishup.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -131,6 +135,7 @@ __all__ = [
     "CLIENT_ATTESTED_OBSERVATION_LINE",
     "CLIENT_ATTESTED_WORKSPACE_LINE",
     "EVIDENCE_PROVENANCE_UNREADABLE_LINE",
+    "evidence_provenance_unknown_section_lines",
     "EVIDENCE_READS_PREFIX",
     "SERVER_COPY_CONNECTION_LINE",
     "SERVER_COPY_NONE_COUNTED_LINE",
@@ -610,18 +615,11 @@ _EVIDENCE_FORGOTTEN_LINE: Final = (
 _EVIDENCE_FORGOTTEN_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {"owner": "the owner forgot it", "expired": "its retention expired"}
 )
-# A server that keeps copies of repositories could not read a claim-bound task's evidence
+# A server that keeps copies of repositories could not give a claim-bound task's evidence
 # account: the receipt is built anyway, and says neither that the server read its copy nor that
-# it did not (``evidence_provenance_unknown_receipt_block``).
-EVIDENCE_PROVENANCE_UNREADABLE_LINE: Final = (
-    "Where this task's workspace evidence was read could not be determined: this server keeps "
-    "copies of repositories, and its account of which reads its copy answered could not be read."
-)
-_EVIDENCE_PROVENANCE_UNREADABLE_IMPACT_LINE: Final = (
-    "Some evidence may have been read from the server's copy of the repository, synced from the "
-    "client machine; the rest was read on the client machine by the FinishUP workspace agent. "
-    "Running receipt again may read the account."
-)
+# it did not (``evidence_provenance_unknown_receipt_block``; every format carries the
+# ``evidence_provenance_unknown`` member, ``domain.evidence_provenance``).
+EVIDENCE_PROVENANCE_UNREADABLE_LINE: Final = EVIDENCE_PROVENANCE_UNKNOWN_LINE
 CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS: Final = frozenset(
     _CHECK_TIME_CHANGE_REASON_PREFIX + reason for reason in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
 )
@@ -4038,28 +4036,48 @@ def server_copy_receipt_block(
     )
 
 
+def evidence_provenance_unknown_section_lines(
+    reason: object, *, hook_observed: bool = False
+) -> tuple[str, ...]:
+    """The fixed lines of the "Workspace evidence" section of a receipt whose evidence account
+    is unknown (ADR-054), without its heading or the serving service: what happened
+    (``EVIDENCE_PROVENANCE_UNREADABLE_LINE``), why it matters and whether a retry can help (the
+    passing ``evidence_provenance_unreadable``) or why it lasts (the copy served evidence whose
+    counts were lost, ``evidence_provenance_counts_incomplete``); then the hook-observation line
+    when ``hook_observed``. Never that the server did not read the repository itself, nor that it
+    did. Any other reason is ``invalid_receipt_document``."""
+
+    if type(hook_observed) is not bool:
+        raise ProtocolValueError("invalid_receipt_document")
+    try:
+        lines = evidence_provenance_unknown_lines(reason)
+    except ValueError:
+        raise ProtocolValueError("invalid_receipt_document") from None
+    return (*lines, *((CLIENT_ATTESTED_OBSERVATION_LINE,) if hook_observed else ()))
+
+
 def evidence_provenance_unknown_receipt_block(
-    service_instance_id: str, *, markdown: bool, hook_observed: bool = False
+    service_instance_id: str,
+    *,
+    markdown: bool,
+    hook_observed: bool = False,
+    reason: EvidenceProvenanceUnknownReason = EVIDENCE_PROVENANCE_UNREADABLE,
 ) -> str:
     """The section a claim-bound task's text or markdown receipt ends with when this service
-    keeps copies of repositories and could not read the task's evidence account (ADR-054).
+    keeps copies of repositories and could not give the task's evidence account (ADR-054).
 
-    What happened (``EVIDENCE_PROVENANCE_UNREADABLE_LINE``), why it matters (some evidence may
-    have been read from the copy, the rest on the client machine) and that a retry may read it;
-    then the hook-observation line when ``hook_observed`` and the serving service. It never says
-    the server did not read the repository itself, and never that it did.
+    ``evidence_provenance_unknown_section_lines`` for ``reason``, then the serving service. It
+    never says the server did not read the repository itself, and never that it did.
     """
 
     validate_id(IdKind.SERVICE_INSTANCE, service_instance_id)
-    if type(markdown) is not bool or type(hook_observed) is not bool:
+    if type(markdown) is not bool:
         raise ProtocolValueError("invalid_receipt_document")
     heading = "## Workspace evidence" if markdown else "Workspace evidence"
     return "\n".join(
         (
             heading,
-            EVIDENCE_PROVENANCE_UNREADABLE_LINE,
-            _EVIDENCE_PROVENANCE_UNREADABLE_IMPACT_LINE,
-            *((CLIENT_ATTESTED_OBSERVATION_LINE,) if hook_observed else ()),
+            *evidence_provenance_unknown_section_lines(reason, hook_observed=hook_observed),
             f"Served by FinishUP service {service_instance_id} (connection: client_claim).",
         )
     )

@@ -161,3 +161,31 @@ def test_the_receipt_summary_carries_the_server_copy_lines() -> None:
         JsonValue, EvidenceProvenance({"client_check": 1}).to_json()
     )
     assert "Evidence reads by source" not in summary_for_receipt(source)
+
+
+@pytest.mark.parametrize("attribution", [_L1, _L2], ids=["l1", "l2"])
+def test_a_json_receipt_whose_account_is_unknown_never_gets_the_l1_sentence(
+    attribution: ServiceAttribution,
+) -> None:
+    from finishup.domain.evidence_provenance import evidence_provenance_unknown_wire
+    from finishup.domain.receipts import evidence_provenance_unknown_section_lines
+
+    wire = _receipt_result_wire()
+    member = evidence_provenance_unknown_wire("evidence_provenance_counts_incomplete")
+    wire["evidence_provenance_unknown"] = cast(JsonValue, member)
+    receipt = ReceiptResultModel.model_validate(wire)
+    canonical = canonical_encode(cast(JsonValue, public_model_to_wire(receipt))).decode("utf-8")
+    text = _text(bridge.result_from_public_model(receipt, attribution=attribution))
+    # The canonical copy carries the member, whose notice holds the section's fixed lines; the
+    # connection then names only the producer, never its level-L1 line.
+    assert text == "\n".join((canonical, _REACHED))
+    for line in evidence_provenance_unknown_section_lines("evidence_provenance_counts_incomplete"):
+        assert canonical_encode(line).decode("utf-8")[1:-1] in text
+    assert _L1_SENTENCE not in text and SERVER_COPY_CONNECTION_LINE not in text
+    # The summary an agent reads in its place says it too, with the member's own fixed words.
+    summary = summary_for_receipt(public_model_to_wire(receipt))
+    for line in evidence_provenance_unknown_section_lines("evidence_provenance_counts_incomplete"):
+        assert line in summary
+    forged = public_model_to_wire(receipt)
+    forged["evidence_provenance_unknown"] = {**member, "notice": "the server read nothing"}
+    assert "could not be determined" not in summary_for_receipt(forged)

@@ -12,6 +12,7 @@ from finishup.client.attribution import (
     attribution_lines,
     coverage_hook_observed,
     evidence_provenance_section,
+    evidence_provenance_unknown_section,
     shows_server_copy_section,
 )
 from finishup.domain.check_totals import render_check_totals
@@ -1274,7 +1275,9 @@ def render_human_receipt(
 
     A receipt whose ``evidence_provenance`` carries a level-L2 account (ADR-054) shows the same
     fixed server-copy lines the service's text ends with, rendered from the member, unless its
-    text already carries them; the connection then names only the producing service.
+    text already carries them; the connection then names only the producing service. So does a
+    receipt whose ``evidence_provenance_unknown`` says that account could not be given, with the
+    evidence-unknown lines for its reason: never the connection's level-L1 line beside them.
     """
 
     if type(result) is not ReceiptSuccessModel:
@@ -1352,12 +1355,15 @@ def render_human_receipt(
         # markdown receipt already ends with them.
         lines.append(workspace_provenance_unknown_block(markdown=False, reason=provenance.reason))
     hook_observed = coverage_hook_observed(result.coverage.publication_channels)
-    server_copy = result.evidence_provenance is not None
+    unknown = result.evidence_provenance_unknown
+    server_copy = result.evidence_provenance is not None or unknown is not None
     if server_copy and not shows_server_copy_section(shown):
-        # ADR-054: the fixed lines for the member's level-L2 account; a text or markdown receipt
-        # already ends with them.
-        section = evidence_provenance_section(
-            result.evidence_provenance, hook_observed=hook_observed
+        # ADR-054: the fixed lines for the member's level-L2 account, or for why that account is
+        # unknown; a text or markdown receipt already ends with them.
+        section = (
+            evidence_provenance_section(result.evidence_provenance, hook_observed=hook_observed)
+            if unknown is None
+            else evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
         )
         if section is not None:
             lines.append(section)

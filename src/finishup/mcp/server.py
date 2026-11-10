@@ -50,6 +50,7 @@ from finishup.client.attribution import (
     connection_attribution,
     coverage_hook_observed,
     evidence_provenance_section,
+    evidence_provenance_unknown_section,
     shows_server_copy_section,
 )
 from finishup.client.workspace_ref import start_request_for_connection
@@ -1605,6 +1606,7 @@ def _attributed_text(
     provenance_unknown: bool = False,
     hook_observed: bool = False,
     server_copy: object = None,
+    evidence_unknown: object = None,
 ) -> str:
     """``text`` followed by a claim-bound connection's provenance lines (ADR-051), unchanged for
     any other connection. A line the text already carries is not repeated, and a page of a paged
@@ -1615,11 +1617,16 @@ def _attributed_text(
     ``server_copy`` is a receipt's ``evidence_provenance`` member (ADR-054): unless ``text``
     already carries the service's server-copy section, the same fixed lines rendered from the
     member follow it, whatever the connection, and the connection then names only the producing
-    service."""
+    service. ``evidence_unknown`` is its ``evidence_provenance_unknown`` member: the
+    evidence-unknown lines for its reason follow on the same terms, never the level-L1 line."""
 
     extra: tuple[str, ...] = ()
     if server_copy is not None and not shows_server_copy_section(text):
         section = evidence_provenance_section(server_copy, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
+    if evidence_unknown is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_unknown_section(evidence_unknown, hook_observed=hook_observed)
         if section is not None:
             extra = (section,)
     lines = attribution_lines(
@@ -1628,7 +1635,7 @@ def _attributed_text(
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
-        server_copy=server_copy is not None,
+        server_copy=server_copy is not None or evidence_unknown is not None,
     )
     if not lines and not extra:
         return text
@@ -1665,6 +1672,8 @@ def result_from_public_model(
     provenance_unknown = "receipt_id" in wire and "workspace_provenance" in wire
     # ADR-054: and, for a level-L2 task, where each kind of evidence was read.
     server_copy = wire.get("evidence_provenance") if "receipt_id" in wire else None
+    # ADR-054: or, when that account could not be given, why (never the level-L1 line).
+    evidence_unknown = wire.get("evidence_provenance_unknown") if "receipt_id" in wire else None
     coverage = wire.get("coverage") if "receipt_id" in wire else None
     hook_observed = isinstance(coverage, Mapping) and coverage_hook_observed(
         cast(Mapping[str, object], coverage).get("publication_channels")
@@ -1676,6 +1685,7 @@ def result_from_public_model(
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
         server_copy=server_copy,
+        evidence_unknown=evidence_unknown,
     )
     # The service budgets canonical text plus structured content. A small result's prose can
     # repeat several fields more often: fall back to that complete canonical text if needed.
@@ -1690,6 +1700,7 @@ def result_from_public_model(
             provenance_unknown=provenance_unknown,
             hook_observed=hook_observed,
             server_copy=server_copy,
+            evidence_unknown=evidence_unknown,
         )
         if mcp_delivery_bytes(wire, text=canonical) < rendered_bytes:
             rendered = canonical

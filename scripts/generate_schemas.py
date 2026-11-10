@@ -8038,7 +8038,9 @@ def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     reader that validates by schema alone admits no notice beside another reason's token.
 
     ADR-054 (in place, 1.5.0 being unreleased) adds the optional ``evidence_provenance`` member, a
-    claim-bound task's level-L2 evidence account (``_evidence_provenance_schema``).
+    claim-bound task's level-L2 evidence account (``_evidence_provenance_schema``), and the
+    optional ``evidence_provenance_unknown`` member, present when that account could not be given
+    (``_evidence_provenance_unknown_schema``).
     """
 
     from finishup.domain.workspace_provenance import (
@@ -8088,7 +8090,47 @@ def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
         )
     properties["evidence_provenance"] = _evidence_provenance_schema()
+    if "evidence_provenance_unknown" in properties:
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["evidence_provenance_unknown"] = _evidence_provenance_unknown_schema()
     return document
+
+
+def _evidence_provenance_unknown_schema() -> dict[str, JsonValue]:
+    """ADR-054 (in place on the unreleased 1.5.0): a claim-bound task's evidence account could
+    not be given. ``status``, ``reason`` and ``notice`` admit only the fixed values of
+    ``finishup.domain.evidence_provenance``, and ``oneOf`` pairs each reason with its own notice."""
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_PROVENANCE_UNKNOWN,
+        EVIDENCE_PROVENANCE_UNKNOWN_REASONS,
+        evidence_provenance_unknown_notice,
+    )
+
+    notices = [
+        evidence_provenance_unknown_notice(reason) for reason in EVIDENCE_PROVENANCE_UNKNOWN_REASONS
+    ]
+    return {
+        "additionalProperties": False,
+        "oneOf": [
+            {
+                "properties": {
+                    "notice": {"const": notice},
+                    "reason": {"const": reason},
+                },
+            }
+            for reason, notice in zip(EVIDENCE_PROVENANCE_UNKNOWN_REASONS, notices, strict=True)
+        ],
+        "properties": {
+            "notice": {"enum": cast(list[JsonValue], notices), "type": "string"},
+            "reason": {"enum": list(EVIDENCE_PROVENANCE_UNKNOWN_REASONS), "type": "string"},
+            "status": {"const": EVIDENCE_PROVENANCE_UNKNOWN, "type": "string"},
+        },
+        "required": ["status", "reason", "notice"],
+        "type": "object",
+    }
 
 
 def _evidence_provenance_schema() -> dict[str, JsonValue]:

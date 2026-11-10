@@ -526,12 +526,21 @@ level-L1 sentence that the server did not read the repository itself.
   excerpts); the hook-observation line when hook-observed; and "Served by FinishUP service <id>
   (connection: client_claim)". The longest block is 1,310 characters, within the 2,048 of a
   closing section.
-- **When the account cannot be read**, the receipt has no member and an "evidence unknown" block
-  that says neither that the server read its copy nor that it did not; an unreadable
-  `content_forgotten` event reads as unknown, never as level L1's words.
+- **When the account cannot be given**, the receipt has no `evidence_provenance` member and an
+  "evidence unknown" block that says neither that the server read its copy nor that it did not;
+  an unreadable `content_forgotten` event reads as unknown, never as level L1's words. Every
+  format, JSON included, carries the optional `evidence_provenance_unknown` member (receipt-result
+  1.5.0, in place; `{status: unknown, reason, notice}`, fixed words, three structural leaves,
+  delivered on a paged result's first page; never beside `evidence_provenance`): `reason` is
+  `evidence_provenance_unreadable` (the account could not be read; a retry may read it) or
+  `evidence_provenance_counts_incomplete` (decision 14's marker without counts; it lasts), and
+  `notice` is exactly that reason's text (`domain.evidence_provenance`). So a client rendering a
+  JSON receipt after an L2 to L1 change never adds the connection's L1 line beside it.
 - **Client renderings.** CLI text, MCP text and summary, and the terminal interface render the
-  same lines from the member of a JSON receipt (`client.attribution.evidence_provenance_section`)
-  and never add the L1 line; paged receipts keep naming only the producing service. A connection
+  same lines from the member of a JSON receipt (`client.attribution.evidence_provenance_section`,
+  and `evidence_provenance_unknown_section` for an unknown account; the MCP canonical copy
+  carries the member's notice) and never add the L1 line; paged receipts keep naming only the
+  producing service. A connection
   whose target was consented at L2 says, beside its status, that the server reads evidence from
   its copy where it has one and the client's agent answers the rest (`ServiceAttribution.level`,
   `ServiceClient.consent_level`); level L1's bytes are unchanged.

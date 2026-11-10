@@ -34,14 +34,23 @@ from typing import Final, Literal, cast
 
 __all__ = [
     "EVIDENCE_COUNT_MAX",
+    "EVIDENCE_PROVENANCE_COUNTS_INCOMPLETE",
     "EVIDENCE_PROVENANCE_SCHEMA",
     "EVIDENCE_PROVENANCE_TOKENS",
+    "EVIDENCE_PROVENANCE_UNKNOWN",
+    "EVIDENCE_PROVENANCE_UNKNOWN_LINE",
+    "EVIDENCE_PROVENANCE_UNKNOWN_REASONS",
+    "EVIDENCE_PROVENANCE_UNREADABLE",
     "ContentForgotten",
-    "EvidenceAccountIncomplete",
     "CopySnapshotRef",
+    "EvidenceAccountIncomplete",
     "EvidenceProvenance",
+    "EvidenceProvenanceUnknownReason",
     "EvidenceToken",
     "evidence_provenance_from_json",
+    "evidence_provenance_unknown_lines",
+    "evidence_provenance_unknown_notice",
+    "evidence_provenance_unknown_wire",
 ]
 
 EVIDENCE_PROVENANCE_SCHEMA: Final = "yoetz.evidence-provenance/1"
@@ -69,6 +78,67 @@ EVIDENCE_COUNT_MAX: Final = _MAX_COUNT
 _HEX40: Final = re.compile(r"^[0-9a-f]{40}$")
 # RFC 3339 UTC with milliseconds, as the service stamps every time it records.
 _TIME: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+
+# A claim-bound task's account could not be given (every receipt format carries this as its
+# ``evidence_provenance_unknown`` member): the receipt then says neither that the server read
+# its copy nor that it did not. One closed reason each, fixed words only.
+type EvidenceProvenanceUnknownReason = Literal[
+    "evidence_provenance_unreadable", "evidence_provenance_counts_incomplete"
+]
+EVIDENCE_PROVENANCE_UNKNOWN: Final = "unknown"
+# Passing: the account could not be read (the source failed or answered no account).
+EVIDENCE_PROVENANCE_UNREADABLE: Final = "evidence_provenance_unreadable"
+# Lasting: the copy served some evidence, but the counts of those reads were lost.
+EVIDENCE_PROVENANCE_COUNTS_INCOMPLETE: Final = "evidence_provenance_counts_incomplete"
+EVIDENCE_PROVENANCE_UNKNOWN_REASONS: Final[tuple[EvidenceProvenanceUnknownReason, ...]] = (
+    EVIDENCE_PROVENANCE_UNREADABLE,
+    EVIDENCE_PROVENANCE_COUNTS_INCOMPLETE,
+)
+EVIDENCE_PROVENANCE_UNKNOWN_LINE: Final = (
+    "Where this task's workspace evidence was read could not be determined: this server keeps "
+    "copies of repositories, and its account of which reads its copy answered could not be read."
+)
+_UNKNOWN_IMPACT_LINES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        EVIDENCE_PROVENANCE_UNREADABLE: (
+            "Some evidence may have been read from the server's copy of the repository, synced "
+            "from the client machine; the rest was read on the client machine by the FinishUP "
+            "workspace agent. Running receipt again may read the account."
+        ),
+        EVIDENCE_PROVENANCE_COUNTS_INCOMPLETE: (
+            "Some evidence was read from the server's copy of the repository, synced from the "
+            "client machine, but the service stopped before it recorded how many reads; the rest "
+            "was read on the client machine by the FinishUP workspace agent. This lasts: running "
+            "receipt again cannot recover those counts."
+        ),
+    }
+)
+
+
+def evidence_provenance_unknown_lines(reason: object) -> tuple[str, str]:
+    """The two fixed lines for ``reason``: what happened, then why it matters and whether a
+    retry can help (the passing cause) or why it lasts. Any other value is ``ValueError``."""
+
+    if type(reason) is not str or reason not in _UNKNOWN_IMPACT_LINES:
+        raise ValueError("evidence_provenance_reason_invalid")
+    return EVIDENCE_PROVENANCE_UNKNOWN_LINE, _UNKNOWN_IMPACT_LINES[reason]
+
+
+def evidence_provenance_unknown_notice(reason: object) -> str:
+    """The ``notice`` of the ``evidence_provenance_unknown`` member: the lines joined."""
+
+    return "\n".join(evidence_provenance_unknown_lines(reason))
+
+
+def evidence_provenance_unknown_wire(reason: EvidenceProvenanceUnknownReason) -> dict[str, str]:
+    """The ``evidence_provenance_unknown`` member of a receipt whose account is unknown."""
+
+    return {
+        "status": EVIDENCE_PROVENANCE_UNKNOWN,
+        "reason": reason,
+        "notice": evidence_provenance_unknown_notice(reason),
+    }
 
 
 def _invalid() -> ValueError:

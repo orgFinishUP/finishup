@@ -25,6 +25,7 @@ from finishup.domain.evidence_provenance import (
     CopySnapshotRef,
     EvidenceAccountIncomplete,
     EvidenceProvenance,
+    evidence_provenance_unknown_wire,
 )
 from finishup.domain.receipts import (
     CLIENT_ATTESTED_WORKSPACE_LINE,
@@ -213,7 +214,18 @@ async def test_a_failing_source_never_claims_more_than_the_server_knows(
     result = await app.receipt(request)
 
     assert len(source.calls) == 1
-    assert "evidence_provenance" not in result.as_json()
+    wire = result.as_json()
+    assert "evidence_provenance" not in wire
+    # Every format, JSON included, says the account is unknown and why (ADR-054), so a client
+    # rendering it never adds the connection's level-L1 line.
+    unknown = (
+        "evidence_provenance_counts_incomplete"
+        if reason == "evidence_provenance_counts_incomplete"
+        else "evidence_provenance_unreadable"
+    )
+    assert wire["evidence_provenance_unknown"] == evidence_provenance_unknown_wire(
+        cast(Any, unknown)
+    )
     assert recorded == [
         {
             "component": "application.receipt",
@@ -227,7 +239,7 @@ async def test_a_failing_source_never_claims_more_than_the_server_knows(
         assert result.human_text.endswith(
             "\n\n"
             + evidence_provenance_unknown_receipt_block(
-                ownership_fence().service_instance_id, markdown=False
+                ownership_fence().service_instance_id, markdown=False, reason=cast(Any, unknown)
             )
         )
         assert _L1_SENTENCE not in result.human_text
@@ -237,6 +249,7 @@ async def test_a_failing_source_never_claims_more_than_the_server_knows(
     again = await app.receipt(request)
     assert again.receipt_id == result.receipt_id
     assert again.as_json()["evidence_provenance"] == _ACCOUNT.to_json()
+    assert "evidence_provenance_unknown" not in again.as_json()
 
 
 async def test_a_task_that_is_not_claim_bound_never_asks_the_source() -> None:

@@ -139,3 +139,36 @@ async def test_a_task_view_over_an_l2_connection_says_the_server_reads_from_its_
         SERVER_COPY_CONNECTION_LINE,
         _REACHED,
     )
+
+
+@pytest.mark.parametrize("level", ["L1", "L2"])
+async def test_a_json_receipt_whose_account_is_unknown_never_gets_the_l1_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, level: str
+) -> None:
+    from finishup.domain.evidence_provenance import evidence_provenance_unknown_wire
+    from finishup.domain.receipts import evidence_provenance_unknown_section_lines
+
+    runtime, client = await _runtime(monkeypatch, tmp_path, level)
+    client.account = None
+    original = _CopyClient.receipt
+
+    async def unknown(self: _CopyClient, request: ReceiptRequestModel) -> object:
+        result = cast(ReceiptResultModel, await original(self, request))
+        wire = cast(
+            dict[str, JsonValue],
+            result.root.model_dump(mode="json", by_alias=True, exclude_unset=True),
+        )
+        wire["evidence_provenance_unknown"] = cast(
+            JsonValue, evidence_provenance_unknown_wire("evidence_provenance_unreadable")
+        )
+        return ReceiptResultModel.model_validate(wire)
+
+    monkeypatch.setattr(_CopyClient, "receipt", unknown)
+    summary = await runtime.build_receipt(_SESSION, "json")
+    section = (
+        "Workspace evidence",
+        *evidence_provenance_unknown_section_lines("evidence_provenance_unreadable"),
+    )
+    assert summary.rendered_lines == (*_document_lines(), *section, _REACHED)
+    assert CLIENT_ATTESTED_WORKSPACE_LINE not in summary.rendered_lines
+    assert not any(_L1_SENTENCE in line for line in summary.rendered_lines)

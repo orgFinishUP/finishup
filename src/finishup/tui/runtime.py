@@ -2871,6 +2871,7 @@ class FinishUpRuntime:
             connection_attribution,
             coverage_hook_observed,
             evidence_provenance_section,
+            evidence_provenance_unknown_section,
         )
         from finishup.domain.receipts import workspace_provenance_unknown_block
         from finishup.protocol.canonical import canonical_encode
@@ -2917,6 +2918,11 @@ class FinishUpRuntime:
                 success.evidence_provenance, hook_observed=hook_observed
             )
         )
+        # ADR-054: and, when that account could not be given, the evidence-unknown lines for its
+        # reason, never the connection's level-L1 line.
+        unknown = success.evidence_provenance_unknown
+        if unknown is not None:
+            server_copy = evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
         rendered = (
             "\n".join(
                 (
@@ -2935,7 +2941,7 @@ class FinishUpRuntime:
                         attribution,
                         provenance_unknown=provenance_unknown,
                         hook_observed=hook_observed,
-                        server_copy=success.evidence_provenance is not None,
+                        server_copy=success.evidence_provenance is not None or unknown is not None,
                     ),
                 )
             )

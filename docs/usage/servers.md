@@ -444,7 +444,10 @@ computer answered, `client_check` checks run here, `client_observation` what you
 captured, `outside_read` reads outside the project, and `stale_copy_read` reads from the copy while
 this computer was offline (the receipt then says its files may have changed since). JSON receipts
 carry the same account as `evidence_provenance`, and the CLI, your agent's FinishUP tools and the
-terminal interface show the same lines. Status and receipts read over a connection to such a
+terminal interface show the same lines. When the server cannot say where a task's evidence was
+read (its account could not be read, or the server stopped before it counted reads its copy
+answered), every receipt says so instead, JSON ones as `evidence_provenance_unknown`, and never
+that the server did not read the repository. Status and receipts read over a connection to such a
 server also say that the server reads evidence from its copy where it has one.
 
 ### See and forget

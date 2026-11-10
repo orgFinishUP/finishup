@@ -203,3 +203,93 @@ def test_a_paged_receipt_delivers_the_member_whole_on_its_first_page() -> None:
     paths = [item["path"] for item in items]
     assert paths.index("/evidence_provenance") < paths.index("/human_text")
     assert {"path": "/evidence_provenance", "value": _COPY_READ.to_json()} in items
+
+
+# --- the account could not be given: ``evidence_provenance_unknown`` -------------------------
+
+
+def _unknown_wire(receipt_format: str, reason: str) -> dict[str, JsonValue]:
+    from finishup.domain.evidence_provenance import evidence_provenance_unknown_wire
+
+    wire = _receipt_result_wire()
+    if receipt_format != "json":
+        wire["format"] = receipt_format
+        wire["document"] = None
+        wire["human_text"] = "Receipt"
+    wire["evidence_provenance_unknown"] = cast(
+        JsonValue, evidence_provenance_unknown_wire(cast(Any, reason))
+    )
+    return wire
+
+
+@pytest.mark.parametrize(
+    "reason", ["evidence_provenance_unreadable", "evidence_provenance_counts_incomplete"]
+)
+@pytest.mark.parametrize("receipt_format", ["json", "text", "markdown"])
+def test_every_receipt_format_says_when_the_account_is_unknown(
+    receipt_format: str, reason: str
+) -> None:
+    receipt = ReceiptResultModel.model_validate(_unknown_wire(receipt_format, reason))
+    success = receipt.root
+    assert type(success) is ReceiptSuccessModel
+    assert success.evidence_provenance_unknown is not None
+    assert success.evidence_provenance_unknown.reason == reason
+    wire = public_model_to_wire(receipt)
+    validate_schema_instance("receipt-result", "1.5.0", cast(JsonValue, wire))
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("receipt-result", "1.4.0", cast(JsonValue, wire))
+    for leaf in ("status", "reason", "notice"):
+        assert classify_result_leaf("receipt", wire, f"/evidence_provenance_unknown/{leaf}") == (
+            "public_structural"
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["another_reasons_notice", "free_text_notice", "unknown_reason", "status", "extra"],
+)
+def test_nothing_but_a_closed_reason_with_its_own_notice_is_admitted(change: str) -> None:
+    from finishup.domain.evidence_provenance import evidence_provenance_unknown_notice
+
+    wire = _unknown_wire("json", "evidence_provenance_unreadable")
+    member = cast(dict[str, Any], wire["evidence_provenance_unknown"])
+    if change == "another_reasons_notice":
+        member["notice"] = evidence_provenance_unknown_notice(
+            "evidence_provenance_counts_incomplete"
+        )
+    elif change == "free_text_notice":
+        member["notice"] = "The server did not read the repository itself."
+    elif change == "unknown_reason":
+        member["reason"] = "evidence_provenance_lost"
+    elif change == "status":
+        member["status"] = "known"
+    else:
+        member["extra"] = 1
+    with pytest.raises(pydantic.ValidationError):
+        ReceiptResultModel.model_validate(wire)
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("receipt-result", "1.5.0", cast(JsonValue, wire))
+
+
+def test_a_receipt_never_carries_an_account_and_its_unknown_status_together() -> None:
+    wire = _unknown_wire("json", "evidence_provenance_unreadable")
+    wire["evidence_provenance"] = cast(JsonValue, _COPY_READ.to_json())
+    with pytest.raises(pydantic.ValidationError, match="evidence_provenance_conflict"):
+        ReceiptResultModel.model_validate(wire)
+
+
+def test_a_paged_receipt_delivers_the_unknown_status_on_its_first_page() -> None:
+    wire = _unknown_wire("text", "evidence_provenance_counts_incomplete")
+    wire["human_text"] = "\n".join(
+        f"Section line {i}: " + "plain receipt prose. " * 6 for i in range(150)
+    )
+    page = page_result(
+        wire,
+        method="receipt",
+        selector={"request_id": wire["request_id"]},
+        writer_id="wri_00000000-0000-4000-8000-000000000095",
+        sink="agent_context",
+        position=0,
+    )
+    paths = [item["path"] for item in cast(list[dict[str, JsonValue]], page["items"])]
+    assert paths.index("/evidence_provenance_unknown") < paths.index("/human_text")
