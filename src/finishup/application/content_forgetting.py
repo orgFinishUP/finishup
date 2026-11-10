@@ -1,14 +1,17 @@
 """Forget the repository content a task derived from a server copy (ADR-054, owner ruling U20).
 
 When a server copy is forgotten (by its owner, or when its retention runs out), the service
-forgets, in every task that read it, the content derived from it. Per task, in this order:
+forgets, in every task that read it, the content derived from it. Per task, holding the task's
+content fence (``application.content_fence``) throughout, so no content object is published
+meanwhile, in this order:
 
 1. list the task's content objects and mark them erased in its object inventory (``redacted``):
    this forget's scope, recorded before anything else;
 2. record one service-written ``content_forgotten`` event (the forget's id, its closed reason, the
    source ``server_copy``, how many objects the erasure sets out to delete, and the task's evidence
    account then). From that event on, every projection, result and receipt reads the quoted
-   excerpts as absent (``kernel.forgotten_content``); findings and checks stay;
+   excerpts as absent (``kernel.forgotten_content``); findings and checks stay, and the content
+   publishers refuse work that tested a frontier before it (a check or review in flight then);
 3. delete their files.
 
 The content objects are the check-time change objects (``vnd.yoetz.check-change+json``: the
@@ -35,6 +38,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
+from finishup.application.content_fence import content_publication_fence
 from finishup.application.lineage_recovery import lineage_recovery_runtime
 from finishup.application.unit_of_work import PreparedMutation, run_prepared_append
 from finishup.domain.events import (
@@ -152,37 +156,39 @@ async def forget_task_content(
     erased = 0
     already = False
     try:
-        already = await _recorded(app, runtime, forget_id)
-        inventory = await _erasable_objects(runtime)
-        if already:
-            # A retry erases what is left of the scope this forget recorded, never a later
-            # check's content, which the event leaves unmasked.
-            marked = await _erased_ids(runtime)
-            plan = tuple(ref for ref in inventory if ref.object_id in marked)
-        else:
-            plan = inventory
-            recorder = getattr(runtime.ledger, "record_erased_objects", None)
-            if plan and callable(recorder):
-                # The scope, durably, before the event that makes it the forget's own.
-                await cast(Callable[[tuple[ObjectRef, ...]], Awaitable[None]], recorder)(plan)
-            await _record_forget(
-                app,
-                runtime,
-                ContentForgottenPayload(
-                    forget_id=forget_id,
-                    reason=reason,
-                    source="server_copy",
-                    objects_erased=len(plan),
-                    provenance=recorded_account,
-                ),
-            )
-        eraser = getattr(runtime.objects, "erase_published", None)
-        if plan and not callable(eraser):
-            _incomplete("object_erasure_unsupported", "object_store")
-            return TaskContentForgetReport("erasure_incomplete", 0, already)
-        for ref in plan:
-            if await cast(Callable[[ObjectRef], Awaitable[bool]], eraser)(ref):
-                erased += 1
+        # No content object of the task is published from the inventory through the erasure.
+        async with content_publication_fence(runtime.task_id):
+            already = await _recorded(app, runtime, forget_id)
+            inventory = await _erasable_objects(runtime)
+            if already:
+                # A retry erases what is left of the scope this forget recorded, never a later
+                # check's content, which the event leaves unmasked.
+                marked = await _erased_ids(runtime)
+                plan = tuple(ref for ref in inventory if ref.object_id in marked)
+            else:
+                plan = inventory
+                recorder = getattr(runtime.ledger, "record_erased_objects", None)
+                if plan and callable(recorder):
+                    # The scope, durably, before the event that makes it the forget's own.
+                    await cast(Callable[[tuple[ObjectRef, ...]], Awaitable[None]], recorder)(plan)
+                await _record_forget(
+                    app,
+                    runtime,
+                    ContentForgottenPayload(
+                        forget_id=forget_id,
+                        reason=reason,
+                        source="server_copy",
+                        objects_erased=len(plan),
+                        provenance=recorded_account,
+                    ),
+                )
+            eraser = getattr(runtime.objects, "erase_published", None)
+            if plan and not callable(eraser):
+                _incomplete("object_erasure_unsupported", "object_store")
+                return TaskContentForgetReport("erasure_incomplete", 0, already)
+            for ref in plan:
+                if await cast(Callable[[ObjectRef], Awaitable[bool]], eraser)(ref):
+                    erased += 1
     except PublicOperationError as exc:
         _incomplete("task_content_forget_failed", exc.code.value.lower())
         return TaskContentForgetReport("erasure_incomplete", erased, already)

@@ -563,7 +563,8 @@ level-L1 sentence that the server did not read the repository itself.
 
 When a copy is forgotten (by its owner or on expiry), the service forgets, in every task pinned to
 it, the content derived from it (`application.content_forgetting.forget_task_content`, outcomes
-`forgotten`, `task_not_found`, `task_unavailable`, `erasure_incomplete`):
+`forgotten`, `task_not_found`, `task_unavailable`, `erasure_incomplete`), holding the task's
+content fence (`application.content_fence`) from the first step through the last:
 
 1. It lists the task's standalone content objects (below) and marks them `redacted` in the
    object inventory: the forget's scope, recorded before the event.
@@ -577,6 +578,13 @@ it, the content derived from it (`application.content_forgetting.forget_task_con
    root) and the reviewer's semantic-response objects (its judgment with the snippets it quoted).
    Never an event's payload object: the ledger is hash-chained, so a recorded event stays exactly
    as written.
+
+Every publisher of a content object (the check-time change, the reviewer's response) holds the
+same fence around its publication, so nothing is published between the listing and the deletes,
+and refuses work that tested a frontier before a `content_forgotten` event (a check or review in
+flight then, whose excerpts every view masks): the change reads as the gap `content_forgotten` and
+the review ends failed, with no object left. A forget while a check's operation is open is refused
+by the ledger (`operation_pending`), stays pending and runs again.
 
 It is idempotent by `forget_id`: a retry records nothing new and deletes what is left of the
 objects the inventory marks `redacted`, never a later check's content (published after the event,

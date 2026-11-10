@@ -298,6 +298,8 @@ leaving findings and checks and a "content forgotten" marker on the receipt.
 - `application/content_forgetting.py` and `kernel/forgotten_content.py` (SERVER): the
   `content_forgotten` event, the erasure of a task's derived content objects and the masks every
   projection applies after it.
+- `application/content_fence.py` (SERVER): the per-task fence a forget and every content publisher
+  hold, and the refusal of content for work a forget came after.
 - `cli/server_code.py` (CLIENT): `finishup server code` (`list`, `forget [--all]`, `exclude`,
   `allow add|list|remove`, `level`).
 

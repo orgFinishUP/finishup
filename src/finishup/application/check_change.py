@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Final, TypedDict, cast
 
 from finishup.adapters.task_input_read import task_input_from_bytes
+from finishup.application.content_fence import content_forgotten_after, content_publication_fence
 from finishup.application.semantic_case import CheckTimeChange, check_time_change_shown_record
 from finishup.domain.events import (
     MAX_CHECK_CHANGE_SHOWN_FILES,
@@ -873,6 +874,7 @@ async def capture_check_time_change(
     space_cut_paths: frozenset[str] = frozenset(),
     snapshots: tuple[TaskInputSnapshotSet, ...] = (),
     current_reader: CurrentInputReader | None = None,
+    subject_sequence: int | None = None,
 ) -> CheckChangeOutcome:
     """Capture, redact and store one check's change; every failure is a disclosed absence.
 
@@ -887,6 +889,10 @@ async def capture_check_time_change(
     outside the workspace that none of them covers (``outside_inputs_not_admitted``, #1102).
     ``space_cut_paths`` are the candidates only the spaces of a quoted value cut out
     (``space_cut_input_paths``); no other candidate ever gives way to a spaced one on disk.
+    ``subject_sequence`` is the frontier the check tests: the change is stored inside the task's
+    content fence (``application.content_fence``), and never when a server copy's content was
+    forgotten after that frontier (``content_forgotten``: every view masks this check's excerpts,
+    so its change must not outlive the forget that erased the rest).
     """
 
     if type(source) is not CheckWorkspaceSource:
@@ -924,7 +930,20 @@ async def capture_check_time_change(
             snapshots=snapshots,
             current_reader=current_reader,
         )
-        ref = await _store(runtime, encode_check_change(capture), CHECK_CHANGE_MEDIA_TYPE, clock)
+        async with content_publication_fence(runtime.task_id):
+            if subject_sequence is not None and await content_forgotten_after(
+                runtime, subject_sequence
+            ):
+                record_bounded_event_without_raising(
+                    component=_COMPONENT,
+                    operation="check_time_change_unavailable",
+                    reason="content_forgotten",
+                    request_id=request_id,
+                )
+                return CheckChangeOutcome(unavailable=True, reason="content_forgotten")
+            ref = await _store(
+                runtime, encode_check_change(capture), CHECK_CHANGE_MEDIA_TYPE, clock
+            )
         return CheckChangeOutcome(CheckTimeChange(ref, capture))
     except ChangeCaptureUnavailable as exc:
         record_bounded_event_without_raising(

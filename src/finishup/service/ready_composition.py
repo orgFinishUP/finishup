@@ -6108,6 +6108,8 @@ def _privacy_gated_semantic_evaluator(
                             port=change_capture,
                             clock=clock,
                             request_id=frozen.lease.operation_id,
+                            # ADR-054 (U20): never stored for a frontier a forget came after.
+                            subject_sequence=frozen.lease.frontier.sequence,
                             # Declared deliverables first, so a clipped packet keeps them.
                             priority_paths=declared_output_paths(frozen.case.projection),
                             input_paths=review_inputs[0],
@@ -6875,16 +6877,33 @@ def _privacy_gated_semantic_evaluator(
                 )
 
             async def _publish_success(handle: object, evaluation: object) -> ObjectRef:
+                from finishup.application.content_fence import (
+                    ContentForgottenError,
+                    content_forgotten_after,
+                    content_publication_fence,
+                )
                 from finishup.ports.ledger import SemanticAttemptHandle as _Handle
 
                 assert type(handle) is _Handle
                 assert type(evaluation) is FinalSemanticEvaluation
-                return await _publish_semantic_response_object(
-                    runtime,
-                    attempt_id=handle.attempt_id,
-                    evaluation=evaluation,
-                    clock=clock,
-                )
+                # ADR-054 (U20): inside the task's content fence, and never for a review of a
+                # frontier a forget of its server-copy content came after (every view masks it):
+                # the attempt then ends failed, with no response object left behind.
+                async with content_publication_fence(runtime.task_id):
+                    if await content_forgotten_after(runtime, frozen.lease.frontier.sequence):
+                        record_bounded_event_without_raising(
+                            component="semantic_composition",
+                            operation="semantic_response_not_published",
+                            reason="content_forgotten",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        raise ContentForgottenError
+                    return await _publish_semantic_response_object(
+                        runtime,
+                        attempt_id=handle.attempt_id,
+                        evaluation=evaluation,
+                        clock=clock,
+                    )
 
             # ``current_lease`` / ``_on_lease_renewed`` are bound at the top of _evaluate so the
             # catch-all can return the newest token too, not only the normal returns here.

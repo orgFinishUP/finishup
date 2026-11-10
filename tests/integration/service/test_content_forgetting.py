@@ -596,3 +596,133 @@ async def test_a_forget_interrupted_while_it_records_its_scope_erases_everything
             await service.app.runtime.release(runtime)
     finally:
         await context.__aexit__(None, None, None)
+
+
+# --- the content fence: nothing published across a forget, nor for work it came after (E1) ----
+
+
+async def _review_with(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, dict[str, JsonValue]]:
+    """Enter the review harness with the statement quoted; the caller runs the check."""
+
+    final = _final_judgment()
+    context = conversation._reviewing(tmp_path, monkeypatch, _replies(final))
+    review = await context.__aenter__()
+    runtime = await _runtime(review.service, review.started.task_id)
+    try:
+        plan = next(
+            str(record.event_id)
+            for record in await _records(runtime)
+            if record.schema.name == "plan_published"
+        )
+    finally:
+        await review.service.app.runtime.release(runtime)
+    cast(list[dict[str, Any]], final["verified"])[0]["cited_refs"] = [plan]
+    cast(list[dict[str, Any]], final["reviewer_challenges"])[0]["cited_refs"] = [plan]
+    (tmp_path / "work" / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    return context, review, final
+
+
+async def test_a_review_of_a_frontier_a_forget_came_after_publishes_no_response(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A review still running when its task's copy content was forgotten (its frontier is before
+    the event) ends failed, and leaves no response object: every view masks its excerpts."""
+
+    from finishup.application import content_fence
+
+    context, review, _final = await _review_with(tmp_path, monkeypatch)
+    try:
+        service, task = review.service, review.started.task_id
+        asked: list[int] = []
+        held: list[bool] = []
+
+        async def forgotten_after(runtime: TaskRuntime, subject_sequence: int) -> bool:
+            import asyncio
+
+            fences = content_fence._FENCES.get(asyncio.get_running_loop(), {})
+            held.append(task in fences and fences[task].lock.locked())
+            asked.append(subject_sequence)
+            return True
+
+        monkeypatch.setattr(content_fence, "content_forgotten_after", forgotten_after)
+        checked = await review.check()
+        assert asked and held and all(held)
+        assert checked.review_summary is None
+        runtime = await _runtime(service, task)
+        try:
+            kinds = {ref.metadata.kind for ref in await _content_objects(runtime)}
+            assert ObjectKind.SEMANTIC_RESPONSE not in kinds
+        finally:
+            await service.app.runtime.release(runtime)
+    finally:
+        await context.__aexit__(None, None, None)
+
+
+async def test_the_forget_holds_the_content_fence_from_its_inventory_through_its_erasure(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from finishup.application import content_fence, content_forgetting
+    from finishup.ports.objects import ObjectMetadata, ObjectSource
+
+    context, review, _checked = await _checked_review(tmp_path, monkeypatch)
+    try:
+        service, task = review.service, review.started.task_id
+        runtime = await _runtime(service, task)
+        try:
+            before = await _content_objects(runtime)
+            tested = (await runtime.ledger.load_frontier()).sequence
+        finally:
+            await service.app.runtime.release(runtime)
+        listing = content_forgetting._erasable_objects
+        held: list[bool] = []
+        publishers: list[asyncio.Task[str]] = []
+
+        async def publish() -> str:
+            """A publisher of work that tested the frontier before the forget, as each one does."""
+
+            runtime = await _runtime(service, task)
+            try:
+                async with content_fence.content_publication_fence(task):
+                    if await content_fence.content_forgotten_after(runtime, tested):
+                        return "refused"
+                    data = b'{"late": "published while the forget ran"}'
+                    staged = await runtime.objects.stage(
+                        ObjectSource(data=data, declared_size=len(data)),
+                        ObjectMetadata(
+                            ObjectKind.SEMANTIC_RESPONSE,
+                            "application/json",
+                            task,
+                            service.app.clock.now_utc(),
+                        ),
+                    )
+                    await runtime.objects.finalize(staged)
+                    return "published"
+            finally:
+                await service.app.runtime.release(runtime)
+
+        async def listing_then_publish(runtime: TaskRuntime) -> tuple[ObjectRef, ...]:
+            found = await listing(runtime)
+            fences = content_fence._FENCES.get(asyncio.get_running_loop(), {})
+            held.append(task in fences and fences[task].lock.locked())
+            publishers.append(asyncio.create_task(publish()))
+            return found
+
+        monkeypatch.setattr(content_forgetting, "_erasable_objects", listing_then_publish)
+        report = await forget_task_content(
+            service.app, task, forget_id=new_forget_id(), reason="owner", provenance=_ACCOUNT
+        )
+        assert report == TaskContentForgetReport("forgotten", len(before), False)
+        assert held == [True]
+        (publisher,) = publishers
+        assert await publisher == "refused"
+        runtime = await _runtime(service, task)
+        try:
+            assert await _content_objects(runtime) == ()
+        finally:
+            await service.app.runtime.release(runtime)
+    finally:
+        await context.__aexit__(None, None, None)
