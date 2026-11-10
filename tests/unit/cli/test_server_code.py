@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 from collections.abc import Iterator
 from pathlib import Path
+from types import TracebackType
+from typing import Self
 
 import pytest
 from tests.builders.server_copy import git, release_l2
@@ -14,6 +16,7 @@ from tests.builders.server_targets import ambient_home
 from typer.testing import CliRunner
 
 from finishup.cli import server as server_cli
+from finishup.cli import trusted_console
 from finishup.cli import zero_network_selection as zero_network
 from finishup.cli.app import app
 from finishup.cli.server import LevelChoice, ServerCommandRefused
@@ -52,6 +55,60 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     git(root, "commit", "-q", "-m", "m")
     monkeypatch.chdir(root)
     return root
+
+
+class _Console:
+    """A trusted console that answers from a script and records what it showed."""
+
+    def __init__(self, *answers: bytes) -> None:
+        self.answers = list(answers)
+        self.shown: list[str] = []
+        self.opened = 0
+
+    def __call__(self) -> Self:
+        self.opened += 1
+        return self
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        _value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    def write(self, text: str) -> None:
+        self.shown.append(text)
+
+    def read_choice(self, _prompt: str, allowed: tuple[bytes, ...]) -> bytes:
+        if not self.answers:
+            raise trusted_console.TrustedConsoleError("eof")
+        answer = self.answers.pop(0)
+        if answer in allowed:
+            return answer
+        raise trusted_console.TrustedConsoleError("input_invalid")
+
+    @property
+    def text(self) -> str:
+        return "".join(self.shown)
+
+
+class _NoConsole:
+    """No trusted console here (a pipe, a script); counts every attempt to open one."""
+
+    def __init__(self) -> None:
+        self.opened = 0
+
+    def __call__(self) -> Self:
+        self.opened += 1
+        raise trusted_console.TrustedConsoleError("trusted_console_required")
+
+
+def _console(monkeypatch: pytest.MonkeyPatch, console: _Console | _NoConsole) -> None:
+    monkeypatch.setattr(trusted_console, "TrustedForegroundConsole", console)
 
 
 def _offer(record: targets.ServerTarget, choice: LevelChoice, document: object = _L2_DOCUMENT):
@@ -185,13 +242,13 @@ def test_what_sends_more_needs_the_trusted_console(
     for arguments in (
         ["server", "code", "exclude", "remove", "data/"],
         ["server", "code", "level", "default"],
-        ["server", "code", "allow", "aws.ini"],
+        ["server", "code", "allow", "add", "aws.ini"],
     ):
         result = _RUNNER.invoke(app, arguments)
         assert result.exit_code != 0, arguments
         assert "trusted_console_required" in result.output or "terminal" in result.output
     assert _settings(remote) == before
-    outside = _RUNNER.invoke(app, ["server", "code", "allow", "../elsewhere.txt"])
+    outside = _RUNNER.invoke(app, ["server", "code", "allow", "add", "../elsewhere.txt"])
     assert outside.exit_code != 0
 
 
@@ -199,4 +256,74 @@ def test_the_choices_are_refused_without_a_server_elsewhere(home: Path, reposito
     del home, repository
     result = _RUNNER.invoke(app, ["server", "code", "exclude", "add", "data/"])
     assert result.exit_code != 0
-    _ = (json, os)
+
+
+# --- allow: add, list and remove ----------------------------------------------------------------------
+
+
+def _allowed(record: targets.ServerTarget) -> tuple[tuple[str, str], ...]:
+    found = read_settings(targets.target_root(record.target_id), record.target_id)
+    return tuple(item for entry in found.values() for item in entry.allow)
+
+
+def test_allow_list_shows_paths_and_short_digests_never_contents(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = b"aws_secret = AKIAABCDEFGHIJKLMNOP\n"
+    (repository / "aws.ini").write_bytes(secret)
+    empty = _RUNNER.invoke(app, ["server", "code", "allow", "list"])
+    assert empty.exit_code == 0, empty.output
+    assert "No file of this repository is allowed past the content scan on lab." in empty.output
+    assert json.loads(
+        _RUNNER.invoke(app, ["server", "code", "allow", "list", "--json"]).output
+    ) == {"allow": []}
+    console = _Console(b"lab")
+    _console(monkeypatch, console)
+    added = _RUNNER.invoke(app, ["server", "code", "allow", "add", "aws.ini"])
+    assert added.exit_code == 0, added.output
+    assert "matched a known secret format" in console.text
+    full = "sha256:" + hashlib.sha256(secret).hexdigest()
+    assert _allowed(remote) == (("aws.ini", full),)
+    listed = _RUNNER.invoke(app, ["server", "code", "allow", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert f"  aws.ini  {full[:19]}\n" in listed.output
+    assert full not in listed.output and "AKIA" not in listed.output
+    assert "allow remove PATH" in listed.output
+    shown = json.loads(_RUNNER.invoke(app, ["server", "code", "allow", "list", "--json"]).output)
+    assert shown == {"allow": [{"digest": full[:19], "path": "aws.ini"}]}
+    # A directory is refused as a file, never read.
+    (repository / "folder").mkdir()
+    refused = _RUNNER.invoke(app, ["server", "code", "allow", "add", "folder"])
+    assert refused.exit_code != 0 and "FILE must be a regular file" in refused.output
+    assert console.opened == 1
+
+
+def test_allow_remove_sends_less_with_no_question_and_is_idempotent(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repository / "aws.ini").write_bytes(b"one\n")
+    _console(monkeypatch, _Console(b"lab", b"lab", b"lab"))
+    assert _RUNNER.invoke(app, ["server", "code", "allow", "add", "aws.ini"]).exit_code == 0
+    (repository / "aws.ini").write_bytes(b"two\n")
+    assert _RUNNER.invoke(app, ["server", "code", "allow", "add", "aws.ini"]).exit_code == 0
+    (repository / "other.ini").write_bytes(b"three\n")
+    assert _RUNNER.invoke(app, ["server", "code", "allow", "add", "other.ini"]).exit_code == 0
+    assert len(_allowed(remote)) == 3
+    no_console = _NoConsole()
+    _console(monkeypatch, no_console)
+    removed = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "aws.ini"])
+    assert removed.exit_code == 0, removed.output
+    assert "aws.ini is no longer allowed past the content scan on lab" in removed.output
+    assert "stays there until you run 'finishup server code forget'" in removed.output
+    # Every allowed content of that path goes; the other file's stays; no question was asked.
+    assert [path for path, _digest in _allowed(remote)] == ["other.ini"]
+    assert no_console.opened == 0
+    again = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "aws.ini"])
+    assert again.exit_code == 0, again.output
+    assert "aws.ini is not allowed past the content scan" in again.output
+    assert "nothing was changed" in again.output
+    never = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "never.ini"])
+    assert never.exit_code == 0 and "never.ini is not allowed" in never.output
+    outside = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "../aws.ini"])
+    assert outside.exit_code != 0 and "PATH must be inside the repository" in outside.output
+    assert [path for path, _digest in _allowed(remote)] == ["other.ini"]

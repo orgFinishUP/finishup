@@ -11,8 +11,10 @@ are refused there, since no server keeps copies yet.
 * ``exclude add|remove|list`` keeps patterns out of this repository's copy. Adding only ever
   sends less, so any process may; removing sends more, so the owner confirms it on the trusted
   console.
-* ``allow FILE`` sends one file the content scan held out, exactly as it is now (its bytes'
+* ``allow add FILE`` sends one file the content scan held out, exactly as it is now (its bytes'
   digest is recorded; any other content is scanned again); confirmed on the trusted console.
+  ``allow list`` shows what was allowed (paths and short digests, never contents), and
+  ``allow remove PATH`` undoes it: sending less, so no question.
 * ``level L1`` keeps this repository at level L1 on that server; ``level default`` undoes it,
   confirmed on the trusted console.
 """
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Final, cast
 
@@ -39,6 +42,7 @@ from finishup.protocol.server_copy import L2_RELEASED
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from finishup.cli.server import RepositoryHere
     from finishup.client.code_copy_settings import RepositoryCodeSettings
     from finishup.client.targets import ServerTarget
 
@@ -50,10 +54,17 @@ code_app = typer.Typer(
 )
 exclude_app = typer.Typer(help="Keep files out of this repository's copy.", no_args_is_help=True)
 code_app.add_typer(exclude_app, name="exclude")
+allow_app = typer.Typer(
+    help="Send files the content scan held out, exactly as they are now; list and undo it.",
+    no_args_is_help=True,
+)
+code_app.add_typer(allow_app, name="allow")
 server_app.add_typer(code_app, name="code", hidden=not L2_RELEASED)
 
 _JSON_OPTION = Annotated[bool, typer.Option("--json", help="Print JSON.")]
 _MAX_ALLOW_BYTES: Final = 1 << 30
+# Hex digits of an allowed content's digest shown by ``allow list``: enough to tell versions apart.
+_SHORT_DIGEST: Final = 12
 
 
 def _field(value: object, key: str) -> object:
@@ -273,37 +284,59 @@ def server_code_exclude_list(repository: _REPOSITORY_OPTION = None) -> None:
         typer.echo(f"This repository is kept at level L1 on {record.name}.")
 
 
-@code_app.command("allow")
+def _shown(path: str) -> str:
+    """``path`` for an owner display: a character that is not printable is shown escaped."""
+
+    return "".join(item if item.isprintable() else repr(item)[1:-1] for item in path)
+
+
+def _inside(here: RepositoryHere, file: str, name: str) -> tuple[str, str]:
+    """``(absolute path, path from the worktree's top)`` of ``file``; refused outside it."""
+
+    path = os.path.normpath(os.path.join(here.worktree, file))
+    relative = os.path.relpath(path, here.worktree)
+    if (
+        relative in {os.curdir, os.pardir}
+        or relative.startswith(os.pardir + os.sep)
+        or os.path.isabs(relative)
+    ):
+        raise ServerCommandRefused("usage", message=f"{name} must be inside the repository")
+    return path, relative
+
+
+@allow_app.command("add")
 @_cli
-def server_code_allow(file: str, repository: _REPOSITORY_OPTION = None) -> None:
+def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> None:
     """Send FILE, which the content scan held out, exactly as it is now (you confirm it here)."""
 
     record = _selected()
     here = repository_here(repository)
-    path = os.path.normpath(os.path.join(here.worktree, file))
-    relative = os.path.relpath(path, here.worktree)
-    if relative.startswith("..") or os.path.isabs(relative):
-        raise ServerCommandRefused("usage", message="FILE must be inside the repository")
+    path, relative = _inside(here, file, "FILE")
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         raise ServerCommandRefused("usage", message="FILE cannot be read") from None
     try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ServerCommandRefused("usage", message="FILE must be a regular file")
         digest = hashlib.sha256()
         total = 0
-        while chunk := os.read(descriptor, 1 << 20):
-            total += len(chunk)
-            if total > _MAX_ALLOW_BYTES:
-                raise ServerCommandRefused("usage", message="FILE is too large")
-            digest.update(chunk)
+        try:
+            while chunk := os.read(descriptor, 1 << 20):
+                total += len(chunk)
+                if total > _MAX_ALLOW_BYTES:
+                    raise ServerCommandRefused("usage", message="FILE is too large")
+                digest.update(chunk)
+        except OSError:
+            raise ServerCommandRefused("usage", message="FILE cannot be read") from None
     finally:
         os.close(descriptor)
     content = "sha256:" + digest.hexdigest()
     _confirm(
         record,
         (
-            f"{relative} was held out of this repository's copy because its content matched a "
-            "known secret format.",
+            f"{_shown(relative)} was held out of this repository's copy because its content "
+            "matched a known secret format.",
             f"Confirm to send it to {record.name} exactly as it is now; any change to it is "
             "scanned again.",
         ),
@@ -313,7 +346,70 @@ def server_code_allow(file: str, repository: _REPOSITORY_OPTION = None) -> None:
         return replace(settings, allow=tuple(sorted({*settings.allow, (relative, content)})))
 
     _update(record, here.key, allow)
-    typer.echo(f"{relative} is sent as it is now at the next sync.")
+    typer.echo(f"{_shown(relative)} is sent as it is now at the next sync.")
+
+
+@allow_app.command("list")
+@_cli
+def server_code_allow_list(
+    repository: _REPOSITORY_OPTION = None, json_output: _JSON_OPTION = False
+) -> None:
+    """Show the files allowed past the content scan (paths and short digests, never contents)."""
+
+    record = _selected()
+    here = repository_here(repository)
+    allowed = [
+        (path, digest[: len("sha256:") + _SHORT_DIGEST])
+        for path, digest in _settings(record, here.key).allow
+    ]
+    if json_output:
+        import json
+
+        typer.echo(
+            json.dumps(
+                {"allow": [{"path": path, "digest": digest} for path, digest in allowed]},
+                sort_keys=True,
+            )
+        )
+        return
+    if not allowed:
+        typer.echo(f"No file of this repository is allowed past the content scan on {record.name}.")
+        return
+    typer.echo(
+        f"Allowed past the content scan on {record.name}, each only with the content it had when "
+        "you allowed it:"
+    )
+    for path, digest in allowed:
+        typer.echo(f"  {_shown(path)}  {digest}")
+    typer.echo("Undo one with 'finishup server code allow remove PATH'.")
+
+
+@allow_app.command("remove")
+@_cli
+def server_code_allow_remove(path: str, repository: _REPOSITORY_OPTION = None) -> None:
+    """Stop sending PATH past the content scan (sends less: no question)."""
+
+    record = _selected()
+    here = repository_here(repository)
+    _absolute, relative = _inside(here, path, "PATH")
+    if not any(item == relative for item, _digest in _settings(record, here.key).allow):
+        typer.echo(
+            f"{_shown(relative)} is not allowed past the content scan for this repository on "
+            f"{record.name}; nothing was changed."
+        )
+        return
+
+    def remove(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        return replace(
+            settings, allow=tuple(item for item in settings.allow if item[0] != relative)
+        )
+
+    _update(record, here.key, remove)
+    typer.echo(
+        f"{_shown(relative)} is no longer allowed past the content scan on {record.name}: from "
+        "the next sync it is held out again while its content matches a known secret format. "
+        "What was already sent stays there until you run 'finishup server code forget'."
+    )
 
 
 @code_app.command("level")
