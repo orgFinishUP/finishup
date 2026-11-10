@@ -503,3 +503,148 @@ def test_forget_all_names_every_copy_it_could_not_forget_and_keeps_its_record(
     assert "a folder this computer cannot name (copy eeeeeeee)" in text.stdout
     assert "4 of 4 not forgotten" in text.stdout and "backups" not in text.stdout
     assert repository.exists()
+
+
+# --- server remove offers to forget first ------------------------------------------------------------
+
+
+@pytest.fixture
+def far(remote: targets.ServerTarget, monkeypatch: pytest.MonkeyPatch) -> targets.ServerTarget:
+    """A second server elsewhere, not selected (``lab`` is), with a stand-in connection."""
+
+    from tests.builders.server_targets import remote_runtime
+
+    del remote
+    remote_runtime(monkeypatch)
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
+    with targets.registry_lock():
+        record, _root = targets.new_remote_target("far", "https", base_url="https://far.example")
+    return record
+
+
+def _names() -> set[str]:
+    return {record.name for record in targets.list_targets()}
+
+
+def test_remove_asks_first_and_yes_forgets_through_that_target_before_removing_it(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    console = _Console(b"yes")
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far"])
+    assert result.exit_code == 0, result.output
+    assert "Forget deletes those copies and their snapshots on far now." in console.text
+    assert "removing far here does not delete them" in console.text
+    assert "this computer cannot ask it to forget them" in console.text
+    # Asked of that target's own root, though another one is selected; then it was removed.
+    root = targets.target_root(far.target_id)
+    assert server.asked == [(os.path.realpath(repository), "forget", root)]
+    assert "forgotten; far deleted 2 snapshot(s)" in result.stdout
+    assert "Removed server target far" in result.stdout
+    assert "may still keep copies" not in result.output
+    assert "far" not in _names() and not folder.exists() and not root.exists()
+
+
+def test_remove_no_keeps_the_copies_there_and_says_so(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    _console(monkeypatch, _Console(b"no"))
+    result = _RUNNER.invoke(app, ["server", "remove", "far"])
+    assert result.exit_code == 0, result.output
+    assert server.asked == []
+    assert "far may still keep copies of code this computer sent it." in result.stderr
+    assert "they stay until they expire or that server's owner deletes them" in result.stderr
+    assert "could not ask" not in result.stderr
+    assert "far" not in _names()
+
+
+def test_remove_answered_with_neither_yes_nor_no_removes_nothing(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    _console(monkeypatch, _Console(b"far"))
+    result = _RUNNER.invoke(app, ["server", "remove", "far"])
+    assert result.exit_code == 2
+    assert result.stderr.startswith(
+        "authorization_declined: neither yes nor no was typed, so nothing was removed"
+    )
+    assert server.asked == [] and "far" in _names() and folder.exists()
+
+
+def test_remove_forget_copies_stops_before_removing_when_a_forget_fails(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _sent_from(far, repository)
+    top = os.path.realpath(repository)
+    server = _server(monkeypatch, _Server(refuse={top: "remote_unreachable"}))
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code == 20, result.output
+    assert f"1. {top} (copy {folder.name[:8]}): not forgotten (remote_unreachable)" in result.stdout
+    assert result.stderr.startswith("code_copy_forget_incomplete: not every copy")
+    assert "so the target was not removed" in result.stderr
+    assert "Removed" not in result.output
+    # Nothing was removed or asked on a console: the owner can retry.
+    assert "far" in _names() and folder.exists() and console.opened == 0
+    assert len(server.asked) == 1
+    server.refuse.clear()
+    again = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert again.exit_code == 0, again.output
+    assert "far" not in _names() and console.opened == 0
+
+
+def test_remove_keep_copies_removes_without_a_question_or_a_forget(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--keep-copies"])
+    assert result.exit_code == 0, result.output
+    assert "far may still keep copies of code this computer sent it." in result.stderr
+    assert "could not ask" not in result.stderr
+    assert server.asked == [] and console.opened == 0 and "far" not in _names()
+
+
+def test_remove_with_no_console_and_no_flag_removes_and_warns_as_before(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far"])
+    assert result.exit_code == 0, result.output
+    assert console.opened == 1 and server.asked == []
+    assert "far may still keep copies of code this computer sent it." in result.stderr
+    assert "'finishup server remove far --forget-copies' forgets them" in result.stderr
+    assert "far" not in _names()
+
+
+def test_remove_flags_are_hidden_refused_together_and_need_copies_to_ask(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del repository
+    shown = _RUNNER.invoke(app, ["server", "remove", "--help"])
+    assert "--forget-copies" not in shown.output and "--keep-copies" not in shown.output
+    both = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies", "--keep-copies"])
+    assert both.exit_code == 2
+    assert "give --forget-copies or --keep-copies, not both" in both.output
+    leftover = _RUNNER.invoke(app, ["server", "remove", "t_0badf00d", "--forget-copies"])
+    assert leftover.exit_code == 2 and "a leftover folder names no server" in leftover.output
+    assert "far" in _names()
+    # No copies sent: nothing is asked, and --forget-copies says there was nothing to forget.
+    server = _server(monkeypatch, _Server())
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code == 0, result.output
+    assert "no record of a copy of code it sent to far; nothing was forgotten" in result.stdout
+    assert console.opened == 0 and server.asked == [] and "far" not in _names()

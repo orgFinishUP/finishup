@@ -2783,11 +2783,38 @@ def server_remove(
         bool,
         typer.Option("--select-local", help="If it is selected, switch to 'local' first."),
     ] = False,
+    forget_copies: Annotated[
+        bool,
+        typer.Option(
+            "--forget-copies",
+            help="L2: first forget every copy of code this computer sent it; if one is not "
+            "forgotten, nothing is removed.",
+            hidden=not L2_RELEASED,
+        ),
+    ] = False,
+    keep_copies: Annotated[
+        bool,
+        typer.Option(
+            "--keep-copies",
+            help="L2: remove it and leave the copies of code this computer sent it there.",
+            hidden=not L2_RELEASED,
+        ),
+    ] = False,
 ) -> None:
     """Remove a target: stop what this client runs for it, delete its key and its folder."""
 
     _require_no_explicit_source()
+    if forget_copies and keep_copies:
+        raise ServerCommandRefused(
+            "usage", message="give --forget-copies or --keep-copies, not both"
+        )
     if _LEFTOVER_ID.match(name):
+        if forget_copies:
+            raise ServerCommandRefused(
+                "usage",
+                message="a leftover folder names no server to ask, so nothing can be forgotten "
+                "through it; remove it without --forget-copies",
+            )
         _remove_leftover(name)
         return
     record = _target_or_fail(name)
@@ -2804,16 +2831,14 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
-    if (root / "state" / "code-export").is_dir() and any(
-        (root / "state" / "code-export").iterdir()
-    ):
-        # Level L2 (ADR-054): removing the target here leaves what it was sent there. Forget is
-        # offered first; this command never forgets on its own.
+    if record.is_remote and _copies_sent(root):
+        # Level L2 (ADR-054): removing the target here leaves what it was sent there, and its
+        # claim salt goes with it, so this is the last moment this computer can forget them.
+        _forget_or_keep_copies(record, forget=forget_copies, keep=keep_copies)
+    elif forget_copies:
         typer.echo(
-            f"{record.name} may still keep copies of code this computer sent it. Removing it here "
-            "does not delete them there: first run 'finishup server code forget' in each "
-            "repository, while it is still selected.",
-            err=True,
+            f"This computer has no record of a copy of code it sent to {record.name}; nothing "
+            "was forgotten."
         )
     key_left = cleared = finished = reports_removed = False
     try:
@@ -2871,6 +2896,100 @@ def server_remove(
 def _say_using_everyday() -> None:
     typer.echo("Using this computer's everyday FinishUP server.")
     _warn_open_sessions()
+
+
+def _copies_sent(root: Path) -> bool:
+    """Whether this computer's export records say it sent copies of code to the target at
+    ``root`` (level L2): an export folder that cannot be listed may name some, so it counts."""
+
+    folder = root / "state" / "code-export"
+    try:
+        return folder.is_dir() and any(folder.iterdir())
+    except OSError:
+        return True
+
+
+def _copies_stay_line(record: ServerTarget) -> str:
+    return (
+        f"{record.name} may still keep copies of code this computer sent it. Removing it here does "
+        "not delete them there, and afterwards this computer cannot ask it to forget them: they "
+        "stay until they expire or that server's owner deletes them."
+    )
+
+
+def _ask_forget_first(record: ServerTarget) -> bool | None:
+    """Ask on the trusted console whether to forget the copies before removing ``record``.
+
+    True to forget them first, False to keep them there; None when there is no trusted console
+    (a script or a pipe), so nothing could be asked. Any other answer cancels the remove.
+    """
+
+    from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+
+    try:
+        with TrustedForegroundConsole() as console:
+            for line in (
+                f"{record.name} may still keep copies of code this computer sent it.",
+                f"Forget deletes those copies and their snapshots on {record.name} now.",
+                f"Keeping them leaves them there: removing {record.name} here does not delete "
+                "them, and once it is removed this computer cannot ask it to forget them, so they "
+                "stay until they expire or that server's owner deletes them.",
+                f"Forget the copies on {record.name} before removing it?",
+            ):
+                console.write(line + "\n")
+            answer = console.read_choice(
+                "Type yes to forget them first, or no to keep them there (anything else cancels): ",
+                (b"yes", b"no"),
+            )
+    except TrustedConsoleError as error:
+        if error.reason == "trusted_console_required":
+            return None
+        raise ServerCommandRefused(
+            "authorization_declined",
+            message="neither yes nor no was typed, so nothing was removed",
+        ) from None
+    return answer == b"yes"
+
+
+def _forget_or_keep_copies(record: ServerTarget, *, forget: bool, keep: bool) -> None:
+    """Before ``server remove`` changes anything: forget the copies sent, or say they stay.
+
+    ``--forget-copies`` (or yes on the trusted console) forgets every repository as ``server
+    code forget --all`` does, through this target's own root, and refuses the remove when one
+    was not forgotten, so the owner can retry. ``--keep-copies`` (or no) and a run with no
+    trusted console and no flag remove it and say the copies stay: never silent, and never a
+    forget nobody asked for.
+    """
+
+    choice: bool | None
+    if forget:
+        choice = True
+    elif keep:
+        choice = False
+    else:
+        choice = _ask_forget_first(record)
+    if choice:
+        from finishup.cli.server_code import forget_every_copy, forget_lines
+
+        outcomes = forget_every_copy(record, named=True)
+        for line in forget_lines(record, outcomes):
+            typer.echo(line)
+        if not all(outcome.forgotten for outcome in outcomes):
+            raise ServerCommandRefused(
+                "code_copy_forget_incomplete",
+                message="not every copy on that server was forgotten (each line above says why "
+                "and what to do), so the target was not removed; run the same command again "
+                "once they are, or pass --keep-copies to remove it and leave them there",
+            )
+        return
+    typer.echo(_copies_stay_line(record), err=True)
+    if choice is None:
+        typer.echo(
+            f"'finishup server remove {record.name} --forget-copies' forgets them before it "
+            "removes a target; this command could not ask, since it does not run on your own "
+            "terminal.",
+            err=True,
+        )
 
 
 def _stop_for_remove(record: ServerTarget, root: Path) -> None:
