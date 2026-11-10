@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from tests.builders.server_copy import release_l2
 
 from finishup.config.models import (
     ExternalRuntimeProfileConfig,
@@ -16,13 +17,15 @@ from finishup.config.models import (
     SemanticFallbackConfig,
 )
 from finishup.config.write import codex_subscription_runtime, fireworks_provider
+from finishup.domain.code_exclusions import ALWAYS_EXCLUDED
 from finishup.ports.control import ServiceState, ServiceStatus
 from finishup.protocol.canonical import JsonValue
-from finishup.protocol.consent_envelope import ReviewEgress
+from finishup.protocol.consent_envelope import Retention, ReviewEgress
 from finishup.protocol.schemas import validate_schema_instance
 from finishup.protocol.server_profile import profile_from_json
 from finishup.service.server_profile import (
     REVISION_FILE_NAME,
+    CodeCopyOffer,
     ProfileRevisionStore,
     ProfileUnavailable,
     ServerProfileSource,
@@ -294,3 +297,54 @@ def test_a_provider_the_profile_cannot_name_exactly_offers_no_profile(
     # Nothing is issued or recorded for it: the record keeps the last revision it stood for.
     assert (state / REVISION_FILE_NAME).read_bytes() == before
     assert ServerProfileSource.load(_fireworks(), state).revision == recorded.revision
+
+
+# --- level L2: a code-copy offer, honoured only while L2 is released (ADR-054) ------------------
+
+_OFFER = CodeCopyOffer(
+    max_repo_bytes=1_048_576,
+    max_file_bytes=65_536,
+    retention=(Retention("task_close", None), Retention("days", 7)),
+    retention_default=Retention("days", 7),
+    exclusions=frozenset({"*.sqlite"}),
+)
+
+
+def test_a_code_copy_offer_changes_nothing_while_level_l2_is_unreleased(state: Path) -> None:
+    source = ServerProfileSource.load(FinishUpConfig(), state, _OFFER)
+    profile = source.profile(_STATUS, _MANIFEST)
+    assert profile.levels.offered == ("L1",)
+    assert (profile.code_sync, profile.retention, profile.exclusions) == (None, None, None)
+    assert not source.keeps_copies
+    assert offer_digest(FinishUpConfig(), _OFFER) == offer_digest(FinishUpConfig())
+
+
+def test_a_released_code_copy_offer_states_l2_its_caps_retention_and_every_exclusion(
+    state: Path,
+) -> None:
+    plain = ServerProfileSource.load(FinishUpConfig(), state)
+    with release_l2():
+        source = ServerProfileSource.load(FinishUpConfig(), state, _OFFER)
+        document = source.document(_STATUS, _MANIFEST)
+        assert source.keeps_copies
+        assert offer_digest(FinishUpConfig(), _OFFER) != offer_digest(FinishUpConfig())
+    validate_schema_instance("server-profile", "1.0.0", cast(JsonValue, document))
+    profile = profile_from_json(json.dumps(document).encode())
+    assert profile.levels.offered == ("L1", "L2") and profile.levels.required_min == "L1"
+    assert profile.code_sync is not None and profile.code_sync.methods == {"git-bundle-1"}
+    assert profile.code_sync.max_file_bytes == 65_536
+    assert profile.retention is not None and profile.retention.default == Retention("days", 7)
+    assert profile.exclusions is not None
+    assert {"*.sqlite", ".env", "*.pem", "id_*"} <= profile.exclusions
+    assert set(ALWAYS_EXCLUDED) <= profile.exclusions
+    # A new offer is a new revision of the same issuer, so a consent made before asks again.
+    assert plain.revision is not None and source.revision is not None
+    assert source.revision.issuer == plain.revision.issuer
+    assert source.revision.revision == plain.revision.revision + 1
+
+
+def test_a_code_copy_offer_must_name_its_default_among_its_options() -> None:
+    with pytest.raises(ValueError, match="code_copy_offer_invalid"):
+        CodeCopyOffer(1_000, 10, (Retention("task_close", None),), Retention("days", 7))
+    with pytest.raises(ValueError, match="code_copy_offer_invalid"):
+        CodeCopyOffer(10, 1_000, (Retention("days", 7),), Retention("days", 7))

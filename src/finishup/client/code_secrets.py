@@ -24,12 +24,10 @@ no pattern lists, is sent. The docs say so.
 
 from __future__ import annotations
 
-import fnmatch
 import re
-from collections.abc import Iterable
 from typing import Final
 
-from finishup.domain.repository_excerpt import credential_name_patterns
+from finishup.domain.code_exclusions import ALWAYS_EXCLUDED, excluded_by, valid_pattern
 
 __all__ = [
     "ALWAYS_EXCLUDED",
@@ -42,25 +40,6 @@ __all__ = [
 # Bumped whenever the content scan changes, so a cached verdict of an older scan is not reused.
 SCANNER_VERSION: Final = "1"
 
-_FURTHER_NAMES: Final = (
-    ".aws/credentials",
-    ".docker/config.json",
-    ".dockercfg",
-    "*.asc",
-    "*.gpg",
-    "*.kubeconfig",
-    "*.ovpn",
-    "*.p8",
-    "*.ppk",
-    "*.secret",
-    "*.secrets",
-    "id_*",
-    "kubeconfig",
-    "secrets.*",
-)
-ALWAYS_EXCLUDED: Final[tuple[str, ...]] = tuple(
-    sorted({*credential_name_patterns(), *_FURTHER_NAMES})
-)
 
 # Known secret formats the diagnostic scanner does not list; each is specific enough that a match
 # in source code is almost always a real credential.
@@ -75,45 +54,6 @@ _FURTHER_FORMATS: Final = (
     re.compile(rb"AccountKey=[A-Za-z0-9+/]{40,128}={0,2}"),
     re.compile(rb"(?<![A-Z0-9])ASIA[A-Z0-9]{16}(?![A-Z0-9])"),
 )
-_PATTERN: Final = re.compile(r"^[^\x00-\x1f]{1,512}$")
-
-
-def valid_pattern(pattern: str) -> bool:
-    """Whether ``pattern`` may be recorded as an exclusion: 1 to 512 characters, no control
-    characters, and not only slashes or stars."""
-
-    return (
-        type(pattern) is str
-        and bool(_PATTERN.match(pattern))
-        and pattern.strip("/*") != ""
-        and pattern != "/"
-    )
-
-
-def _matches(pattern: str, path: str) -> bool:
-    pattern = pattern.lower()
-    path = path.lower()
-    if pattern.endswith("/"):
-        directory = pattern.rstrip("/")
-        components = path.split("/")[:-1]
-        if "/" in directory:
-            return any(
-                fnmatch.fnmatchcase("/".join(components[: index + 1]), directory.lstrip("/"))
-                for index in range(len(components))
-            )
-        return any(fnmatch.fnmatchcase(component, directory) for component in components)
-    if "/" in pattern.strip("/"):
-        return fnmatch.fnmatchcase(path, pattern.lstrip("/"))
-    return fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], pattern.strip("/"))
-
-
-def excluded_by(path: str, patterns: Iterable[str]) -> str | None:
-    """The first of ``patterns`` (in sorted order) that excludes repository path ``path``."""
-
-    for pattern in sorted(set(patterns)):
-        if _matches(pattern, path):
-            return pattern
-    return None
 
 
 def holds_known_secret(data: bytes) -> bool:

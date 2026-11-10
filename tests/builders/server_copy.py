@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from finishup.protocol.server_copy import (
     write_pack,
 )
 
-__all__ = ["Snapshot", "git", "git_bytes", "held_lookup", "snapshot_objects"]
+__all__ = ["Snapshot", "git", "git_bytes", "held_lookup", "release_l2", "snapshot_objects"]
 
 
 def git_bytes(repository: Path, *arguments: str, stdin: bytes | None = None) -> bytes:
@@ -153,3 +154,16 @@ def held_lookup(
         return Held("commit", tree=tree)
 
     return have
+
+
+@contextmanager
+def release_l2() -> Iterator[None]:
+    """Turn the unreleased level L2 on for the duration of a test (``l2_released``)."""
+
+    from finishup.protocol.server_copy import enable_unreleased_l2
+
+    enable_unreleased_l2(True)
+    try:
+        yield
+    finally:
+        enable_unreleased_l2(False)

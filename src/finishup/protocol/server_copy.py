@@ -78,9 +78,11 @@ __all__ = [
     "component_refusal",
     "decode_commit",
     "decode_tree",
+    "enable_unreleased_l2",
     "encode_commit",
     "encode_tree",
     "folded_name",
+    "l2_released",
     "loose_decode",
     "loose_encode",
     "manifest_digest",
@@ -99,6 +101,24 @@ __all__ = [
 # True must be the last code commit of the layer that completes every protection design v2 §8.3
 # names; ``tests/unit/architecture`` pins the value.
 L2_RELEASED: Final = False
+# While L2 is unreleased, only a test (``tests/builders/server_copy.release_l2``) or a harness that
+# runs FinishUP in its own process may turn it on, by calling ``enable_unreleased_l2``: nothing a
+# user can set (no flag, no variable, no file) reaches it.
+_ENABLED_IN_THIS_PROCESS: list[bool] = [False]
+
+
+def l2_released() -> bool:
+    """Whether level L2 is available in this process (see ``L2_RELEASED``)."""
+
+    return L2_RELEASED or _ENABLED_IN_THIS_PROCESS[0]
+
+
+def enable_unreleased_l2(enabled: bool = True) -> None:
+    """Turn the unreleased level L2 on (or off again) in this process only; for tests and the
+    real-network harness of the layer that builds it, never called by FinishUP itself."""
+
+    _ENABLED_IN_THIS_PROCESS[0] = bool(enabled)
+
 
 CODE_SYNC_METHOD: Final = "git-bundle-1"
 BUNDLE_HEADER: Final = b"# v2 git bundle\n"

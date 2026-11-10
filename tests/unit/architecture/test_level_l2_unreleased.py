@@ -13,3 +13,9 @@ def test_level_l2_is_not_released() -> None:
     from finishup.protocol.server_copy import L2_RELEASED
 
     assert L2_RELEASED is False
+
+
+def test_nothing_turns_level_l2_on_by_default_in_a_process() -> None:
+    from finishup.protocol.server_copy import l2_released
+
+    assert l2_released() is False
