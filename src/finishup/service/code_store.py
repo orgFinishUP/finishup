@@ -23,9 +23,14 @@ chunks in order; ``commit`` decrypts the staged bundle, checks its digest, verif
 same verifier the client's audit ran (``protocol.server_copy.verify_snapshot_bundle``) against the
 objects this copy holds, checks the manifest against what was verified and against the revision and
 claim the service names, applies the quotas (what they still allow is also the budget the pack's
-objects may inflate to, checked before each is inflated), writes the objects, then the manifest,
-then the index, and the copy record last (each to a temporary file, fsynced, renamed). A crash
-before the last rename leaves the previous snapshot in force.
+objects may inflate to, checked before each is inflated), and publishes a new committed
+**generation**: an admission journal (``admission.json``: the objects it creates, a new snapshot's
+manifest, the next generation) first, then the objects, the manifest and the generation's own index
+(``index.<n>.enc``), and the copy record naming that generation last (each to a temporary file,
+fsynced, renamed). The record is the commit point: until it is written the previous generation (its
+index, its ``stored_bytes``) is in force, and what the journal names is removed at once after a
+failure and at the next start after a crash, so no byte is ever kept outside the quota accounting
+and no later upload can treat an uncommitted object as held.
 
 **Forget (§4.3, U20, §8.7).** ``forget`` first advances the copy's **epoch** in the tombstone record
 (fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), records
@@ -103,6 +108,8 @@ COPY_SCHEMA: Final = "yoetz.code-copy/1"
 WRAP_SCHEMA: Final = "yoetz.code-copy-wrap/1"
 _TOMBSTONE_SCHEMA: Final = "yoetz.code-copy-tombstones/1"
 _ERASURE_SCHEMA: Final = "yoetz.code-copy-erasures/1"
+_JOURNAL_SCHEMA: Final = "yoetz.code-copy-admission/1"
+_JOURNAL: Final = "admission.json"
 _PRINCIPAL_DOMAIN: Final = b"yoetz/code-copy-principal/v1\x00"
 _REPOSITORY_DOMAIN: Final = b"yoetz/code-copy-repository/v1\x00"
 _COPY_DOMAIN: Final = b"yoetz/code-copy-key/v1\x00"
@@ -396,9 +403,14 @@ class CodeStore:
             copy_key = record.get("copy_key")
             if type(copy_key) is not str or not _HEX64.match(copy_key):
                 continue
-            if copy_key[:32] == copy.name and self._forgotten(copy_key, record):
+            if copy_key[:32] != copy.name:
+                continue
+            if self._forgotten(copy_key, record):
                 found = self._forget_one(copy_key, "reconciled", advance=False)
                 report = report.plus(replace(found, reason="reconciled"))
+            else:
+                # An admission that stopped before its record: back to the committed generation.
+                self._recover(copy_key)
         return report
 
     def _copy_folder(self, copy_key: str) -> Path:
@@ -568,13 +580,69 @@ class CodeStore:
         except InvalidTag:
             raise CodeStoreError("code_copy_corrupt") from None
 
-    def _index(self, copy_key: str, key: bytes) -> dict[str, list[JsonValue]]:
-        path = self._copy_folder(copy_key) / "index.enc"
+    def _index(
+        self, copy_key: str, key: bytes, record: Mapping[str, JsonValue]
+    ) -> dict[str, list[JsonValue]]:
+        """The object index of the record's committed generation (never one an admission that
+        did not commit wrote)."""
+
+        generation = _generation(record)
+        path = self._copy_folder(copy_key) / _index_name(generation)
         frame = _read_private(path, 1 << 30)
         if frame is None:
             return {}
-        plain = self._open_frame(key, _INDEX_AAD + copy_key.encode(), frame)
+        plain = self._open_frame(key, _index_aad(copy_key, generation), frame)
         return cast(dict[str, list[JsonValue]], strict_json_parse(plain))
+
+    def _recover(self, copy_key: str) -> bool:
+        """Bring the copy's folder back to its committed generation (``_admit``): what an
+        admission that stopped before its record (a crash, a failure) added goes, and what one
+        that committed left to clean up is cleaned up. True when nothing is left to recover."""
+
+        folder = self._copy_folder(copy_key)
+        record = self._read_record(copy_key, forgotten=True)
+        if record is None:
+            return True
+        committed = _generation(record)
+        journal_path = folder / _JOURNAL
+        data = _read_private(journal_path, 16_777_216)
+        if data is not None:
+            try:
+                journal = cast(dict[str, JsonValue], strict_json_parse(data))
+                if journal.get("schema") != _JOURNAL_SCHEMA:
+                    raise ValueError("schema")
+                target = journal["generation"]
+                created = journal["objects"]
+                snapshot = journal["snapshot"]
+                if (
+                    type(target) is not int
+                    or type(created) is not list
+                    or (snapshot is not None and type(snapshot) is not str)
+                ):
+                    raise TypeError("journal")
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return False  # which additions were uncommitted is not known: nothing is trusted
+            if target > committed:
+                for oid in cast(list[JsonValue], created):
+                    if type(oid) is str and _HEX40.match(oid):
+                        _remove_file(folder / "objects" / oid)
+                if snapshot is not None and snapshot not in cast(list[str], record["snapshots"]):
+                    if _HEX40.match(snapshot):
+                        _remove_file(folder / "snapshots" / f"{snapshot}.enc")
+        keep = _index_name(committed)
+        for path in folder.iterdir():
+            if path.name.startswith("index.") and path.name.endswith(".enc") and path.name != keep:
+                _remove_file(path)
+        try:
+            for below in (folder / "objects", folder / "snapshots", folder):
+                if below.is_dir():
+                    _fsync_directory(below)
+            if data is not None:
+                os.unlink(journal_path)
+                _fsync_directory(folder)
+        except OSError:
+            return False
+        return True
 
     # --- uploads ------------------------------------------------------------------------------
 
@@ -744,9 +812,11 @@ class CodeStore:
             if left or os.path.lexists(self._copy_folder(upload.copy_key)):
                 raise CodeStoreError("code_copy_erasure_backlog")
         if record is not None:
+            if not self._recover(upload.copy_key):
+                raise CodeStoreError("code_copy_record_invalid")
             key = self._data_key(upload.copy_key, record)
             return self._admit(
-                upload, manifest, bundle, record, key, self._index(upload.copy_key, key)
+                upload, manifest, bundle, record, key, self._index(upload.copy_key, key, record)
             )
         record, key = self._new_copy(upload.copy_key, upload.principal, upload.repository)
         try:
@@ -818,38 +888,70 @@ class CodeStore:
         objects_folder = folder / "objects"
         _private_directory(objects_folder)
         _private_directory(folder / "snapshots")
-        for oid, item in verified.objects.items():
-            self._write_object(upload.copy_key, key, objects_folder, item)
-            index[oid] = held_to_json(verified.held[oid])
-        encoded = canonical_encode(manifest_to_json(manifest))
-        _write_private(
-            folder / "snapshots" / f"{manifest.snapshot}.enc",
-            self._seal(
-                key, _MANIFEST_AAD + upload.copy_key.encode() + manifest.snapshot.encode(), encoded
-            ),
-        )
-        _write_private(
-            folder / "index.enc",
-            self._seal(
-                key, _INDEX_AAD + upload.copy_key.encode(), canonical_encode(cast(JsonValue, index))
-            ),
-        )
-        snapshots = [
-            item for item in cast(list[str], record["snapshots"]) if item != manifest.snapshot
+        # A committed generation is published atomically: the journal names what this admission
+        # adds (objects it creates, a new snapshot's manifest, the next index) before any of it
+        # is written, and the record naming the new generation is the commit point; until then
+        # the previous generation is in force, and ``_recover`` removes the additions.
+        generation = _generation(record) + 1
+        known = manifest.snapshot in cast(list[str], record["snapshots"])
+        created: list[JsonValue] = [
+            oid for oid in sorted(verified.objects) if not (objects_folder / oid).exists()
         ]
-        snapshots.append(manifest.snapshot)
-        kind, days = upload.retention
-        record.update(
-            {
-                "snapshots": cast(JsonValue, snapshots[-_MAX_SNAPSHOTS:]),
-                "stored_bytes": stored + verified.new_bytes,
-                "objects": len(index),
-                "last_sync_at": format_rfc3339_ms(self._clock()),
-                "retention": {"kind": kind, "days": days},
-                "epoch": max(_record_epoch(record), upload.epoch),
-            }
+        journal: dict[str, JsonValue] = {
+            "schema": _JOURNAL_SCHEMA,
+            "generation": generation,
+            "objects": created,
+            "snapshot": None if known else manifest.snapshot,
+        }
+        _write_private(folder / _JOURNAL, canonical_encode(journal))
+        encoded = canonical_encode(manifest_to_json(manifest))
+        sealed = self._seal(
+            key, _MANIFEST_AAD + upload.copy_key.encode() + manifest.snapshot.encode(), encoded
         )
-        self._write_record(upload.copy_key, record)
+        try:
+            for oid, item in verified.objects.items():
+                self._write_object(upload.copy_key, key, objects_folder, item)
+                index[oid] = held_to_json(verified.held[oid])
+            if not known:
+                _write_private(folder / "snapshots" / f"{manifest.snapshot}.enc", sealed)
+            _write_private(
+                folder / _index_name(generation),
+                self._seal(
+                    key,
+                    _index_aad(upload.copy_key, generation),
+                    canonical_encode(cast(JsonValue, index)),
+                ),
+            )
+            snapshots = [
+                item for item in cast(list[str], record["snapshots"]) if item != manifest.snapshot
+            ]
+            snapshots.append(manifest.snapshot)
+            kind, days = upload.retention
+            record.update(
+                {
+                    "snapshots": cast(JsonValue, snapshots[-_MAX_SNAPSHOTS:]),
+                    "stored_bytes": stored + verified.new_bytes,
+                    "objects": len(index),
+                    "last_sync_at": format_rfc3339_ms(self._clock()),
+                    "retention": {"kind": kind, "days": days},
+                    "epoch": max(_record_epoch(record), upload.epoch),
+                    "generation": generation,
+                }
+            )
+            self._write_record(upload.copy_key, record)
+        except BaseException:
+            try:
+                self._recover(upload.copy_key)
+            except CodeStoreError:
+                pass  # the journal stays: the next admission or the next start rolls it back
+            raise
+        try:
+            if known:
+                # A snapshot synced again: its manifest's metadata, once the generation committed.
+                _write_private(folder / "snapshots" / f"{manifest.snapshot}.enc", sealed)
+            self._recover(upload.copy_key)  # the superseded index and the journal go
+        except CodeStoreError:
+            pass  # committed; what is left to clean is cleaned by the next admission or start
         return UploadReceipt(
             manifest.snapshot,
             manifest_digest(manifest),
@@ -1370,6 +1472,24 @@ class CodeStore:
                     continue  # a task read the copy meanwhile: asked again at the next run
                 report = report.plus(self._forget_one(copy_key, "expired"))
         return report
+
+
+def _generation(record: Mapping[str, JsonValue] | None) -> int:
+    """The committed generation a copy's record names (0: written before generations, whose
+    index is ``index.enc``)."""
+
+    generation = None if record is None else record.get("generation")
+    return generation if type(generation) is int and generation >= 0 else 0
+
+
+def _index_name(generation: int) -> str:
+    return "index.enc" if generation == 0 else f"index.{generation}.enc"
+
+
+def _index_aad(copy_key: str, generation: int) -> bytes:
+    if generation == 0:
+        return _INDEX_AAD + copy_key.encode()
+    return _INDEX_AAD + copy_key.encode() + b"\x00" + str(generation).encode()
 
 
 def _record_epoch(record: Mapping[str, JsonValue] | None) -> int:

@@ -289,10 +289,15 @@ every copy unreadable (*Owner rulings*, 4).
 An upload is staged encrypted under a key held only in memory. Commit decrypts it, verifies it with
 the verifier of decision 1, checks the manifest against what was verified, against the revision the
 service issues and against the claim's worktree, and applies the quotas: a checkout of at most
-`max_repo_bytes`, four times that per copy and sixteen times per principal. It writes the objects,
-then the manifest, then the index, and the copy record (`copy.json`, `yoetz.code-copy/1`) last, so
-a crash leaves the previous snapshot in force; a service start removes staged uploads and folders
-without a record.
+`max_repo_bytes`, four times that per copy and sixteen times per principal. It publishes a new
+committed generation: an admission journal (`admission.json`, `yoetz.code-copy-admission/1`:
+the objects it creates, a new snapshot's manifest, the next generation) first, then the objects,
+the manifest and that generation's index (`index.<n>.enc`), and the copy record (`copy.json`,
+`yoetz.code-copy/1`, naming the generation) last. The record is the commit point: until then the
+previous generation, its index and its `stored_bytes` are in force, and the journal's additions are
+removed at once after a failure and at the next start after a crash, so nothing is stored outside
+the quota accounting and no later upload can lean on an uncommitted object. A service start also
+removes staged uploads and folders without a record.
 
 ### 7. Forget, the tombstone, the fence and every repository at once
 

@@ -871,3 +871,88 @@ def test_a_record_written_before_epochs_is_forgotten_by_a_newer_tombstone(
     tombstones.write_bytes(canonical_encode(document))
     os.chmod(tombstones, 0o600)
     assert _store(tmp_path, clock=clock).copies("alice") == ()
+
+
+def _second(first: Snapshot) -> tuple[Snapshot, bytes]:
+    second = snapshot_objects(BASE, {**CURRENT, "src/more.py": b"more " + MARKER + b"\n"})
+    verified = verify_snapshot_bundle(
+        first.bundle(), have=lambda _o: None, limits=BundleLimits(max_file_bytes=65_536)
+    )
+    held = held_lookup(first.objects, verified.aggregates)
+    bundle = second.bundle(
+        omit=frozenset(oid for oid in second.objects if held(oid) is not None),
+        prerequisites=(first.snapshot,),
+        ref_number=2,
+    )
+    return second, bundle
+
+
+@pytest.mark.parametrize("stopped", ["failed", "crashed"])
+def test_an_admission_that_stops_before_its_record_leaves_nothing_outside_the_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stopped: str
+) -> None:
+    """Objects and the next index are written before the record: until the record names the
+    new generation, the previous one is in force, and what was added goes (at once after a
+    failure, at the next start after a crash), so no later upload can lean on uncharged bytes."""
+
+    keyring = MemoryKeyring()
+    store = _store(tmp_path, keyring)
+    first = snapshot_objects(BASE, CURRENT)
+    _upload(store, first.bundle(), _manifest(first, first.bundle()))
+    folder = _copy_folder(tmp_path)
+    before = sorted(path.name for path in (folder / "objects").iterdir())
+    stored = store.copies("alice")[0].stored_bytes
+    second, bundle = _second(first)
+    real = code_store._write_private  # pyright: ignore[reportPrivateUsage]
+
+    def stop(path: Path, data: bytes) -> None:
+        if path.name == "copy.json":
+            raise CodeStoreError("code_store_unsafe")
+        real(path, data)
+
+    monkeypatch.setattr(code_store, "_write_private", stop)
+    if stopped == "crashed":
+        # The process dies: nothing runs after the failed write.
+        def dies(_self: CodeStore, _key: str) -> bool:
+            return True
+
+        monkeypatch.setattr(CodeStore, "_recover", dies)
+    with pytest.raises(CodeStoreError):
+        _upload(store, bundle, _manifest(second, bundle))
+    monkeypatch.undo()
+    if stopped == "crashed":
+        assert sorted(path.name for path in (folder / "objects").iterdir()) != before
+        store = _store(tmp_path, keyring)  # the next start
+    assert sorted(path.name for path in (folder / "objects").iterdir()) == before
+    assert sorted(path.name for path in folder.iterdir()) == [
+        "copy.json",
+        "index.1.enc",
+        "objects",
+        "snapshots",
+    ]
+    assert sorted(path.name for path in (folder / "snapshots").iterdir()) == [
+        f"{first.snapshot}.enc"
+    ]
+    assert store.copies("alice")[0].stored_bytes == stored
+    # A later upload that leans on the uncommitted snapshot as held is refused, and the same
+    # snapshot sent again is charged in full.
+    third = snapshot_objects(
+        BASE, {**CURRENT, "src/more.py": b"more " + MARKER + b"\n", "z": b"z\n"}
+    )
+    lean = third.bundle(
+        omit=frozenset(oid for oid in third.objects if oid in second.objects),
+        prerequisites=(second.snapshot,),
+        ref_number=3,
+    )
+    with pytest.raises(CodeStoreError, match="code_bundle_invalid"):
+        _upload(store, lean, _manifest(third, lean))
+    receipt = _upload(store, bundle, _manifest(second, bundle))
+    assert receipt.stored_bytes == stored + receipt.new_bytes > stored  # type: ignore[attr-defined]
+    assert sorted(path.name for path in folder.iterdir()) == [
+        "copy.json",
+        "index.2.enc",
+        "objects",
+        "snapshots",
+    ]
+    assert store.have("alice", "repo-1") == (first.snapshot, second.snapshot)
+    assert _store(tmp_path, keyring).have("alice", "repo-1") == (first.snapshot, second.snapshot)
