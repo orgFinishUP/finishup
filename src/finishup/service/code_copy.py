@@ -103,7 +103,10 @@ __all__ = [
 
 CODE_COPY_KEK_MAC_DOMAIN: Final = b"yoetz/code-copy-kek/v1\x00"
 # The claim the service keyed is already namespaced by the caller's principal (an API key's at
-# the REST edge, the owner's over SSH), so its commitment separates principals (Q7).
+# the REST edge, the owner's over SSH), so its commitment separates principals' copies (Q7). The
+# principal itself does not reach the service over the control channel yet, so every upload of a
+# claim remembered without an ``account`` is charged to this one shared namespace: the store's
+# principal quota is then a server-wide bound (ADR-054, an honest limit).
 COPY_PRINCIPAL: Final = "claim"
 _PREPARE_SECONDS: Final = 60.0
 _READ_SECONDS: Final = 30.0
@@ -176,6 +179,9 @@ class CopyView:
 class _Claim:
     commitment: str
     worktree: str | None
+    # The authenticated principal its uploads are charged to (the store's principal quota);
+    # None: not known to this service (see ``COPY_PRINCIPAL``), the shared namespace is charged.
+    account: str | None = None
 
 
 class _Flight:
@@ -248,15 +254,23 @@ class CodeCopies:
     def checkouts(self) -> CopyCheckouts | None:
         return self._checkouts
 
-    def remember(self, handle: str | None, commitment: str, worktree: str | None) -> None:
-        """A claim this service keyed: ``handle`` names that repository's commitment."""
+    def remember(
+        self,
+        handle: str | None,
+        commitment: str,
+        worktree: str | None,
+        *,
+        account: str | None = None,
+    ) -> None:
+        """A claim this service keyed: ``handle`` names that repository's commitment, and
+        ``account`` the authenticated principal its uploads are charged to, when known."""
 
         if handle is None:
             return
         with self._lock:
             if len(self._claims) >= 4_096 and handle not in self._claims:
                 self._claims.pop(next(iter(self._claims)))
-            self._claims[handle] = _Claim(commitment, worktree)
+            self._claims[handle] = _Claim(commitment, worktree, account)
 
     def commitment_of(self, handle: str) -> str | None:
         with self._lock:
@@ -363,6 +377,7 @@ class CodeCopies:
                 sha256=prepared.sha256,
                 retention=(prepared.retention_kind, prepared.retention_days),
                 epoch=epoch,
+                account=claim.account,
             )
             offset = 0
             while offset < prepared.size:

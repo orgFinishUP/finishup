@@ -987,3 +987,50 @@ def test_a_pinned_snapshot_outlives_the_recent_window_until_no_pin_names_it(
     with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
         store.snapshot("alice", "repo-1", first)
     assert not (folder / "snapshots" / f"{first}.enc").exists()
+
+
+def test_uploads_are_charged_to_their_authenticated_account_not_the_copy_namespace(
+    tmp_path: Path,
+) -> None:
+    """Copies of every claim share one owning namespace (``COPY_PRINCIPAL``); the principal
+    quota is charged per authenticated account, so one account filling its quota never blocks
+    another's uploads (and without an account, the namespace is charged as before)."""
+
+    snap = snapshot_objects(BASE, CURRENT)
+    verified = verify_snapshot_bundle(
+        snap.bundle(), have=lambda _o: None, limits=BundleLimits(max_file_bytes=65_536)
+    )
+    limits = StoreLimits(
+        max_file_bytes=65_536, max_repo_bytes=max(verified.tree_bytes, verified.new_bytes // 4 + 1)
+    )
+    store = _store(tmp_path, limits=limits)
+
+    def upload(repository: str, account: str | None) -> object:
+        bundle = snap.bundle()
+        upload_id = store.begin_upload(
+            "claim",
+            repository,
+            manifest=_manifest(snap, bundle),
+            size=len(bundle),
+            sha256="sha256:" + hashlib.sha256(bundle).hexdigest(),
+            retention=("until_forgotten", None),
+            account=account,
+        )
+        store.append(upload_id, "claim", repository, 0, bundle)
+        return store.commit(upload_id, "claim", repository, revision=REVISION, worktree=WORKTREE)
+
+    admitted = 0
+    with pytest.raises(CodeStoreError, match="code_copy_over_quota"):
+        for number in range(40):
+            upload(f"mallory-{number}", "key:mallory")
+            admitted += 1
+    assert 0 < admitted < 40
+    upload("alice-1", "key:alice")  # another account still has its own quota
+    with pytest.raises(CodeStoreError, match="code_copy_owner_invalid"):
+        upload("x", "")
+    # Without an account, the owning namespace is what is charged.
+    shared = _store(tmp_path / "shared", limits=limits)
+    store = shared
+    with pytest.raises(CodeStoreError, match="code_copy_over_quota"):
+        for number in range(40):
+            upload(f"anyone-{number}", None)

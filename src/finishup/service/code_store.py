@@ -307,6 +307,7 @@ class _Upload:
     copy_key: str
     principal: str
     repository: str
+    account: str
     epoch: int
     size: int
     sha256: str
@@ -673,12 +674,17 @@ class CodeStore:
         sha256: str,
         retention: tuple[RetentionKind, int | None],
         epoch: int | None = None,
+        account: str | None = None,
     ) -> str:
         """Start receiving a bundle of ``size`` bytes; its id.
 
         ``epoch`` is the copy's forget epoch when the sync began (``epoch``, read before the
         client was asked to prepare): a forget since then refuses the upload now
         (``code_copy_forgotten``). Without one, the epoch is recorded now.
+
+        ``account`` is the authenticated principal the upload is charged to (the principal
+        quota), kept apart from ``principal``, the namespace the copy is owned in; without one
+        the owning principal is charged.
         """
 
         if type(size) is not int or not 0 < size <= self._limits.max_bundle_bytes:
@@ -699,10 +705,13 @@ class CodeStore:
             if len(self._uploads) >= _MAX_UPLOADS:
                 raise CodeStoreError("code_upload_busy")
             upload_id = secrets.token_hex(16)
+            if account is not None:
+                _digest(_PRINCIPAL_DOMAIN, account)  # refuses an account it cannot name
             self._uploads[upload_id] = _Upload(
                 copy_key=copy_key,
                 principal=principal,
                 repository=repository,
+                account=principal if account is None else account,
                 epoch=current,
                 size=size,
                 sha256=sha256,
@@ -881,7 +890,7 @@ class CodeStore:
         if stored + verified.new_bytes > self._limits.copy_quota:
             raise CodeStoreError("code_copy_over_quota")
         if (
-            self._principal_bytes(upload.principal) + verified.new_bytes
+            self._principal_bytes(upload.account) + verified.new_bytes
             > self._limits.principal_quota
         ):
             raise CodeStoreError("code_copy_over_quota")
@@ -937,6 +946,7 @@ class CodeStore:
                     "retention": {"kind": kind, "days": days},
                     "epoch": max(_record_epoch(record), upload.epoch),
                     "generation": generation,
+                    "account": _digest(_PRINCIPAL_DOMAIN, upload.account),
                 }
             )
             self._write_record(upload.copy_key, record)
@@ -1019,12 +1029,15 @@ class CodeStore:
                     found.append((copy_key, record))
         return found
 
-    def _principal_bytes(self, principal: str) -> int:
-        principal_id = _digest(_PRINCIPAL_DOMAIN, principal)
+    def _principal_bytes(self, account: str) -> int:
+        """What every copy charged to ``account`` stores (a record from before accounts were
+        recorded is charged to its owning principal)."""
+
+        account_id = _digest(_PRINCIPAL_DOMAIN, account)
         return sum(
             cast(int, record["stored_bytes"])
             for _key, record in self._records(forgotten=True)
-            if record.get("principal") == principal_id
+            if record.get("account", record.get("principal")) == account_id
         )
 
     # --- reads --------------------------------------------------------------------------------

@@ -277,7 +277,9 @@ server after the answer's own deletes.
 `service.code_store` keeps copies under `<state>/code-copies/`, one copy per (principal,
 repository commitment), both kept only as digests. The principal namespace comes from the claim,
 which the REST edges namespace by the key's principal (ADR-053 decision 6), so keys with different
-principals never share a copy.
+principals never share a copy. Each upload is charged to an account kept apart from that namespace
+(`begin_upload(account=...)`, recorded as a digest in the copy record), and the principal quota is
+counted per account; a claim remembered without one charges the shared namespace (honest limit 15).
 
 Every object, every snapshot manifest and the copy's index is an AES-256-GCM frame whose associated
 data binds the copy and the object. Each copy has its own random data key, stored only wrapped
@@ -642,6 +644,14 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     each is covered in process. Over REST, a client whose helper stopped without closing its
     connection is noticed only when the sync's 60-second wait ends (`deadline_exceeded`), so that
     check returned `operation_pending` while the server finished it.
+15. The authenticated principal does not reach the service over the control channel yet (the REST
+    edges namespace the claim by the key's principal but send only the namespaced claim), so the
+    service remembers every claim without an account and charges all uploads to one shared
+    namespace: the sixteen-times principal quota is in practice a server-wide bound, and one
+    principal filling it refuses every other's next upload (`code_copy_over_quota`) until copies are
+    forgotten or expire. The store and the puller charge per account already; carrying the key's
+    principal to the service (a control-hello field from both REST edges, the owner's for SSH) is
+    the follow-up.
 
 ## Reverse states
 
