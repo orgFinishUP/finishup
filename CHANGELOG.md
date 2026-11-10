@@ -187,9 +187,9 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   server answer the server's reads of your project while they run, and leave a 15-minute
   registration so the helper answers what the server goes on with. FinishUP's tools never resend a
   request to a different server from the one it was first sent to.
-- **Not in this release:** a copy of your code on the server, adding an SSH server from the
-  terminal interface, SSH host certificates. SSH servers were tested on Linux; macOS and Windows
-  through WSL 2 are not tested yet.
+- **Not in this release:** adding an SSH server from the terminal interface, SSH host
+  certificates. SSH servers were tested on Linux; macOS and Windows through WSL 2 are not tested
+  yet. A copy of your code on the server is described below.
 
 ### HTTPS servers (#1308)
 
@@ -240,20 +240,43 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   signing in with anything but an API key, an official FinishUP service. HTTPS servers were tested
   on Linux; macOS and Windows through WSL 2 are not tested yet.
 
-### A copy of your code on a server, not yet available (#1308)
+### A copy of your code on a server (level L2) (#1308)
 
-- **Groundwork for servers that keep a copy of your code (level L2), not available in this
-  release.** Nothing you see changes: no server offers it, FinishUP never sends a copy of your code,
-  and `finishup server add` and `server use` work as before. Part of what a later release needs is
-  in place: a sanitized copy of a project's git-visible files (never its history) that leaves out
-  credential file names, the server's exclusions and your own list, sends only the names of what it
-  leaves out, and holds back files whose contents match known secret formats; a server that would
-  get it only from this computer's FinishUP helper, after your agreement and the project's hold are
-  checked again, and keep it encrypted under its vault; and forgetting a copy, which deletes it
-  there and says exactly what was deleted. Holding a project or stopping only stops future sends;
-  only forgetting removes what was sent. Reading evidence from such a copy is not built yet. Control
-  envelopes 2.10.0 and the REST contract 1.0.0, both unreleased, are amended in place (two workspace
-  operations and the `code_copy` method). See
+- **A server can keep a copy of your code, if its owner offers it and you agree.** Nothing changes
+  unless both happen: a server offers it only when its owner turns it on in the server's
+  `config.toml` (`[server.code_copy]`, with the retention choices, size limits and exclusions it
+  offers), and FinishUP sends a copy only after you choose `finishup server add|use NAME --level L2
+  --retention …` on your own terminal. The copy holds the files git can see, never the project's
+  history, and leaves out credential file names, the server's exclusions and your own list; it
+  sends only the names of what it leaves out, and holds back files whose contents match known
+  secret formats until you allow those exact contents. Only FinishUP's background helper on this
+  computer sends it, and only after your agreement, the project's hold and this computer's network
+  policy are checked again. The server keeps it encrypted under its vault, reads a task's evidence
+  from it, and still asks this computer for files outside the project and runs approved checks
+  here; while this computer is offline it reads the copy as last updated and says so, and checks
+  cannot pass.
+- **Receipts say where each kind of evidence was read.** A task that read the copy ends its
+  receipt with fixed lines counting reads from the copy, from this computer, checks, hook
+  observations, outside reads and reads made while this computer was offline, and carries the same
+  account as `evidence_provenance` in JSON, on every surface.
+- **Forget deletes the copy and what tasks kept from it.** `finishup server code list` shows what a
+  server keeps; `forget` (or `forget --all` for every project) deletes the copy and its snapshots,
+  and the tasks that read it lose the captured changes and review excerpts they kept from it,
+  keeping their findings and checks and a "content forgotten" note on their receipts. Copies also
+  expire as you chose: a number of days after the last update, once the tasks that read them are
+  closed, or never. `server code exclude`, `allow add|list|remove` and `level L1|default` set
+  per-project choices, and `finishup server remove` asks whether to forget a server's copies first
+  (`--forget-copies`, `--keep-copies`). Holding a project or stopping only stops future updates;
+  only forget removes what was sent.
+- **Limits.** Names and scans are not a guarantee that no secret is sent, and the names of
+  left-out files are sent. Forget does not reach the server's backups, receipts already delivered,
+  the reviewer's own words about its findings, files from outside the project sent as task inputs,
+  or what hooks captured. A server's copy is readable on its disk while in use, and the server's
+  owner controls that server. The terminal interface has no level L2 choices (use your shell).
+  Tested on Linux only; macOS and Windows through WSL 2 are not tested yet. Config 1.4.0 adds the
+  `[server]` table (1.3.0 is unchanged); control envelopes 2.10.0, receipt-result 1.5.0 and the
+  REST contract 1.0.0, all unreleased, are amended in place, and task bundles move to storage
+  version 20 (a new service-written `content_forgotten` record), upgrading in place. See
   [FinishUP servers](docs/usage/servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2) and
   [ADR-054](docs/adr/ADR-054-level-l2-the-server-copy.md).
 

@@ -701,13 +701,19 @@ default service.
   `server_authorization_changed`, and a new key asks for the owner's consent again
   (`server_profile_changed`). The terminal interface adds only a server on this computer; an HTTPS
   server is added in a terminal.
-- **Level L2, the server copy (layer 6, ADR-054).** Not available in this release: level L2 is
-  unreleased, so no server offers it, `--level` and `finishup server code` are hidden, and nothing
-  sends a copy of code. Decision, the same on every host and with no registration change: the sync
+- **Level L2, the server copy (layer 6, ADR-054).** Released, and opt-in at both ends: a server
+  offers it only when its owner's `[server.code_copy]` table enables an offer, and a copy is sent
+  only after the owner consents at L2 on the trusted console (`finishup server add|use NAME --level
+  L2 --retention …`). Decision, the same on every host and with no registration change: the sync
   runs only in the target's helper, whose background agent alone declares the two code-sync
   operations and checks the gate and the L2 consent again before anything is read; Cursor's hooks,
   its MCP bridge and Agent CLI shell calls never declare them, so they never sync and the server
-  never asks them. No Cursor session ran against it.
+  never asks them. Receipts and status show where each kind of evidence was read (the
+  `evidence_provenance` member and the fixed "Workspace evidence" lines, never the L1
+  client-attested line, for a task that read the copy), the same through the CLI, the MCP text and
+  summary and the terminal interface; the terminal interface has no L2 flows (consent, `server code`
+  and `server remove`'s question are CLI only). No Cursor session ran against a server keeping a
+  copy, and no macOS or WSL 2 run (layer 7).
 - **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host, and
   acting for an SSH server from layer 4 and an HTTPS or port server from layer 5: the gate's consent
   step names `server_profile_changed` or `server_level_unavailable` in the same SessionStart texts,

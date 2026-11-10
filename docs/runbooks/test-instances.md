@@ -256,6 +256,32 @@ the client, then the edge by its PID and the server root's service with its own 
 stop`; remove the private folders last. macOS (its system store, the XDG variables it ignores)
 and WSL 2 are untested here (gap, owner: layer 7).
 
+### Trying level L2, the server copy (ADR-054, layer 6)
+
+A server offers level L2 only when its own `config.toml` enables `[server.code_copy]` (config
+1.4.0), so an SSH or HTTPS test server set up as above needs that table before a client can
+consent at L2. For an isolated root the file is `<root>/config/config.toml`; never edit the
+everyday install's. Add the table there (every key but `enabled` has a default), then restart that
+root's service through its own launcher (`finishup service restart`), since the table is read only
+at service start:
+
+```toml
+[server.code_copy]
+enabled = true
+retention = ["task_close", "days:7", "until_forgotten"]
+retention_default = "days:7"
+```
+
+On the client home of the SSH or HTTPS test, consent with `finishup server add NAME … --level L2
+--retention days:7` (or `server use NAME --level L2`) on a pseudo-terminal, as for any consent.
+The copy, its checkouts and its pending erasures live beneath the server root's state
+(`code-copies/`); the client's export records beneath the client's target root
+(`state/code-export/`). Clean up in this order: `finishup server code forget --all` on the client
+(or `finishup server remove NAME --forget-copies`, which forgets first and removes nothing if one
+copy is not forgotten), then the server root's service and the private folders as above. A test
+that removes the target without forgetting leaves the copies in the server root until it is
+deleted.
+
 ## Concurrency
 
 - One tag per worker or job. Two workers must never share a `<base>/<tag>`; the second `create`
