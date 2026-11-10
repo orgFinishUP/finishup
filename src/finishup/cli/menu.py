@@ -138,19 +138,26 @@ def _remote_refusal_phase(error: ControlError) -> str | None:
     return None
 
 
+def _refusal_head(phase: str) -> str:
+    """What stopped, in the shared phase-specific words (``authorization.refusal_summary``).
+
+    Only a phase that refuses before a connection sends anything says so; a changed
+    authorization says FinishUP stopped sending over a connection that had sent, a changed
+    profile that the server did no work for the request, and an unreachable server what
+    happened to the way there.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    return refusal_summary(phase) or "the selected FinishUP server could not be reached"
+
+
 def _control_guidance(error: ControlError) -> str:
     phase = _remote_refusal_phase(error)
     if phase is not None:
         from finishup.cli.render import render_remote_refusal
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
 
-        head = (
-            "this computer refused the selected FinishUP server before anything was sent"
-            if phase in AUTHORIZATION_REFUSALS
-            # A server elsewhere that could not be reached refused nothing: say what happened.
-            else refusal_summary(phase) or "the selected FinishUP server could not be reached"
-        )
-        return "service_unavailable: " + render_remote_refusal(phase, head=head)
+        return "service_unavailable: " + render_remote_refusal(phase, head=_refusal_head(phase))
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (
@@ -313,7 +320,7 @@ async def _service_summary() -> str:
 
         directive = directive_for(remote_root_continuation(phase))
         assert directive is not None
-        return f"refused before anything was sent ({phase}) — {directive.directive}"
+        return f"{_refusal_head(phase)} ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
 

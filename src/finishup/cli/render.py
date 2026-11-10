@@ -1497,8 +1497,8 @@ def render_recovery_directive_lines(
 
 
 def render_remote_refusal(phase: str, *, head: str) -> str:
-    """A remote root refused before anything was sent (ADR-051): ``<phase>: <head>``, then the
-    directive lines of its way back, as every CLI error surface shows a directive.
+    """A connection to a server elsewhere refused or ended (ADR-051, ADR-052): ``<phase>: <head>``,
+    then the directive lines of its way back, as every CLI error surface shows a directive.
 
     ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code. Its directive
     follows what named the root (``targets.remote_root_continuation``): 'finishup server use
