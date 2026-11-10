@@ -360,6 +360,28 @@ def test_caps_hold_a_large_file_and_refuse_an_oversized_copy(tmp_path: Path) -> 
         export_snapshot(_request(root), tight, ExportDatabase(tmp_path / "e2"), gate=_open)
 
 
+def test_the_repository_cap_holds_for_the_base_too(tmp_path: Path) -> None:
+    # Each file fits, the worktree fits, but the base whose files were deleted since does not.
+    root = _repository(
+        tmp_path, {"keep.txt": b"k\n", "old/a.bin": b"a" * 900, "old/b.bin": b"b" * 900}
+    )
+    for name in ("old/a.bin", "old/b.bin"):
+        (root / name).unlink()
+    policy = ExportPolicy(
+        server=(), owner=RepositoryCodeSettings(), max_file_bytes=1_000, max_repo_bytes=1_500
+    )
+    database = ExportDatabase(tmp_path / "export")
+    with pytest.raises(ExportRefused, match="code_copy_too_large"):
+        export_snapshot(_request(root), policy, database, gate=_open)
+    # Refused before anything was written into the export database.
+    assert [p for p in (tmp_path / "export" / "objects").rglob("*") if p.is_file()] == []
+    # The same worktree from a base that fits is exported.
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "drop the old files")
+    prepared = export_snapshot(_request(root), policy, database, gate=_open)
+    assert set(_tree_of(prepared, tmp_path)) == {"keep.txt"}
+
+
 def test_links_are_sent_as_their_target_and_never_followed(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()

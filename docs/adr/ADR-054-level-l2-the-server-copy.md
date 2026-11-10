@@ -169,8 +169,8 @@ pattern; files over `max_file_bytes`; known secret content (decision 3) unless t
 those exact bytes; a Git LFS file whose bytes are not its pointer; case-fold collisions; nested
 repositories — each named in its completeness list — and unsafe or non-UTF-8 names, special files
 and multiply-linked files, which are counted. A link is sent as its target text, a submodule as a
-gitlink, an LFS file as its pointer. A sanitized tree over `max_repo_bytes` is refused
-(`code_copy_too_large`): no partial copy is sent.
+gitlink, an LFS file as its pointer. A sanitized base or current tree over `max_repo_bytes` is
+refused (`code_copy_too_large`) before any object is written: no partial copy is sent.
 
 The exclusion patterns start from `domain.code_exclusions.ALWAYS_EXCLUDED`: ADR-031's credential
 names (`.env`, `.env.*`, `.envrc`, `.git-credentials`, `.htpasswd`, `.netrc`, `_netrc`, `.npmrc`,

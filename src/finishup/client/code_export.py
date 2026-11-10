@@ -25,8 +25,9 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    their target text, submodules as gitlinks (commit id only), LFS files as their pointers.
 4. Every admitted object is re-created from the bytes read, by this module, into the target's
    **export object database** (``ExportDatabase``: git loose objects owned by FinishUP, never
-   the repository's own ``.git``), and wrapped in the two synthetic commits. A sanitized tree
-   over ``max_repo_bytes`` refuses the export: no partial copy is sent.
+   the repository's own ``.git``), and wrapped in the two synthetic commits. A sanitized base or
+   current tree over ``max_repo_bytes`` refuses the export before anything is written: no partial
+   copy is sent.
 5. The bundle carries only what the server's have-set does not reach (incremental), and the
    **object-closure audit** parses it back with the server's own verifier: every object in it
    was admitted in this run, everything the snapshot reaches is in it or held by the server,
@@ -1152,9 +1153,11 @@ def export_snapshot(
     base_entries = {p: e for p, e in base.entries.items() if not _under(p, held_paths)}
     current_entries = {p: e for p, e in current.entries.items() if not _under(p, held_paths)}
     objects: dict[str, GitObject] = {}
-    base_tree, _base_size, _base_files = _build_tree(base_entries, objects)
+    base_tree, base_bytes, _base_files = _build_tree(base_entries, objects)
     tree, tree_bytes, tree_files = _build_tree(current_entries, objects)
-    if tree_bytes > policy.max_repo_bytes:
+    # The cap holds for each checkout the copy keeps: a base whose files were deleted from the
+    # worktree is sent too. Nothing is written or packed before both fit.
+    if base_bytes > policy.max_repo_bytes or tree_bytes > policy.max_repo_bytes:
         raise ExportRefused("code_copy_too_large")
     for admission in (base, current):
         for path, entry in admission.entries.items():
