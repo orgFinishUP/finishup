@@ -115,6 +115,7 @@ _STRUCTURAL_METADATA_UNAVAILABLE: Final = "metadata_unavailable"
 # A claim-bound task's workspace agent did not answer a read the capture needed (ADR-051).
 _WORKSPACE_AGENT_UNAVAILABLE: Final = "workspace_agent_unavailable"
 _WORKSPACE_AGENT_REFUSED: Final = "workspace_agent_refused"
+_CODE_COPY_UNAVAILABLE: Final = "code_copy_unavailable"
 # The hub reasons for an agent that answered with a refusal, or declared no such operation.
 _AGENT_REFUSALS: Final = frozenset({"agent_refused", "operation_not_declared"})
 
@@ -126,9 +127,13 @@ def _agent_loss_reason(exc: WorkspaceAgentUnavailable) -> str:
     other loss (no agent, a dropped connection, a deadline, a busy agent, a reply that did not
     decode, an agent that failed or was itself unavailable) is ``workspace_agent_unavailable``.
     Each has its own fixed receipt sentence, so a receipt never says the agent was silent when it
-    refused, nor that it refused when it failed (ADR-051).
+    refused, nor that it refused when it failed (ADR-051). A read of a task pinned to the
+    server's copy that the copy could not serve is ``code_copy_unavailable`` (ADR-054): the
+    client's agent was never asked, so its sentence names the copy instead.
     """
 
+    if exc.reason == _CODE_COPY_UNAVAILABLE:
+        return _CODE_COPY_UNAVAILABLE
     if exc.reason in _AGENT_REFUSALS:
         return _WORKSPACE_AGENT_REFUSED
     return _WORKSPACE_AGENT_UNAVAILABLE

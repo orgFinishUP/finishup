@@ -531,6 +531,15 @@ CHECK_TIME_CHANGE_UNAVAILABLE_REASONS: Final[Mapping[str, str]] = MappingProxyTy
             "the change this check captured was deleted when the server's copy of the code it "
             "was read from was forgotten, by its owner or when the copy expired."
         ),
+        # ADR-054 (design v2 section 8.6): the task's evidence is read from the server's copy,
+        # and the snapshot it is pinned to could not be read; the client's files never stand in.
+        "code_copy_unavailable": (
+            "the server keeps a copy of this repository and reads this task's evidence from it, "
+            "but could not read the copy as synced for this task (its working checkout could "
+            "not be made, or the snapshot could not be read), so the server could not see the "
+            "change and did not read the client machine's files in its place. Checking again "
+            "can help once the server has room or its copy is readable."
+        ),
     }
 )
 _CHECK_TIME_CHANGE_REASON_PREFIX: Final = CHECK_TIME_CHANGE_UNAVAILABLE_GAP + "_"

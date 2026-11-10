@@ -26,8 +26,11 @@ listings, file reads and declared tests beneath the root, and an opened workspac
 and inspection. Reads outside the root, the check policy, the subject state and approved checks
 stay with the client's agent (approved checks run on the user's computer, U7). A git read at an
 evidence boundary syncs first; a client that is offline then reads the copy as last synced
-(``stale_copy_read``), and a refused sync never falls back to the copy. Every read of a task
-pinned to a copy is counted for the task by where it was answered (``evidence_task_scope``).
+(``stale_copy_read``), and a refused sync never falls back to the copy. Nor does the copy fall
+back to the client: a read of a task the copy serves that the pinned snapshot cannot answer (its
+checkout cannot be made, its manifest cannot be read) is the typed gap ``code_copy_unavailable``,
+never the client's live bytes. Every read of a task pinned to a copy is counted for the task by
+where it was answered (``evidence_task_scope``).
 """
 
 from __future__ import annotations
@@ -198,6 +201,19 @@ def _record_copy(operation: str) -> None:
     )
 
 
+def _copy_read_failed() -> WorkspaceAgentUnavailable:
+    """A read of a task pinned to the copy that the copy could not serve (design v2 §8.6).
+
+    Once a task's evidence is read from a snapshot, the client's live bytes never stand in for
+    it: they may be another subject than the snapshot the task's other evidence was read from,
+    with no mismatch or gap to say so. The read is the typed gap instead
+    (``code_copy_unavailable``), which every caller records and never turns into a pass.
+    """
+
+    _record_copy("code_copy_read_failed")
+    return WorkspaceAgentUnavailable("code_copy_unavailable")
+
+
 def client_bound(workspace: object) -> bool:
     """Whether ``workspace`` names a claim-bound task's workspace (its ``client:`` handle)."""
 
@@ -266,7 +282,9 @@ class RoutedChangeCapture:
     ) -> tuple[bool, Any]:
         """Level L2 (ADR-054): sync before an evidence-consuming git read, then serve it from
         the copy when the copy serves this task (``CodeCopies.git_view``); ``(False, None)``
-        sends it to the client's agent. A checkout that cannot be made also does."""
+        sends it to the client's agent. Once the copy serves a task, a checkout that cannot be
+        made is ``code_copy_unavailable``, never a read of the client's live tree (a read for no
+        task pins nothing, so the client answers it then)."""
 
         copies = self._copies()
         if copies is None:
@@ -286,9 +304,12 @@ class RoutedChangeCapture:
         except ChangeCaptureUnavailable:
             copies.count(workspace, task, view.token)
             raise
-        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
-            _record_copy("code_copy_read_failed")
-            return False, None
+        except Exception:  # noqa: BLE001 - the pinned snapshot could not be read: a gap
+            if task is None:
+                # Read for no task: nothing is pinned to the snapshot, so the client answers.
+                _record_copy("code_copy_read_failed")
+                return False, None
+            raise _copy_read_failed() from None
         copies.count(workspace, task, view.token)
         return True, result
 
@@ -299,7 +320,8 @@ class RoutedChangeCapture:
 
     def _pinned(self, workspace: str, read: Callable[[str], Any]) -> tuple[bool, Any]:
         """A probe that follows a capture: served from the snapshot the task is pinned to when
-        the copy serves the task (no sync), else ``(False, None)``."""
+        the copy serves the task (no sync), else ``(False, None)``; a pinned snapshot that
+        cannot be read is ``code_copy_unavailable``."""
 
         copies = self._copies()
         if copies is None:
@@ -314,9 +336,8 @@ class RoutedChangeCapture:
         except ChangeCaptureUnavailable:
             copies.count(workspace, task, view.token)
             raise
-        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
-            _record_copy("code_copy_read_failed")
-            return False, None
+        except Exception:  # noqa: BLE001 - the pinned snapshot could not be read: a gap
+            raise _copy_read_failed() from None
         copies.count(workspace, task, view.token)
         return True, result
 
@@ -610,9 +631,8 @@ class ClientWorkspaceReads:
         except ReadDeadline:
             copies.count(self._handle, current_evidence_task(), view.token)
             raise
-        except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
-            _record_copy("code_copy_read_failed")
-            return False, None
+        except Exception:  # noqa: BLE001 - the pinned snapshot could not be read: a gap
+            raise _copy_read_failed() from None
         copies.count(self._handle, current_evidence_task(), view.token)
         return True, result
 
@@ -1018,7 +1038,8 @@ def _opened_from_copy(
     hub: WorkspaceAgentHub | None, client: _ClientOpenedWorkspace, read: Callable[[str], Any]
 ) -> tuple[bool, Any]:
     """Level L2: an opened workspace's changed paths and inspection, from the snapshot the task
-    is pinned to when the copy serves the task; ``(False, None)`` asks the client's agent."""
+    is pinned to when the copy serves the task; ``(False, None)`` asks the client's agent. A
+    pinned snapshot that cannot be read is ``code_copy_unavailable``, never the client's tree."""
 
     copies = cast("CodeCopies | None", getattr(hub, "code_copies", None))
     if copies is None:
@@ -1030,9 +1051,8 @@ def _opened_from_copy(
     try:
         with copies.checkout(view) as folder:
             result = read(os.fspath(folder))
-    except Exception:  # noqa: BLE001 - a checkout that cannot be made: the client answers
-        _record_copy("code_copy_read_failed")
-        return False, None
+    except Exception:  # noqa: BLE001 - the pinned snapshot could not be read: a gap
+        raise _copy_read_failed() from None
     copies.count(client.workspace, task, view.token)
     return True, result
 

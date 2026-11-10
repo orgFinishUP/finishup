@@ -529,9 +529,14 @@ class CodeCopies:
 
     def reader_view(self, handle: str, task_id: str | None) -> CopyView | None:
         """The pinned snapshot a reviewer's read of ``task_id`` reads, when the copy served the
-        task's evidence (no sync: a review reads what its check read); else None."""
+        task's evidence (no sync: a review reads what its check read); else None.
 
-        if task_id is None or not self._serving:
+        A task the copy serves whose pinned snapshot cannot be read (its pin or manifest is
+        unreadable, or this service no longer reads its copies) raises ``WorkspaceAgentUnavailable``
+        (``code_copy_unavailable``): the client's live bytes never stand in for the snapshot the
+        task's evidence was read from (design v2 §8.6)."""
+
+        if task_id is None:
             return None
         with self._lock:
             claim = self._claims.get(handle)
@@ -540,12 +545,12 @@ class CodeCopies:
         try:
             entry = self._store.pin_entry(COPY_PRINCIPAL, claim.commitment, task_id)
         except CodeStoreError:
-            return None
+            raise _copy_unavailable() from None
         if entry is None or not entry.served:
             return None
-        manifest = self._manifest(claim.commitment, entry.snapshot)
+        manifest = self._manifest(claim.commitment, entry.snapshot) if self._serving else None
         if manifest is None:
-            return None
+            raise _copy_unavailable()
         # A reviewer's read reads what its check read: stale when that check was served while
         # the client was offline.
         return CopyView(claim.commitment, manifest, entry.stale, entry.synced_at)
@@ -755,6 +760,16 @@ class CodeCopies:
 
 def _never_closed(_task_id: str) -> bool:
     return False
+
+
+def _copy_unavailable() -> WorkspaceAgentUnavailable:
+    """A read of a task pinned to a copy that the copy cannot serve: the typed gap, never the
+    client's live bytes (``code_copy_unavailable``)."""
+
+    record_bounded_event_without_raising(
+        component=_COMPONENT, operation="code_copy_read_failed", reason="code_copy_read_failed"
+    )
+    return WorkspaceAgentUnavailable("code_copy_unavailable")
 
 
 def _original(manifest: SnapshotManifest) -> str | None:

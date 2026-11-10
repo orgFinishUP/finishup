@@ -637,3 +637,87 @@ def test_a_checkout_left_by_a_failed_removal_keeps_the_forget_incomplete_until_i
     copies.expire_now()
     assert not checkout.exists()
     assert copies.forget(COMMITMENT).complete
+
+
+def _no_room(*_args: object, **_kwargs: object) -> object:
+    raise OSError(28, "No space left on device")
+
+
+def test_a_pinned_snapshot_that_cannot_be_checked_out_is_a_gap_never_the_client_s_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Design v2 §8.6: once a task's evidence is read from a snapshot, a read the snapshot cannot
+    # answer (here the checkout cannot be rebuilt: the disk is full) is the typed gap, never the
+    # client's live files, which may be another subject than the one the task read.
+    root = _repository(tmp_path, {"src/a.py": b"pinned\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), HANDLE)
+    with evidence_task_scope(TASK):
+        base = routed.read_task_base(HANDLE)
+    (root / "src" / "a.py").write_bytes(b"newer bytes on the client\n")
+    monkeypatch.setattr(CopyCheckouts, "checkout", _no_room)
+    access = RoutedObservationWorkspace(cast(WorkspaceAgentHub, hub), cast(Any, None))
+    opened = access.open(HANDLE)
+    attempts: list[Any] = [
+        lambda: routed.capture(HANDLE, base),
+        lambda: routed.capture_metadata(HANDLE, base),
+        lambda: routed.probe_requested_paths(HANDLE, ("src/a.py",)),
+        lambda: routed.count_change_lines(HANDLE, base.commit, ("src/a.py",)),
+        lambda: reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False),
+        lambda: reads.list_beneath(HANDLE, "src", excluded=(), expired=lambda: False),
+        lambda: reads.declared_test(HANDLE + "/src/a.py", excluded=()),
+        lambda: access.list_changed(opened),
+    ]
+    for attempt in attempts:
+        with evidence_task_scope(TASK), pytest.raises(WorkspaceAgentUnavailable) as raised:
+            attempt()
+        assert raised.value.reason == "code_copy_unavailable"
+    # The client's agent was asked to sync and to open the workspace, never to read in its place.
+    assert set(_client_only(hub)) == {"open_workspace"}
+    account = copies.provenance(TASK)
+    assert account is not None
+    assert account.count("client_attested_read") == 0
+    assert account.count("server_copy_read") == 1  # the base, read before the disk filled
+
+
+def test_a_served_task_whose_pinned_snapshot_is_unreadable_is_a_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.service.code_store import CodeStoreError
+
+    root = _repository(tmp_path, {"src/a.py": b"pinned\n"})
+    hub, copies, routed = _service(tmp_path, root)
+    reads = ClientWorkspaceReads(cast(WorkspaceAgentHub, hub), HANDLE)
+    with evidence_task_scope(TASK):
+        routed.read_task_base(HANDLE)
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        raise CodeStoreError("code_copy_corrupt")
+
+    monkeypatch.setattr(CodeStore, "snapshot", unreadable)
+    with evidence_task_scope(TASK), pytest.raises(WorkspaceAgentUnavailable) as raised:
+        reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+    assert raised.value.reason == "code_copy_unavailable"
+    monkeypatch.setattr(CodeStore, "pin_entry", unreadable)
+    with evidence_task_scope(TASK), pytest.raises(WorkspaceAgentUnavailable):
+        copies.reader_view(HANDLE, TASK)
+    assert _client_only(hub) == []
+    # A task the copy never served still reads the client (nothing was pinned to read instead).
+    monkeypatch.undo()
+    with evidence_task_scope("task_two"):
+        text = reads.read_text_beneath(HANDLE, "src/a.py", excluded=(), expired=lambda: False)
+    assert text == (b"from the client\n", 16)
+
+
+def test_a_copy_read_gap_has_its_own_check_time_reason() -> None:
+    from finishup.application import check_change
+    from finishup.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+
+    loss = WorkspaceAgentUnavailable("code_copy_unavailable")
+    reason = check_change._agent_loss_reason(loss)  # pyright: ignore[reportPrivateUsage]
+    assert reason == "code_copy_unavailable"
+    sentence = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS[reason]
+    assert "copy" in sentence and "workspace agent" not in sentence
+    assert check_change._agent_loss_reason(WorkspaceAgentUnavailable("no_agent")) == (  # pyright: ignore[reportPrivateUsage]
+        "workspace_agent_unavailable"
+    )

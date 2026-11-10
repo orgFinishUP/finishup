@@ -456,6 +456,11 @@ the read's snapshot is known: the sync that precedes it (task base or check) ret
   approved check then fails `workspace_agent_unavailable` (agent reason `no_agent`), never a pass.
 - **A refused sync never falls back to the copy.** After a refusal (the hold, zero network,
   consent, revision) the read goes to the client's agent, which answers or refuses as at L1.
+- **Nor does a pinned read fall back to the client.** Once the copy serves a task, a read its
+  pinned snapshot cannot answer (the checkout cannot be made, say for want of disk; the pin or
+  manifest cannot be read; the service no longer reads its copies) is the typed gap
+  `code_copy_unavailable` (the check-time reason of the same name, a review ending unavailable),
+  never the client's live bytes, which may be another subject than the task's other evidence.
 
 `service.code_checkout` materializes the snapshot a read needs: one owner-only (`0700`/`0600`)
 working directory per copy under `<state>/code-copies/checkouts/`, written only from objects the

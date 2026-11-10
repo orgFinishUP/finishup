@@ -333,6 +333,10 @@ WORKSPACE_AGENT_UNAVAILABLE_REASONS: Final[frozenset[str]] = frozenset(
         "hub_unavailable",
         # The control call this call served was cancelled or ran out of time; it was abandoned.
         "call_cancelled",
+        # Level L2 (ADR-054): the task's evidence is pinned to the server's copy, and the copy
+        # could not serve this read (its checkout or snapshot could not be read). The read is a
+        # gap, never answered with the client's live bytes instead.
+        "code_copy_unavailable",
     }
 )
 
