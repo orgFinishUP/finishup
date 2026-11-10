@@ -110,6 +110,18 @@ def test_l2_consents_to_an_offered_retention_and_discloses_the_copy(
     assert "Checks you approved still run on this computer." in text
 
 
+@pytest.mark.parametrize("written", ["days:0", "days:36501", "days:+7", "weekly"])
+def test_a_retention_no_envelope_admits_is_a_usage_error_naming_the_tokens(
+    remote: targets.ServerTarget, written: str
+) -> None:
+    """``--retention`` is read by the one shared parser ``[server.code_copy]`` uses too."""
+
+    with release_l2(), pytest.raises(ServerCommandRefused) as raised:
+        _offer(remote, LevelChoice(level="L2", retention=written))
+    assert raised.value.reason == "usage"
+    assert "--retention is task_close, until_forgotten or days:N" in str(raised.value.message)
+
+
 def test_server_use_keeps_the_level_and_retention_already_agreed(
     remote: targets.ServerTarget,
 ) -> None:

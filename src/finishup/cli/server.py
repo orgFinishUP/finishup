@@ -1007,16 +1007,14 @@ class LevelChoice:
 
 
 def _retention_of(value: str) -> Retention:
-    from finishup.protocol.consent_envelope import Retention as _Retention  # noqa: N814
+    from finishup.protocol.consent_envelope import EnvelopeError, retention_from_token
 
-    if value in {"task_close", "until_forgotten"}:
-        return _Retention(value, None)
-    head, _colon, days = value.partition(":")
-    if head == "days" and days.isdigit() and 0 <= int(days) <= 36_500 and days == str(int(days)):
-        return _Retention("days", int(days))
-    raise ServerCommandRefused(
-        "usage", message="--retention is task_close, until_forgotten or days:N"
-    )
+    try:
+        return retention_from_token(value)
+    except EnvelopeError:
+        raise ServerCommandRefused(
+            "usage", message="--retention is task_close, until_forgotten or days:N"
+        ) from None
 
 
 def _chosen_terms(
