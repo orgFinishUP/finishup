@@ -3105,6 +3105,56 @@ def _lineage_child_snapshot_schema() -> dict[str, JsonValue]:
     }
 
 
+def _content_forgotten_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """The closed ``content_forgotten`` payload (ADR-054, owner ruling U20).
+
+    The forget's 32-hex identity, its closed reason and source, how many objects the erasure set
+    out to delete, and the task's evidence account then (``yoetz.evidence-provenance/1`` with no
+    snapshot and no marker: counts per closed token and fenced reads only).
+    """
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_PROVENANCE_SCHEMA,
+        EVIDENCE_PROVENANCE_TOKENS,
+    )
+
+    count = {"maximum": 1_000_000_000, "minimum": 0, "type": "integer"}
+    raw: dict[str, object] = {
+        "additionalProperties": False,
+        "properties": {
+            "forget_id": {
+                "maxLength": 32,
+                "minLength": 32,
+                "pattern": r"^[0-9a-f]{32}$",
+                "type": "string",
+            },
+            "objects_erased": count,
+            "provenance": {
+                "additionalProperties": False,
+                "properties": {
+                    "content_forgotten": {"type": "null"},
+                    "fenced_reads": count,
+                    "reads": {
+                        "additionalProperties": False,
+                        "properties": {token: count for token in EVIDENCE_PROVENANCE_TOKENS},
+                        "required": list(EVIDENCE_PROVENANCE_TOKENS),
+                        "type": "object",
+                    },
+                    "schema": {"const": EVIDENCE_PROVENANCE_SCHEMA, "type": "string"},
+                    "snapshot": {"type": "null"},
+                },
+                "required": ["content_forgotten", "fenced_reads", "reads", "schema", "snapshot"],
+                "type": "object",
+            },
+            "reason": {"enum": ["expired", "owner"], "type": "string"},
+            "source": {"const": "server_copy", "type": "string"},
+        },
+        "required": ["forget_id", "objects_erased", "provenance", "reason", "source"],
+        "type": "object",
+    }
+    return _normalize(raw, entry)
+
+
 def _lineage_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Build closed event payload schemas for delegation, lifecycle, and frozen manifests."""
 
@@ -13255,6 +13305,20 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).ContactExpectationDeclaredPayload
         ),
     ),
+    # ADR-054 (owner ruling U20): the service-written record that a server copy's content was
+    # forgotten. A new family: agents cannot publish it, so no event draft names it.
+    _RegistryEntry(
+        "events/content-forgotten-1.0.0.schema.json",
+        "content-forgotten",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "finishup.domain.events", fromlist=["ContentForgottenPayload"]
+            ).ContentForgottenPayload
+        ),
+    ),
     _RegistryEntry(
         "events/work-written-off-1.0.0.schema.json",
         "work-written-off",
@@ -14814,6 +14878,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/work-closed-1.0.0.schema.json",
         "events/work-written-off-1.0.0.schema.json",
         "events/contact-expectation-declared-1.0.0.schema.json",
+        "events/content-forgotten-1.0.0.schema.json",
         "operations/check-result-1.3.0.schema.json",
         "operations/check-result-1.4.0.schema.json",
         "operations/check-result-1.5.0.schema.json",
@@ -15298,6 +15363,8 @@ def build_schema_documents(
             "events/contact-expectation-declared-1.0.0.schema.json",
         }:
             normalized = _lineage_event_schema(entry)
+        elif entry.relative_path == "events/content-forgotten-1.0.0.schema.json":
+            normalized = _content_forgotten_event_schema(entry)
         elif entry.relative_path in {
             "events/coordination-context-recorded-1.0.0.schema.json",
             "events/coordination-obligation-declared-1.0.0.schema.json",

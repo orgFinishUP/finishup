@@ -59,6 +59,7 @@ from finishup.domain.events import (
     UnknownEvent,
     WriterChain,
     encode_payload,
+    is_content_forgotten_record,
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
@@ -1765,6 +1766,11 @@ def _projection_items(
         result_history: list[StatusHistoryItemModel | StatusHistoryItemV14Model] = []
         for row in records:
             if row.session_id != session:
+                continue
+            if is_content_forgotten_record(row):
+                # ADR-054 (U20): the released status-result contracts (1.4.0, 1.5.0) cannot name
+                # this service-written family, so a history row would fail their closed summary
+                # codes. The task projection carries its marker, which receipts render instead.
                 continue
             manifest = (
                 None

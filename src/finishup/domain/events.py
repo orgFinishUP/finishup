@@ -22,6 +22,7 @@ from finishup.domain.coordination import (
     WorkState,
     project_id,
 )
+from finishup.domain.evidence_provenance import EvidenceProvenance, evidence_provenance_from_json
 from finishup.domain.findings import (
     FINDING_KIND_TRAITS,
     MAX_RECORDED_VERDICTS,
@@ -272,6 +273,9 @@ __all__ = [
     "WorkClosedPayload",
     "ContactExpectationDeclaredPayload",
     "MAX_DECLARED_QUIET_SECONDS",
+    "CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION",
+    "ContentForgottenPayload",
+    "is_content_forgotten_record",
     "WorkWrittenOffPayload",
     "UnknownEvent",
     "WritePolicy",
@@ -436,6 +440,7 @@ EVENT_FAMILIES: Final = (
     "work_cancelled",
     "work_written_off",
     "contact_expectation_declared",
+    "content_forgotten",
 )
 
 
@@ -1623,6 +1628,47 @@ class ContactExpectationDeclaredPayload:
         _bounded_integer(self.expected_quiet_seconds, 1, MAX_DECLARED_QUIET_SECONDS)
         if self.reason_code is not None:
             object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+# ADR-054 (owner ruling U20): the service-written record that the repository content a task read
+# from a server copy was forgotten. A new family, so every other ledger keeps its exact bytes.
+CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION: Final = "1.0.0"
+_FORGET_ID_RE: Final = re.compile(r"^[0-9a-f]{32}$", re.ASCII)
+_MAX_OBJECTS_ERASED: Final = 1_000_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class ContentForgottenPayload:
+    """The content a task derived from a server copy was forgotten (ADR-054, U20).
+
+    Only the service writes it, after a copy is forgotten by its owner or expires: excerpts the
+    task recorded from that content read as absent in every projection from here on, and the
+    task's standalone content objects are erased. ``forget_id`` is the forget's random 32-hex
+    identity (a retry of the same forget records nothing new); ``objects_erased`` how many
+    objects the erasure set out to delete; ``provenance`` the task's evidence account when it was
+    forgotten (counts per closed token and fenced reads; never a snapshot or a marker), so the
+    ledger keeps which kinds of evidence were read after the content is gone.
+    """
+
+    forget_id: str
+    reason: Literal["owner", "expired"]
+    source: Literal["server_copy"]
+    objects_erased: int
+    provenance: EvidenceProvenance
+
+    def __post_init__(self) -> None:
+        if type(self.forget_id) is not str or _FORGET_ID_RE.fullmatch(self.forget_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.reason not in {"owner", "expired"} or self.source != "server_copy":
+            raise ProtocolValueError("invalid_event_value_type")
+        _bounded_integer(self.objects_erased, 0, _MAX_OBJECTS_ERASED)
+        provenance = self.provenance
+        if (
+            type(provenance) is not EvidenceProvenance
+            or provenance.snapshot is not None
+            or provenance.content_forgotten is not None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -3802,6 +3848,7 @@ type EventPayload = (
     | ChildWrittenOffPayload
     | WorkClosedPayload
     | ContactExpectationDeclaredPayload
+    | ContentForgottenPayload
     | WorkAbandonedPayload
     | WorkCancelledPayload
     | WorkWrittenOffPayload
@@ -3900,6 +3947,9 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema(
             "contact_expectation_declared", LINEAGE_EVENT_SCHEMA_VERSION
         ): ContactExpectationDeclaredPayload,
+        EventSchema(
+            "content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION
+        ): ContentForgottenPayload,
     }
 )
 
@@ -4857,6 +4907,10 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
             frozenset({"expected_quiet_seconds"}),
             frozenset({"reason_code"}),
         ),
+        "content_forgotten": (
+            frozenset({"forget_id", "reason", "source", "objects_erased", "provenance"}),
+            frozenset(),
+        ),
         "work_abandoned": (
             frozenset({"service_stamped"}),
             frozenset({"reason_code"}),
@@ -4969,6 +5023,18 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "work_closed":
         return WorkClosedPayload(reason_code=cast(str | None, _optional(source, "reason_code")))
+    if schema.name == "content_forgotten":
+        try:
+            provenance = evidence_provenance_from_json(_field(source, "provenance"))
+        except ValueError as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        return ContentForgottenPayload(
+            forget_id=cast(str, _field(source, "forget_id")),
+            reason=cast(Literal["owner", "expired"], _field(source, "reason")),
+            source=cast(Literal["server_copy"], _field(source, "source")),
+            objects_erased=cast(int, _field(source, "objects_erased")),
+            provenance=provenance,
+        )
     if schema.name == "contact_expectation_declared":
         return ContactExpectationDeclaredPayload(
             expected_quiet_seconds=cast(int, _field(source, "expected_quiet_seconds")),
@@ -5594,6 +5660,17 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         result = {"child_task_id": value.child_task_id}
         _optional_value(result, "reason_code", value.reason_code)
         return _json_object(result)
+    if payload_type is ContentForgottenPayload:
+        value = cast(ContentForgottenPayload, payload)
+        return _json_object(
+            {
+                "forget_id": value.forget_id,
+                "reason": value.reason,
+                "source": value.source,
+                "objects_erased": value.objects_erased,
+                "provenance": value.provenance.to_json(),
+            }
+        )
     if payload_type is ContactExpectationDeclaredPayload:
         value = cast(ContactExpectationDeclaredPayload, payload)
         result: dict[str, object] = {"expected_quiet_seconds": value.expected_quiet_seconds}
@@ -6611,6 +6688,23 @@ def redaction_targets(
         events.update(record.projection_locator.redaction_target_event_ids)
         objects.update(record.projection_locator.redaction_target_object_ids)
     return frozenset(events), frozenset(objects)
+
+
+def is_content_forgotten_record(record: LedgerRecord) -> bool:
+    """Whether ``record`` is a service-written ``content_forgotten`` event (ADR-054, U20).
+
+    Only the service's coordinator writes the family, with its observation stamp; agents cannot
+    publish it. A record of the family without that stamp is not one (replay refuses it as
+    corrupt), and an unknown version of the name never is.
+    """
+
+    return (
+        type(record) is AcceptedEvent
+        and record.schema
+        == EventSchema("content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION)
+        and (record.payload is None or type(record.payload) is ContentForgottenPayload)
+        and is_observation_authored(record)
+    )
 
 
 def is_lineage_service_stamped(record: LedgerRecord) -> bool:

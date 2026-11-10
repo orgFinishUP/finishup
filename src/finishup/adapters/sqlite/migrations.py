@@ -99,6 +99,7 @@ BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0017", _load_resource("bundle", "0017")),
     Migration("0018", _load_resource("bundle", "0018")),
     Migration("0019", _load_resource("bundle", "0019")),
+    Migration("0020", _load_resource("bundle", "0020")),
 )
 
 
@@ -171,7 +172,7 @@ def _migration_authorization_window(db: apsw.Connection):
 def _requires_foreign_keys_disabled(pending: Sequence[Migration]) -> bool:
     """Return whether pending migrations include a dependent-table rebuild."""
 
-    return any(item.version in {"0014", "0016", "0019"} for item in pending)
+    return any(item.version in {"0014", "0016", "0019", "0020"} for item in pending)
 
 
 def _validate_v10_bundle_layout(

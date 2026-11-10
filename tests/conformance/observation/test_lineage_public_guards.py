@@ -104,3 +104,74 @@ async def test_public_publish_rejects_service_stamped_lineage_families(
         assert caught.value.code is PublicErrorCode.INVALID_REQUEST
         assert caught.value.safe_details["reason_code"] == "event_family_not_admitted"
         assert await app.start_catalog.task_route(started.task_id) is not None
+
+
+_CONTENT_FORGOTTEN = {
+    "forget_id": "0123456789abcdef0123456789abcdef",
+    "reason": "owner",
+    "source": "server_copy",
+    "objects_erased": 0,
+    "provenance": {
+        "schema": "yoetz.evidence-provenance/1",
+        "reads": {
+            "server_copy_read": 0,
+            "client_attested_read": 0,
+            "client_check": 0,
+            "client_observation": 0,
+            "outside_read": 0,
+            "stale_copy_read": 0,
+        },
+        "fenced_reads": 0,
+        "snapshot": None,
+        "content_forgotten": None,
+    },
+}
+
+
+async def test_public_publish_rejects_content_forgotten(tmp_path: Path) -> None:
+    """ADR-054 (U20): only the service records that a task's copy content was forgotten.
+
+    A well-formed payload decodes, so the refusal is admission's own: the family is not one an
+    agent publishes, and the ledger records nothing.
+    """
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        app = service.app
+        started = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Service-only guard",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "service-only-content-forgotten",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        request = PublishWorkRequest.model_validate(
+            {
+                **_identity(),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": started.frontier.model_dump(mode="json"),
+                "event_drafts": [
+                    {
+                        "event_id": new_id(IdKind.EVENT),
+                        "schema": {"name": "content_forgotten", "version": "1.0.0"},
+                        "occurred_at": "2026-09-05T12:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": _CONTENT_FORGOTTEN,
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+        with pytest.raises(PublicOperationError) as caught:
+            await app.publish_work(request, repository_privacy_context=_REPOSITORY)
+        assert caught.value.code is PublicErrorCode.EVENT_INVALID
+        assert caught.value.safe_details["reason_code"] == "event_family_not_admitted"
+        assert caught.value.safe_details["field"] == "/event_drafts/0/schema"
