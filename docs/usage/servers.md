@@ -106,7 +106,9 @@ Before you add one, you need from the server's owner:
   your agents' everyday work, `operator` adds support commands.
 - **How to trust its certificate.** By default FinishUP trusts a certificate your computer's
   system store trusts. For a server with its own certificate authority, give that authority's
-  certificate with `--ca-file`; for a self-signed certificate, give its fingerprint with
+  certificate with `--ca-file` (PEM certificates, or OpenSSL's trusted certificates as `openssl
+  x509 -trustout` writes them, whose trust settings FinishUP keeps); for a self-signed certificate,
+  give its fingerprint with
   `--tls-pin sha256:…`: the SHA-256 of the certificate in DER form, as 64 lowercase hex digits
   after `sha256:` (for example from `openssl x509 -in server.pem -outform der | sha256sum`). Give
   at most one of them.

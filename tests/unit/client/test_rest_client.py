@@ -458,3 +458,73 @@ async def test_at_most_one_key_read_is_ever_outstanding_however_many_callers_tim
         assert reads["peak"] == 1
     finally:
         release.set()
+
+
+def _trusted_block(ca_file: Path, aux: bytes) -> bytes:
+    """The CA as OpenSSL's ``TRUSTED CERTIFICATE`` block: its DER followed by ``aux`` (an
+    ``X509_CERT_AUX``: trust settings)."""
+
+    import base64
+    import ssl
+    import textwrap
+
+    der = ssl.PEM_cert_to_DER_cert(ca_file.read_text())
+    body = "\n".join(textwrap.wrap(base64.b64encode(der + aux).decode(), 64))
+    return (
+        f"-----BEGIN TRUSTED CERTIFICATE-----\n{body}\n-----END TRUSTED CERTIFICATE-----\n"
+    ).encode()
+
+
+# X509_CERT_AUX: trust { serverAuth }, and reject [0] { serverAuth }.
+_TRUST_SERVER_AUTH = bytes.fromhex("300c300a06082b06010505070301")
+_REJECT_SERVER_AUTH = bytes.fromhex("300ca00a06082b06010505070301")
+
+
+async def test_a_ca_file_of_openssl_trusted_certificates_is_trusted_as_it_says(
+    server: _Server, tls: TlsMaterial
+) -> None:
+    """Item 9: an OpenSSL ``TRUSTED CERTIFICATE`` CA file (what ``openssl x509 -trustout``
+    writes) verifies the server again, with its trust settings: one trusted for server
+    authentication answers, one that rejects it verifies nobody. The identity stays the digest
+    of the exact bytes loaded."""
+
+    import hashlib
+    import tempfile
+
+    def copies() -> set[str]:
+        return {path.name for path in Path(tempfile.gettempdir()).glob("finishup-ca-*")}
+
+    before = copies()
+    folder = tls.ca_file.parent
+    for name, aux, answers in (
+        ("trusted.pem", _TRUST_SERVER_AUTH, True),
+        ("rejected.pem", _REJECT_SERVER_AUTH, False),
+    ):
+        path = folder / name
+        path.write_bytes(_trusted_block(tls.ca_file, aux))
+        trust = load_trust_for_ca(path)
+        assert trust.endpoint == (
+            "tls_ca_file",
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        transport = RestTransport(server.url, key="fuk_x", ca_file=str(path))
+        try:
+            if answers:
+                assert (await transport.request("GET", f"/{name}")).status == 200
+            else:
+                with pytest.raises(RestUnavailable) as refused:
+                    await transport.request("GET", f"/{name}")
+                assert refused.value.reason == "remote_identity_changed"
+        finally:
+            await transport.aclose()
+    assert "/trusted.pem" in server.seen and "/rejected.pem" not in server.seen
+    empty = folder / "empty.pem"
+    empty.write_bytes(b"-----BEGIN TRUSTED CERTIFICATE-----\n-----END TRUSTED CERTIFICATE-----\n")
+    with pytest.raises(RestUnavailable) as unusable:
+        load_trust_for_ca(empty)
+    assert unusable.value.reason == "remote_unreachable"
+    assert copies() == before  # the private copy handed to OpenSSL never stays behind
+
+
+def load_trust_for_ca(path: Path) -> rest_client.TlsTrust:
+    return rest_client._trust_for(str(path), None)  # pyright: ignore[reportPrivateUsage]

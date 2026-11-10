@@ -38,8 +38,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import os
 import re
 import ssl
+import tempfile
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -222,6 +224,9 @@ _MAX_CA_FILE_BYTES: Final = 1_048_576
 _PEM_CERTIFICATE: Final = re.compile(
     rb"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n\t ]+-----END CERTIFICATE-----"
 )
+# Blocks OpenSSL reads from a CA file that a PEM ``cadata`` string cannot carry: OpenSSL's own
+# trusted certificates (a certificate with its trust settings) and the older certificate label.
+_OPENSSL_CA_BLOCK: Final = re.compile(rb"-----BEGIN (?:TRUSTED|X509) CERTIFICATE-----")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +265,10 @@ def _ca_trust(ca_file: str, *, build: bool) -> TlsTrust:
     identity = "sha256:" + hashlib.sha256(data).hexdigest()
     if not build:
         return TlsTrust("tls_ca_file", identity)
+    if _OPENSSL_CA_BLOCK.search(data):
+        # OpenSSL's ``TRUSTED CERTIFICATE`` blocks (trust settings included) are read only from a
+        # file: these exact bytes are handed to it through a private copy, never the path again.
+        return TlsTrust("tls_ca_file", identity, _verifying(_context_from_ca_bytes(data)))
     blocks = _PEM_CERTIFICATE.findall(data)
     if not blocks:
         # A CA file that holds no certificate verifies nobody.
@@ -269,6 +278,29 @@ def _ca_trust(ca_file: str, *, build: bool) -> TlsTrust:
     except (ssl.SSLError, ValueError):
         raise RestUnavailable("remote_unreachable") from None
     return TlsTrust("tls_ca_file", identity, _verifying(context))
+
+
+def _context_from_ca_bytes(data: bytes) -> ssl.SSLContext:
+    """A context trusting exactly what OpenSSL reads from ``data`` as a CA file: its
+    certificates, OpenSSL's trusted certificates with their trust settings (a certificate whose
+    settings reject server authentication verifies no server), and nothing else; never this
+    computer's system store. The bytes go through an owner-only temporary file, removed at once.
+    """
+
+    try:
+        descriptor, path = tempfile.mkstemp(prefix="finishup-ca-", suffix=".pem")
+    except OSError:
+        raise RestUnavailable("remote_unreachable") from None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        return ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError, ValueError):
+        # Nothing OpenSSL can use as a CA (no certificate at all): it verifies nobody.
+        raise RestUnavailable("remote_unreachable") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def _trust_for(ca_file: str | None, tls_pin: str | None, *, build: bool = True) -> TlsTrust:

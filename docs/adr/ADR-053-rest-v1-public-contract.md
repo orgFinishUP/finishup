@@ -333,9 +333,13 @@ fetches.
   certificate's DER right after the handshake, before any request byte, and replaces chain and
   host-name validation, as the owner chose; `--ca-file F` trusts that CA only, with the host name
   checked; otherwise this computer's system store (Python's default verify paths). A CA file that
-  cannot be read, or holds no PEM certificate, sends nothing. The CA file is read once per
-  transport (`load_trust`): those bytes are both the TLS context and the identity the transport
-  reports (layer-5 review).
+  cannot be read, or holds no certificate, sends nothing. The CA file is read once per transport
+  (`load_trust`): those bytes are both the TLS context and the identity the transport reports
+  (layer-5 review). A file of PEM `CERTIFICATE` blocks is loaded from those bytes directly; one
+  holding OpenSSL's `TRUSTED CERTIFICATE` (or older `X509 CERTIFICATE`) blocks, as `openssl x509
+  -trustout` writes them, is handed to OpenSSL through an owner-only temporary copy of the same
+  bytes, removed at once, so their trust settings hold (one that rejects server authentication
+  verifies no server; layer-5 review, second round).
 - **No proxies and no redirects.** Proxy variables are ignored and a `3xx` is never followed
   (`remote_incompatible`), so the hop goes only where the record says and no credential is carried
   elsewhere.

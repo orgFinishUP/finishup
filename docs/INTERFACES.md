@@ -15030,7 +15030,9 @@ proxy variables and no redirects; TLS by `tls_pin` (the leaf's DER `sha256` chec
 handshake, before any request byte), `ca_file` (that CA only, host name checked) or the system
 store; answers bounded by `MAX_RESPONSE_BYTES` (the largest control frame plus 64 KiB).
 `load_trust(record) -> TlsTrust` reads the CA file once: `TlsTrust.context` holds exactly its PEM
-certificates and `TlsTrust.endpoint` is the identity recorded with a fetched profile, `("tls_pin",
+certificates (OpenSSL's `TRUSTED CERTIFICATE` blocks with their trust settings, through an
+owner-only temporary copy of the same bytes) and `TlsTrust.endpoint` is the identity recorded with a
+fetched profile, `("tls_pin",
 pin)`, `("tls_ca_file", "sha256:<hex of those bytes>")` or `("tls_system_ca", None)`
 (`RestTransport.identity`; it replaces layer 5's `observed_identity`, which read the file a second
 time). `consented=True` (the helper's upstream, the direct style, the helper's refresh, a login
