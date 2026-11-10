@@ -629,8 +629,9 @@ _TRANSPORT_SUMMARIES: Final[dict[str, str]] = {
         "server, the keys OpenSSH offered)"
     ),
     "remote_identity_changed": (
-        "the selected FinishUP server elsewhere could not be verified (its SSH host key is not "
-        "the one this computer knows), so FinishUP did not connect to it"
+        "the selected FinishUP server elsewhere could not be verified (an SSH server's host key, "
+        "or an HTTPS server's certificate or the CA file chosen for it, is not the one this "
+        "computer agreed to), so FinishUP did not connect to it"
     ),
     "remote_service_not_running": (
         "the selected FinishUP server elsewhere is reachable, but its FinishUP service is not "

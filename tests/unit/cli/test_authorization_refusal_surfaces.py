@@ -220,3 +220,12 @@ def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_servic
     assert phase in guidance and directive.directive in guidance
     assert "finishup service run" not in guidance
     _clean(" ".join((failure.message, *failure.details, guidance)), home, record)
+
+
+def test_a_changed_identity_names_an_https_servers_trust_as_well_as_an_ssh_host_key() -> None:
+    """Layer-5 review (B1): an HTTPS target refused because its certificate or the CA file chosen
+    for it changed is told so, not only about an SSH host key."""
+
+    summary = cast(str, refusal_summary("remote_identity_changed"))
+    assert "SSH server's host key" in summary
+    assert "HTTPS server's certificate or the CA file" in summary
