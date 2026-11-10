@@ -516,3 +516,14 @@ async def test_the_service_takes_its_l2_offer_from_its_config_only_when_the_tabl
         finally:
             await _close(composed)
     assert set(digests.values()) == {offer_digest(FinishUpConfig())}
+
+    # The offer withdrawn later (the same state, the table disabled): the copies it left are
+    # kept, listed, forgotten and expire, but nothing is synced or read from them.
+    with release_l2():
+        composed = await _composed(tmp_path / "released", _configured(_DISABLED))
+    try:
+        assert not composed.server_profile.keeps_copies
+        retained = composed.workspace_hub.code_copies
+        assert retained is not None and not retained.serving
+    finally:
+        await _close(composed)

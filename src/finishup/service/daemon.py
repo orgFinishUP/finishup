@@ -5629,10 +5629,18 @@ def _attach_code_copies(
     """Give the hub the copy puller of a service whose profile offers level L2 (ADR-054): the
     encrypted store under the state directory, its keys derived by the vault, opened now
     (removing what a crash left), the checkouts reads are served from (every one left by a
-    previous run removed now), and its expiry run now and every ten minutes."""
+    previous run removed now), and its expiry run now and every ten minutes.
+
+    A service whose owner withdrew the offer still keeps the copies an earlier offer left: it
+    attaches the store without serving it (nothing is synced or read from it), so those copies
+    can still be listed, forgotten and expire, and their tasks' excerpts erased. A way in that
+    can be closed must not strand what it let in."""
 
     offer = source.code_copy
-    if not source.keeps_copies or offer is None or vault is None:
+    if vault is None:
+        return
+    serving = source.keeps_copies and offer is not None
+    if not serving and not (state / "code-copies").is_dir():
         return
     from finishup.service.code_checkout import CopyCheckouts
     from finishup.service.code_copy import CodeCopies, VaultCopyKeyring
@@ -5641,15 +5649,17 @@ def _attach_code_copies(
     keyring = VaultCopyKeyring(
         lambda: cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
     )
-    store = CodeStore(
-        state / "code-copies",
-        keyring,
-        StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes),
+    # Without an offer nothing is admitted, so the caps only bound reads of what is kept.
+    limits = (
+        StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes)
+        if offer is not None and serving
+        else StoreLimits(max_file_bytes=1 << 30, max_repo_bytes=1 << 30)
     )
+    store = CodeStore(state / "code-copies", keyring, limits)
     store.open()
     checkouts = CopyCheckouts(state / "code-copies" / "checkouts", store)
     checkouts.sweep()
-    copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts)
+    copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts, serving=serving)
     copies.start_expiry()
     hub.attach_code_copies(copies)
 

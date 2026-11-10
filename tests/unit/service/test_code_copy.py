@@ -131,6 +131,29 @@ def test_a_sync_stores_the_snapshot_and_names_the_revision(tmp_path: Path) -> No
     assert hub.calls[0] == "code_sync_prepare" and set(hub.calls[1:]) == {"code_sync_read"}
 
 
+def test_copies_an_offer_left_are_kept_listed_and_forgotten_but_never_synced_or_read(
+    tmp_path: Path,
+) -> None:
+    """The server's owner withdrew the offer: its copies are neither synced nor read, and can
+    still be listed, forgotten and expire (no one-way door)."""
+
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    assert copies.sync_blocking(HANDLE, purpose="check").outcome == "synced"
+    retained = CodeCopies(store, hub, lambda: REVISION, serving=False)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    retained.remember(HANDLE, COMMITMENT, WORKTREE)
+    calls = len(hub.calls)
+    refused = retained.sync_blocking(HANDLE, purpose="check", task_id="tsk_kept")
+    assert (refused.outcome, refused.reason) == ("refused", "server_level_unavailable")
+    assert len(hub.calls) == calls  # the client was never asked
+    assert not retained.serving and copies.serving
+    assert retained.reader_view(HANDLE, "tsk_kept") is None
+    assert len(store.copies("claim")) == 1
+    report = retained.forget(COMMITMENT)
+    assert (report.copies, report.snapshots) == (1, 1)
+    assert store.copies("claim") == ()
+
+
 def test_a_helper_refusal_stores_nothing_and_is_named(tmp_path: Path) -> None:
     copies, hub, store = _copies(tmp_path)
     copies.remember(HANDLE, COMMITMENT, WORKTREE)

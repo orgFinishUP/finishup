@@ -201,6 +201,7 @@ class CodeCopies:
         "_lock",
         "_pending",
         "_revision",
+        "_serving",
         "_store",
         "_task_closed",
     )
@@ -212,7 +213,11 @@ class CodeCopies:
         revision: Callable[[], ServerProfileRevision | None],
         *,
         checkouts: CopyCheckouts | None = None,
+        serving: bool = True,
     ) -> None:
+        # ``serving`` False: the server's owner withdrew the offer, so nothing is synced or read
+        # from the copies it still keeps; they can still be listed, forgotten and expire.
+        self._serving = serving
         self._store = store
         self._hub = hub
         self._revision = revision
@@ -227,6 +232,13 @@ class CodeCopies:
         self._task_closed: Callable[[str], bool] = _never_closed
         self._erase: Callable[[PendingErasure], bool] | None = None
         self._draining = threading.Lock()
+
+    @property
+    def serving(self) -> bool:
+        """Whether this service syncs and reads copies (its profile offers L2) or only keeps,
+        lists, forgets and expires the ones an earlier offer left."""
+
+        return self._serving
 
     @property
     def store(self) -> CodeStore:
@@ -263,6 +275,8 @@ class CodeCopies:
     ) -> SyncOutcome:
         """Sync ``handle``'s repository now, from a worker thread (coalesced, bounded)."""
 
+        if not self._serving:
+            return SyncOutcome("refused", "server_level_unavailable")
         with self._lock:
             claim = self._claims.get(handle)
             if claim is None:
@@ -502,7 +516,7 @@ class CodeCopies:
         """The pinned snapshot a reviewer's read of ``task_id`` reads, when the copy served the
         task's evidence (no sync: a review reads what its check read); else None."""
 
-        if task_id is None:
+        if task_id is None or not self._serving:
             return None
         with self._lock:
             claim = self._claims.get(handle)
