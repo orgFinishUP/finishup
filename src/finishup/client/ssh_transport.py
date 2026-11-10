@@ -1275,11 +1275,16 @@ class SshControlStream:
                 writer.close()
 
     async def _wait_exit(self, seconds: float) -> int | None:
-        try:
+        """``ssh``'s exit status once it exited, or ``None`` while it still runs past ``seconds``.
+
+        What is left on its output is read and dropped (a wait also waits for its pipes, and an
+        unread one would never reach its end).
+        """
+
+        with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(seconds):
-                return await self._process.wait()
-        except TimeoutError:
-            return None
+                await asyncio.gather(_discard(self._process.stdout), self._process.wait())
+        return self._process.returncode
 
     async def failure_phase(self) -> str | None:
         """Why this stream ended, once ``ssh`` exited (bounded); ``None`` when it ended cleanly.
@@ -1305,14 +1310,40 @@ class SshControlStream:
         if writer is not None:
             with contextlib.suppress(Exception):
                 writer.close()
-        if self._process.returncode is None:
-            # Only the child this stream spawned is signalled, by its own pid (AGENTS.md hazard 2).
-            # The shared master is a separate process and stays up for the next stream.
-            with contextlib.suppress(ProcessLookupError):
-                self._process.terminate()
-            if await self._wait_exit(_TERMINATE_WAIT_SECONDS) is None:
+        try:
+            if self._process.returncode is None:
+                # Only the child this stream spawned is signalled, by its own pid (AGENTS.md
+                # hazard 2). The shared master is a separate process and stays up.
                 with contextlib.suppress(ProcessLookupError):
-                    self._process.kill()
-                await self._wait_exit(_TERMINATE_WAIT_SECONDS)
+                    self._process.terminate()
+                if await self._wait_exit(_TERMINATE_WAIT_SECONDS) is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        self._process.kill()
+                    await self._wait_exit(_TERMINATE_WAIT_SECONDS)
+        except BaseException:
+            # The caller's deadline cancelled the close (``service.client`` bounds it): the child
+            # is killed now and a task of its own waits for it, so it ends and is reaped whatever
+            # the caller does next; this stream is closed either way.
+            with contextlib.suppress(ProcessLookupError):
+                self._process.kill()
+            _finish_later(self._process, self._stderr_task)
+            raise
         self._stderr_task.cancel()
         await asyncio.gather(self._stderr_task, return_exceptions=True)
+
+
+# The waits a cancelled close left behind, held until each child ended (a task needs a reference).
+_FINISHING: set[asyncio.Task[None]] = set()
+
+
+def _finish_later(process: asyncio.subprocess.Process, stderr: asyncio.Task[None]) -> None:
+    async def finish() -> None:
+        try:
+            await _kill_and_reap(process)
+        finally:
+            stderr.cancel()
+            await asyncio.gather(stderr, return_exceptions=True)
+
+    task = asyncio.get_running_loop().create_task(finish())
+    _FINISHING.add(task)
+    task.add_done_callback(_FINISHING.discard)

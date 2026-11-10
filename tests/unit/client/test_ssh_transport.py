@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import os
 import stat
@@ -739,3 +740,45 @@ def test_a_command_that_writes_too_much_is_killed_while_it_writes(
     # pipe still held), never allowed to finish.
     assert not (tmp_path / "done").exists()
     assert int(progress.read_text() or "0") < 32
+
+
+def test_a_close_the_callers_deadline_cancels_still_ends_and_reaps_the_child(
+    tmp_path: Path,
+) -> None:
+    """B4: ``service.client`` gives a close 50 ms; a child that outlives SIGTERM is killed anyway.
+
+    The stand-in ``ssh -W`` ignores SIGTERM (as a stuck one can) and keeps its output open; the
+    close is cancelled by the caller's bound long before the SIGKILL fallback was due.
+    """
+
+    from finishup.service.client import (
+        _best_effort_close_stream,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # SIGTERM stays ignored across exec; the end of its input does not end it either.
+    stubborn = _script(tmp_path, "stubborn", "trap '' TERM\necho started >&2\nexec sleep 600")
+
+    async def run() -> tuple[int | None, int]:
+        stream = await SshControlStream.open((stubborn,))
+        pid = stream.pid
+        try:
+            async with asyncio.timeout(10):
+                while b"started" not in bytes(stream._stderr):  # pyright: ignore[reportPrivateUsage]
+                    await asyncio.sleep(0)
+            # The real caller: it cancels a close that takes longer than its bound.
+            await _best_effort_close_stream(stream)
+            # Bounded, observing the child itself: killed and reaped by the stream's own task.
+            async with asyncio.timeout(10):
+                while stream._process.returncode is None:  # pyright: ignore[reportPrivateUsage]
+                    await asyncio.sleep(0.01)
+            async with asyncio.timeout(10):
+                while Path(f"/proc/{pid}").exists():
+                    await asyncio.sleep(0.01)
+            return stream._process.returncode, pid  # pyright: ignore[reportPrivateUsage]
+        finally:
+            # Whatever happened, the child this test started is stopped by its own pid.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+
+    returncode, _pid = asyncio.run(run())
+    assert returncode == -9
