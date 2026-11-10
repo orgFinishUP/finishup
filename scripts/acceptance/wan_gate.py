@@ -378,7 +378,7 @@ def render(paths: list[Path]) -> str:
         for style, result in document["styles"].items():
             if "error" in result:
                 rows.append(
-                    f"| {document['rtt_ms']:g} ms | {document['mode']} | {document['commit']} | "
+                    f"| {document['rtt_ms']:g} ms | {document['mode']} | {document.get('commit', '–')} | "
                     f"{style} | error: {result['error']} | | | | | | | fail |"
                 )
                 continue
@@ -390,7 +390,7 @@ def render(paths: list[Path]) -> str:
             status = (parts.get("status") or {}).get("p50")
             imported = (parts.get("import") or {}).get("p50")
             rows.append(
-                f"| {document['rtt_ms']:g} ms | {document['mode']} | {document['commit']} | "
+                f"| {document['rtt_ms']:g} ms | {document['mode']} | {document.get('commit', '–')} | "
                 f"{style} | {warm['p50']:.0f} / {warm['p95']:.0f} | {_ms(connect)} / {_ms(status)}"
                 f" | {process['p95']:.0f} | "
                 f"{hook['p50']:.0f} / {hook['p95']:.0f}, {hook['served_within_budget']}/{hook['n']}"

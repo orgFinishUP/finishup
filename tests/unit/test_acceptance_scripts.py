@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -147,10 +148,70 @@ def test_the_gate_table_names_every_style_and_its_verdict(tmp_path: Path) -> Non
         )
     )
     table = wan_gate.render([path])
-    assert "| 100 ms | netns | ssh-relay | 550 / 600 | 1500 |" in table
+    assert "| 100 ms | netns | – | ssh-relay | 550 / 600 | – / – | 1500 |" in table
     assert "failed open: remote_unreachable; next call served 5/5" in table
     assert table.rstrip().endswith("| fail |")  # the style that errored fails, never vanishes
     assert "| ssh-relay |" in table and "| pass |" in table
+    assert "| –, – | pass |" in table  # no import time or calibration recorded: said, not zero
+
+
+def test_the_gate_table_shows_the_split_and_this_computers_speed(tmp_path: Path) -> None:
+    style = {
+        **_style(600, 1002, 1500),
+        "warm_connect_status": {"p50": 550, "p95": 600, "failures": 0},
+        "warm_parts": {
+            "connect": {"p50": 320.4},
+            "status": {"p50": 229.6},
+            "import": {"p50": 841.0},
+        },
+        "warm_process": {"p95": 1500, "failures": 0},
+        "hook_cold_connect": {
+            "n": 1,
+            "p50": 1001,
+            "p95": 1002,
+            "served_within_budget": 1,
+            "failed_open_phases": [],
+            "next_call_served": 1,
+            "failures": 0,
+        },
+        "cold_connect": {"p50": 2500},
+        "server_test": {"round_trip_p95_ms": 120},
+        "cpu_calibration_ms": 78.3,
+    }
+    style["gate"] = wan_gate.gate(style)
+    path = tmp_path / "wan.json"
+    path.write_text(
+        json.dumps(
+            {"rtt_ms": 100, "mode": "netns", "commit": "abc1234-dirty", "styles": {"x": style}}
+        )
+    )
+    table = wan_gate.render([path])
+    assert "| 100 ms | netns | abc1234-dirty | x | 550 / 600 | 320 / 230 | 1500 |" in table
+    assert "| 841, 78 | pass |" in table
+
+
+def test_the_calibration_is_a_number_of_milliseconds() -> None:
+    measured = wan_gate.calibration()
+    assert isinstance(measured, float) and measured > 0
+
+
+def test_a_modified_tree_names_its_commit_dirty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def git(*arguments: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *arguments], check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "a").write_text("a\n")
+    git("add", "a")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a")
+    monkeypatch.setattr(wan_gate, "REPO", tmp_path)
+    clean = wan_gate.revision()
+    assert clean and not clean.endswith("-dirty")
+    (tmp_path / "untracked").write_text("x\n")
+    assert wan_gate.revision() == clean  # an untracked file is not a change to the code
+    (tmp_path / "a").write_text("b\n")
+    assert wan_gate.revision() == clean + "-dirty"
 
 
 def _echo_server() -> tuple[socket.socket, int]:
