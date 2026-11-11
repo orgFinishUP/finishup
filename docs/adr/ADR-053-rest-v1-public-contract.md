@@ -481,8 +481,9 @@ address that names none of the open kinds (`http://`, another scheme).
   for this server (input hidden): "); then `GET /v1/server` with it (a refused key adds nothing,
   `remote_auth_failed`); then the disclosure, the outside-read question (not for an official
   target) and the typed name; then, under the registry lock, the record, the consent, the key (the
-  platform credential store, else an owner-only file) and a credential generation. A server that
-  cannot be reached adds nothing: no consent can be given without its profile.
+  platform credential store when there is one and it takes the key, else an owner-only file, as
+  ADR-051 decision 7 says; `login` keeps a key the same way) and a credential generation. A server
+  that cannot be reached adds nothing: no consent can be given without its profile.
 - **`finishup server add official`**: decision 9.
 - **`finishup server login NAME [--key-file F]`** (shown in help): `https` and `local_port` only
   (`credential_not_applicable` otherwise); zero-network refusal first; the key is checked with the
@@ -562,6 +563,12 @@ advertises.
    offered only by a server whose owner enables it. Not built: the WAN timing gate and an upgrade
    over running gateways and helpers (layer 7); adding an HTTPS server from the terminal
    interface; OAuth credential sources; an official service (another repository).
+10. The macOS keychain check before a key is stored (a default keychain that exists and is
+    unlocked, read through Security.framework without user interaction; ADR-051 decision 7) ran
+    only against stand-ins on Linux. On a Mac it is unverified: that no keychain dialog appears
+    under a private `HOME`, that a locked keychain and a headless SSH session put the key in the
+    file, and that an unlocked login keychain still takes it (owner: layer 7, with the macOS run
+    of limit 6).
 
 ## Reverse states
 

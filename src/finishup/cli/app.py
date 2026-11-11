@@ -761,6 +761,28 @@ def _control_failure(
     )
 
 
+def _operation_failure(
+    error: ControlError,
+    *,
+    json_output: bool,
+    operation: str | None = None,
+    check_mode: object = None,
+) -> int:
+    """An operation command's control failure (ADR-052 recovery contract).
+
+    A refusal or end of a connection to a server elsewhere (``bootstrap.is_remote_refusal``)
+    answers a JSON caller (``--json``, or a stdout that is not a terminal, as the command's own
+    result would) with the same JSON body ``service status --json`` prints, on stdout, and the
+    same exit code and stderr lines. Every other control failure renders as on ``main``: its
+    lines on stderr only.
+    """
+
+    from finishup.cli.bootstrap import is_remote_refusal
+
+    as_json = is_remote_refusal(error) and (json_output or not sys.stdout.isatty())
+    return _control_failure(error, json_output=as_json, operation=operation, check_mode=check_mode)
+
+
 def control_failure(
     error: ControlError, *, json_output: bool = False, operation: str | None = None
 ) -> int:
@@ -989,7 +1011,9 @@ async def _call_workflow(
     except (ProtocolValueError, ValidationError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error, operation=method, check_mode=check_mode)
+        return _operation_failure(
+            error, json_output=json_output, operation=method, check_mode=check_mode
+        )
     except WorkspaceRefNotPortable as refusal:
         # Refused before anything was sent; the fixed message and directive name no path.
         _stderr(refusal.message)
@@ -2001,7 +2025,8 @@ def closure_prepare_command(
             _stderr(f"{reason}: {remediation}")
             _finish(2)
     except ControlError as error:
-        _finish(_control_failure(error))
+        # Its result is always JSON on stdout, so is a refusal by a server elsewhere.
+        _finish(_operation_failure(error, json_output=True))
 
 
 @app.command("closure-schema")
@@ -2136,7 +2161,7 @@ async def _call_support(
     except (OSError, ProtocolValueError, ValidationError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _operation_failure(error, json_output=json_output)
 
 
 _POLICY_CHANGE_METHODS: Final = frozenset({"privacy_propose_policy", "privacy_tighten_policy"})

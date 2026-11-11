@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -194,6 +195,18 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     # The start correlation matches either registration key (ADR-048).
     assert "^mcp__(?:finishup|yoetz)__start$" in hooks
     assert "resume|compact" in hooks
+
+
+def test_plugin_manifest_does_not_call_the_ledger_local() -> None:
+    """The ledger is the selected FinishUP server's, which may be on another machine (ADR-051)."""
+
+    manifest = json.loads(
+        render_plugin_tree(resource_source=_resources())[".codex-plugin/plugin.json"]
+    )
+    assert manifest["description"] == (
+        "FinishUP work ledger plugin: skill, MCP server, and lifecycle hooks. Automatic activation "
+        "is not claimed without exact-host capability evidence."
+    )
 
 
 def _observe_handler(parsed: Mapping[str, object], event: str) -> dict[str, object]:

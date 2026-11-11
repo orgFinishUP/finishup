@@ -733,7 +733,8 @@ def _sent_outcome(error: ControlError) -> ControlError:
 
 
 def _ask_helper_to_refresh(authorization: AuthorizationCheck | None) -> None:
-    """Leave the marker that asks a remote target's helper to fetch the profile again."""
+    """Leave the marker that asks a remote target's helper to fetch the profile again, naming
+    the profile revision this connection's hello named (the one the server no longer issues)."""
 
     grant = getattr(authorization, "grant", None)
     target_id = getattr(grant, "target_id", None)
@@ -743,7 +744,7 @@ def _ask_helper_to_refresh(authorization: AuthorizationCheck | None) -> None:
         from finishup.client.helper_status import request_profile_refresh
         from finishup.client.targets import target_root
 
-        request_profile_refresh(target_root(target_id))
+        request_profile_refresh(target_root(target_id), _server_profile_of(authorization))
     except Exception:  # noqa: BLE001 - a marker that cannot be left asks nothing
         return
 
@@ -2722,7 +2723,7 @@ async def _reach_remote(
         )
     except ControlError as error:
         if error.phase == "server_profile_changed":
-            request_profile_refresh(root)
+            request_profile_refresh(root, _server_profile_of(admission.authorization))
         raise
 
 

@@ -5084,10 +5084,14 @@ or the owner switched servers inside it. `privacy decide-policy` stays `server_h
 **Credentials.** `finishup.client.credentials.CredentialSource` reads, stores and deletes one
 target's credential, so a later OAuth source can replace the API key. `KeyringOrFileCredential` uses
 the OS credential store (service `yoetz.server-credential.v1`, account = `target_id`) and, where
-none is usable, the owner-only file store at `<target root>/config/credential`. `delete()` raises
-`credential_store_unavailable` only when the store the key is recorded in cannot be used (a recorded
-platform store that cannot be loaded now included); the other store is tidied best effort. `server
-remove` asks no store for an SSH target, and when the recorded platform store cannot be used it
+none is usable, the macOS keychain is missing or locked (read first without user interaction), or
+it refuses the write, the owner-only file store at `<target root>/config/credential`; `store()`
+raises `credential_store_unavailable` only when the file cannot keep the key either, and returns
+the location the caller records (ADR-051 decision 7).
+`delete()` raises `credential_store_unavailable` only when the store the key is recorded in cannot
+be used (a recorded platform store that cannot be loaded now included); the other store is tidied
+best effort. `server remove` asks no store for an SSH target, and when the recorded platform store
+cannot be used it
 still removes the target and names, on stderr, the entry left there (service and target id). The
 credential never appears in argv, the environment, `target.json`, a registration, a log, hook
 output, an MCP frame or JSON output. In layer 1 `server login` refuses `remote_kind_unavailable`,
@@ -5763,7 +5767,7 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 | `repository_egress_held` | layer 2: the shared gate's last step (ADR-052) refuses a connection to a server elsewhere, before anything from it is sent, for a repository whose own grant on this computer allows no network use and for which the owner made no current choice; a long-lived connection that is already open ends as `server_authorization_changed` once the repository becomes held | continuation `repository_send_decision_required`: ask the user once; only they run `finishup server repositories add` on the trusted console; on a decline run `finishup server repositories keep` and do not ask again; then repeat the request |
 | `repository_egress_kept` | layer 2: as above, for a repository the owner kept on this computer for that target | continuation `repository_kept_on_this_computer`: continue without FinishUP for that repository; never ask again |
 | `server_authorization_changed` | layer 2: a connection admitted to a server elsewhere ends because what it was authorized under changed — the selection no longer names its target, the target's record was replaced or removed, the credential generation changed, or (for an open connection, whatever the gate now refuses) this computer's policy or the repository's hold changed (ADR-052); FinishUP stopped sending over it and what the server received stays there | continuation `server_connection_renew`: a request already sent over that connection may be recorded there and is never resent (no replay across targets), so its outcome is unknown; later requests run under the current selection or name the refusal now in force |
-| `server_profile_changed` | layer 3: the consent step (ADR-052 decision 10): what the selected server elsewhere offers or needs (its profile, as last fetched) is wider than, or not comparable with, what the owner consented to; or its revision is another issuer's, its endpoint identity changed, or a consent record is missing, unreadable or inconsistent; or the server refused the revision a hello or request named (control error code `server_profile_changed`). Refused before that server did any work for it: by this client before anything was sent, or by the server before it keyed the claim, registered an agent or did the request's work; every other call already sent over a connection the server refused ends as `server_authorization_changed` (its outcome is unknown, it is never resent) | continuation `remote_reconsent`: only the owner agrees again, with `finishup server use NAME` in their own terminal; agents never do |
+| `server_profile_changed` | layer 3: the consent step (ADR-052 decision 10): what the selected server elsewhere offers or needs (its profile, as last fetched) is wider than, or not comparable with, what the owner consented to; or its revision is another issuer's, its endpoint identity changed, or a consent record is missing, unreadable or inconsistent; or the server refused the revision a hello or request named (control error code `server_profile_changed`). Refused before that server did any work for it: by this client before anything was sent, or by the server before it keyed the claim, registered an agent or did the request's work; every other call already sent over a connection the server refused ends as `server_authorization_changed` (its outcome is unknown, it is never resent) | continuation `remote_reconsent`: only the owner agrees again, with `finishup server use NAME` in their own terminal; agents never do. When the target's consent still admits the profile this computer holds (the server named a revision this computer has not fetched), `remote_profile_checking` instead: FinishUP is checking what changed, so the agent repeats the same request and follows the next refusal's continuation (`targets.profile_change_continuation`, read through `targets.remote_root_continuation`; attached by the client, never through a reason code) |
 | `server_level_unavailable` | layer 3: the server requires a level of use above the one the owner agreed to (never a silent upgrade); refused before anything was sent | continuation `server_level_decision_required`: only the owner decides (`finishup server use NAME` shows what it requires, or `finishup server use local`) |
 | `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored). From layer 4 the same for `https://…`, `--port N` and their records only (and any address that is not `ssh://`), and `server login` for every kind. From layer 5 only an address that names none of the open kinds (`http://`, another scheme) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): nothing was added, selected or sent; the owner runs `finishup server use local`, then the request is repeated |
 | `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: the owner runs `finishup server use local`, or, for an SSH server (layer 4), `finishup server use NAME` on their own terminal to agree to the current disclosure, then starts a new session; in layer 4 an HTTPS or port server could be authorized again only by a later release, and from layer 5 `finishup server use NAME` agrees again for it too (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
@@ -5777,7 +5781,11 @@ The remote connection phases ride as `phase` on a retryable `service_unavailable
 from layer 2, `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`
 (the six `AUTHORIZATION_REFUSAL_PHASES`, which a `phase` safe detail admits and every surface
 renders alike). A client that catches that `TargetError` from the binding
-helpers raises it as this phase, so every surface renders its directive. `remote_auth_failed` is
+helpers raises it as this phase, so every surface renders its directive. A CLI command that
+answers in JSON answers such a refusal on stdout with the body `service status --json` prints
+(`ok: false`, `public_code`, `reason`, `phase`, `retryable`, `correlation_id`, `recovery`), the
+operation commands included (`bootstrap.is_remote_refusal`, ADR-052 consequences); their other
+control failures print nothing on stdout, as on `main`. `remote_auth_failed` is
 a server that answered and refused this client's key, so no surface calls it unreachable or
 unanswered: `server status` and `server test` say "State: answered, key refused" with the fix for
 the target's kind. In layer 1 no remote server is ever reached, so these phases arise only as the
@@ -10480,7 +10488,10 @@ facade and are never MCP tools.
   state. `read_guidance` does not use the service client. On the policy route
   `build_bridge_runtime` reads the service configuration once at startup, through the same
   tolerant loader the logging sink uses, only to render the AI-powered review destination disclosure
-  (issue #479); it keeps no configuration state and the strict route never reads it.
+  (issue #479); it keeps no configuration state and the strict route never reads it. When the
+  bridge's root is a FinishUP server elsewhere (a remote target, ADR-051), or its target record
+  cannot be read, it reads no configuration: the disclosure says that server decides AI-powered
+  review under its own settings and that this computer's settings do not apply.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
   workflow tool names, `read_guidance`, `closure_prepare`, descriptions, and annotations, plus
   the `instructions` text.
@@ -10490,10 +10501,13 @@ facade and are never MCP tools.
   destination-disclosure amendment), which `mcp/semantic_destination.py` renders from validated
   configuration through a closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`,
   `DISCLOSURE_PREFIX`, `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
-  `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
-  `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
-  off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
-  configured fallback endpoint beside the primary; strict instructions never carry it. Shared values
+  `disclose_remote_destination()`, `read_semantic_destination_disclosure()`) and hands to
+  `server_instructions()` only as a `SemanticDestinationDisclosure`. Absent or invalid
+  configuration renders as unknown, an off-catalog endpoint profile as an unknown host, an unlisted
+  provider id as unlisted, and a configured fallback endpoint beside the primary; a remote root
+  renders as `remote`, naming the selected server by its target id and transport only (never a host
+  name), and an unreadable target record renders as `remote` without them; strict instructions
+  never carry it. Shared values
   are `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,

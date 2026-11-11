@@ -70,7 +70,9 @@ def _store_key(record: ServerTarget, root: Path, key: str) -> None:
 
 @pytest.fixture
 def lab(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Lab]:
-    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    # No platform credential store: the key goes to the owner-only file (injected, since
+    # keyring's process-wide cache may hold whatever an earlier test loaded).
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
     base = Path.home() / f".yz-helper-rest-{os.getpid()}-{id(object())}"
     base.mkdir(mode=0o700)
     try:
@@ -563,6 +565,48 @@ async def test_a_refused_revision_asks_for_the_profile_at_once(lab: _Lab, own: b
         assert fetched == [lab.record.target_id]
         lab.backend.revision = ServerProfileRevision(TEST_REVISION.issuer, 7, "sha256:" + "c" * 64)
         clock.now += 31.0
+        assert await _refused_relay(helper, own=own) == b""
+        await helper.step()
+        task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+        if task is not None:
+            await asyncio.wait_for(task, timeout=10)
+    finally:
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+    assert fetched == [lab.record.target_id] * 2
+
+
+@pytest.mark.parametrize("own", [True, False])
+async def test_a_refused_revision_the_cache_still_holds_is_fetched_within_seconds(
+    lab: _Lab, own: bool
+) -> None:
+    """A narrowing made a few seconds after the last fetch (macOS dogfood): the refused hello
+    named the revision this computer's cache still holds, so the cache is stale for certain and
+    the fetch waits 2 seconds after the last one, not the 30-second floor that bounds periodic
+    and repeated refreshes (ADR-052)."""
+
+    from finishup.client.server_profile import read_cached_profile
+
+    fetched: list[str] = []
+
+    async def refresher(record: ServerTarget) -> None:
+        fetched.append(record.target_id)
+
+    class Clock:
+        now = 1_000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    cached = read_cached_profile(lab.root)
+    assert cached is not None and cached.profile.revision == TEST_REVISION
+    clock = Clock()
+    helper = Helper(lab.root, lab.record, refresher=refresher, clock=clock)
+    try:
+        await helper._run_refresh()  # pyright: ignore[reportPrivateUsage]  # the start's fetch
+        assert fetched == [lab.record.target_id]
+        lab.backend.revision = ServerProfileRevision(TEST_REVISION.issuer, 7, "sha256:" + "c" * 64)
+        clock.now += 3.0
         assert await _refused_relay(helper, own=own) == b""
         await helper.step()
         task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
