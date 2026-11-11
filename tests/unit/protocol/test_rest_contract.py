@@ -150,11 +150,28 @@ def test_the_revision_header_round_trips_and_refuses_anything_else() -> None:
             parse_revision_header(bad)
 
 
-def test_api_keys_have_one_spelling_and_never_echo_their_secret() -> None:
+@pytest.mark.parametrize("secret", ["random", "underscored"])
+def test_api_keys_have_one_spelling_and_never_echo_their_secret(
+    secret: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if secret == "underscored":
+        # A base64url secret may hold "_": the whole secret, not its first fragment ("k" here,
+        # which "ApiKeyToken" spells), is what must never be echoed (a flake seen in CI).
+        import base64
+        import secrets
+
+        fixed = base64.urlsafe_b64decode("k_" + "A" * 41 + "=")
+        real = secrets.token_bytes
+
+        def token_bytes(count: int | None = None) -> bytes:
+            # The secret only (32 bytes); the key id's own bytes stay random.
+            return fixed if count == len(fixed) else real(count)
+
+        monkeypatch.setattr(secrets, "token_bytes", token_bytes)
     token, text = mint_api_key()
     assert text.startswith("fuk_") and parse_api_key(text) == token
     assert "secret" not in repr(token) or "<redacted>" in repr(token)
-    assert text.split("_")[2] not in repr(token)
+    assert text.split("_", 2)[2] not in repr(token)
     assert parse_api_key(_CASE["headers"]["api_key"]["valid"]) is not None
     for bad in _CASE["headers"]["api_key"]["rejected"]:
         assert parse_api_key(bad) is None
