@@ -5713,7 +5713,11 @@ The remote connection phases ride as `phase` on a retryable `service_unavailable
 from layer 2, `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`
 (the six `AUTHORIZATION_REFUSAL_PHASES`, which a `phase` safe detail admits and every surface
 renders alike). A client that catches that `TargetError` from the binding
-helpers raises it as this phase, so every surface renders its directive. `remote_auth_failed` is
+helpers raises it as this phase, so every surface renders its directive. A CLI command that
+answers in JSON answers such a refusal on stdout with the body `service status --json` prints
+(`ok: false`, `public_code`, `reason`, `phase`, `retryable`, `correlation_id`, `recovery`), the
+operation commands included (`bootstrap.is_remote_refusal`, ADR-052 consequences); their other
+control failures print nothing on stdout, as on `main`. `remote_auth_failed` is
 a server that answered and refused this client's key, so no surface calls it unreachable or
 unanswered: `server status` and `server test` say "State: answered, key refused" with the fix for
 the target's kind. In layer 1 no remote server is ever reached, so these phases arise only as the

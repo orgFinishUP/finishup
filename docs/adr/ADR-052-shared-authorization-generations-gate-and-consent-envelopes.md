@@ -249,4 +249,10 @@ Every remote path a later layer opens inherits the gate, the generation and the 
 through them (or carry `ConnectionAuthorization` itself, FR-2). The protocol registry gains one
 reason code and one continuation; `REMOTE_CONNECTION_PHASES` and the admitted `phase` safe details
 (`AUTHORIZATION_REFUSAL_PHASES`) gain the hold and the changed authorization, and every surface
-renders all six phases alike.
+renders all six phases alike. A command that answers in JSON (`--json`, or a stdout that is not a
+terminal) answers such a refusal in JSON too: the operation commands (`start`, `publish-work`,
+`check`, `respond`, `status`, `receipt`, the support commands and `closure prepare`) print, on
+stdout, the same body `service status --json` prints (`ok`, `public_code`, `reason`, `phase`,
+`retryable`, `correlation_id`, `recovery`), with the same exit code and stderr lines
+(`bootstrap.is_remote_refusal`, added after the macOS dogfood, 2026-11-11). Any other control
+failure of an operation command still prints nothing on stdout, as on `main`.
