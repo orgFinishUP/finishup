@@ -765,10 +765,20 @@ class Helper:
     def stop_reason(self) -> str:
         return self._stop_reason
 
-    def _write_status(self, phase: HelperPhase, reason: str | None) -> None:
+    def _write_status(self, phase: HelperPhase, reason: str | None, *, fresh: bool = False) -> None:
+        """Record ``phase`` and ``reason``; an unchanged one is not written again unless ``fresh``.
+
+        ``fresh`` (a client's own relay refused): written again even when unchanged, with its own
+        correlation id, so the client that waits on this attempt sees a record made after it began
+        (``service.client._helper_failure``) and names the refusal at once, instead of waiting out
+        its deadline while a background agent's earlier refusal of the same reason stands. The
+        generation moves only when the phase or the reason changes (``new_status``).
+        """
+
         previous = self._status
         if (
-            previous is not None
+            not fresh
+            and previous is not None
             and previous.started_at == self._started_at
             and previous.pid == os.getpid()
             and (previous.phase, previous.reason) == (phase, reason)
@@ -796,6 +806,14 @@ class Helper:
             self.request_stop("target_removed")
             return
         self._status = status
+
+    def _name_refusal_again(self) -> None:
+        """A client's relay refused under the helper's standing refusal: record it again for that
+        client (``_write_status(fresh=True)``), so it is named at once, not after a deadline."""
+
+        status = self._status
+        if status is not None and status.phase == "unavailable" and status.reason is not None:
+            self._write_status("unavailable", status.reason, fresh=True)
 
     # -- admission (FR-3) -----------------------------------------------------------------------
 
@@ -1028,6 +1046,8 @@ class Helper:
                 return
             admission = self._admitted()
             if admission is None:
+                if not own:
+                    self._name_refusal_again()
                 return
             # This relay's own repository: its hold, by the repository's key, withholds the
             # relay's frames and its REST stream's own requests (design v2 section 8.3).
@@ -1040,7 +1060,15 @@ class Helper:
                     bound=lambda: self._relay_refusal(admission, repository),
                 )
             except UpstreamUnavailable as error:
-                self._write_status("unavailable", error.reason)
+                # A client waits on this attempt's own record; a background agent's refusal of the
+                # same reason may already stand (defect B, dogfood 2026-11-11).
+                self._write_status("unavailable", error.reason, fresh=not own)
+                if error.reason == _PROFILE_CHANGED:
+                    # A REST server refused the consented revision: the stream ended unanswered,
+                    # so no client (the helper's own agents included) sees the typed refusal an
+                    # SSH relay passes on. Fetch the profile again now (at most every 30 s) so the
+                    # consent reads what changed (defect B).
+                    self._profile_changed()
                 return
             self._last_upstream_use = self._clock()
             self._write_status("ready", None)

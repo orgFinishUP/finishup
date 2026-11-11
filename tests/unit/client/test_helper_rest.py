@@ -501,3 +501,74 @@ async def test_the_refresh_asks_the_stop_epoch_before_each_request(lab: _Lab) ->
     assert may_send()
     assert helper_status._move_helper_epoch(lab.root)  # pyright: ignore[reportPrivateUsage]
     assert not may_send()
+
+
+async def _refused_relay(helper: Helper, *, own: bool) -> bytes:
+    client, local = _pair()
+    relay = asyncio.create_task(helper._serve_local(local, own=own))  # pyright: ignore[reportPrivateUsage]
+    try:
+        async with asyncio.timeout(10):
+            await client.send_all(hello_frame(server_profile=TEST_REVISION))
+            answered = await client.receive(65_536)
+            await relay
+    finally:
+        await client.aclose()
+    return answered
+
+
+async def test_a_refused_revision_is_named_to_each_client_after_the_agents_refusal(
+    lab: _Lab,
+) -> None:
+    """Defect B (dogfood, 2026-11-11): once the helper's background agent was refused the old
+    revision, a client's relay refused the same way was not named to the client, which retried
+    until its deadline and read ``remote_unreachable``; it is named ``server_profile_changed``."""
+
+    from finishup.service.client import _helper_failure  # pyright: ignore[reportPrivateUsage]
+
+    lab.backend.revision = ServerProfileRevision(TEST_REVISION.issuer, 7, "sha256:" + "c" * 64)
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh)
+    try:
+        assert await _refused_relay(helper, own=True) == b""
+        before = read_helper_status(lab.root)
+        assert await _refused_relay(helper, own=False) == b""
+        named = _helper_failure(lab.root, before)
+    finally:
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+    assert named is not None and named.phase == "server_profile_changed"
+    assert lab.backend.calls == []
+
+
+@pytest.mark.parametrize("own", [True, False])
+async def test_a_refused_revision_asks_for_the_profile_at_once(lab: _Lab, own: bool) -> None:
+    """Defect B: over HTTPS the refusal of the old revision ends the relayed stream unanswered, so
+    the helper's agent never saw the typed ``server_profile_changed`` an SSH relay passes on, and
+    the profile was fetched again only at the ten-minute refresh: the consent never read
+    ``changed``. The helper itself asks for the refresh (still at most every 30 s)."""
+
+    fetched: list[str] = []
+
+    async def refresher(record: ServerTarget) -> None:
+        fetched.append(record.target_id)
+
+    class Clock:
+        now = 1_000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = Clock()
+    helper = Helper(lab.root, lab.record, refresher=refresher, clock=clock)
+    try:
+        await helper._run_refresh()  # pyright: ignore[reportPrivateUsage]  # the start's fetch
+        assert fetched == [lab.record.target_id]
+        lab.backend.revision = ServerProfileRevision(TEST_REVISION.issuer, 7, "sha256:" + "c" * 64)
+        clock.now += 31.0
+        assert await _refused_relay(helper, own=own) == b""
+        await helper.step()
+        task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+        if task is not None:
+            await asyncio.wait_for(task, timeout=10)
+    finally:
+        await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+    assert fetched == [lab.record.target_id] * 2
