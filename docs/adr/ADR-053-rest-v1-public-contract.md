@@ -302,8 +302,9 @@ free one (`rest_listen_invalid`); an address that cannot be bound is `rest_liste
 another `--edge` is `rest_edge_invalid`. Open connections are capped at 256 in all and 64 per peer
 address, shrunk to a quarter of the process's descriptor budget, and a connection over a cap is
 closed before TLS; a connection completes TLS and a request head within 10 seconds and a body
-within 120 seconds (a long-poll being answered has no such bound). No access log, no `Server` or
-`Date` header, no trust in forwarded-for headers.
+within 120 seconds (a long-poll being answered has no such bound); an idle keep-alive connection
+is held 30 seconds for the client's next request. No access log, no `Server` or `Date` header, no
+trust in forwarded-for headers.
 
 **The audit.** `<log dir>/rest-audit.jsonl`: owner-only canonical JSON lines of closed tokens (the
 time, the edge, the event, the route, the status or refusal reason, the key id once a key
@@ -355,6 +356,10 @@ fetches.
   (`remote_incompatible`), so the hop goes only where the record says and no credential is carried
   elsewhere.
 - **Bounded answers.** A body past the largest control frame plus 64 KiB is refused unread.
+- **Warm connections.** An idle connection is kept 25 seconds for the next request, under the
+  edge's own 30 (a reused connection is never one the server already closed), so the helper's
+  relay answers a hook after a pause without a new TCP and TLS connection first (layer 7's WAN
+  gate: httpx's 5 seconds added two round trips to every hook after a pause).
 - **The key** is read off the event loop, one read at a time (A-KEYRING-LOOP), on a daemon thread
   of its own (never the loop's default executor, so a blocked read holds neither the loop's
   shutdown nor the process's exit), from where the record says it lives now (A-CRED-STALE); a store
