@@ -139,7 +139,9 @@ def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> _Source:
         return stand_in.fetch(record), "fuk_0123456789ab_" + "A" * 43
 
     monkeypatch.setattr(server_cli, "_discover_rest", discover_rest)
-    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    # No platform credential store: the key goes to the owner-only file (injected, since
+    # keyring's process-wide cache may hold whatever an earlier test loaded).
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
     return stand_in
 
 

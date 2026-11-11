@@ -112,7 +112,9 @@ class _Server:
 
 @pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Server]:
-    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    # No platform credential store: the key goes to the owner-only file (injected, since
+    # keyring's process-wide cache may hold whatever an earlier test loaded).
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
     base = Path.home() / f".yz-https-add-{os.getpid()}-{id(object())}"
     base.mkdir(mode=0o700)
     try:

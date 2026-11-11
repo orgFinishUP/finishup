@@ -12,7 +12,39 @@ from builders import clock as clock_builder_module
 from builders import events as event_builder_module
 from builders import ids as id_builder_module
 from builders import operations as operation_builder_module
+from credential_store_guard import cached_platform_stores, forget_cached_backend, pin_fail_backend
 from fixture_loader import FixtureLoader, build_fixture_loader
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Pin keyring to its fail backend before any test can load a credential store.
+
+    Set in the environment, so it holds in this process and in every child process that inherits
+    it: no test reaches the developer's platform credential store (``credential_store_guard``).
+    """
+
+    del config
+    pin_fail_backend()
+
+
+@pytest.fixture(autouse=True)
+def _no_platform_credential_store() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Fail the test that left a platform credential store in keyring's process-wide cache.
+
+    keyring caches the first backend it loads, so a test that discovered one would hand it to
+    every later test in the process (and, on macOS, store test keys in the login keychain). The
+    cache is dropped before failing, so only the test that loaded it fails.
+    """
+
+    yield
+    found = cached_platform_stores()
+    if found:
+        forget_cached_backend()
+        pytest.fail(
+            f"this test loaded a platform credential store ({', '.join(found)}); inject a "
+            "stand-in instead (see tests/credential_store_guard.py)",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)

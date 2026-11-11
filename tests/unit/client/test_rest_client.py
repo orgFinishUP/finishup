@@ -190,7 +190,9 @@ def test_the_observed_identity_is_the_pin_the_ca_digest_or_the_system_store(
 async def test_the_key_is_read_where_the_record_says_now_and_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    # No platform credential store: the key goes to the owner-only file (injected, since
+    # keyring's process-wide cache may hold whatever an earlier test loaded).
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
     with ambient_home(monkeypatch):
         with registry_lock():
             record, root = new_remote_target("later", "https", base_url="https://d.example")
