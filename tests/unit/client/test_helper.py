@@ -1278,6 +1278,14 @@ def test_a_consent_changed_under_a_running_helper_opens_its_agents_again_under_i
             opened[0].label,
             f"{consent.level}/2026-11-11T09:00:00.000Z",
         ]
+        from finishup.client.authorization import consent_digest
+        from finishup.client.helper_status import read_followed_consent
+
+        moved = targets.read_target(root)
+        assert moved is not None
+        # It says it follows the new consent (``server use`` waits for that), and by then an
+        # agent that declared less is closed.
+        assert read_followed_consent(root) == consent_digest(moved)
         if change == "level_l2":
             assert closed == [opened[0].label]  # closed at once
         else:

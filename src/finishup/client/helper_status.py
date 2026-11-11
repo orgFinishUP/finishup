@@ -79,6 +79,8 @@ __all__ = [
     "CONNECTION_STYLES",
     "CONNECTION_STYLE_NAME",
     "CONNECTION_STYLE_SCHEMA",
+    "HELPER_CONSENT_NAME",
+    "HELPER_CONSENT_SCHEMA",
     "HELPER_EPOCH_NAME",
     "HELPER_EPOCH_SCHEMA",
     "HELPER_IDLE_SECONDS",
@@ -103,6 +105,7 @@ __all__ = [
     "new_status",
     "now_stamp",
     "read_connection_style",
+    "read_followed_consent",
     "read_helper_epoch",
     "read_helper_status",
     "read_relay_binding",
@@ -115,6 +118,7 @@ __all__ = [
     "supersede_helper",
     "take_profile_refresh_request",
     "write_connection_style",
+    "write_followed_consent",
     "write_helper_status",
 ]
 
@@ -124,6 +128,10 @@ HELPER_LOCK_NAME: Final = "helper.lock"
 CONNECTION_STYLE_SCHEMA: Final = "yoetz.connection-style/1"
 CONNECTION_STYLE_NAME: Final = "connection-style.json"
 PROFILE_REFRESH_MARKER: Final = "profile-refresh-requested"
+# ``state/helper-consent`` (``yoetz.helper-consent/1``): the consent the running helper's agents
+# were opened under (``client.authorization.consent_digest``), written once it followed a change.
+HELPER_CONSENT_SCHEMA: Final = "yoetz.helper-consent/1"
+HELPER_CONSENT_NAME: Final = "helper-consent"
 HELPER_EPOCH_SCHEMA: Final = "yoetz.helper-epoch/1"
 HELPER_EPOCH_NAME: Final = "helper-epoch"
 _EPOCH_FENCE_NAME: Final = "helper-epoch.lock"
@@ -399,6 +407,42 @@ def request_profile_refresh(root: Path) -> None:
         os.close(descriptor)
     except (OSError, PathSafetyError):
         return
+
+
+def write_followed_consent(root: Path, digest: str) -> None:
+    """Record that the helper's background agents are opened under the consent ``digest`` (any
+    agent opened under an earlier one that declared less is closed): what ``server use`` waits
+    for after a new level. Never raises."""
+
+    payload = {"schema": HELPER_CONSENT_SCHEMA, "consent_digest": digest}
+    try:
+        _write_owner_only(
+            root / "state" / HELPER_CONSENT_NAME,
+            canonical_encode(cast(JsonValue, payload)) + b"\n",
+        )
+    except (OSError, ValueError):
+        return
+
+
+def read_followed_consent(root: Path) -> str | None:
+    """The consent digest the running helper last said its agents follow; ``None`` when none
+    was recorded or the record cannot be read."""
+
+    data = _read_owner_only(root / "state" / HELPER_CONSENT_NAME)
+    if data is None or not data.endswith(b"\n"):
+        return None
+    try:
+        parsed = strict_json_parse(data[:-1])
+    except ValueError:
+        return None
+    if (
+        type(parsed) is not dict
+        or set(cast(dict[str, JsonValue], parsed)) != {"schema", "consent_digest"}
+        or cast(dict[str, JsonValue], parsed)["schema"] != HELPER_CONSENT_SCHEMA
+    ):
+        return None
+    digest = cast(dict[str, JsonValue], parsed)["consent_digest"]
+    return digest if type(digest) is str else None
 
 
 def relay_binding(repository_key: str) -> bytes:

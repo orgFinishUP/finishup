@@ -996,21 +996,38 @@ def test_a_target_authorized_again_before_the_connection_is_refused_and_nothing_
     assert "deleted" not in result.stdout.replace("not forgotten", "")
 
 
-@pytest.mark.parametrize(("before", "after"), [("L1", "L2"), ("L2", "L1"), ("L1", "L1")])
-def test_server_use_that_changes_the_level_stops_that_servers_helper(
-    remote: targets.ServerTarget, monkeypatch: pytest.MonkeyPatch, before: str, after: str
+@pytest.mark.parametrize(
+    ("before", "after", "helper"),
+    [
+        ("L1", "L2", "follows"),
+        ("L2", "L1", "follows"),
+        ("L1", "L2", "silent"),
+        ("L1", "L2", "none"),
+        ("L1", "L1", "silent"),
+    ],
+)
+def test_server_use_that_changes_the_level_ends_once_that_servers_helper_follows_it(
+    remote: targets.ServerTarget,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    after: str,
+    helper: str,
 ) -> None:
     """Defect A, re-review (Codex, R2-1): a helper's background agent declares the code-sync
     operations only when it opens, and the helper follows a changed consent only at its next
     tick, so a task sent right after ``server use NAME --level L2`` could meet the L1 agent and
-    be refused the sync at once. A level change now stops that server's helper before the
-    command ends (as ``server set --style`` does); the next client starts one under the new
-    level. Confirming the same level stops nothing."""
+    be refused the sync at once. A level change now waits until that server's running helper
+    says it follows the new consent (every agent that declared less closed); one that does not
+    say so in time is stopped instead; with no helper nothing is waited for. Confirming the same
+    level waits for nothing."""
 
     from types import SimpleNamespace
 
     from tests.builders.server_profiles import consent_to
     from tests.builders.server_targets import remote_runtime
+
+    from finishup.client import helper_status
+    from finishup.client.authorization import consent_digest
 
     def at(level: str) -> targets.ServerTarget:
         with release_l2():
@@ -1023,12 +1040,23 @@ def test_server_use_that_changes_the_level_stops_that_servers_helper(
 
     at(before)
     runtime = remote_runtime(monkeypatch)
+    root = targets.target_root(remote.target_id)
+    waited: list[float] = []
 
     def use(_name: str, **_options: object) -> object:
-        return SimpleNamespace(record=at(after), left_lines=tuple, left_open=False)
+        record = at(after)
+        if helper == "follows":
+            helper_status.write_followed_consent(root, consent_digest(record))
+        return SimpleNamespace(record=record, left_lines=tuple, left_open=False)
 
     monkeypatch.setattr(server_cli, "use_target", use)
+    monkeypatch.setattr(
+        helper_status, "helper_holder", lambda _root: None if helper == "none" else object()
+    )
+    monkeypatch.setattr(server_cli, "_FOLLOW_SECONDS", 0.3)
+    monkeypatch.setattr(server_cli.time, "sleep", waited.append)
     result = CliRunner().invoke(server_cli.server_app, ["use", "lab", "--level", after])
     assert result.exit_code == 0, result.output
-    root = targets.target_root(remote.target_id)
-    assert runtime.stops == ([] if before == after else [root])
+    stopped = before != after and helper == "silent"
+    assert runtime.stops == ([root] if stopped else [])
+    assert bool(waited) is stopped

@@ -45,6 +45,7 @@ import contextlib
 import functools
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -2076,7 +2077,7 @@ def server_use(
     if record is not None:
         _say_repository_hold(record)
         if before is not None and before != _level_key(record):
-            _stop_helper_for_level(record)
+            _helper_follows_level(record)
     _warn_open_sessions()
 
 
@@ -2099,16 +2100,49 @@ def _consented_level(name: str) -> tuple[str, str] | None:
         return None
 
 
-def _stop_helper_for_level(record: ServerTarget) -> None:
-    """The owner chose another level for a server: stop its helper before this command ends.
+# How long ``server use`` waits for a running helper to follow a new level before it stops it.
+_FOLLOW_SECONDS: Final = 5.0
+_FOLLOW_POLL_SECONDS: Final = 0.1
+
+
+def _helper_follows_level(record: ServerTarget) -> None:
+    """The owner chose another level for a server: this command ends once its helper follows it.
 
     A background agent declares the code-sync operations only when it opens, under the level of
     its time; one opened before would still be the one the server asks, and at L1 it refuses the
-    sync at once. Stopped now (its agents closed, as ``server set --style`` does), the next
-    client starts a helper under the new level; the server waits for its agent meanwhile (defect
-    A of the 2026-11-11 dogfood; a helper that did not stop still follows the consent itself). A
-    stop that does not finish in time is named, with its fix.
+    sync at once, so a task sent right after this command would be read from this computer for
+    its whole life (defect A of the 2026-11-11 dogfood). A running helper follows the consent at
+    its next tick and then says so (``helper_status.read_followed_consent``), once every agent
+    that declared less is closed; this waits for that, a few seconds at most. A helper that does
+    not say so in time is stopped instead (``_stop_helper_for_level``), and with no helper
+    running the next client starts one under the new level.
     """
+
+    from finishup.client.authorization import consent_digest
+    from finishup.client.helper_status import helper_holder, read_followed_consent
+
+    root = target_root(record.target_id)
+    try:
+        current = read_target(root)
+    except TargetError:
+        current = None
+    if current is None:
+        return
+    wanted = consent_digest(current)
+    deadline = time.monotonic() + _FOLLOW_SECONDS
+    while helper_holder(root) is not None:
+        if read_followed_consent(root) == wanted:
+            return
+        if time.monotonic() >= deadline:
+            _stop_helper_for_level(record)
+            return
+        time.sleep(_FOLLOW_POLL_SECONDS)
+
+
+def _stop_helper_for_level(record: ServerTarget) -> None:
+    """Stop a helper that did not follow a new level in time (``_helper_follows_level``): its
+    agents closed, as ``server set --style`` does; the next client starts one under the new
+    level. A stop that does not finish in time is named, with its fix."""
 
     try:
         runtime_for(record.kind).stop(target_root(record.target_id))
