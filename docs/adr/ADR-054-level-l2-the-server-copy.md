@@ -231,7 +231,9 @@ an agent that declares it, so the server never asks them, and it never replays e
 connection. The declaration is made when the agent opens (defect A of the 2026-11-11 dogfood), so
 a running helper follows the consent (`client.helper.Helper._follow`): it opens each background
 agent again under the record as it is now, then records which consent its agents follow
-(`state/helper-consent`, `yoetz.helper-consent/1`). `server use NAME --level` that changes the
+(`state/helper-consent`, `yoetz.helper-consent/1`): after a new level, only once each old agent is
+closed and its relay ended (a relayed REST stream unregisters its agent at the server as it
+ends), within 3 seconds, or not at all. `server use NAME --level` that changes the
 level ends only once that server's running helper has recorded the new consent, a few seconds at
 most; a helper that does not is stopped instead (its agents closed, as `server set --style` does),
 and with none running the next client starts one under the new level. A workspace
