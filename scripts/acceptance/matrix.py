@@ -12,10 +12,13 @@ Cells (``list`` prints them): ``local`` and ``named-local`` (L0 over the unix so
 conformance kit against a stand-in server (the official service is built in another repository;
 ``server add official`` names none in this release). Each remote cell adds a target (the
 handshake and the consent on a pseudo-terminal), uses it, runs a claim-bound start, publish,
-check and receipt, proves the repository hold and zero network refuse before any dial (the dial
-counter of a pass-through relay in front of the server, the helper's lock, the export database),
-changes the server's profile and agrees again, logs out and in (HTTPS and port), forgets the copy
-(L2), disconnects and removes. Every step is recorded with its verdict in ``<out>/<cell>.json``
+check and receipt, chooses L2 under the warm helper and back (an L1 cell: the next task syncs
+with the same helper process, then nothing does), proves the repository hold and zero network
+refuse before any dial (the dial counter of a pass-through relay in front of the server, the
+helper's lock, the export database), warms the helper with a task and changes the server's
+profile (the first call is refused typed within 10 s) and agrees again, logs out and in (HTTPS and
+port), forgets the copy (L2), disconnects and removes. The two "warm helper" paths are the
+defects the 2026-11-11 dogfood found and the earlier matrix missed. Every step is recorded with its verdict in ``<out>/<cell>.json``
 and a transcript excerpt in ``<out>/<cell>.md``. Exit status 1 when any step failed.
 
 See ``harness.py`` for what a run touches (one fresh 0700 folder beneath the home) and how it stops
@@ -426,10 +429,13 @@ def sent_between(before: dict[str, int], after: dict[str, int]) -> dict[str, int
 def changed_profile(world: World, report: Report, cell: Cell) -> None:
     client, server = world.client, world.server(cell)
     restarted = server.new_profile_revision()
+    began = time.monotonic()
     first = client.fu("service", "status", "--json", timeout=120)
+    took = time.monotonic() - began
     # The first refusal is the one the server named (the hello's answer); every surface names it
-    # typed, with the owner's way back. The ssh-direct cells once printed a traceback here.
-    seen = typed_refusal(first, "server_profile_changed", "remote_reconsent")
+    # typed, with the owner's way back, at once (a warm HTTPS relay helper once made it wait out
+    # a 30 s deadline and read remote_unreachable). The ssh-direct cells once printed a traceback.
+    seen = typed_refusal(first, "server_profile_changed", "remote_reconsent") and took < 10.0
 
     def consent_changed() -> bool:
         document = json_of(client.fu("server", "status", cell.target, "--json").stdout)
@@ -448,7 +454,8 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
         "profile changed → refused",
         restarted and changed and seen and refused and quiet,
         f"server restarted with a new revision: {restarted}; first call exit {first.returncode} "
-        f"(typed server_profile_changed, remote_reconsent: {seen}); consent state changed: "
+        f"in {took:.1f} s (typed server_profile_changed, remote_reconsent, under 10 s: {seen}); "
+        "consent state changed: "
         f"{changed}; next call refused typed: {refused}; it sent nothing: {quiet} "
         f"({json.dumps(sent, sort_keys=True)})",
         shown(world, first) + "\n\n" + shown(world, blocked),
@@ -463,6 +470,77 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
         f"server use exit {again.exit_code}; next call exit {after.returncode}",
         world.run.redact(excerpt(again.transcript.replace("\r", ""), lines=30)),
     )
+
+
+def warm_helper(world: World, report: Report, cell: Cell) -> None:
+    """Before the profile changes, a task's start warms the helper: its workspace is registered
+    and the helper's background agent is connected (defect B of the 2026-11-11 dogfood: a warm
+    HTTPS relay helper read a changed profile as ``remote_unreachable`` after 31 s; the hold and
+    zero-network steps before this one leave the helper stopped, so the matrix never saw it)."""
+
+    client = world.client
+    root = client.target_root(cell.target)
+    task, result = start_task(world, f"Acceptance {cell.name} warm")
+    running = wait_until(lambda: helper_pid(root) is not None, seconds=30, interval=0.3)
+    report.add(
+        "helper warmed by a task",
+        task.ok and running,
+        f"start exit {result.returncode}; helper running: {running}",
+        shown(world, result),
+    )
+
+
+def level_switch(world: World, report: Report, cell: Cell) -> bool:
+    """L2 chosen for a server in use at L1 while its helper runs takes effect at once (defect A of
+    the 2026-11-11 dogfood: the helper's L1 agent stayed the one the server asked, so every sync
+    was refused ``operation_not_declared`` until it restarted; the L2 cells consent at ``add``, so
+    the matrix never saw it). The same helper process serves the next task's sync; back at L1 its
+    agent declares nothing again and the copy is forgotten. Whether the copy was made."""
+
+    client, server = world.client, world.server(cell)
+    root = client.target_root(cell.target)
+    helper = helper_pid(root)
+    up = client.ceremony(
+        ["server", "use", cell.target, "--level", "L2", "--retention", "days:7"],
+        [Reply(r"Type the target name", cell.target, secret=False)],
+    )
+    since = now_rfc3339()
+    copies = server.copy_records()
+    task, result = start_task(world, f"Acceptance {cell.name} after L2")
+    events = server.copy_events(since)
+    same = helper is not None and helper_pid(root) == helper
+    synced = server.copy_records() > copies and any(
+        event.startswith("code_copy_sync_synced") for event in events
+    )
+    made = report.add(
+        "L1 → L2 under a warm helper syncs",
+        up.exit_code == 0 and task.ok and same and synced,
+        f"server use --level L2 exit {up.exit_code}; start exit {result.returncode}; same helper "
+        f"process: {same}; server copy records {copies} → {server.copy_records()}; copy events: "
+        f"{', '.join(events) or 'none'}",
+        world.run.redact(excerpt(up.transcript.replace("\r", ""), lines=30)),
+    )
+    forgot = client.fu("server", "code", "forget", timeout=180)
+    down = client.ceremony(
+        ["server", "use", cell.target, "--level", "L1"],
+        [Reply(r"Type the target name", cell.target, secret=False)],
+    )
+    since = now_rfc3339()
+    task, result = start_task(world, f"Acceptance {cell.name} back at L1")
+    events = server.copy_events(since)
+    report.add(
+        "back to L1: nothing synced",
+        forgot.returncode == 0
+        and down.exit_code == 0
+        and task.ok
+        and server.copy_records() == 0
+        and not any(event.startswith("code_copy_sync_synced") for event in events),
+        f"forget exit {forgot.returncode}; server use --level L1 exit {down.exit_code}; start exit "
+        f"{result.returncode}; server copy records {server.copy_records()}; copy events: "
+        f"{', '.join(events) or 'none'}",
+        shown(world, forgot),
+    )
+    return made
 
 
 def logout_login(world: World, report: Report, cell: Cell) -> None:
@@ -606,6 +684,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
     )
     since = now_rfc3339()
     task = task_round(world, report, cell, f"Acceptance {cell.name}")
+    switched = cell.level == "L1" and task is not None and level_switch(world, report, cell)
     if cell.level == "L2":
         events = server.copy_events(since)
         listed = client.fu("server", "code", "list")
@@ -636,6 +715,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
         "0",
         ZERO_CODE,
     )
+    warm_helper(world, report, cell)
     changed_profile(world, report, cell)
     if cell.kind in {"https", "port"}:
         logout_login(world, report, cell)
@@ -650,7 +730,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
         shown(world, result),
     )
     client.fu("server", "use", "local")
-    removal = ["--forget-copies"] if cell.level == "L2" else []
+    removal = ["--forget-copies"] if cell.level == "L2" or switched else []
     result = client.fu("server", "remove", name, *removal, timeout=180)
     report.add(
         "remove",
