@@ -426,10 +426,19 @@ def sent_between(before: dict[str, int], after: dict[str, int]) -> dict[str, int
     return {key: after.get(key, 0) - before.get(key, 0) for key in sorted({*before, *after})}
 
 
-def changed_profile(world: World, report: Report, cell: Cell, warm: int | None = None) -> None:
+def changed_profile(
+    world: World, report: Report, cell: Cell, warm: tuple[int | None, str] | None = None
+) -> None:
     client, server = world.client, world.server(cell)
-    # The helper the warm step proved serving is the one the change meets (defect B's path).
-    same = warm is None or helper_pid(client.target_root(cell.target)) == warm
+    # The helper the warm step proved serving is the one the change meets, with an agent still
+    # registered at the server right before the restart (defect B's path).
+    same = True
+    if warm is not None:
+        registered, unregistered = agent_events(server, warm[1])
+        same = (
+            helper_pid(client.target_root(cell.target)) == warm[0]
+            and registered - unregistered >= 1
+        )
     restarted = server.new_profile_revision() and same
     began = time.monotonic()
     first = client.fu("service", "status", "--json", timeout=120)
@@ -501,7 +510,7 @@ def agent_events(server: Server, since: str) -> tuple[int, int]:
     return registered, unregistered
 
 
-def warm_helper(world: World, report: Report, cell: Cell) -> int | None:
+def warm_helper(world: World, report: Report, cell: Cell) -> tuple[int | None, str]:
     """Before the profile changes, a task's start warms the helper: its workspace is registered,
     the helper's background agent is connected to the server and its first profile fetch is done
     (defect B of the 2026-11-11 dogfood: a warm HTTPS relay helper read a changed profile as
@@ -509,7 +518,9 @@ def warm_helper(world: World, report: Report, cell: Cell) -> int | None:
     helper stopped, so the matrix never saw it). Warm means, at the server, an agent still
     registered once the start's own one left (the helper's background agent), and, here, the
     profile cache written since the step began (a fetch landing after the restart would let the
-    consent read changed before the first call and skip the warm path). The helper's pid."""
+    consent read changed before the first call and skip the warm path). The server's events name
+    no agent's role, so which agent survived is inferred, and checked again right before the
+    restart (``changed_profile``). The helper's pid and when the step began."""
 
     client, server = world.client, world.server(cell)
     root = client.target_root(cell.target)
@@ -541,7 +552,7 @@ def warm_helper(world: World, report: Report, cell: Cell) -> int | None:
         f"registered, {unregistered} unregistered); first profile fetch done: {refreshed}",
         shown(world, result),
     )
-    return pid
+    return pid, since
 
 
 def level_switch(world: World, report: Report, cell: Cell) -> bool:
