@@ -5082,9 +5082,10 @@ or the owner switched servers inside it. `privacy decide-policy` stays `server_h
 **Credentials.** `finishup.client.credentials.CredentialSource` reads, stores and deletes one
 target's credential, so a later OAuth source can replace the API key. `KeyringOrFileCredential` uses
 the OS credential store (service `yoetz.server-credential.v1`, account = `target_id`) and, where
-none is usable or it refuses the write, the owner-only file store at
-`<target root>/config/credential`; `store()` raises `credential_store_unavailable` only when the
-file cannot keep the key either, and returns the location the caller records (ADR-051 decision 7).
+none is usable, the macOS keychain is missing or locked (read first without user interaction), or
+it refuses the write, the owner-only file store at `<target root>/config/credential`; `store()`
+raises `credential_store_unavailable` only when the file cannot keep the key either, and returns
+the location the caller records (ADR-051 decision 7).
 `delete()` raises `credential_store_unavailable` only when the store the key is recorded in cannot
 be used (a recorded platform store that cannot be loaded now included); the other store is tidied
 best effort. `server remove` asks no store for an SSH target, and when the recorded platform store

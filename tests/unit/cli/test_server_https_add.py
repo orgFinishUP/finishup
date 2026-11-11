@@ -343,6 +343,39 @@ def test_add_and_login_keep_the_key_in_the_owner_only_file_when_the_store_cannot
     assert store.asked == ["set", "set"]
 
 
+class _MissingKeychain(_RefusingStore):
+    """keyring's macOS backend, by identity, on a Mac whose keychain is missing or locked."""
+
+    __module__ = "keyring.backends.macOS"
+    __qualname__ = "Keyring"
+
+
+def test_add_and_login_never_ask_a_keychain_that_is_missing_or_locked(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under a private HOME, storing the key made macOS show "A keychain cannot be found to
+    store ..." and wait. The keychain's state is read first, without asking anyone; a missing
+    or locked one is never asked to store, and the owner-only file keeps the key."""
+
+    from finishup.client import credentials
+
+    keychain = _MissingKeychain()
+    monkeypatch.setattr(credentials, "_platform_backend", lambda: keychain)
+    monkeypatch.setattr(credentials, "_macos_keychain_ready", lambda: False)
+    remote_runtime(monkeypatch)
+    _console(monkeypatch, b"listed", b"web")
+    added = _invoke("add", "web", "https://web.example", "--key-file", str(server.key_file()))
+    assert added.exit_code == 0, added.output
+    _rotated, newer = server.keys.create("laptop-2", "agent")
+    login = _invoke("login", "web", "--key-file", str(server.key_file(newer, "new.key")))
+    assert login.exit_code == 0, login.output
+    assert "in an owner-only file; the server accepted it" in login.stdout
+    record, root = _added()
+    assert record.credential == "file"
+    assert KeyringOrFileCredential(record.target_id, root, recorded="file").read() == newer
+    assert keychain.asked == []
+
+
 def test_login_keeps_nothing_the_server_refuses_and_an_unverified_key_when_it_is_down(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:

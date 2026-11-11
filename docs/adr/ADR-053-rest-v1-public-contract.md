@@ -551,6 +551,12 @@ advertises.
 9. Not built: the server copy and code sync over REST (layer 6); the WAN timing gate and an upgrade
    over running gateways and helpers (layer 7); adding an HTTPS server from the terminal interface;
    OAuth credential sources; an official service (another repository).
+10. The macOS keychain check before a key is stored (a default keychain that exists and is
+    unlocked, read through Security.framework without user interaction; ADR-051 decision 7) ran
+    only against stand-ins on Linux. On a Mac it is unverified: that no keychain dialog appears
+    under a private `HOME`, that a locked keychain and a headless SSH session put the key in the
+    file, and that an unlocked login keychain still takes it (owner: layer 7, with the macOS run
+    of limit 6).
 
 ## Reverse states
 

@@ -1145,8 +1145,13 @@ authorization lapsed answers every call `workspace_unavailable` (ADR-052).
   later. `KeyringOrFileCredential` stores the key in the OS credential store under service
   `yoetz.server-credential.v1`, account = target id, and falls back to the existing owner-only
   file store at `<target root>/config/credential` where no platform store can take it: none is
-  usable, or the one there refuses the write (locked, denied, or a macOS keychain that cannot be
-  found). Only a key the file cannot keep either is refused (`credential_store_unavailable`).
+  usable, the macOS keychain is missing or locked, or the one there refuses the write (locked,
+  denied). On macOS the keychain is asked first, without any user interaction, whether a default
+  keychain exists and is unlocked (`SecKeychainCopyDefault`, `SecKeychainGetStatus`): writing to a
+  missing keychain shows a dialog ("A keychain cannot be found to store ...") and waits, and a
+  locked one asks to be unlocked, which no `server add` or `server login` may wait on (an SSH
+  session has nobody to answer). Any failure of that check means the file. Only a key the file
+  cannot keep either is refused (`credential_store_unavailable`).
   `target.json` records which store took the key, and every read follows that record. A key the
   platform store held before stays there when the file takes the new one (that store is not asked
   again while it refuses): the next key it takes replaces it, and `logout` and `remove` tidy it
