@@ -142,9 +142,13 @@ _FRAME_PREFIX: Final = 4
 _RESTART_WINDOW_SECONDS: Final = 30.0
 # The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
 _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
-# A client's refusal is recorded again at most this often for one phase and reason: a client
-# retrying fast (``remote_unreachable`` keeps it waiting) never makes a write and a diagnostic each.
+# ``remote_unreachable`` is recorded again for clients at most this often while unchanged: a client
+# keeps waiting and retrying on it (``service.client._connect_through_helper``), whatever the record
+# says, so a fresh record changes no answer and a fast retry never makes a write and a diagnostic
+# each. Every other refusal ends a waiting client's wait at its first fresh record, so each one is
+# recorded for its client (a hook's short budget included).
 _FRESH_STATUS_SECONDS: Final = 1.0
+_COALESCED_FRESH: Final = frozenset({"remote_unreachable"})
 _RECONNECT_MIN_SECONDS: Final = 0.5
 _RECONNECT_MAX_SECONDS: Final = 30.0
 _ZERO_NETWORK: Final = "zero_network_remote_selected"
@@ -776,11 +780,10 @@ class Helper:
         ``fresh`` (a client's own relay refused): written again even when unchanged, with its own
         correlation id, so the client that waits on this attempt sees a record made after it began
         (``service.client._helper_failure``) and names the refusal at once, instead of waiting out
-        its deadline while a background agent's earlier refusal of the same reason stands. Written
-        again for clients at most once every ``_FRESH_STATUS_SECONDS`` while unchanged, so a
-        client that retries fast is named within that time and never makes a write and a
-        diagnostic per retry. The generation moves only when the phase or the reason changes
-        (``new_status``).
+        its deadline while a background agent's earlier refusal of the same reason stands.
+        ``remote_unreachable``, on which a client keeps retrying anyway, is written again at most
+        once every ``_FRESH_STATUS_SECONDS`` while unchanged (``_COALESCED_FRESH``). The
+        generation moves only when the phase or the reason changes (``new_status``).
         """
 
         previous = self._status
@@ -792,7 +795,8 @@ class Helper:
             and (
                 not fresh
                 or (
-                    self._fresh_written is not None
+                    reason in _COALESCED_FRESH
+                    and self._fresh_written is not None
                     and self._clock() - self._fresh_written < _FRESH_STATUS_SECONDS
                 )
             )
