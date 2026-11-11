@@ -12,8 +12,8 @@ Cells (``list`` prints them): ``local`` and ``named-local`` (L0 over the unix so
 conformance kit against a stand-in server (the official service is built in another repository;
 ``server add official`` names none in this release). Each remote cell adds a target (the
 handshake and the consent on a pseudo-terminal), uses it, runs a claim-bound start, publish,
-check and receipt, chooses L2 under the warm helper and back (an L1 cell: the next task syncs
-with the same helper process, then nothing does), proves the repository hold and zero network
+check and receipt, chooses L2 under the warm helper and back (an L1 cell: the command ends once
+the helper follows it and the very next task syncs, then nothing does), proves the repository hold and zero network
 refuse before any dial (the dial counter of a pass-through relay in front of the server, the
 helper's lock, the export database), warms the helper with a task and changes the server's
 profile (the first call is refused typed within 10 s) and agrees again, logs out and in (HTTPS and
@@ -475,50 +475,70 @@ def changed_profile(world: World, report: Report, cell: Cell, warm: int | None =
     )
 
 
-def agent_registrations(server: Server, since: str) -> int:
-    """How many workspace agents the server registered since ``since`` (its bounded
-    ``workspace_agent_registered`` events with reason ``registered``)."""
+def agent_events(server: Server, since: str) -> tuple[int, int]:
+    """How many workspace agents the server registered and unregistered since ``since`` (its
+    bounded ``workspace_agent_registered``/``_unregistered`` events)."""
 
-    count = 0
+    registered = unregistered = 0
     for log in sorted(server.root.rglob("*.jsonl")):
         with contextlib.suppress(OSError):
             for line in log.read_text(errors="replace").splitlines():
-                if "workspace_agent_registered" not in line:
+                if "workspace_agent_" not in line:
                     continue
                 try:
                     record = json.loads(line)
                 except ValueError:
                     continue
-                if (
-                    record.get("operation") == "workspace_agent_registered"
-                    and record.get("reason") == "registered"
-                    and str(record.get("timestamp", "")) >= since
+                if str(record.get("timestamp", "")) < since:
+                    continue
+                if (record.get("operation"), record.get("reason")) == (
+                    "workspace_agent_registered",
+                    "registered",
                 ):
-                    count += 1
-    return count
+                    registered += 1
+                elif record.get("operation") == "workspace_agent_unregistered":
+                    unregistered += 1
+    return registered, unregistered
 
 
 def warm_helper(world: World, report: Report, cell: Cell) -> int | None:
-    """Before the profile changes, a task's start warms the helper: its workspace is registered
-    and the helper's background agent is connected to the server (defect B of the 2026-11-11
-    dogfood: a warm HTTPS relay helper read a changed profile as ``remote_unreachable`` after
-    31 s; the hold and zero-network steps before this one leave the helper stopped, so the matrix
-    never saw it). Warm means the server registered two agents since the start, the command's own
-    and the helper's background one, not only that a helper process lives. The helper's pid."""
+    """Before the profile changes, a task's start warms the helper: its workspace is registered,
+    the helper's background agent is connected to the server and its first profile fetch is done
+    (defect B of the 2026-11-11 dogfood: a warm HTTPS relay helper read a changed profile as
+    ``remote_unreachable`` after 31 s; the hold and zero-network steps before this one leave the
+    helper stopped, so the matrix never saw it). Warm means, at the server, an agent still
+    registered once the start's own one left (the helper's background agent), and, here, the
+    profile cache written since the step began (a fetch landing after the restart would let the
+    consent read changed before the first call and skip the warm path). The helper's pid."""
 
     client, server = world.client, world.server(cell)
     root = client.target_root(cell.target)
     since = now_rfc3339()
+    began = time.time()
     task, result = start_task(world, f"Acceptance {cell.name} warm")
     running = wait_until(lambda: helper_pid(root) is not None, seconds=30, interval=0.3)
-    agents = wait_until(lambda: agent_registrations(server, since) >= 2, seconds=60, interval=0.5)
+
+    def background_agent() -> bool:
+        registered, unregistered = agent_events(server, since)
+        return registered >= 2 and unregistered >= 1 and registered - unregistered >= 1
+
+    agent = wait_until(background_agent, seconds=60, interval=0.5)
+    cache = None if root is None else root / "state" / "server-profile.json"
+
+    def fetched() -> bool:
+        with contextlib.suppress(OSError):
+            return cache is not None and cache.stat().st_mtime >= began
+        return False
+
+    refreshed = wait_until(fetched, seconds=60, interval=0.5)
     pid = helper_pid(root)
+    registered, unregistered = agent_events(server, since)
     report.add(
         "helper warmed by a task",
-        task.ok and running and agents and pid is not None,
-        f"start exit {result.returncode}; helper running: {running}; the server registered the "
-        f"command's agent and the helper's background agent: {agents} "
-        f"({agent_registrations(server, since)} registrations)",
+        task.ok and running and agent and refreshed and pid is not None,
+        f"start exit {result.returncode}; helper running: {running}; the helper's background "
+        f"agent registered at the server after the start's own left: {agent} ({registered} "
+        f"registered, {unregistered} unregistered); first profile fetch done: {refreshed}",
         shown(world, result),
     )
     return pid
@@ -528,8 +548,9 @@ def level_switch(world: World, report: Report, cell: Cell) -> bool:
     """L2 chosen for a server in use at L1 while its helper runs takes effect at once (defect A of
     the 2026-11-11 dogfood: the helper's L1 agent stayed the one the server asked, so every sync
     was refused ``operation_not_declared`` until it restarted; the L2 cells consent at ``add``, so
-    the matrix never saw it). The same helper process serves the next task's sync; back at L1 its
-    agent declares nothing again and the copy is forgotten. Whether the copy was made."""
+    the matrix never saw it). ``server use --level`` ends once the running helper follows the new
+    level, and the very next task syncs; back at L1 nothing syncs and the copy is forgotten.
+    Whether the copy was made."""
 
     client, server = world.client, world.server(cell)
     root = client.target_root(cell.target)
@@ -538,20 +559,22 @@ def level_switch(world: World, report: Report, cell: Cell) -> bool:
         ["server", "use", cell.target, "--level", "L2", "--retention", "days:7"],
         [Reply(r"Type the target name", cell.target, secret=False)],
     )
+    # The command ends once the helper that served at L1 follows the new level (or stopped it).
+    followed = helper is not None and helper_pid(root) in {helper, None}
     since = now_rfc3339()
     copies = server.copy_records()
     task, result = start_task(world, f"Acceptance {cell.name} after L2")
     events = server.copy_events(since)
-    same = helper is not None and helper_pid(root) == helper
     synced = server.copy_records() > copies and any(
         event.startswith("code_copy_sync_synced") for event in events
     )
     made = report.add(
         "L1 → L2 under a warm helper syncs",
-        up.exit_code == 0 and task.ok and same and synced,
-        f"server use --level L2 exit {up.exit_code}; start exit {result.returncode}; same helper "
-        f"process: {same}; server copy records {copies} → {server.copy_records()}; copy events: "
-        f"{', '.join(events) or 'none'}",
+        up.exit_code == 0 and task.ok and followed and synced,
+        f"server use --level L2 exit {up.exit_code}; the helper that served at L1 followed it "
+        f"(same process: {helper_pid(root) == helper}): {followed}; start exit {result.returncode}; "
+        f"server copy records {copies} → "
+        f"{server.copy_records()}; copy events: {', '.join(events) or 'none'}",
         world.run.redact(excerpt(up.transcript.replace("\r", ""), lines=30)),
     )
     forgot = client.fu("server", "code", "forget", timeout=180)
