@@ -244,6 +244,14 @@ not answer), `server status` (a direct probe that did not answer in time), and t
 `remote_direct_slow` continuation of a direct-style `remote_unreachable` on every surface (CLI,
 `--json`, MCP, hooks, the terminal interface, the menu).
 
+The layer's smaller questions were taken as recommended (the owner, 2026-11-11): the 25-second
+HTTPS client keep-alive (under the edge's 30) stays; a refused direct-style hook starts the helper
+detached to fetch the profile; a process that cannot read which build is installed never replaces
+another build's helper; a bridge that followed the selection to a local server keeps it (O1 stays
+one-way, documented); macOS and WSL 2 stay the maintainer's gaps (below); and a "warm after a
+pause" sample, which would have caught the 5-second keep-alive, is the harness's next revision
+(reported, not gated).
+
 ## Hosts on Linux
 
 ```text
