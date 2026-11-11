@@ -572,3 +572,136 @@ async def test_a_refused_revision_asks_for_the_profile_at_once(lab: _Lab, own: b
         await helper._upstream.close()  # pyright: ignore[reportPrivateUsage]
         await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
     assert fetched == [lab.record.target_id] * 2
+
+
+class _StoppingAgent:
+    """A background agent whose close ends its connection, as ``HelperAgent.aclose`` does, and
+    returns once that connection's relay is unregistering it at the server."""
+
+    alive = True
+    client = None
+
+    def __init__(self, stream: Any, unregistering: asyncio.Event) -> None:
+        self._stream = stream
+        self._unregistering = unregistering
+
+    async def drain(self, *, may_send: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+        await self._unregistering.wait()
+
+
+async def _no_sync() -> None:
+    """Keep the agents a test placed (no registration is read)."""
+
+
+async def _no_tick() -> None:
+    """The watch never ticks: the test drives the helper."""
+
+    await asyncio.Event().wait()
+
+
+async def _registered_agent(helper: Helper, lab: _Lab, *, direct: bool = False) -> Any:
+    """A background agent's connection dialled the helper's own way, registered at the server."""
+
+    assert helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
+    dial = helper._agent_dial()  # pyright: ignore[reportPrivateUsage]
+    stream = await dial()
+    async with asyncio.timeout(10):
+        if not direct:
+            await stream.send_all(relay_binding_frame())
+        await stream.send_all(_relay_hello())
+        assert await stream.receive(65_536)  # the hello-result: the agent is registered
+    assert len(lab.backend.agents) == 1 and not lab.backend.agents[0].closed
+    return stream
+
+
+def _slow_unregistration(
+    monkeypatch: pytest.MonkeyPatch, *, seconds: float | None
+) -> asyncio.Event:
+    """The REST stream's courtesy ``DELETE`` takes ``seconds`` to leave (never, with ``None``);
+    the event is set once it began."""
+
+    from finishup.client.rest_stream import RestControlStream
+
+    began = asyncio.Event()
+    original = RestControlStream._courtesy  # pyright: ignore[reportPrivateUsage]
+
+    async def courtesy(self: RestControlStream) -> None:
+        began.set()
+        if seconds is None:
+            await asyncio.Event().wait()
+        else:
+            await asyncio.sleep(seconds)  # a round trip's latency, which a stop must not cut short
+        await original(self)
+
+    monkeypatch.setattr(RestControlStream, "_courtesy", courtesy)
+    return began
+
+
+async def test_a_stopping_helper_unregisters_its_relayed_agent_before_ending_its_relays(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """u4: a stop closes the background agents, then lets their relays end on their own (bounded)
+    before cancelling the rest, so the REST stream's courtesy ``DELETE`` reaches the server and no
+    dead agent stays registered there to be asked first by the next task's workspace calls."""
+
+    began = _slow_unregistration(monkeypatch, seconds=0.2)
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh, tick=_no_tick)
+    helper._sync_agents = _no_sync  # type: ignore[method-assign]
+    stream = await _registered_agent(helper, lab)
+    helper._agents[("x",)] = _StoppingAgent(stream, began)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    helper.request_stop()
+    async with asyncio.timeout(10):
+        assert await helper.serve(None) == "stop_requested"
+    assert lab.backend.agents[0].closed
+
+
+async def test_a_relay_that_never_ends_holds_the_stop_no_longer_than_its_bound(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client import helper as helper_module
+
+    monkeypatch.setattr(helper_module, "_STOP_AGENT_SECONDS", 0.3)
+    began = _slow_unregistration(monkeypatch, seconds=None)
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh, tick=_no_tick)
+    helper._sync_agents = _no_sync  # type: ignore[method-assign]
+    stream = await _registered_agent(helper, lab)
+    helper._agents[("x",)] = _StoppingAgent(stream, began)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    helper.request_stop()
+    loop = asyncio.get_running_loop()
+    stopping = loop.time()
+    async with asyncio.timeout(10):
+        assert await helper.serve(None) == "stop_requested"
+    assert loop.time() - stopping < 3.0
+    assert not lab.backend.agents[0].closed  # cancelled at the bound: the server's lease ends it
+
+
+async def test_a_stopping_direct_helper_unregisters_the_agent_its_connection_stopped_waiting_for(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """u4, direct style: the agent's connection waits 50 ms for its stream to close
+    (``service.client``); the close goes on as the helper's own task and the stop waits for it."""
+
+    from finishup.service.client import (
+        _best_effort_close_stream,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    began = _slow_unregistration(monkeypatch, seconds=0.2)
+    helper = Helper(
+        lab.root,
+        lab.record,
+        style="direct",
+        refresher=_no_refresh,
+        tick=_no_tick,
+    )
+    helper._sync_agents = _no_sync  # type: ignore[method-assign]
+    stream = await _registered_agent(helper, lab, direct=True)
+    await _best_effort_close_stream(stream)
+    await began.wait()
+    helper.request_stop()
+    async with asyncio.timeout(10):
+        assert await helper.serve(None) == "stop_requested"
+    assert lab.backend.agents[0].closed
