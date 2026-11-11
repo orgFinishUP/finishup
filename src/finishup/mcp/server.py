@@ -372,7 +372,8 @@ _INHERITED_AVAILABILITY_SUFFIX: Final = (
 # message says to stop replaying and read status instead (tb4n3 RC-2). The remedy is the one the
 # text channel renders (`REASON_REMEDIES`), so the two cannot disagree.
 _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
-    "The operation completed on the local service. " + REASON_REMEDIES["response_projection_failed"]
+    "The operation completed on the FinishUP service. "
+    + REASON_REMEDIES["response_projection_failed"]
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
 # A text section that failed to render is recorded, but one runaway renderer must not write an
@@ -390,7 +391,7 @@ _CONSENT_AUTHORIZE_COMMAND: Final = "finishup consent authorize"
 # A read never appended, so there is no stored result and no operation record to replay against.
 # Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
 _READ_PROJECTION_FAILED_MESSAGE: Final = (
-    "The read completed on the local service, but its response could not be shaped. No durable "
+    "The read completed on the FinishUP service, but its response could not be shaped. No durable "
     "state changed. Repeat the request with a new request_id, or read status view=versions for "
     "the authoritative frontier."
 )
@@ -474,7 +475,7 @@ def _internal_stage_error(
 # #65, #239). The remedy is always safe: the service is the authority on request identity and will
 # replay or reject the id itself.
 _PUBLISH_RECOVERY_UNCHECKED_CAVEAT: Final = (
-    " A prior operation under this request_id could not be checked; the local service was "
+    " A prior operation under this request_id could not be checked; the FinishUP service was "
     "unreachable. Correct the named fields and resubmit; the service will replay or reject the "
     "request_id itself if it already names a committed operation."
 )
@@ -2191,7 +2192,7 @@ def _vault_initialization_required_message(include_authorize: bool) -> str:
         else "Direct"
     )
     return (
-        "The local service vault is uninitialized: first-run initialization must complete before "
+        "The FinishUP service vault is uninitialized: first-run initialization must complete before "
         "any FinishUP task can start. This is a bounded initialization-required continuation "
         "(safe_details.continuation), not an ordinary terminal error. Run "
         "`finishup consent prepare vault_initialize`, show the returned danger text to the user, "
@@ -2240,7 +2241,7 @@ def _control_error_result(
             )
         if error.retryable:
             message = (
-                "The local service vault is soft-locked or a transient unlock attempt just "
+                "The FinishUP service vault is soft-locked or a transient unlock attempt just "
                 "failed; it re-opens automatically. Retry this operation shortly. If the "
                 "error persists, on a local terminal run `finishup service unlock` or "
                 "`finishup service auto-unlock repair`. If those no longer work, run "
@@ -2249,7 +2250,7 @@ def _control_error_result(
             )
         else:
             message = (
-                "The local service vault is locked or uninitialized. After trusted setup with "
+                "The FinishUP service vault is locked or uninitialized. After trusted setup with "
                 "platform auto-unlock, soft locks (idle/session) re-open automatically; this "
                 "error means a hard lock or missing setup. On a local terminal run "
                 "`finishup service unlock` (uses the platform credential store when provisioned) "
@@ -2338,7 +2339,7 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
-                "Receipt projection is temporarily unavailable; retry after the local service is ready."
+                "Receipt projection is temporarily unavailable; retry after the FinishUP service is ready."
             ),
             retryable=True,
             host_profile=host_profile,
@@ -2353,21 +2354,20 @@ def _control_error_result(
             # generic write recovery names cannot be queried. The shipped guidance excepts this
             # case explicitly: replay the exact start once under the same request_id.
             message = (
-                "The local start timed out and may still have committed. Replay the exact same "
+                "The start timed out and may still have committed. Replay the exact same "
                 "start body once with the same request_id; the idempotent start path returns the "
                 "stored result or a typed boundary. Do not fabricate session or writer ids for a "
                 "status query."
             )
         elif operation_kind == "write":
             message = (
-                "The local operation timed out and may still have committed. Retry with the same "
+                "The operation timed out and may still have committed. Retry with the same "
                 "request_id to recover the stored outcome; for an existing FinishUP session, status "
                 "view=operation can inspect that request_id."
             )
         else:
             message = (
-                "The local read timed out and requested no write. Repeat the read with a new "
-                "request_id."
+                "The read timed out and requested no write. Repeat the read with a new request_id."
             )
         # The read-versus-write distinction above was previously legible only in the free-form
         # message, which the native text channel drops by design; a typed continuation carries it
@@ -2429,7 +2429,7 @@ def _control_error_result(
             request_id,
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
-            message="The local service is draining; retry after it is ready.",
+            message="The FinishUP service is draining; retry after it is ready.",
             retryable=True,
             host_profile=host_profile,
             safe_details={"reason_code": "service_draining"},
@@ -2596,7 +2596,7 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
-                "The local service instance changed after reconnect. Retry this operation with "
+                "The FinishUP service instance changed after reconnect. Retry this operation with "
                 "the same request_id."
             ),
             retryable=True,

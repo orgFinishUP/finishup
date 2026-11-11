@@ -332,4 +332,8 @@ already sent over a connection the server refused ends as `server_connection_ren
 owner agrees again, with `finishup server use` in their own terminal) and
 `server_level_decision_required` (`server_level_unavailable`: the server requires more of this
 computer than the owner agreed to for this repository; refused before anything was sent; only the
-owner decides). Neither lets an agent agree for the owner.
+owner decides). Neither lets an agent agree for the owner. A third, `remote_profile_checking`, is
+attached by the client instead of `remote_reconsent` when its copy of that server's profile still
+agrees with the consent (the server named a revision this computer has not fetched): FinishUP is
+checking what changed, so the agent repeats the same request and follows the next refusal's
+continuation (ADR-052 decision 10); it is never reached through a reason code.

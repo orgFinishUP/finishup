@@ -1095,7 +1095,7 @@ async def test_start_timeout_directs_an_exact_replay_not_an_operation_query(
         "reason_code": "request_timeout",
     }
     assert error["message"] == (
-        "The local start timed out and may still have committed. Replay the exact same "
+        "The start timed out and may still have committed. Replay the exact same "
         "start body once with the same request_id; the idempotent start path returns the "
         "stored result or a typed boundary. Do not fabricate session or writer ids for a "
         "status query."
@@ -1138,7 +1138,7 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
         "state": "unknown",
     }
     assert error["message"] == (
-        "The local operation timed out and may still have committed. Retry with the same "
+        "The operation timed out and may still have committed. Retry with the same "
         "request_id to recover the stored outcome; for an existing FinishUP session, status "
         "view=operation can inspect that request_id."
     )

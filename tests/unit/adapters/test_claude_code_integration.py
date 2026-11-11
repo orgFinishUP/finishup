@@ -440,6 +440,11 @@ def test_native_projection_uses_claude_skill_and_shared_guidance_components() ->
     hooks = json.loads(managed.members["hooks/hooks.json"])["hooks"]
     assert manifest["defaultEnabled"] is False
     assert manifest["name"] == "finishup"
+    # The ledger is the selected FinishUP server's, which may be on another machine (ADR-051).
+    assert manifest["description"] == (
+        "Records material work in a FinishUP ledger and checks completion claims against that "
+        "record."
+    )
     assert marketplace["plugins"] == [
         {"name": "finishup", "source": "./plugins/finishup", "strict": True}
     ]
