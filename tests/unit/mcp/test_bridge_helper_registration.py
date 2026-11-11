@@ -264,6 +264,9 @@ async def test_closing_or_cursors_retirement_ends_the_renewal_and_no_renewal_wri
     record = _remote(monkeypatch)
     clock = _LeaseClock()
     monkeypatch.setattr(bridge, "_lease_wait", clock, raising=False)
+    # Registered long ago: the renewal is due at the first tick (a tick before it is due only
+    # looks at the consent again).
+    _clock(monkeypatch, _T0)
     host = "cursor" if ending == "cursor_roots_changed" else "claude"
     runtime = bridge.build_bridge_runtime(
         host_profile=cast(bridge.McpHostProfile, host),
@@ -342,4 +345,58 @@ async def test_one_connections_release_never_removes_another_connections_registr
     finally:
         await bridge._close_client(stale)  # pyright: ignore[reportPrivateUsage]
         await bridge._close_client(fresh)  # pyright: ignore[reportPrivateUsage]
+    assert _registrations(record) == []
+
+
+async def test_a_consent_changed_under_a_connected_bridge_renews_its_registration_at_once(
+    home: Path,
+    workspace: str,
+    daemon: ScriptedDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defect A, review: the owner agreeing again under the same profile revision (``server use
+    NAME --level L2``, say) leaves the bridge's connection admitted, but the helper no longer
+    serves a registration made under the earlier consent, and the bridge renewed only at half
+    its lease (7.5 minutes): an agent session's tasks meanwhile had no background agent to sync.
+    The bridge looks at the consent every few seconds and renews at once when it moved; a tick
+    before the lease is due with the consent unchanged renews nothing."""
+
+    from dataclasses import replace
+
+    from finishup.client.authorization import consent_digest
+
+    del home, daemon
+    record = _remote(monkeypatch)
+    clock = _LeaseClock()
+    monkeypatch.setattr(bridge, "_lease_wait", clock, raising=False)
+    _clock(monkeypatch, datetime.now(UTC))  # registered now: the lease is not due for 7.5 min
+    renewed = _renewals(monkeypatch)
+    runtime = bridge.build_bridge_runtime(
+        host_profile="claude", workspace_locator=WorkspaceLocator(workspace)
+    )
+    try:
+        await bridge.dispatch_status(_status(), runtime)
+        (first,) = _registrations(record)
+        await clock.next_wait()
+        assert clock.asked[-1] <= 2.0  # it looks again within seconds, not at half the lease
+        clock.ticks.release()  # nothing changed, not due: no renewal
+        await clock.next_wait()
+        assert not renewed.is_set()
+        assert _registrations(record) == [first]
+        root = targets.target_root(record.target_id)
+        current = targets.read_target(root)
+        assert current is not None
+        with targets.registry_lock():
+            targets.write_target(root, replace(current, authorized_at="2026-11-11T09:00:00.000Z"))
+        moved = targets.read_target(root)
+        grant = cast(dict[str, object], first["grant"])
+        assert moved is not None and consent_digest(moved) != grant["consent_digest"]
+        clock.ticks.release()
+        assert await asyncio.to_thread(renewed.wait, _WAIT_SECONDS)
+        await clock.next_wait()
+        (second,) = _registrations(record)
+        assert cast(dict[str, object], second["grant"])["consent_digest"] == consent_digest(moved)
+        assert second["registrant"] == first["registrant"]
+    finally:
+        await bridge.close_bridge_runtime(runtime)
     assert _registrations(record) == []

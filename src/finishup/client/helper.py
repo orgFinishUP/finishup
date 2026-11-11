@@ -152,6 +152,9 @@ _FRAME_PREFIX: Final = 4
 _RESTART_WINDOW_SECONDS: Final = 30.0
 # The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
 _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
+# A client's refusal is recorded again at most this often for one phase and reason: a client
+# retrying fast (``remote_unreachable`` keeps it waiting) never makes a write and a diagnostic each.
+_FRESH_STATUS_SECONDS: Final = 1.0
 _RECONNECT_MIN_SECONDS: Final = 0.5
 _RECONNECT_MAX_SECONDS: Final = 30.0
 _ZERO_NETWORK: Final = "zero_network_remote_selected"
@@ -702,6 +705,16 @@ async def _refresh_over_rest(
 _REST_KINDS: Final = frozenset({"https", "local_port"})
 
 
+def _declares_code_sync(record: ServerTarget) -> bool:
+    """Whether a background agent opened under ``record`` declares the code-sync operations
+    (``remote_binding.remote_workspace_binding``: level L2 consented, L2 released)."""
+
+    from finishup.protocol.server_copy import l2_released
+
+    consent = record.consent
+    return l2_released() and consent is not None and consent.level == "L2"
+
+
 class Helper:
     """One remote target's helper: relay, background agents, drain, profile refresh, idle exit."""
 
@@ -751,6 +764,9 @@ class Helper:
         self._tick = tick or (lambda: asyncio.sleep(min(_TICK_SECONDS, drain_interval)))
         self._clock = clock
         self._status: HelperStatus | None = read_helper_status(root)
+        # When this process last wrote its status again for a client (``_write_status(fresh=)``,
+        # ``_clock``); ``None`` when its last write was not one.
+        self._fresh_written: float | None = None
         self._started_at = now_stamp()
         self._admission: ConnectionAuthorization | None = None
         self._active = 0
@@ -786,17 +802,26 @@ class Helper:
         ``fresh`` (a client's own relay refused): written again even when unchanged, with its own
         correlation id, so the client that waits on this attempt sees a record made after it began
         (``service.client._helper_failure``) and names the refusal at once, instead of waiting out
-        its deadline while a background agent's earlier refusal of the same reason stands. The
-        generation moves only when the phase or the reason changes (``new_status``).
+        its deadline while a background agent's earlier refusal of the same reason stands. Written
+        again for clients at most once every ``_FRESH_STATUS_SECONDS`` while unchanged, so a
+        client that retries fast is named within that time and never makes a write and a
+        diagnostic per retry. The generation moves only when the phase or the reason changes
+        (``new_status``).
         """
 
         previous = self._status
         if (
-            not fresh
-            and previous is not None
+            previous is not None
             and previous.started_at == self._started_at
             and previous.pid == os.getpid()
             and (previous.phase, previous.reason) == (phase, reason)
+            and (
+                not fresh
+                or (
+                    self._fresh_written is not None
+                    and self._clock() - self._fresh_written < _FRESH_STATUS_SECONDS
+                )
+            )
         ):
             return
         correlation_id = None
@@ -821,6 +846,7 @@ class Helper:
             self.request_stop("target_removed")
             return
         self._status = status
+        self._fresh_written = self._clock() if fresh else None
 
     def _name_refusal_again(self) -> None:
         """A client's relay refused under the helper's standing refusal: record it again for that
@@ -1280,8 +1306,9 @@ class Helper:
                 if self._last_upstream_use is None:
                     self._last_upstream_use = self._clock()
 
-    def _follow_consent(self) -> bool:
-        """Take the target's record as it is now when the owner's consent changed; whether it did.
+    def _follow_consent(self) -> ServerTarget | None:
+        """Take the target's record as it is now; the record before it when the owner's consent
+        changed, else ``None``.
 
         Every background agent is opened under the record (its consent decides, among others,
         whether it answers the server's code-sync calls, ADR-054). A consent the owner changed
@@ -1299,36 +1326,45 @@ class Helper:
         try:
             facts = os.lstat(self._root / SERVER_TARGET_FILE_NAME)
         except OSError:
-            return False
+            return None
         stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
         if stamp == self._record_stamp:
-            return False
+            return None
         self._record_stamp = stamp
         try:
             current = read_target(self._root)
         except TargetError:
-            return False
+            return None
         if current is None or current.target_id != self._record.target_id:
-            return False
-        changed = consent_digest(current) != consent_digest(self._record)
+            return None
+        previous = self._record
         self._record = current
-        return changed
+        return previous if consent_digest(current) != consent_digest(previous) else None
 
-    def _replace_agents(self) -> None:
-        """Every agent opened under the earlier consent is replaced (make before break).
+    def _replace_agents(self, previous: ServerTarget) -> None:
+        """Every agent opened under the earlier consent (``previous``'s) is replaced.
 
-        The next agent sync opens each one again under the record now; the old one keeps serving
-        until its replacement is connected (``_close_replaced``), so the server never finds no
-        agent for the workspace meanwhile. A workspace replaced again before that closes its
-        oldest agent at once.
+        The next agent sync opens each one again under the record now, for each workspace whose
+        registration the new consent still serves (a registration made under the earlier one is
+        renewed by its registrant: a command at its next run, an MCP bridge within seconds). The
+        old agent keeps serving until its replacement is connected (``_close_replaced``), so work
+        in flight on it finishes and the server is never without one, except when the new consent
+        declares the code-sync operations the old agent does not (level L2 chosen): that agent
+        closes now, since the server would ask it, and refuse the sync at once
+        (``operation_not_declared``), while it waits for an agent when none is there. A workspace
+        replaced again before that closes its oldest agent at once.
         """
 
         now = self._clock()
+        widened = _declares_code_sync(self._record) and not _declares_code_sync(previous)
         for key, agent in self._agents.items():
             older = self._retiring.pop(key, None)
             if older is not None:
                 self._spawn_close(older[0])
-            self._retiring[key] = (agent, now)
+            if widened:
+                self._spawn_close(agent)
+            else:
+                self._retiring[key] = (agent, now)
         self._agents.clear()
         self._last_sync = None
 
@@ -1482,8 +1518,8 @@ class Helper:
             return True
         if admission is None:
             await self._close_agents()
-        elif self._follow_consent():
-            self._replace_agents()
+        elif (previous := self._follow_consent()) is not None:
+            self._replace_agents(previous)
         now = self._clock()
         if self._registrations_changed() or (
             self._last_sync is None or now - self._last_sync >= _AGENT_SYNC_SECONDS

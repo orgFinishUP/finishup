@@ -1185,22 +1185,9 @@ def test_a_clients_relay_refused_by_the_helpers_own_standing_refusal_is_named_at
     assert named is not None and named.phase == before.reason
 
 
-def test_a_consent_changed_under_a_running_helper_reopens_its_agents_under_it_first(
-    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Defect A (dogfood, 2026-11-11): ``server use NAME --level L2`` on a server in use at L1
-    changes the consent under the same profile revision, which ends no connection; the helper's
-    background agent, opened under the L1 record, declared no code-sync operation, so every
-    sync was refused (``operation_not_declared``) until the helper restarted. The helper follows
-    the consent: each agent is opened again under the record as it is now, and the old one
-    closes only once its replacement is connected (the server never sees no agent meanwhile)."""
-
-    from dataclasses import replace
-
+def _one_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
     from finishup.client import helper_registrations
 
-    record, root = ssh_target
-    assert record.consent is not None and record.consent.level == "L1"
     row = SimpleNamespace(
         registration=SimpleNamespace(
             claim="claim-a",
@@ -1214,61 +1201,98 @@ def test_a_consent_changed_under_a_running_helper_reopens_its_agents_under_it_fi
         return (row,)
 
     monkeypatch.setattr(helper_registrations, "served_workspaces", served)
-    opened: list[tuple[str, SimpleNamespace]] = []
+
+
+class _StandInAgent:
+    """A background agent stand-in: its connection is up once ``client`` is set."""
+
+    alive = True
+
+    def __init__(self, label: str, closed: list[str]) -> None:
+        self.label = label
+        self.client: object = None
+        self._closed = closed
+
+    async def drain(self, *, may_send: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        self._closed.append(self.label)
+
+
+async def _settle(helper: Helper) -> None:
+    """Let the closes the helper spawned run."""
+
+    tasks = tuple(helper._tasks)  # pyright: ignore[reportPrivateUsage]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("change", ["level_l2", "same_level"])
+def test_a_consent_changed_under_a_running_helper_opens_its_agents_again_under_it(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """Defect A (dogfood, 2026-11-11): ``server use NAME --level L2`` on a server in use at L1
+    changes the consent under the same profile revision, which ends no connection; the helper's
+    background agent, opened under the L1 record, declared no code-sync operation, so every
+    sync was refused (``operation_not_declared``) until the helper restarted. The helper follows
+    the consent and opens each agent again under the record as it is now. Choosing L2 closes the
+    old agent at once (the server would ask it and refuse the sync; with none, it waits for the
+    new one); any other change keeps the old one until its replacement is connected, so work in
+    flight on it finishes (make before break)."""
+
+    from dataclasses import replace
+
+    record, root = ssh_target
+    assert record.consent is not None and record.consent.level == "L1"
+    _one_workspace(monkeypatch)
+    opened: list[_StandInAgent] = []
     closed: list[str] = []
 
-    class Agent:
-        alive = True
-        client: object = None
-
-        def __init__(self, level: str) -> None:
-            self.level = level
-
-        async def drain(self, *, may_send: object) -> None:
-            return None
-
-        async def aclose(self) -> None:
-            closed.append(self.level)
-
-    async def opener(*arguments: object) -> Agent:
+    async def opener(*arguments: object) -> _StandInAgent:
         opened_under = cast(ServerTarget, arguments[1])
         assert opened_under.consent is not None
-        agent = Agent(opened_under.consent.level)
-        opened.append((opened_under.consent.level, cast(SimpleNamespace, agent)))
+        agent = _StandInAgent(f"{opened_under.consent.level}/{opened_under.authorized_at}", closed)
+        opened.append(agent)
         return agent
 
     async def run() -> None:
         helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
         monkeypatch.setattr(helper, "_admitted", lambda: object())
         await helper.step()
-        assert [level for level, _agent in opened] == ["L1"]
+        assert len(opened) == 1
         current = targets.read_target(root)
         assert current is not None and current.consent is not None
+        consent = (
+            replace(current.consent, level="L2", retention_kind="days", retention_days=7)
+            if change == "level_l2"
+            else current.consent
+        )
         with targets.registry_lock():
             targets.write_target(
-                root,
-                replace(
-                    current,
-                    authorized_at="2026-11-11T09:00:00.000Z",
-                    consent=replace(
-                        current.consent, level="L2", retention_kind="days", retention_days=7
-                    ),
-                ),
+                root, replace(current, authorized_at="2026-11-11T09:00:00.000Z", consent=consent)
             )
         await helper.step()
-        # Opened again under the new consent; the old agent still serves until it is replaced.
-        assert [level for level, _agent in opened] == ["L1", "L2"]
-        assert closed == []
-        await helper.step()
-        assert closed == []
-        opened[1][1].client = object()  # the replacement's connection is up
-        await helper.step()
-        assert closed == ["L1"]
+        await _settle(helper)
+        assert [agent.label for agent in opened] == [
+            opened[0].label,
+            f"{consent.level}/2026-11-11T09:00:00.000Z",
+        ]
+        if change == "level_l2":
+            assert closed == [opened[0].label]  # closed at once
+        else:
+            assert closed == []  # the old one serves until its replacement is up
+            await helper.step()
+            assert closed == []
+            opened[1].client = object()
+            await helper.step()
+            assert closed == [opened[0].label]
         # Nothing changed since: nothing is opened or closed again.
         await helper.step()
-        assert len(opened) == 2 and closed == ["L1"]
+        await _settle(helper)
+        assert len(opened) == 2 and closed == [opened[0].label]
         await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
-        assert closed == ["L1", "L2"]
+        assert closed == [agent.label for agent in opened]
 
     asyncio.run(run())
 
@@ -1336,3 +1360,52 @@ def test_an_agent_replaced_for_a_changed_consent_closes_within_its_bound_if_neve
         assert closed == [record.authorized_at, "2026-11-11T09:00:00.000Z"]
 
     asyncio.run(run())
+
+
+def test_a_client_retrying_fast_makes_one_record_a_second_not_one_per_retry(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the defect-B fix: each fresh record also records a diagnostic, and a client kept
+    waiting (``remote_unreachable``) retries every few tens of milliseconds; an unchanged refusal
+    is recorded again at most once a second, so it is still named to a client within that time."""
+
+    from finishup.observability import logging as diagnostics
+
+    record, root = ssh_target
+    recorded: list[str] = []
+    real = diagnostics.record_public_error_without_raising
+
+    def count(**fields: str) -> str | None:
+        recorded.append(fields["reason"])
+        return real(**fields)
+
+    monkeypatch.setattr(diagnostics, "record_public_error_without_raising", count)
+    clock = Clock()
+
+    async def relay(helper: Helper) -> None:
+        client, local = _pair()
+        task = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await client.send_all(hello_frame(server_profile=TEST_REVISION))
+            async with asyncio.timeout(10):
+                assert await client.receive(65_536) == b""
+                await task
+        finally:
+            await client.aclose()
+
+    async def run() -> list[HelperStatus | None]:
+        helper = _helper(record, root, _DownUpstream(), clock=clock)
+        seen: list[HelperStatus | None] = []
+        for _retry in range(5):
+            await relay(helper)
+            seen.append(read_helper_status(root))
+            clock.now += 0.05
+        clock.now += 1.0
+        await relay(helper)
+        seen.append(read_helper_status(root))
+        return seen
+
+    seen = asyncio.run(run())
+    assert len(recorded) == 2
+    assert len({status.correlation_id for status in seen if status is not None}) == 2
+    assert all(status is not None and status.generation == 1 for status in seen)
