@@ -68,6 +68,7 @@ from finishup.client.targets import (
     find_target,
     leftover_target_ids,
     list_targets,
+    profile_change_continuation,
     read_selected_target_id,
     read_target,
     registry_lock,
@@ -2779,9 +2780,17 @@ _KEY_KEPT: Final = (
 
 
 _RECONSENT_AT_CONNECT: Final = (
-    "what that server offers or needs changed since you agreed to use it, so FinishUP connected "
-    "nothing and sent nothing; agree again on your own terminal with 'finishup server use NAME' "
-    "(it shows what changed and asks you), then connect"
+    "what that server offers or needs changed since you agreed to use it, so it was refused "
+    "before that server did any work for it; agree again on your own terminal with 'finishup "
+    "server use NAME' (it shows what changed and asks you), then connect"
+)
+# The same refusal while this computer's consent still admits its cached profile: the server
+# named a revision not fetched here yet, which may be a narrowing FinishUP adjusts to by itself
+# (``targets.profile_change_continuation``, ADR-052 decision 10).
+_PROFILE_CHECKING_AT_CONNECT: Final = (
+    "what that server offers changed since you agreed to use it, so it was refused before that "
+    "server did any work for it; FinishUP is checking what changed: run the same command again "
+    "in a few seconds, and agree again with 'finishup server use NAME' only if it says so"
 )
 
 
@@ -2805,12 +2814,19 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
             runtime.stop(root)
     except TargetRuntimeError as error:
         if error.reason == "service_unavailable" and error.phase == "server_profile_changed":
-            # What the server offers changed since the owner agreed: only the owner agrees
-            # again, on their own terminal; the registered directive says so (remote_reconsent).
+            # What the server offers changed since the owner agreed. While the consent here
+            # still admits the cached profile the change may be a narrowing FinishUP adjusts to
+            # by itself (remote_profile_checking); otherwise only the owner agrees again, on
+            # their own terminal (remote_reconsent). Both are registered directives.
+            continuation = profile_change_continuation(record)
             raise ServerCommandRefused(
                 "server_profile_changed",
-                message=_RECONSENT_AT_CONNECT,
-                continuation="remote_reconsent",
+                message=(
+                    _RECONSENT_AT_CONNECT
+                    if continuation == "remote_reconsent"
+                    else _PROFILE_CHECKING_AT_CONNECT
+                ),
+                continuation=continuation,
             ) from None
         _runtime_failure(error)
     if record is not None:

@@ -215,3 +215,32 @@ def test_connect_after_the_profile_widened_names_the_owners_way_to_agree_again(
     assert rest[:2] == ["Continuation: remote_reconsent", f"Next: {directive.directive}"]
     assert directive.nudge is not None and directive.nudge in rest
     assert "lab.example" not in result.stderr
+
+
+def test_connect_refused_on_a_revision_not_fetched_yet_asks_to_repeat_not_to_agree_again(
+    lab: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: the server refused a hello naming a revision this computer has not fetched while the
+    owner's consent still admits the profile held here. What changed is not known yet and may be
+    a narrowing FinishUP adjusts to by itself, so ``server connect`` asks for the same command
+    again (``remote_profile_checking``), not for the owner to agree again."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+    from finishup.protocol.recovery import directive_for
+
+    record, _root = lab
+    consent_to(record)
+    runtime = remote_runtime(monkeypatch)
+    runtime.ready_error = TargetRuntimeError("service_unavailable", phase="server_profile_changed")
+
+    result = _invoke("connect", "lab")
+
+    assert result.exit_code != 0
+    first, *rest = result.stderr.splitlines()
+    assert first.startswith("server_profile_changed: ")
+    assert "refused before that server did any work for it" in first
+    assert "run the same command again" in first
+    directive = directive_for("remote_profile_checking")
+    assert directive is not None
+    assert rest[:2] == ["Continuation: remote_profile_checking", f"Next: {directive.directive}"]
+    assert "lab.example" not in result.stderr
