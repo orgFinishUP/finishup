@@ -401,8 +401,11 @@ def _refusing_direct_server(
         refreshes.append("refresh")
         raise AssertionError("a refused request never refreshes the profile on its own path")
 
+    def no_holder(_root: Path) -> None:
+        return None
+
     monkeypatch.setattr(helper_status, "spawn_helper", spawn)
-    monkeypatch.setattr(helper_status, "helper_holder", lambda _root: None)
+    monkeypatch.setattr(helper_status, "helper_holder", no_holder)
     monkeypatch.setattr(server_profile, "refresh_profile", refresh)
     return spawns, refreshes
 

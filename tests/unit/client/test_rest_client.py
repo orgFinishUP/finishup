@@ -143,8 +143,11 @@ async def test_an_idle_connection_is_kept_for_the_next_request_within_the_edges_
             return real_time.monotonic() + moved[0]
 
     monkeypatch.setattr(http11, "time", _Clock)
-    anchor = {"ca_file": str(server.tls.ca_file), "tls_pin": server.tls.pin}[trust]
-    transport = RestTransport(server.url, key="fuk_x", **{trust: anchor})
+    transport = (
+        RestTransport(server.url, key="fuk_x", ca_file=str(server.tls.ca_file))
+        if trust == "ca_file"
+        else RestTransport(server.url, key="fuk_x", tls_pin=server.tls.pin)
+    )
     try:
         assert (await transport.request("GET", "/first")).status == 200
         moved[0] = 20.0

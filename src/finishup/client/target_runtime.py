@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import Final, Literal, Protocol, cast
 
 from finishup.client.targets import TargetKind
 
@@ -132,14 +132,18 @@ def time_new_connections(root: Path | None, count: int) -> tuple[int, ...]:
             raise TargetRuntimeError("service_unavailable", phase="timeout") from None
         lines = done.stdout.decode("utf-8", "replace").strip().splitlines()
         try:
-            answer = json.loads(lines[-1]) if lines else None
+            parsed: object = json.loads(lines[-1]) if lines else None
         except ValueError:
-            answer = None
-        if isinstance(answer, dict) and type(answer.get("ms")) is int and answer["ms"] >= 0:
-            times.append(answer["ms"])
+            parsed = None
+        answer: dict[str, object] = (
+            cast(dict[str, object], parsed) if isinstance(parsed, dict) else {}
+        )
+        milliseconds = answer.get("ms")
+        if type(milliseconds) is int and milliseconds >= 0:
+            times.append(milliseconds)
             continue
-        reason = answer.get("error") if isinstance(answer, dict) else None
-        phase = answer.get("phase") if isinstance(answer, dict) else None
+        reason = answer.get("error")
+        phase = answer.get("phase")
         if not isinstance(reason, str) or not _TOKEN.match(reason):
             raise TargetRuntimeError("service_unavailable")
         if not isinstance(phase, str) or not _TOKEN.match(phase):

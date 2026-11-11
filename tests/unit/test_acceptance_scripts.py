@@ -181,7 +181,7 @@ def test_the_gate_table_names_every_style_and_its_verdict(tmp_path: Path) -> Non
 
 
 def test_the_gate_table_shows_the_split_and_this_computers_speed(tmp_path: Path) -> None:
-    style = {
+    style: dict[str, Any] = {
         **_style(600, 1002, 1500),
         "warm_connect_status": {"p50": 550, "p95": 600, "failures": 0},
         "warm_parts": {
