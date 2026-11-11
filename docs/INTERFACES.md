@@ -10451,7 +10451,10 @@ facade and are never MCP tools.
   state. `read_guidance` does not use the service client. On the policy route
   `build_bridge_runtime` reads the service configuration once at startup, through the same
   tolerant loader the logging sink uses, only to render the AI-powered review destination disclosure
-  (issue #479); it keeps no configuration state and the strict route never reads it.
+  (issue #479); it keeps no configuration state and the strict route never reads it. When the
+  bridge's root is a FinishUP server elsewhere (a remote target, ADR-051), or its target record
+  cannot be read, it reads no configuration: the disclosure says that server decides AI-powered
+  review under its own settings and that this computer's settings do not apply.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
   workflow tool names, `read_guidance`, `closure_prepare`, descriptions, and annotations, plus
   the `instructions` text.
@@ -10461,10 +10464,13 @@ facade and are never MCP tools.
   destination-disclosure amendment), which `mcp/semantic_destination.py` renders from validated
   configuration through a closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`,
   `DISCLOSURE_PREFIX`, `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
-  `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
-  `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
-  off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
-  configured fallback endpoint beside the primary; strict instructions never carry it. Shared values
+  `disclose_remote_destination()`, `read_semantic_destination_disclosure()`) and hands to
+  `server_instructions()` only as a `SemanticDestinationDisclosure`. Absent or invalid
+  configuration renders as unknown, an off-catalog endpoint profile as an unknown host, an unlisted
+  provider id as unlisted, and a configured fallback endpoint beside the primary; a remote root
+  renders as `remote`, naming the selected server by its target id and transport only (never a host
+  name), and an unreadable target record renders as `remote` without them; strict instructions
+  never carry it. Shared values
   are `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
