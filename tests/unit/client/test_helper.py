@@ -1036,14 +1036,27 @@ def test_a_clients_relay_refused_by_the_helpers_own_standing_refusal_is_named_at
     assert named is not None and named.phase == before.reason
 
 
-def test_a_client_retrying_fast_makes_one_record_a_second_not_one_per_retry(
-    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+class _UnreachableUpstream(FakeUpstream):
+    """The server cannot be reached at all: the upstream names ``remote_unreachable`` at once."""
+
+    async def ensure(self) -> None:
+        from finishup.client.helper import UpstreamUnavailable
+
+        raise UpstreamUnavailable("remote_unreachable")
+
+
+@pytest.mark.parametrize("named", ["remote_unreachable", "remote_service_not_running"])
+def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, named: str
 ) -> None:
-    """Review of the defect-B fix: each fresh record also records a diagnostic, and a client kept
-    waiting (``remote_unreachable``) retries every few tens of milliseconds; an unchanged refusal
-    is recorded again at most once a second, so it is still named to a client within that time."""
+    """Review of the defect-B fix (Codex, B2 and its re-review): each fresh record also records a
+    diagnostic. A client kept waiting on ``remote_unreachable`` retries every few tens of
+    milliseconds whatever the record says, so that phase is recorded again at most once a
+    second; any other refusal ends a waiting client's wait at its first fresh record, so it is
+    recorded for every client, one right after another (a hook's 0.4 s budget included)."""
 
     from finishup.observability import logging as diagnostics
+    from finishup.service.client import _helper_failure  # pyright: ignore[reportPrivateUsage]
 
     record, root = ssh_target
     recorded: list[str] = []
@@ -1067,19 +1080,31 @@ def test_a_client_retrying_fast_makes_one_record_a_second_not_one_per_retry(
         finally:
             await client.aclose()
 
-    async def run() -> list[HelperStatus | None]:
-        helper = _helper(record, root, _DownUpstream(), clock=clock)
-        seen: list[HelperStatus | None] = []
-        for _retry in range(5):
+    async def run() -> list[bool]:
+        upstream = (
+            _UnreachableUpstream(ScriptedDaemon())
+            if named == "remote_unreachable"
+            else _DownUpstream()
+        )
+        helper = _helper(record, root, upstream, clock=clock)
+        each: list[bool] = []
+        for _client in range(5):
+            before = read_helper_status(root)
             await relay(helper)
-            seen.append(read_helper_status(root))
+            each.append(_helper_failure(root, before) is not None)
             clock.now += 0.05
         clock.now += 1.0
+        before = read_helper_status(root)
         await relay(helper)
-        seen.append(read_helper_status(root))
-        return seen
+        each.append(_helper_failure(root, before) is not None)
+        return each
 
-    seen = asyncio.run(run())
-    assert len(recorded) == 2
-    assert len({status.correlation_id for status in seen if status is not None}) == 2
-    assert all(status is not None and status.generation == 1 for status in seen)
+    each = asyncio.run(run())
+    status = read_helper_status(root)
+    assert status is not None and (status.reason, status.generation) == (named, 1)
+    if named == "remote_unreachable":
+        assert len(recorded) == 2
+        assert each == [True, False, False, False, False, True]
+    else:
+        assert len(recorded) == 6
+        assert all(each)
