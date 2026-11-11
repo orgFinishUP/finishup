@@ -1301,9 +1301,9 @@ class Helper:
 
         return _ClosingStream(await self._upstream.open_stream(), self._agent_closes)
 
-    async def _await_agent_ends(self, seconds: float) -> bool:
-        """Wait, at most ``seconds``, for the background agents' relays and stream closes to end on
-        their own; whether they all did."""
+    async def _await_agent_ends(self, seconds: float | None) -> bool:
+        """Wait, at most ``seconds`` (None: the caller bounds it), for the background agents'
+        relays and stream closes to end on their own; whether they all did."""
 
         pending = {task for task in (*self._own_relays, *self._agent_closes) if not task.done()}
         if not pending:
@@ -1464,19 +1464,18 @@ class Helper:
         if not closing:
             return True
         # Gone from the server before the helper says it follows the new consent (``_follow``):
-        # each agent closed, then every background agent's relay ended, since a relayed REST
-        # stream unregisters its agent as it ends (no other agent runs now: a new level closes
-        # them all, and the next sync opens their replacements). Bounded, so a close that hangs
-        # never holds the tick; one that does not finish in time is not acknowledged, and
-        # ``server use`` then stops the helper instead.
+        # each agent closed, then every background agent's relay (relay style) or stream close
+        # (direct style, ``_ClosingStream``) ended, since a REST stream unregisters its agent as
+        # it closes (no other agent runs now: a new level closes them all, and the next sync
+        # opens their replacements). Bounded, so a close that hangs never holds the tick; one
+        # that does not finish in time is not acknowledged, and ``server use`` then stops the
+        # helper instead.
         try:
             async with asyncio.timeout(_CLOSE_SECONDS):
                 closed = await asyncio.gather(
                     *(agent.aclose() for agent in closing), return_exceptions=True
                 )
-                relays = tuple(self._own_relays)
-                if relays:
-                    await asyncio.wait(relays)
+                await self._await_agent_ends(None)
         except TimeoutError:
             return False
         return not any(isinstance(result, BaseException) for result in closed)

@@ -111,8 +111,11 @@ _HELPER_OPERATIONS: Final = frozenset(
 # declares it and registered after it (a helper replaced, restarted or reconnected: the older
 # agent may be one that stopped polling and is still registered at the edge until its lease ends).
 # The older channel is left open; its late answer is dropped as unmatched. The same reads as a
-# replay: an approved check may already have run, so it is never sent twice.
-_SUPERSEDABLE_OPERATIONS: Final = _REPLAYABLE_OPERATIONS
+# replay: an approved check may already have run, so it is never sent twice. A code-sync prepare
+# is taken over too (ADR-054): the snapshot is built by the agent that answers it, and the sync's
+# reads go to the newest background agent, which is that one. A read is not: its snapshot lives
+# only in the agent that prepared it.
+_SUPERSEDABLE_OPERATIONS: Final = _REPLAYABLE_OPERATIONS | {WorkspaceOperation.CODE_SYNC_PREPARE}
 _COMPONENT: Final = "service.workspace_hub"
 _WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 

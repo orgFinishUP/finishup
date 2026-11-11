@@ -15122,7 +15122,9 @@ the manifest, `EVIDENCE_PROVENANCE`), `domain.code_exclusions` (`ALWAYS_EXCLUDED
   `{unchanged, sync_id, manifest, size, sha256, retention}`; `code_sync_read` `{sync_id, offset,
   length (at most 3 MiB)}` → a base64 chunk. Declared only by the helper's background agent of a
   target consented at L2; never by the MCP bridge, a CLI command or a hook. The hub never replays
-  either to another connection.
+  either to another connection. A `code_sync_prepare` still unanswered on an older helper agent is
+  taken over by a newer one that registers meanwhile (see *Several connections per worktree*),
+  whose snapshot the sync's reads then fetch; a `code_sync_read` never is.
 - Reply reasons: refused `code_copy_not_consented`, `repository_egress_held`,
   `repository_egress_kept`, `server_authorization_changed`, `server_profile_changed`,
   `zero_network_remote_selected`; unavailable `code_copy_too_large`, `code_export_failed`

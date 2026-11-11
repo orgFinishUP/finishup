@@ -976,3 +976,21 @@ async def test_only_a_newer_helper_agent_declaring_the_operation_takes_a_call_ov
         await asyncio.wait_for(pending, 5.0)
     assert caught.value.reason == "deadline_exceeded"
     assert others == []
+
+
+async def test_a_code_sync_read_is_never_taken_over_by_a_newer_helper_agent() -> None:
+    """ADR-054: a read names a snapshot only the agent that prepared it holds; a prepare is taken
+    over (``test_code_copy``), a read waits out its own deadline on the agent asked."""
+
+    hub = _hub()
+    fresh: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, declaration=_background())
+    pending = asyncio.create_task(
+        hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=0.3)
+    )
+    await _until(lambda: older.pending_count > 0)
+    await _register(hub, lambda call: _ok(call, b"abcd"), sent=fresh, declaration=_background())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.wait_for(pending, 5.0)
+    assert caught.value.reason == "deadline_exceeded"
+    assert fresh == []

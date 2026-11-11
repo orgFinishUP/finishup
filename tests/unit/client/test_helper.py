@@ -1399,14 +1399,20 @@ def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
         assert all(each)
 
 
+@pytest.mark.parametrize("ending_in", ["_own_relays", "_agent_closes"])
 @pytest.mark.parametrize("relay", ["ends", "hangs"])
 def test_a_new_level_is_acknowledged_only_once_the_old_agents_relays_ended(
-    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, relay: str
+    ssh_target: tuple[ServerTarget, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    relay: str,
+    ending_in: str,
 ) -> None:
     """Re-review (Codex, R3-1): closing an agent closes its end of the helper's own relay; a REST
     stream unregisters the agent at the server only as that relay ends, so the helper says it
     follows a new level only once the old agents' relays ended, and not at all when they do not
-    end within its bound (``server use`` then stops the helper)."""
+    end within its bound (``server use`` then stops the helper). u5: in the direct style the
+    agent's own stream close, which runs on past its connection's 50 ms bound, is waited for
+    the same way."""
 
     from dataclasses import replace
 
@@ -1432,8 +1438,8 @@ def test_a_new_level_is_acknowledged_only_once_the_old_agents_relays_ended(
         async def ending() -> None:
             await gate.wait()
 
-        own = asyncio.create_task(ending())  # the L1 agent's relay, still sending its end
-        helper._own_relays.add(own)  # pyright: ignore[reportPrivateUsage]
+        own = asyncio.create_task(ending())  # the L1 agent's relay or close, still sending its end
+        cast("set[asyncio.Task[None]]", getattr(helper, ending_in)).add(own)
         if relay == "ends":
             asyncio.get_running_loop().call_later(0.05, gate.set)
         current = targets.read_target(root)
