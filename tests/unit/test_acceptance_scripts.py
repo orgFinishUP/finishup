@@ -198,7 +198,8 @@ def test_the_gate_table_names_every_style_and_its_verdict(tmp_path: Path) -> Non
     table = wan_gate.render([path])
     assert "| 100 ms | netns | – | ssh-relay | 550 / 600 | – / – | 1500 |" in table
     assert "failed open: remote_unreachable; next call served 5/5" in table
-    assert table.rstrip().endswith("| fail |")  # the style that errored fails, never vanishes
+    # The style that errored is said, never vanishes (a direct style is reported, not required).
+    assert table.rstrip().endswith("| reported: error |")
     assert "| ssh-relay |" in table and "| pass |" in table
     assert "| –, – | pass |" in table  # no import time or calibration recorded: said, not zero
 
@@ -647,3 +648,49 @@ def test_a_replayed_write_is_recorded_once_only_with_one_event_and_an_unmoved_he
     assert upgrade.recorded_once("3", "4", "4", 1)
     assert not upgrade.recorded_once("3", "4", "5", 1)
     assert not upgrade.recorded_once("x", "4", "4", 1)
+
+
+def test_the_direct_styles_are_reported_against_the_gate_and_only_relay_is_required(
+    tmp_path: Path,
+) -> None:
+    """The owner's decision (2026-11-11): the WAN gate stays a measured, reported result for the
+    direct styles; the relay styles still must pass it. No budget changes."""
+
+    assert wan_gate.BUDGETS_MS == {
+        "warm_connect_status": 650,
+        "hook_cold_connect": 1150,
+        "warm_process": 3200,
+    }
+    assert [wan_gate.required(cell.name) for cell in wan_gate.STYLES] == [True, False, True, False]
+    over = _style(826, 900, 2000)
+    styles: dict[str, Any] = {}
+    for name in ("https-relay", "https-direct"):
+        style: dict[str, Any] = {
+            **over,
+            "warm_connect_status": {"p50": 700, "p95": 826, "failures": 0},
+            "hook_cold_connect": {
+                "n": 1,
+                "p50": 900,
+                "p95": 900,
+                "served_within_budget": 1,
+                "failed_open_phases": [],
+                "next_call_served": 1,
+                "failures": 0,
+            },
+            "cold_connect": {"p50": 2500},
+            "server_test": {"round_trip_p95_ms": 120},
+        }
+        style["gate"] = wan_gate.gate(style, required=wan_gate.required(name))
+        styles[name] = style
+    styles["ssh-direct"] = {"error": "x"}
+    styles["ssh-relay"] = {"error": "x"}
+    assert styles["https-relay"]["gate"] == {**styles["https-relay"]["gate"], "required": True}
+    assert styles["https-direct"]["gate"]["required"] is False
+    assert styles["https-direct"]["gate"]["pass"] is False  # still measured against the budget
+    path = tmp_path / "wan.json"
+    path.write_text(json.dumps({"rtt_ms": 100, "mode": "netns", "styles": styles}))
+    rows = {row.split(" | ")[3]: row for row in wan_gate.render([path]).splitlines()[2:]}
+    assert rows["https-relay"].endswith("| fail |")
+    assert rows["https-direct"].endswith("| reported: over |")
+    assert rows["ssh-direct"].endswith("| reported: error |")
+    assert rows["ssh-relay"].endswith("| fail |")  # a required style that errored fails

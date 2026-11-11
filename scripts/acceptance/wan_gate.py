@@ -41,6 +41,13 @@ a claim-bound task was started:
 Before sampling, ``server set --style`` must succeed and ``server status --json`` must report the
 style under test. Every number is reported; a style that misses a budget says so (a failed gate is
 a result, not an error). ``render`` turns result files into the markdown table the runbook keeps.
+
+**Required and reported (the owner's decision, 2026-11-11).** The relay styles (the default) must
+pass the gate. The direct styles stay available and are measured and reported against the same
+budgets, never required: a direct style slower than them is a property of the network, and
+FinishUP tells the user so (``server test``, ``server status``, the ``remote_direct_slow``
+continuation of a direct-style timeout) with ``server set NAME --style relay`` as the remedy. No
+budget changes for either.
 """
 
 from __future__ import annotations
@@ -205,8 +212,15 @@ def summary(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
-def gate(result: dict[str, Any]) -> dict[str, Any]:
-    """The verdict of one style's measurements against ``BUDGETS_MS`` (p95, every sample ok)."""
+def required(style: str) -> bool:
+    """Whether the gate must pass for ``style`` (a cell name): the relay styles only (above)."""
+
+    return not style.endswith("-direct")
+
+
+def gate(result: dict[str, Any], *, required: bool = True) -> dict[str, Any]:
+    """The verdict of one style's measurements against ``BUDGETS_MS`` (p95, every sample ok);
+    ``required`` says whether that verdict gates the build or is reported only."""
 
     checks: dict[str, Any] = {}
     for name, budget in BUDGETS_MS.items():
@@ -218,7 +232,11 @@ def gate(result: dict[str, Any]) -> dict[str, Any]:
             "failures": failures,
             "pass": measured is not None and measured <= budget and failures == 0,
         }
-    return {"checks": checks, "pass": all(item["pass"] for item in checks.values())}
+    return {
+        "checks": checks,
+        "pass": all(item["pass"] for item in checks.values()),
+        "required": required,
+    }
 
 
 def judge_hook_sample(timing: dict[str, Any]) -> dict[str, Any]:
@@ -379,7 +397,7 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
         "warned": "Warning:" in tested.stdout,
         "last_line": world.run.redact((tested.stdout.strip().splitlines() or [""])[-1]),
     }
-    out["gate"] = gate(out)
+    out["gate"] = gate(out, required=required(cell.name))
     client.fu("server", "disconnect", name)
     client.fu("server", "use", "local")
     client.fu("server", "remove", name)
@@ -462,6 +480,17 @@ def _ms(value: object) -> str:
     return f"{value:.0f}" if isinstance(value, (int, float)) else "–"
 
 
+def _verdict(style: str, *, passed: bool, error: bool = False) -> str:
+    """``pass`` or ``fail`` for a required style; for a direct style, reported only (a run that
+    errored is said, never dropped)."""
+
+    if required(style):
+        return "pass" if passed else "fail"
+    if error:
+        return "reported: error"
+    return "reported: within" if passed else "reported: over"
+
+
 def render(paths: list[Path]) -> str:
     """A markdown table of WAN gate result files (one row per style and round trip)."""
 
@@ -479,7 +508,8 @@ def render(paths: list[Path]) -> str:
             if "error" in result:
                 rows.append(
                     f"| {document['rtt_ms']:g} ms | {document['mode']} | {document.get('commit', '–')} | "
-                    f"{style} | error: {result['error']} | | | | | | | fail |"
+                    f"{style} | error: {result['error']} | | | | | | | "
+                    f"{_verdict(style, passed=False, error=True)} |"
                 )
                 continue
             warm, process = result["warm_connect_status"], result["warm_process"]
@@ -502,7 +532,7 @@ def render(paths: list[Path]) -> str:
                 f"{_ms(cold['p50'])} | "
                 f"{_server_test_cell(result['server_test'])} | "
                 f"{_ms(imported)}, {_ms(result.get('cpu_calibration_ms'))} | "
-                f"{'pass' if result['gate']['pass'] else 'fail'} |"
+                f"{_verdict(style, passed=bool(result['gate']['pass']))} |"
             )
     return "\n".join(rows) + "\n"
 

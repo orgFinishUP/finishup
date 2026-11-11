@@ -230,9 +230,19 @@ where the hook is served (direct HTTPS: 671 → 827 ms at p95, still within 1150
 open at its 1.0 s deadline nothing more runs, so the complete operation ends at the deadline (1002
 to 1113 ms). No sample was missing, no fail-open named anything but `remote_unreachable`, and every
 next call was served. Direct SSH, marginal at p95 in the earlier rounds (475 and 673 ms), passed
-in both harnesses this time (468 and 433 ms): it remains load-sensitive. A longer budget for the
-direct styles on a WAN, or relay only over a WAN, is the owner decision the gaps name; the earlier
-rounds' tables (and the before/after of the third engineering round) are in the layer reports.
+in both harnesses this time (468 and 433 ms): it remains load-sensitive. The earlier rounds' tables
+(and the before/after of the third engineering round) are in the layer reports.
+
+**Decided by the owner (2026-11-11): accept it and tell the user** (ADR-052 decision 24.5). No
+budget changes. The relay styles, the default, must pass the gate; the direct styles stay
+available and are measured and reported against the same budgets, never required: from this
+decision `render` writes `pass`/`fail` for a relay style and `reported: within`, `reported: over`
+or `reported: error` for a direct one (in the table above, the direct HTTPS rows' **fail** reads
+`reported: over`). A slow direct connection is told to the user, with `finishup server set NAME
+--style relay` as the remedy: `server test` (a direct new connection past 650 ms, or one that did
+not answer), `server status` (a direct probe that did not answer in time), and the
+`remote_direct_slow` continuation of a direct-style `remote_unreachable` on every surface (CLI,
+`--json`, MCP, hooks, the terminal interface, the menu).
 
 ## Hosts on Linux
 
@@ -274,7 +284,7 @@ gate runs report-only there (its table in the summary, its JSON uploaded).
 | macOS: every cell (launchd reaping of the helper, `/private/tmp`, the Homebrew launcher path, `getpeereid` on the relay, the system trust store through Python's default verify paths, the XDG variables being ignored for FinishUP's folders, case-insensitive file systems and `O_NOFOLLOW` per component in the exporter) | maintainer, on the macOS dogfood run (#1308 follow-up) |
 | WSL 2: every cell (a distribution that stops takes the helper and service with it; systemd/linger for a session-bound endpoint; Windows-side versus Linux OpenSSH; a listener reached from Windows only as WSL forwards it) | maintainer, on a Windows machine with WSL 2 (#1308 follow-up) |
 | Host model sessions (Codex, Claude Code, Cursor) against a server elsewhere, at L1 and L2 | maintainer's dogfood run (needs host credentials) |
-| The WAN gate at 100 ms: direct HTTPS fails (four round trips per process; 826 ms p95 with the reviewed harness) and direct SSH is load-sensitive at p95; both relay styles pass | owner decision (report): the direct styles' budget on a WAN, or relay only over a WAN |
+| The WAN gate at 100 ms: direct HTTPS is over the budget (four round trips per process; 826 ms p95 with the reviewed harness) and direct SSH is load-sensitive at p95; both relay styles pass | decided (owner, 2026-11-11): reported, not required, for the direct styles; the user is told and offered relay (ADR-052 decision 24.5) |
 | The terminal interface's server flows (consent at L2, `server code`, `server remove`'s question, SSH and HTTPS add) | a later layer (ADR-051, ADR-054) |
 | A check left in flight across a server restart over a remote connection (frozen operation recovery end to end) | the harness's next revision |
 | Remote cells with a live everyday policy (the everyday installation's service running, its policy zero network) | the harness's next revision; unit and integration tests cover the live read |
