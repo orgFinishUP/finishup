@@ -1442,3 +1442,72 @@ def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
     else:
         assert len(recorded) == 6
         assert all(each)
+
+
+@pytest.mark.parametrize("relay", ["ends", "hangs"])
+def test_a_new_level_is_acknowledged_only_once_the_old_agents_relays_ended(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, relay: str
+) -> None:
+    """Re-review (Codex, R3-1): closing an agent closes its end of the helper's own relay; a REST
+    stream unregisters the agent at the server only as that relay ends, so the helper says it
+    follows a new level only once the old agents' relays ended, and not at all when they do not
+    end within its bound (``server use`` then stops the helper)."""
+
+    from dataclasses import replace
+
+    from finishup.client import helper as helper_module
+    from finishup.client.helper_status import read_followed_consent
+
+    record, root = ssh_target
+    _one_workspace(monkeypatch)
+    closed: list[str] = []
+
+    async def opener(*arguments: object) -> _StandInAgent:
+        return _StandInAgent(str(cast(ServerTarget, arguments[1]).authorized_at), closed)
+
+    monkeypatch.setattr(helper_module, "_CLOSE_SECONDS", 0.2)
+
+    async def run() -> str | None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        before = read_followed_consent(root)
+        gate = asyncio.Event()
+
+        async def ending() -> None:
+            await gate.wait()
+
+        own = asyncio.create_task(ending())  # the L1 agent's relay, still sending its end
+        helper._own_relays.add(own)  # pyright: ignore[reportPrivateUsage]
+        if relay == "ends":
+            asyncio.get_running_loop().call_later(0.05, gate.set)
+        current = targets.read_target(root)
+        assert current is not None and current.consent is not None
+        with targets.registry_lock():
+            targets.write_target(
+                root,
+                replace(
+                    current,
+                    authorized_at="2026-11-11T09:00:00.000Z",
+                    consent=replace(
+                        current.consent, level="L2", retention_kind="days", retention_days=7
+                    ),
+                ),
+            )
+        await helper.step()
+        followed = read_followed_consent(root)
+        gate.set()
+        await own
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert before is not None
+        return followed
+
+    followed = asyncio.run(run())
+    from finishup.client.authorization import consent_digest
+
+    moved = targets.read_target(root)
+    assert moved is not None
+    if relay == "ends":
+        assert followed == consent_digest(moved)
+    else:
+        assert followed != consent_digest(moved)

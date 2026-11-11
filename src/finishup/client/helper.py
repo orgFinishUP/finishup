@@ -791,6 +791,7 @@ class Helper:
         self._delivery: asyncio.Task[None] | None = None
         self._refresh = _Refresh()
         self._relays: set[asyncio.Task[None]] = set()
+        self._own_relays: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._stop_reason = "stop_requested"
@@ -972,6 +973,11 @@ class Helper:
         task = asyncio.create_task(self._serve_local(local, own=own))
         self._relays.add(task)
         task.add_done_callback(self._relays.discard)
+        if own:
+            # A background agent's relay: its end is where a REST stream's agent is unregistered
+            # (``RestControlStream.aclose``), which a new level waits for (``_replace_agents``).
+            self._own_relays.add(task)
+            task.add_done_callback(self._own_relays.discard)
 
     def _may_forward(self, admission: ConnectionAuthorization) -> bool:
         """Whether something admitted under ``admission`` may leave this computer now.
@@ -1358,12 +1364,11 @@ class Helper:
         from finishup.client.helper_status import write_followed_consent
 
         previous, read = self._follow_consent()
-        if previous is not None:
-            await self._replace_agents(previous)
-        if read:
+        retired = True if previous is None else await self._replace_agents(previous)
+        if read and retired:
             write_followed_consent(self._root, consent_digest(self._record))
 
-    async def _replace_agents(self, previous: ServerTarget) -> None:
+    async def _replace_agents(self, previous: ServerTarget) -> bool:
         """Every agent opened under the earlier consent (``previous``'s) is replaced.
 
         The next agent sync opens each one again under the record now, for each workspace whose
@@ -1390,14 +1395,25 @@ class Helper:
                 self._retiring[key] = (agent, now)
         self._agents.clear()
         self._last_sync = None
-        if closing:
-            # Closed before the helper says it follows the new consent (``_follow``), bounded so a
-            # close that hangs never holds the tick.
-            with contextlib.suppress(TimeoutError):
-                async with asyncio.timeout(_CLOSE_SECONDS):
-                    await asyncio.gather(
-                        *(agent.aclose() for agent in closing), return_exceptions=True
-                    )
+        if not closing:
+            return True
+        # Gone from the server before the helper says it follows the new consent (``_follow``):
+        # each agent closed, then every background agent's relay ended, since a relayed REST
+        # stream unregisters its agent as it ends (no other agent runs now: a new level closes
+        # them all, and the next sync opens their replacements). Bounded, so a close that hangs
+        # never holds the tick; one that does not finish in time is not acknowledged, and
+        # ``server use`` then stops the helper instead.
+        try:
+            async with asyncio.timeout(_CLOSE_SECONDS):
+                closed = await asyncio.gather(
+                    *(agent.aclose() for agent in closing), return_exceptions=True
+                )
+                relays = tuple(self._own_relays)
+                if relays:
+                    await asyncio.wait(relays)
+        except TimeoutError:
+            return False
+        return not any(isinstance(result, BaseException) for result in closed)
 
     async def _close_replaced(self) -> None:
         """Close each replaced agent whose replacement is connected, is not wanted, or that
