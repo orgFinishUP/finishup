@@ -232,7 +232,10 @@ interface's server flows were not exercised (no add flow for SSH or HTTPS there 
 
 ## Continuous integration
 
-`.github/workflows/real-network.yml` (pull requests to any branch, dispatch, weekly) installs
+A real-network workflow, `.github/workflows/real-network.yml`, is written but **not yet in the tree**: adding a
+workflow file needs a GitHub token with the `workflow` scope, which the build agent did not have, so the
+file is kept as a patch in the build report for the maintainer to add. Once added (pull requests to any
+branch, dispatch, weekly), it installs
 OpenSSH where the runner lacks it without starting the system service, and runs
 `tests/capability/test_openssh_helper.py`, `tests/conformance/rest` and
 `tests/capability/test_acceptance_matrix.py` (cells `local`, `ssh-relay-L2`,

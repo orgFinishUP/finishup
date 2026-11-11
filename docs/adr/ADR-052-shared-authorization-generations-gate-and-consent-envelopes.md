@@ -931,14 +931,14 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
 13. Real OpenSSH was exercised on Linux only (the capability tests against a private `sshd`, and an
     end-to-end run, and every SSH cell of the layer-7 acceptance matrix); macOS and WSL 2 have no
     recorded run (owner: the maintainer), and PR CI does not run the capability tests (the
-    real-network workflow does).
+    real-network workflow will, once the maintainer adds it; see the acceptance-matrix runbook).
 14. In the direct style every dialing process reads the API key (decision 22); in the relay style
     only the helper does. Either way any process running as the same user can read the stored key
     (ADR-051 decision 7), and an API key is a bearer credential within its scope (ADR-053).
 15. Real HTTPS (TLS from a throwaway CA and a pin, both server edges) was exercised on Linux only:
     the REST conformance kit and an end-to-end run of the CLI, and every REST cell of the layer-7
     acceptance matrix. macOS and WSL 2 have no recorded run (owner: the maintainer), and PR CI does
-    not run the conformance kit (the real-network workflow does).
+    not run the conformance kit (the real-network workflow will, once the maintainer adds it).
 16. A key changed outside FinishUP (in the platform store, or the key file edited by hand) moves no
     credential generation: a running helper may keep using the key it read until the owner's next
     `login`, `logout` or `remove` moves the generation, or it restarts (decision 4).

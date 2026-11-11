@@ -557,7 +557,8 @@ advertises.
    is Python's default verify paths: on macOS a python.org Python may need its certificates
    installed; untested.
 7. PR CI does not run `tests/conformance/rest/` (it starts real services); the real-network
-   workflow (`real-network.yml`, layer 7) does, on pull requests to any branch.
+   workflow (`real-network.yml`, layer 7) will, on pull requests to any branch, once the
+   maintainer adds it (it ships as a patch; adding a workflow needs the `workflow` token scope).
 8. A receipt's frozen version slice holds 64 entries: the next layer that adds operation schemas
    needs a receipt-document version bump.
 9. The server copy and its code sync over REST are built and released in layer 6 (ADR-054),
