@@ -3,8 +3,9 @@
 ``CredentialSource`` is the pluggable interface; an OAuth source can implement it later.
 ``KeyringOrFileCredential`` keeps one target's key in the platform credential store under the
 fixed service ``yoetz.server-credential.v1`` with the target id as the account, or — where no
-platform store is usable (WSL 2, headless Linux) — in an owner-only file beneath
-``<target root>/config/credential/``. ``target.json`` records only which of the two holds it.
+platform store can take it (WSL 2, headless Linux, a store that refuses the write) — in an
+owner-only file beneath ``<target root>/config/credential/``. ``target.json`` records only which
+of the two holds it, and reading follows that record.
 
 The key never appears in argv, the environment, ``target.json``, logs, or JSON output, and no
 error carries it: every failure is a closed ``CredentialError`` reason. Same-user software can
@@ -232,19 +233,36 @@ class KeyringOrFileCredential:
         return validate_secret(value)
 
     def store(self, secret: str) -> CredentialLocation:
+        """Store (or replace) the key; return where it went, for the caller to record.
+
+        The platform store takes it when there is one and it accepts the write. Otherwise the
+        owner-only file does: no platform store, or one that refuses (locked, denied, no keychain
+        to write to). Only a key the file cannot keep either is ``credential_store_unavailable``.
+        Reading follows the location recorded.
+
+        A key moved into the platform store leaves the file. A key the platform store held
+        before stays there when the file takes the new one: that store was not usable, so it is
+        not asked again. The next key it takes replaces it, and ``delete()`` tidies it when it
+        can be used.
+        """
+
         validate_secret(secret)
-        location: CredentialLocation = "keyring" if self._platform_store() is not None else "file"
-        try:
-            self._store_for(location).set_password(
-                SERVER_CREDENTIAL_SERVICE, self._target_id, secret
-            )
-        except CredentialError:
-            raise
-        except Exception:
-            raise CredentialError("credential_store_unavailable") from None
-        other: CredentialLocation = "file" if location == "keyring" else "keyring"
-        if self._recorded == other:
-            self._delete_from(other)
+        location: CredentialLocation = "file"
+        platform = self._platform_store()
+        if platform is not None:
+            try:
+                platform.set_password(SERVER_CREDENTIAL_SERVICE, self._target_id, secret)
+            except Exception:
+                location = "file"
+            else:
+                location = "keyring"
+        if location == "file":
+            try:
+                self._file_store().set_password(SERVER_CREDENTIAL_SERVICE, self._target_id, secret)
+            except Exception:
+                raise CredentialError("credential_store_unavailable") from None
+        elif self._recorded == "file":
+            self._delete_from("file")
         self._recorded = location
         return location
 

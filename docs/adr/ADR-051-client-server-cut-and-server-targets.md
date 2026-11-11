@@ -1144,7 +1144,13 @@ authorization lapsed answers every call `workspace_unavailable` (ADR-052).
 - `finishup.client.credentials.CredentialSource` is the interface, so OAuth can replace an API key
   later. `KeyringOrFileCredential` stores the key in the OS credential store under service
   `yoetz.server-credential.v1`, account = target id, and falls back to the existing owner-only
-  file store at `<target root>/config/credential` where no platform store is usable.
+  file store at `<target root>/config/credential` where no platform store can take it: none is
+  usable, or the one there refuses the write (locked, denied, or a macOS keychain that cannot be
+  found). Only a key the file cannot keep either is refused (`credential_store_unavailable`).
+  `target.json` records which store took the key, and every read follows that record. A key the
+  platform store held before stays there when the file takes the new one (that store is not asked
+  again while it refuses): the next key it takes replaces it, and `logout` and `remove` tidy it
+  when it can be used.
 - **Layer 1.** No remote kind can be added, so there is no key to store: `server login` is
   refused with `remote_kind_unavailable` (decision 3) before any prompt, and both `login` and
   `logout` are hidden from `--help`. `server logout` stays the offline way out: it deletes a key

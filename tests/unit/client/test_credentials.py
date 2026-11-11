@@ -16,6 +16,7 @@ from finishup.client.credentials import (
     read_key_file,
     validate_secret,
 )
+from finishup.client.targets import CredentialLocation
 
 _KEY = "fuk_0123456789ab_" + "B" * 43
 _TARGET = "t_0a1b2c3d"
@@ -92,6 +93,62 @@ class _LockedKeyring:
 
     def delete_password(self, service: str, username: str) -> None:
         raise RuntimeError("locked", service, username)
+
+
+class _RefusingKeyring:
+    """A platform store that is there but refuses every call (locked, denied, no keychain to
+    write to); it records what it was asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.asked.append("get")
+        raise RuntimeError("refused", service, username)
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        del password
+        self.asked.append("set")
+        raise RuntimeError("refused", service, username)
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.asked.append("delete")
+        raise RuntimeError("refused", service, username)
+
+
+@pytest.mark.parametrize("recorded", [None, "file", "keyring"])
+def test_a_platform_store_that_refuses_the_key_hands_it_to_the_owner_only_file(
+    root: Path, recorded: CredentialLocation | None
+) -> None:
+    """On a Mac whose keychain could not take a key, ``server add`` and ``login`` failed with
+    ``credential_store_unavailable``, though a file only the owner can read is the promised
+    place where the platform store cannot keep it. Reading follows the recorded file and never
+    asks the refusing store again."""
+
+    if recorded == "file":
+        KeyringOrFileCredential(_TARGET, root, recorded=None, platform=None).store("x" * 16)
+    refusing = _RefusingKeyring()
+    credential = KeyringOrFileCredential(_TARGET, root, recorded=recorded, platform=refusing)
+    assert credential.store(_KEY) == "file"
+    entry = root / "config" / "credential" / _TARGET
+    assert entry.read_text(encoding="ascii") == _KEY
+    assert entry.stat().st_mode & 0o777 == 0o600
+    assert credential.location() == "file"
+    assert credential.read() == _KEY
+    assert KeyringOrFileCredential(_TARGET, root, recorded="file", platform=refusing).read() == _KEY
+    # Asked once, to take the key; a key it held before is not asked about again.
+    assert refusing.asked == ["set"]
+
+
+def test_only_a_key_neither_store_can_keep_is_refused(root: Path) -> None:
+    unwritable = root / "missing"  # the file store creates only its own folder, never parents
+    for platform in (_RefusingKeyring(), None):
+        credential = KeyringOrFileCredential(_TARGET, unwritable, recorded=None, platform=platform)
+        with pytest.raises(CredentialError) as raised:
+            credential.store(_KEY)
+        assert raised.value.reason == "credential_store_unavailable"
+        assert _KEY not in str(raised.value)
+        assert credential.location() is None
 
 
 def test_a_store_the_key_is_not_recorded_in_never_blocks_its_delete(root: Path) -> None:
