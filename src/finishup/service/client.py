@@ -2496,6 +2496,14 @@ async def _remote_end_phase(stream: ControlStream | None, deadline: float) -> st
             phase = await failure_phase()
     except TimeoutError:
         return None
+    except asyncio.CancelledError:
+        # A cancellation the stream's own task raised (a close ended its reader) is not this
+        # caller's: it names nothing, so the answer the connection already has (a refusal the
+        # hello named) stays the answer. Only a cancellation of this task leaves as one.
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
+        return None
     except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
         return None
     return phase if phase in REMOTE_CONNECTION_PHASES else None

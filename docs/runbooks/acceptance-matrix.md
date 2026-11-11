@@ -80,7 +80,12 @@ Each cell took 21 to 90 seconds.
 Defects the matrix found, fixed in this layer with unit tests: in the direct style the refresh
 marker a `server_profile_changed` refusal left was never taken (no helper on the path), so
 `server status` went on calling the consent current and a narrowed profile was never adjusted;
-the refusal now starts the target's helper, which fetches the profile itself.
+the refusal now starts the target's helper, which fetches the profile itself. The re-run on the
+merged head showed that fix never ran in the real direct style: the shared master keeps an
+`ssh -W` client's stderr open past its exit, the close cancelled the stream's stderr reader, and
+asking why the stream ended raised that cancellation in place of the refusal (a traceback from
+`service status`, exit 1, and no helper). The question now names nothing in that case, and the
+cell checks the first refusal is typed (exit 20, `remote_reconsent`, no traceback).
 
 ## Upgrade over a running helper, bridge and service
 

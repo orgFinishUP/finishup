@@ -6402,6 +6402,17 @@ def main() -> None:
             "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
         )
         raise SystemExit(70) from None
+    except BaseException as error:
+        # An interrupt arrives as KeyboardInterrupt (above); a cancellation that still escapes a
+        # command's event loop is a defect, named as one and never printed as a traceback. Only
+        # a process that loaded asyncio can raise one, so it is never imported here.
+        loop_module = sys.modules.get("asyncio")
+        if loop_module is None or not isinstance(error, loop_module.CancelledError):
+            raise
+        _stderr(
+            "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
+        )
+        raise SystemExit(70) from None
 
 
 def _unexpected_failure_suffix(error: BaseException) -> str:

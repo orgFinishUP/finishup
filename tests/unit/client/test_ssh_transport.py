@@ -392,6 +392,42 @@ def test_a_direct_stream_carries_bytes_both_ways_and_names_why_it_ended(tmp_path
     assert phase == "remote_service_not_running"
 
 
+def test_why_a_stream_ended_never_raises_the_cancellation_its_close_gave_its_stderr_reader(
+    tmp_path: Path,
+) -> None:
+    """An OpenSSH master holds a multiplexed ``ssh -W`` client's stderr past that client's exit,
+    so the close ends the stream's stderr reader by cancelling it. Asking why the stream ended
+    afterwards (the handshake's refusal path does) names nothing; it never raises the reader's
+    cancellation as its own (the ssh-direct-L1 matrix cell: a traceback, exit 1)."""
+
+    holder_pid = tmp_path / "holder.pid"
+    # The stand-in exits at the end of its input; a child of its own keeps its stderr open (as
+    # the master does) and writes nothing else.
+    client = _script(
+        tmp_path,
+        "muxed",
+        f"sleep 30 </dev/null >/dev/null &\necho $! > {holder_pid}\nexec cat",
+    )
+
+    async def run() -> tuple[bool, str | None]:
+        stream = await SshControlStream.open((client,))
+        try:
+            async with asyncio.timeout(10):
+                while not holder_pid.exists() or not holder_pid.read_text().strip():
+                    await asyncio.sleep(0.01)
+            await stream.aclose()
+            reader = stream._stderr_task  # pyright: ignore[reportPrivateUsage]
+            return reader.cancelled(), await stream.failure_phase()
+        finally:
+            # The holder this test started is stopped by its own pid.
+            with contextlib.suppress(ProcessLookupError, ValueError, OSError):
+                os.kill(int(holder_pid.read_text().strip()), 9)
+
+    cancelled, phase = asyncio.run(run())
+    assert cancelled  # the case under test: the close ended the reader
+    assert phase is None
+
+
 def test_an_upstream_socket_is_reached_only_with_the_fixed_endpoint_fences() -> None:
     # A short base: CI's temporary folders are too deep for an AF_UNIX path.
     base = Path(tempfile.mkdtemp(prefix=".yz-st-", dir=short_home_base()))

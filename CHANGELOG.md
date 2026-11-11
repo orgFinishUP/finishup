@@ -293,7 +293,10 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **The direct style notices a changed server.** In the direct style, a request refused because the
   server's profile changed now starts the background helper to read the new profile, so `finishup
   server status` shows the change (and a profile that only asks for less is adjusted) instead of
-  calling the consent current while every request is refused.
+  calling the consent current while every request is refused. Through a shared SSH connection
+  that refusal used to reach `finishup service status` as a Python traceback (exit 1), and the
+  helper was never started; it is now the usual refusal, with `finishup server use NAME` as the
+  way back, on every surface.
 - **A server that does not answer in time is named.** In the direct style, a hook or command whose
   server elsewhere did not answer within its time now names `remote_unreachable`, as the relay
   style does, instead of reading as this computer's own service being down.

@@ -94,6 +94,31 @@ def test_one_failed_step_fails_the_cell(verdicts: list[str], expected: str) -> N
     assert report.verdict == expected
 
 
+def test_a_refusal_counts_only_when_its_surface_names_it_typed() -> None:
+    """The profile-changed step: a traceback that happens to name the phase (exit 1) fails."""
+
+    document = json.dumps(
+        {
+            "ok": False,
+            "phase": "server_profile_changed",
+            "recovery": {"continuation": "remote_reconsent"},
+        }
+    )
+
+    def result(code: int, out: str, err: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["finishup"], code, out, err)
+
+    typed = matrix.typed_refusal
+    assert typed(result(20, document), "server_profile_changed", "remote_reconsent")
+    traceback = "Traceback (most recent call last):\nControlProtocolError: server_profile_changed"
+    assert not typed(result(1, "", traceback), "server_profile_changed", "remote_reconsent")
+    assert not typed(result(20, document, traceback), "server_profile_changed", "remote_reconsent")
+    assert not typed(result(1, document), "server_profile_changed", "remote_reconsent")
+    assert not typed(result(0, document), "server_profile_changed", "remote_reconsent")
+    assert not typed(result(20, document), "server_profile_changed", "remote_reauthorize")
+    assert not typed(result(20, "{}"), "server_profile_changed", "remote_reconsent")
+
+
 def test_the_percentile_is_nearest_rank() -> None:
     values = [float(n) for n in range(1, 21)]
     assert wan_gate.percentile(values, 0.95) == 19.0

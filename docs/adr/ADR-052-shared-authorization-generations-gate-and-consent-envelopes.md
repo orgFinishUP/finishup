@@ -852,6 +852,12 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    helper on its path, so a `server_profile_changed` refusal also starts the target's helper
    (client-owned, vault-less) unless one runs: it fetches the profile itself (never on the
    request's or a hook's path), so `server status` names the change and a narrowing is adjusted.
+   The refusal the hello named stays the answer: a closed `ssh -W` stream is asked why it ended
+   only within the deadline, and the end of its own stderr reader (an OpenSSH master holds a
+   multiplexed client's stderr past that client's exit, so the close cancels the reader) names
+   nothing. Before this, that cancellation replaced the refusal on every surface: `service
+   status` printed a traceback (exit 1) and the helper was never started. A cancellation that
+   still escapes a command is `internal_error` (exit 70), never a traceback.
 2. **Every remote outage names its phase.** A direct stream (`ssh -W` or REST) that does not answer
    within the deadline is `remote_unreachable`, as through the helper; never a phaseless outage a
    hook or the CLI renders as this computer's service being down.

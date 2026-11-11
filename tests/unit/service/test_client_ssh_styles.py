@@ -333,6 +333,139 @@ def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_r
     assert spawns == ([] if running else [record.target_id])
 
 
+class _MultiplexedDirectStream:
+    """A direct ``ssh -W`` stand-in whose close cancels its own stderr reader (an OpenSSH master
+    holds a multiplexed client's stderr past its exit), and which, asked afterwards why it
+    ended, raises that reader's cancellation: the shape the real stream had."""
+
+    def __init__(self, inner: ControlStream) -> None:
+        self._inner = inner
+        self._reader = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+
+    @property
+    def peer_identity(self) -> object:
+        return self._inner.peer_identity
+
+    async def receive(self, max_bytes: int) -> bytes:
+        return await self._inner.receive(max_bytes)
+
+    async def send_all(self, data: Buffer) -> None:
+        await self._inner.send_all(data)
+
+    async def aclose(self) -> None:
+        self._reader.cancel()
+        await asyncio.gather(self._reader, return_exceptions=True)
+        await self._inner.aclose()
+
+    async def failure_phase(self) -> str | None:
+        await asyncio.shield(self._reader)
+        return None
+
+
+def _refusing_direct_server(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[str], list[str]]:
+    """The direct style against a server that issues another profile revision now, over the
+    multiplexed stand-in; returns the helper spawns and the profile refreshes run here."""
+
+    from builders.server_profiles import _revision_of  # pyright: ignore[reportPrivateUsage]
+    from finishup.client import server_profile
+
+    write_connection_style(root, "direct")
+    daemon = ScriptedDaemon()
+    daemon.profile_revision = _revision_of(profile_document(revision=2))
+
+    async def open_stream(  # noqa: ANN202
+        _ssh: str,
+        _root: Path,
+        _record: targets.ServerTarget,
+        *,
+        expected: str | None,
+        deadline: float | None,
+    ):
+        del expected, deadline
+        client_end, server_end = memory_pair()
+        daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
+        return _MultiplexedDirectStream(client_end)
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
+    monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
+    spawns: list[str] = []
+    refreshes: list[str] = []
+
+    def spawn(_root: Path, target_id: str) -> object:
+        spawns.append(target_id)
+        return object()
+
+    def refresh(*_args: object, **_kwargs: object) -> object:
+        refreshes.append("refresh")
+        raise AssertionError("a refused request never refreshes the profile on its own path")
+
+    monkeypatch.setattr(helper_status, "spawn_helper", spawn)
+    monkeypatch.setattr(helper_status, "helper_holder", lambda _root: None)
+    monkeypatch.setattr(server_profile, "refresh_profile", refresh)
+    return spawns, refreshes
+
+
+@pytest.mark.parametrize("surface", ["cli", "mcp_bridge", "hook"])
+def test_a_multiplexed_direct_streams_refusal_is_typed_and_starts_the_helper_on_every_surface(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    """The ssh-direct-L1 matrix cell: the hello's ``server_profile_changed`` reaches every
+    surface as the typed refusal (never the stream's own cancellation, which left as a
+    traceback), and leaves the marker and starts the helper, which refreshes the profile, so
+    ``server status`` names the change. Nothing refreshes it on the refused request's path (a
+    hook's included: design v2 section 8.9)."""
+
+    record, root = ssh_selected
+    spawns, refreshes = _refusing_direct_server(root, monkeypatch)
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            if surface == "hook":
+                # The hooks' attach path (``observe_hooks._connect_attachment_service``).
+                await connect_service_on_demand(
+                    ControlClientKind.CLI, timeout_seconds=5.0, supersede_incompatible=False
+                )
+            else:
+                await connect_service(ControlClientKind(surface))
+        return raised.value
+
+    error = asyncio.run(run())
+    assert (error.reason, error.phase) == ("service_unavailable", "server_profile_changed")
+    assert (root / "state" / "profile-refresh-requested").exists()
+    assert spawns == [record.target_id]
+    assert refreshes == []
+
+
+def test_service_status_names_a_multiplexed_direct_streams_refusal_with_its_continuation(
+    ssh_selected: tuple[targets.ServerTarget, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``finishup service status --json`` (its fast path) names the refusal and the owner's way
+    back (``remote_reconsent``), exit 20; never a traceback, never exit 1."""
+
+    import json
+
+    from finishup.cli import entry
+
+    _record, root = ssh_selected
+    _refusing_direct_server(root, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = entry._service_status_fast_path(["--json"])  # pyright: ignore[reportPrivateUsage]
+
+    captured = capsys.readouterr()
+    assert code == 20
+    assert "Traceback" not in captured.err
+    document = json.loads(captured.out)
+    assert document["phase"] == "server_profile_changed"
+    assert document["recovery"]["continuation"] == "remote_reconsent"
+    assert "server_profile_changed" in captured.err
+
+
 def test_a_direct_stream_that_does_not_answer_within_the_deadline_names_remote_unreachable(
     ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

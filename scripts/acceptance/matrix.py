@@ -399,11 +399,29 @@ def refusal_before_dial(
     client.py(code, *disarm.split())
 
 
+def typed_refusal(result: subprocess.CompletedProcess[str], phase: str, continuation: str) -> bool:
+    """Whether a ``--json`` call was refused as the surface names it: ``phase`` and its
+    ``continuation`` in the document, an exit code of the public taxonomy (never 1, Python's own
+    for a traceback), and no traceback."""
+
+    document = json_of(result.stdout)
+    recovery = document.get("recovery")
+    return (
+        result.returncode not in (0, 1)
+        and document.get("phase") == phase
+        and isinstance(recovery, dict)
+        and recovery.get("continuation") == continuation
+        and "Traceback" not in result.stderr
+    )
+
+
 def changed_profile(world: World, report: Report, cell: Cell) -> None:
     client, server = world.client, world.server(cell)
     restarted = server.new_profile_revision()
     first = client.fu("service", "status", "--json", timeout=120)
-    seen = "server_profile_changed" in first.stdout + first.stderr
+    # The first refusal is the one the server named (the hello's answer); every surface names it
+    # typed, with the owner's way back. The ssh-direct cells once printed a traceback here.
+    seen = typed_refusal(first, "server_profile_changed", "remote_reconsent")
 
     def consent_changed() -> bool:
         document = json_of(client.fu("server", "status", cell.target, "--json").stdout)
@@ -412,16 +430,14 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
 
     changed = wait_until(consent_changed, seconds=120, interval=1.0)
     blocked = client.fu("service", "status", "--json", timeout=60)
-    refused = (
-        blocked.returncode != 0 and "server_profile_changed" in blocked.stdout + blocked.stderr
-    )
+    refused = typed_refusal(blocked, "server_profile_changed", "remote_reconsent")
     report.add(
         "profile changed → refused",
-        restarted and changed and (seen or refused),
+        restarted and changed and seen and refused,
         f"server restarted with a new revision: {restarted}; first call exit {first.returncode} "
-        f"(server_profile_changed: {seen}); consent state changed: {changed}; next call refused "
-        f"with server_profile_changed: {refused}",
-        shown(world, blocked),
+        f"(typed server_profile_changed, remote_reconsent: {seen}); consent state changed: "
+        f"{changed}; next call refused typed: {refused}",
+        shown(world, first) + "\n\n" + shown(world, blocked),
     )
     again = client.ceremony(
         ["server", "use", cell.target], [Reply(r"Type the target name", cell.target, secret=False)]
