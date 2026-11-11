@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -43,6 +44,24 @@ harness = _load("harness")
 matrix = _load("matrix")
 wan_gate = _load("wan_gate")
 upgrade = _load("upgrade")
+
+
+@pytest.fixture(autouse=True)
+def no_run_folder_outlives_its_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A ``Run`` a test makes in this process never leaves its ``~/.yz-acc-*`` folder behind,
+    even when the test fails before the run's own cleanup (only the folders made here)."""
+
+    made: list[Any] = []
+    original = harness.Run.__init__
+
+    def recording(self: Any, *arguments: Any, **options: Any) -> None:
+        original(self, *arguments, **options)
+        made.append(self)
+
+    monkeypatch.setattr(harness.Run, "__init__", recording)
+    yield
+    for run in made:
+        harness.remove_tree(run.base)
 
 
 def test_the_cells_are_the_design_matrix_and_nothing_else() -> None:
