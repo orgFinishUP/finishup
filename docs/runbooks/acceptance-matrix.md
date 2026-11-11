@@ -63,11 +63,12 @@ installation has a vault, a server elsewhere is refused while its live policy ca
 (`network_policy_unreadable`, ADR-051 decision 8); the local cells therefore run on a client home
 of their own.
 
-### Results (Linux x86-64, 2026-11-10, `53fa8e2a2`)
+### Results (Linux x86-64, 2026-11-11, `07e94dd94`)
 
 All 23 cells passed every step: 2 local, 4 SSH, 16 REST (both edges, both styles, both levels,
 `local_port` and self-hosted `https`) and the official stand-in (the conformance kit's 9 cases).
-Each cell took 21 to 90 seconds.
+Each cell took 15 to 50 seconds. The first run (2026-11-10, `53fa8e2a2`) passed as well; a run on
+the merged head in between failed `ssh-direct-L1` (below).
 
 | Cell group | add | use | task | hold / zero network | re-consent | logout | L2 sync / forget | out |
 |---|---|---|---|---|---|---|---|---|
@@ -100,7 +101,8 @@ newer wheel over the older in place, while the processes started from the older 
 A pinned instance cannot play either computer (a client must be ambient; an instance is never
 upgraded in place). The client and an SSH server (isolated root, private `sshd`), relay style.
 
-What a running process does across an in-place upgrade:
+What a running process does across an in-place upgrade (first run 2026-11-10; the same results
+again on 2026-11-11 at `07e94dd94`, against layer 4's `f1e3f5707`):
 
 - **An MCP bridge keeps its own code.** A bridge runs from a retained copy of its runtime
   (`.<venv>-releases/<digest>/`), so after the upgrade it, and every helper it starts, is still the
