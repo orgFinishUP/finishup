@@ -206,8 +206,7 @@ _MAX_FILES: Final = 64
 _MAX_PATH: Final = 4_096
 _MAX_COMMAND_OUTPUT: Final = 1_048_576
 _DESCRIPTION: Final = (
-    "Records material work in a local FinishUP ledger and checks completion claims "
-    "against that record."
+    "Records material work in a FinishUP ledger and checks completion claims against that record."
 )
 _GUIDANCE_URI_PREFIX: Final = "finishup://guidance/"
 _GUIDANCE_NAMES: Final = tuple(

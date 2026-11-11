@@ -309,8 +309,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:fb2a3250c76b3cc02dbc28974aef6d2c64287e34f43b08130f318be1a94922cc",
-        "strict": "sha256:abc6b61032ff3e339ee3dede09bb7fb48452830dff0d88c800cddac8387381f0",
+        "policy": "sha256:80854cb4baecb7068ea6c9b7bc354ad6bd039ce52032da38fd2d5ee49b1a2fb3",
+        "strict": "sha256:a817a339b3b383ebb4cd4ed6d36c46f0319b004b7c5c36c464b48678820984d0",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -331,10 +331,13 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "current status frontier" in respond_description
     assert "result frontier of the check that returned it" not in respond_description
     assert "not its subject_frontier" in respond_description
-    for local_description in (descriptor_for("publish_work").description, respond_description):
-        assert "local FinishUP ledger" in local_description
-        assert "does not publish to GitHub" in local_description
-        assert "run an AI-powered evaluation" in local_description
+    # The ledger these append to is the task's on the selected FinishUP server, which may be on
+    # another machine (ADR-051), so neither calls it local.
+    for ledger_description in (descriptor_for("publish_work").description, respond_description):
+        assert "the task's FinishUP ledger" in ledger_description
+        assert "local FinishUP ledger" not in ledger_description
+        assert "does not publish to GitHub" in ledger_description
+        assert "run an AI-powered evaluation" in ledger_description
     assert descriptor_for("start").description.startswith(
         "First read finishup://guidance/agent-instructions.md."
     )
