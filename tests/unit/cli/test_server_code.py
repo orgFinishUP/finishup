@@ -994,3 +994,41 @@ def test_a_target_authorized_again_before_the_connection_is_refused_and_nothing_
     assert "server_authorization_changed" in result.output
     assert connection == [] and folder.exists()
     assert "deleted" not in result.stdout.replace("not forgotten", "")
+
+
+@pytest.mark.parametrize(("before", "after"), [("L1", "L2"), ("L2", "L1"), ("L1", "L1")])
+def test_server_use_that_changes_the_level_stops_that_servers_helper(
+    remote: targets.ServerTarget, monkeypatch: pytest.MonkeyPatch, before: str, after: str
+) -> None:
+    """Defect A, re-review (Codex, R2-1): a helper's background agent declares the code-sync
+    operations only when it opens, and the helper follows a changed consent only at its next
+    tick, so a task sent right after ``server use NAME --level L2`` could meet the L1 agent and
+    be refused the sync at once. A level change now stops that server's helper before the
+    command ends (as ``server set --style`` does); the next client starts one under the new
+    level. Confirming the same level stops nothing."""
+
+    from types import SimpleNamespace
+
+    from tests.builders.server_profiles import consent_to
+    from tests.builders.server_targets import remote_runtime
+
+    def at(level: str) -> targets.ServerTarget:
+        with release_l2():
+            return consent_to(
+                remote,
+                _L2_DOCUMENT,
+                level=level,
+                retention=Retention("days", 7) if level == "L2" else None,
+            )
+
+    at(before)
+    runtime = remote_runtime(monkeypatch)
+
+    def use(_name: str, **_options: object) -> object:
+        return SimpleNamespace(record=at(after), left_lines=tuple, left_open=False)
+
+    monkeypatch.setattr(server_cli, "use_target", use)
+    result = CliRunner().invoke(server_cli.server_app, ["use", "lab", "--level", after])
+    assert result.exit_code == 0, result.output
+    root = targets.target_root(remote.target_id)
+    assert runtime.stops == ([] if before == after else [root])

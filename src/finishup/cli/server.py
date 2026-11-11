@@ -2061,6 +2061,7 @@ def server_use(
 ) -> None:
     """Select the server new client processes use ('local' returns to this computer's)."""
 
+    before = _consented_level(name)
     switch = use_target(
         name,
         choice=None if level is None and retention is None else LevelChoice(level, retention),
@@ -2074,7 +2075,50 @@ def server_use(
         typer.echo(line, err=switch.left_open)
     if record is not None:
         _say_repository_hold(record)
+        if before is not None and before != _level_key(record):
+            _stop_helper_for_level(record)
     _warn_open_sessions()
+
+
+def _level_key(record: ServerTarget) -> tuple[str, str] | None:
+    """The target and the level its consent names; ``None`` for no remote consent."""
+
+    if not record.is_remote or record.consent is None:
+        return None
+    return record.target_id, record.consent.level
+
+
+def _consented_level(name: str) -> tuple[str, str] | None:
+    """``_level_key`` of the target named ``name`` before ``server use`` changes it."""
+
+    if name == "local":
+        return None
+    try:
+        return _level_key(find_target(name))
+    except TargetError:
+        return None
+
+
+def _stop_helper_for_level(record: ServerTarget) -> None:
+    """The owner chose another level for a server: stop its helper before this command ends.
+
+    A background agent declares the code-sync operations only when it opens, under the level of
+    its time; one opened before would still be the one the server asks, and at L1 it refuses the
+    sync at once. Stopped now (its agents closed, as ``server set --style`` does), the next
+    client starts a helper under the new level; the server waits for its agent meanwhile (defect
+    A of the 2026-11-11 dogfood; a helper that did not stop still follows the consent itself). A
+    stop that does not finish in time is named, with its fix.
+    """
+
+    try:
+        runtime_for(record.kind).stop(target_root(record.target_id))
+    except TargetRuntimeError:
+        typer.echo(
+            f"The connection this computer keeps for {record.name} did not stop in time; it "
+            f"follows the new level within a few seconds, or run 'finishup server disconnect "
+            f"{record.name}'.",
+            err=True,
+        )
 
 
 def _probe_document(result: ProbeResult | None, error: TargetRuntimeError | None) -> JsonValue:
