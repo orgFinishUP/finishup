@@ -228,7 +228,13 @@ Only the target's helper declares them: `client.code_sync.CodeSyncResponder` is 
 background agent built with `remote_workspace_binding(..., code_sync=True)` for a target consented
 at L2. The MCP bridge, CLI commands and hooks never declare them; the hub sends an operation only to
 an agent that declares it, so the server never asks them, and it never replays either to another
-connection.
+connection. The declaration is made when the agent opens, so a running helper follows the consent:
+when the owner changes it without a lapse (`server use NAME --level L2` on a server already in use
+at L1, or back to L1), the helper opens each background agent again under the record as it is now
+and closes the old one once the replacement is connected (at most 30 seconds later), so the server
+never finds no agent meanwhile and an agent opened at L1 never stays the one it asks to sync (defect
+A of the 2026-11-11 dogfood; `client.helper.Helper._follow_consent`). Each call is still checked
+against the consent as it is when the call arrives (below).
 
 `code_sync_prepare` checks, in this order and before anything is read for the export (FR-7):
 

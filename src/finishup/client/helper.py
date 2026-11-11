@@ -21,14 +21,20 @@ one spawned before such a stop never serves. Its roles:
    claim-bound connection whose agent declares ``role: background``, built through
    ``remote_workspace_binding`` under the helper's admission, so the repository hold is decided
    before the claim and the agent fences held repositories and answers nothing once its check
-   lapses. It never counts as client activity and never starts the server's service.
+   lapses. It never counts as client activity and never starts the server's service. Each agent
+   is opened under the target's record as it is then; when the owner's consent changes under
+   the same profile revision (``server use NAME --level L2``: no lapse), every agent is opened
+   again under the new record and the old one serves until its replacement is connected (at
+   most 30 seconds), so an agent opened at L1 never stays the one the server asks to sync.
 3. **Observation drain**: what this computer's hooks captured for each served workspace is
    delivered over its agent every 30 seconds, as its own task (never holding the tick or a stop),
    and once more, bounded, as the helper stops, never while this computer is zero-network.
 4. **Profile cache and re-check** (design v2 sections 2.3 and 8.9): the server's profile is
    fetched (``client.ssh_discovery``) and recorded (``client.server_profile.refresh_profile``) at
-   start, every 10 minutes while an upstream was used, when one of its own connections is refused
-   ``server_profile_changed`` and when a client left the refresh marker; at most every 30 seconds.
+   start, every 10 minutes while an upstream was used, when one of its own connections or a
+   relayed one is refused ``server_profile_changed`` (over HTTPS the refusal ends the stream
+   unanswered, so the helper asks itself) and when a client left the refresh marker; at most
+   every 30 seconds.
 
 **Admission (FR-3).** Everything above runs only under the helper's own admission through the
 shared gate (``authorization.authorize_target``: pinned to its root, steps 2 to 5 and the
@@ -38,7 +44,8 @@ admitted again. While this computer last reported a zero-network policy the help
 records ``zero_network_remote_selected``, asks its OpenSSH master to exit and stops at once.
 
 Its status record (``client.helper_status``) names every outage with a closed phase, so a client
-whose connection closed can say why. Nothing here logs or raises a path, host or name.
+whose connection closed can say why; a client's own relay refused is recorded again for that
+client even when the phase stands already (a background agent's earlier refusal). Nothing here logs or raises a path, host or name.
 """
 
 from __future__ import annotations
@@ -132,6 +139,8 @@ REFRESH_INTERVAL_SECONDS: Final = 600.0
 _REFRESH_MIN_SECONDS: Final = 30.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
+# How long an agent opened under an earlier consent keeps serving while its replacement connects.
+_RETIRE_SECONDS: Final = 30.0
 _HELLO_SECONDS: Final = 10.0
 # One upstream attempt, from the master's start to the server's first answer to the hello: a
 # server that accepts the channel and never answers ends the relay here, its stream closed.
@@ -751,6 +760,11 @@ class Helper:
         self._last_sync: float | None = None
         self._registrations_stamp: object = None
         self._agents: dict[tuple[object, ...], HelperAgent] = {}
+        # Agents opened under an earlier consent, each with when it was replaced: they keep serving
+        # until their replacement is connected, at most ``_RETIRE_SECONDS`` (defect A).
+        self._retiring: dict[tuple[object, ...], tuple[HelperAgent, float]] = {}
+        # The identity stamp of ``target.json`` when the record agents open under was last read.
+        self._record_stamp: object = None
         self._served_count = 0
         self._delivery: asyncio.Task[None] | None = None
         self._refresh = _Refresh()
@@ -766,10 +780,20 @@ class Helper:
     def stop_reason(self) -> str:
         return self._stop_reason
 
-    def _write_status(self, phase: HelperPhase, reason: str | None) -> None:
+    def _write_status(self, phase: HelperPhase, reason: str | None, *, fresh: bool = False) -> None:
+        """Record ``phase`` and ``reason``; an unchanged one is not written again unless ``fresh``.
+
+        ``fresh`` (a client's own relay refused): written again even when unchanged, with its own
+        correlation id, so the client that waits on this attempt sees a record made after it began
+        (``service.client._helper_failure``) and names the refusal at once, instead of waiting out
+        its deadline while a background agent's earlier refusal of the same reason stands. The
+        generation moves only when the phase or the reason changes (``new_status``).
+        """
+
         previous = self._status
         if (
-            previous is not None
+            not fresh
+            and previous is not None
             and previous.started_at == self._started_at
             and previous.pid == os.getpid()
             and (previous.phase, previous.reason) == (phase, reason)
@@ -797,6 +821,14 @@ class Helper:
             self.request_stop("target_removed")
             return
         self._status = status
+
+    def _name_refusal_again(self) -> None:
+        """A client's relay refused under the helper's standing refusal: record it again for that
+        client (``_write_status(fresh=True)``), so it is named at once, not after a deadline."""
+
+        status = self._status
+        if status is not None and status.phase == "unavailable" and status.reason is not None:
+            self._write_status("unavailable", status.reason, fresh=True)
 
     # -- admission (FR-3) -----------------------------------------------------------------------
 
@@ -1029,6 +1061,8 @@ class Helper:
                 return
             admission = self._admitted()
             if admission is None:
+                if not own:
+                    self._name_refusal_again()
                 return
             # This relay's own repository: its hold, by the repository's key, withholds the
             # relay's frames and its REST stream's own requests (design v2 section 8.3).
@@ -1041,7 +1075,15 @@ class Helper:
                     bound=lambda: self._relay_refusal(admission, repository),
                 )
             except UpstreamUnavailable as error:
-                self._write_status("unavailable", error.reason)
+                # A client waits on this attempt's own record; a background agent's refusal of the
+                # same reason may already stand (defect B, dogfood 2026-11-11).
+                self._write_status("unavailable", error.reason, fresh=not own)
+                if error.reason == _PROFILE_CHANGED:
+                    # A REST server refused the consented revision: the stream ended unanswered,
+                    # so no client (the helper's own agents included) sees the typed refusal an
+                    # SSH relay passes on. Fetch the profile again now (at most every 30 s) so the
+                    # consent reads what changed (defect B).
+                    self._profile_changed()
                 return
             self._last_upstream_use = self._clock()
             self._write_status("ready", None)
@@ -1238,9 +1280,84 @@ class Helper:
                 if self._last_upstream_use is None:
                     self._last_upstream_use = self._clock()
 
-    async def _close_agents(self) -> None:
-        agents = tuple(self._agents.values())
+    def _follow_consent(self) -> bool:
+        """Take the target's record as it is now when the owner's consent changed; whether it did.
+
+        Every background agent is opened under the record (its consent decides, among others,
+        whether it answers the server's code-sync calls, ADR-054). A consent the owner changed
+        under the same profile revision (``finishup server use NAME --level L2``, another
+        retention, the same level confirmed again) ends no connection, so the agents opened
+        before it would go on under the old one: an L1 agent declares no code-sync operation and
+        every sync is refused until the helper restarts (defect A of the 2026-11-11 dogfood).
+        ``target.json`` is read again only when its identity stamp moved (one ``lstat`` a tick).
+        """
+
+        from finishup.client.authorization import consent_digest
+        from finishup.client.targets import read_target
+        from finishup.config.paths import SERVER_TARGET_FILE_NAME
+
+        try:
+            facts = os.lstat(self._root / SERVER_TARGET_FILE_NAME)
+        except OSError:
+            return False
+        stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+        if stamp == self._record_stamp:
+            return False
+        self._record_stamp = stamp
+        try:
+            current = read_target(self._root)
+        except TargetError:
+            return False
+        if current is None or current.target_id != self._record.target_id:
+            return False
+        changed = consent_digest(current) != consent_digest(self._record)
+        self._record = current
+        return changed
+
+    def _replace_agents(self) -> None:
+        """Every agent opened under the earlier consent is replaced (make before break).
+
+        The next agent sync opens each one again under the record now; the old one keeps serving
+        until its replacement is connected (``_close_replaced``), so the server never finds no
+        agent for the workspace meanwhile. A workspace replaced again before that closes its
+        oldest agent at once.
+        """
+
+        now = self._clock()
+        for key, agent in self._agents.items():
+            older = self._retiring.pop(key, None)
+            if older is not None:
+                self._spawn_close(older[0])
+            self._retiring[key] = (agent, now)
         self._agents.clear()
+        self._last_sync = None
+
+    async def _close_replaced(self) -> None:
+        """Close each replaced agent whose replacement is connected, is not wanted, or that
+        waited its bound."""
+
+        now = self._clock()
+        for key, (agent, since) in tuple(self._retiring.items()):
+            replacement = self._agents.get(key)
+            if (
+                replacement is None
+                or replacement.client is not None
+                or not agent.alive
+                or now - since >= _RETIRE_SECONDS
+            ):
+                del self._retiring[key]
+                with contextlib.suppress(Exception):
+                    await agent.aclose()
+
+    def _spawn_close(self, agent: HelperAgent) -> None:
+        task = asyncio.create_task(agent.aclose())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _close_agents(self) -> None:
+        agents = (*self._agents.values(), *(agent for agent, _since in self._retiring.values()))
+        self._agents.clear()
+        self._retiring.clear()
         for agent in agents:
             with contextlib.suppress(Exception):
                 await agent.aclose()
@@ -1346,10 +1463,11 @@ class Helper:
         """One tick of the helper's watch; whether it is stopping.
 
         Zero-network first (a stop, at once); a moved stop epoch (a stop); then the admission (a
-        lapse ends every relay and
-        every agent); the registrations when their folder changed or every 30 seconds; the drain
-        and the profile refresh when due, each as its own task (the refresh under gate steps 2 to
-        4 only, so it also runs while the consent refuses the cached profile); the idle exit.
+        lapse ends every relay and every agent; a consent changed without a lapse opens every
+        agent again under it, make before break); the registrations when their folder changed or
+        every 30 seconds; the drain and the profile refresh when due, each as its own task (the
+        refresh under gate steps 2 to 4 only, so it also runs while the consent refuses the
+        cached profile); the idle exit.
         """
 
         if self._stop.is_set() or self._refuse_zero_network():
@@ -1364,11 +1482,15 @@ class Helper:
             return True
         if admission is None:
             await self._close_agents()
+        elif self._follow_consent():
+            self._replace_agents()
         now = self._clock()
         if self._registrations_changed() or (
             self._last_sync is None or now - self._last_sync >= _AGENT_SYNC_SECONDS
         ):
             await self._sync_agents()
+        if self._retiring:
+            await self._close_replaced()
         if self._agents or self._served_count:
             # A served registration is a client: the helper stays while one is live.
             self._last_activity = now
