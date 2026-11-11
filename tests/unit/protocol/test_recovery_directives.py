@@ -353,7 +353,7 @@ class TestCliProjection:
         model = PublicErrorModel.model_validate(
             {
                 "code": "SERVICE_UNAVAILABLE",
-                "message": "The local operation timed out and may still have committed.",
+                "message": "The operation timed out and may still have committed.",
                 "retryable": True,
                 "correlation_id": _CORRELATION_ID,
                 "safe_details": {

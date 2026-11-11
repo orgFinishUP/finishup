@@ -1394,7 +1394,7 @@ REASON_REMEDIES: Final[Mapping[str, str]] = MappingProxyType(
             "nothing was recorded. Send the same call once more, then report the correlation_id."
         ),
         "bridge_invoke_failed": (
-            "The bridge failed while calling the local service. A write (start, publish_work, "
+            "The bridge failed while calling the FinishUP service. A write (start, publish_work, "
             "check other than an inspection, respond, receipt) may or may not be recorded: replay the same request_id "
             "(never a new one); replay is idempotent and returns the stored result when the "
             "write committed. A read changed nothing: repeat it. Report the correlation_id."
