@@ -937,14 +937,14 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="remote_direct_slow",
         directive=(
-            "The selected server did not answer in time in the direct style (a connection per "
-            "program), which is slow on this network. Ask the owner to run 'finishup server set "
-            "NAME --style relay', then repeat this request."
+            "The selected server could not be reached in time in the direct style, where each "
+            "program opens its own connection: slow on a slow network. Ask the owner to run "
+            "'finishup server set NAME --style relay', then repeat this request."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge=(
             "Never change the style or switch servers for the owner; 'finishup server test' shows "
-            "each step."
+            "whether it is up and how slow."
         ),
     ),
     RecoveryDirective(

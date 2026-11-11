@@ -910,9 +910,13 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    instead of `remote_server_test` on every surface that names it (CLI text and `--json`, MCP,
    hooks, the terminal interface and the menu: `targets.remote_root_continuation`, attached by the
    client that knows the style, never through a reason code); `server status` adds the line when
-   a direct probe did not answer in time (the probe now keeps the phase its connection named);
-   `server test` adds it when a direct new connection misses the gate's 650 ms or does not answer.
-   A refusal, a refused key or a changed identity keeps its own way back. Receipts are not
+   a direct probe did not answer in time (the probe now keeps the phase its connection named, and
+   its JSON carries the continuation, decided by the named target's own style); `server connect`
+   names it too; `server test` adds it when a direct new connection misses the gate's 650 ms or
+   does not answer. `remote_unreachable` is also a server that is down or a name that does not
+   resolve, so where nothing was measured the texts say it could not be reached in time and that
+   the direct style is slow on a slow network; only a measurement (`server test`) says this
+   network is slow. A refusal, a refused key or a changed identity keeps its own way back. Receipts are not
    involved: a connection that did not answer records nothing. The owner's words: "if it has
    issues it should bring them to the user; it's agentic, so with bad internet it won't work
    anyway." `server test` compares what the gate times with the

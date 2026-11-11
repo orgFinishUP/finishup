@@ -230,8 +230,10 @@ When FinishUP sees that, it tells you and names the fix:
 
 - `finishup server test lab` measures a new connection the way an agent's tools need it; past
   650 ms in the direct way it says the direct way is slow on this network;
-- `finishup server status lab`, and the message an agent or a command shows when the server did
-  not answer in time in the direct way, say the same;
+- `finishup server status lab`, `finishup server connect lab`, and the message an agent or a
+  command shows when the server could not be reached in time in the direct way, say that the direct
+  way is slow on a slow network (a server that is down looks the same; `server test` tells them
+  apart);
 - the fix is `finishup server set lab --style relay`, which makes the helper keep one connection
   for every program again.
 

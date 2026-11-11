@@ -791,6 +791,7 @@ def test_a_probe_not_sent_carries_when_this_computer_reported_zero_network() -> 
         "round_trip_p95_ms": None,
         "samples": 0,
         "last_reported_at": "2026-11-07T09:30:00.000Z",
+        "continuation": None,
     }
     document = {**payload, "probe": not_sent}
     validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, document))
@@ -2148,8 +2149,8 @@ def test_server_test_names_the_relay_style_when_a_direct_connection_did_not_answ
     tested = _invoke("test", "lab")
     assert tested.exit_code == 20
     assert (
-        "lab did not answer in time in the direct style, which is slow on this network: each "
-        "program here opens its own connection to that server. " + _RELAY_REMEDY
+        "lab could not be reached in time in the direct style, where each program here opens its "
+        "own connection to that server, which is slow on a slow network. " + _RELAY_REMEDY
     ) in tested.stderr
 
 
@@ -2196,3 +2197,58 @@ def test_a_remote_probe_keeps_the_phase_its_connection_named(
         "service_unavailable",
         "remote_unreachable",
     )
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "expected"),
+    [
+        ("direct", "remote_unreachable", "remote_direct_slow"),
+        ("direct", "timeout", "remote_direct_slow"),
+        ("direct", "remote_auth_failed", "remote_credential_repair"),
+        ("relay", "remote_unreachable", "remote_server_test"),
+        ("relay", "timeout", None),
+    ],
+)
+def test_server_status_json_names_the_continuation_of_a_probe_that_failed(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, expected: str | None
+) -> None:
+    """Review (Codex, layer 7): `server status --json` (and a piped status) named a direct
+    timeout's phase but not its way back; the probe carries its registered continuation, decided
+    by the named target's own style."""
+
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == expected
+    runtime.probe_result = ProbeResult(
+        "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=40, samples=10
+    )
+    assert cast(dict[str, JsonValue], _status_json("lab")["probe"])["continuation"] is None
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_connect_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """Review (Codex, layer 7): `server connect NAME` of a target reached in the direct style that
+    could not be reached in time printed only the network remedy; it names the relay style, by
+    the named target's own style."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+
+    def unreachable(_root: Path | None) -> None:
+        raise TargetRuntimeError("service_unavailable", phase="remote_unreachable")
+
+    monkeypatch.setattr(runtime, "ensure_ready", unreachable)
+    connected = _invoke("connect", "lab")
+    assert connected.exit_code != 0
+    assert connected.stderr.startswith("remote_unreachable: ")
+    assert ("'finishup server set NAME --style relay'" in connected.stderr) is (style == "direct")

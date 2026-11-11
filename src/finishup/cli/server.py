@@ -2246,7 +2246,9 @@ def build_status_document(
         "client_version": __version__,
         "target": target,
         # Nothing is sent to probe it while this computer is zero-network (ADR-051 decision 8).
-        "probe": (_probe_document(result, failure) if refused is None else _not_probed(refused)),
+        "probe": _with_continuation(
+            _probe_document(result, failure) if refused is None else _not_probed(refused), target
+        ),
         "zero_network_selection": zero_network_item,
         "observed_at": format_rfc3339_ms(stamp),
     }
@@ -2254,6 +2256,28 @@ def build_status_document(
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _with_continuation(probe: JsonValue, target: Mapping[str, JsonValue]) -> JsonValue:
+    """``probe`` with the registered continuation of its failure, for a server elsewhere.
+
+    The target's own style decides it, never the selected one's: a probe of a target reached in
+    the direct style that did not answer in time is ``remote_direct_slow`` (the owner's WAN-gate
+    decision); any other remote phase is its own continuation; anything else has none.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+    from finishup.protocol.recovery import continuation_for_reason
+
+    document = cast(dict[str, JsonValue], probe)
+    phase = document.get("phase")
+    continuation: str | None = None
+    if document.get("outcome") in {"not_running", "unavailable"} and type(phase) is str:
+        if _direct_style(target) and phase in _DIRECT_TIMEOUT_PHASES:
+            continuation = "remote_direct_slow"
+        elif phase in REMOTE_CONNECTION_PHASES:
+            continuation = continuation_for_reason(phase)
+    return {**document, "continuation": continuation}
 
 
 def _connection_document(record: ServerTarget | None, root: Path | None) -> JsonValue:
@@ -2497,6 +2521,16 @@ def _key_refused_line(kind: str, name: str) -> str:
 _DIRECT_TIMEOUT_PHASES: Final = frozenset({"remote_unreachable", "timeout"})
 
 
+def _reached_directly(record: ServerTarget | None, root: Path | None) -> bool:
+    """Whether ``record`` is a server elsewhere this computer reaches in the direct style."""
+
+    if record is None or root is None or record.kind not in _STYLE_KINDS:
+        return False
+    from finishup.client.helper_status import read_connection_style
+
+    return read_connection_style(root) == "direct"
+
+
 def _direct_style(target: Mapping[str, JsonValue]) -> bool:
     connection = target.get("connection")
     return isinstance(connection, Mapping) and connection.get("style") == "direct"
@@ -2505,17 +2539,20 @@ def _direct_style(target: Mapping[str, JsonValue]) -> bool:
 def direct_style_slow_line(name: str, *, answered: bool) -> str:
     """The plain line of a slow direct-style connection and its remedy (the owner's decision,
     2026-11-11): the direct style opens a connection per program, which a slow network makes
-    slow; ``finishup server set NAME --style relay`` keeps one for every program instead."""
+    slow; ``finishup server set NAME --style relay`` keeps one for every program instead.
+    ``answered``: measured slow (``server test``); otherwise it could not be reached in time,
+    which a server that is down also does, so that line says only what the style costs."""
 
     head = (
-        "The direct style is slow on this network"
+        "The direct style is slow on this network: each program here opens its own connection "
+        "to that server"
         if answered
-        else f"{name} did not answer in time in the direct style, which is slow on this network"
+        else f"{name} could not be reached in time in the direct style, where each program here "
+        "opens its own connection to that server, which is slow on a slow network"
     )
     return (
-        f"{head}: each program here opens its own connection to that server. Run 'finishup "
-        f"server set {name} --style relay' (the default) so this computer's FinishUP helper keeps "
-        "one connection for every program."
+        f"{head}. Run 'finishup server set {name} --style relay' (the default) so this "
+        "computer's FinishUP helper keeps one connection for every program."
     )
 
 
@@ -3483,6 +3520,17 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
                 "server_profile_changed",
                 message=_RECONSENT_AT_CONNECT,
                 continuation="remote_reconsent",
+            ) from None
+        if (
+            error.reason == "service_unavailable"
+            and error.phase in _DIRECT_TIMEOUT_PHASES
+            and _reached_directly(record, root)
+        ):
+            # This target, reached in the direct style, could not be reached in time: the
+            # direct style is slow on a slow network, and the relay style is the remedy (the
+            # owner's WAN-gate decision; the named target's own style, never the selected one's).
+            raise ServerCommandRefused(
+                "remote_unreachable", continuation="remote_direct_slow"
             ) from None
         _runtime_failure(error)
     if record is not None:

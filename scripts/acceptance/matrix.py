@@ -426,9 +426,11 @@ def sent_between(before: dict[str, int], after: dict[str, int]) -> dict[str, int
     return {key: after.get(key, 0) - before.get(key, 0) for key in sorted({*before, *after})}
 
 
-def changed_profile(world: World, report: Report, cell: Cell) -> None:
+def changed_profile(world: World, report: Report, cell: Cell, warm: int | None = None) -> None:
     client, server = world.client, world.server(cell)
-    restarted = server.new_profile_revision()
+    # The helper the warm step proved serving is the one the change meets (defect B's path).
+    same = warm is None or helper_pid(client.target_root(cell.target)) == warm
+    restarted = server.new_profile_revision() and same
     began = time.monotonic()
     first = client.fu("service", "status", "--json", timeout=120)
     took = time.monotonic() - began
@@ -453,7 +455,8 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
     report.add(
         "profile changed → refused",
         restarted and changed and seen and refused and quiet,
-        f"server restarted with a new revision: {restarted}; first call exit {first.returncode} "
+        f"warm helper still serving: {same}; server restarted with a new revision: {restarted}; "
+        f"first call exit {first.returncode} "
         f"in {took:.1f} s (typed server_profile_changed, remote_reconsent, under 10 s: {seen}); "
         "consent state changed: "
         f"{changed}; next call refused typed: {refused}; it sent nothing: {quiet} "
@@ -472,22 +475,53 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
     )
 
 
-def warm_helper(world: World, report: Report, cell: Cell) -> None:
-    """Before the profile changes, a task's start warms the helper: its workspace is registered
-    and the helper's background agent is connected (defect B of the 2026-11-11 dogfood: a warm
-    HTTPS relay helper read a changed profile as ``remote_unreachable`` after 31 s; the hold and
-    zero-network steps before this one leave the helper stopped, so the matrix never saw it)."""
+def agent_registrations(server: Server, since: str) -> int:
+    """How many workspace agents the server registered since ``since`` (its bounded
+    ``workspace_agent_registered`` events with reason ``registered``)."""
 
-    client = world.client
+    count = 0
+    for log in sorted(server.root.rglob("*.jsonl")):
+        with contextlib.suppress(OSError):
+            for line in log.read_text(errors="replace").splitlines():
+                if "workspace_agent_registered" not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    record.get("operation") == "workspace_agent_registered"
+                    and record.get("reason") == "registered"
+                    and str(record.get("timestamp", "")) >= since
+                ):
+                    count += 1
+    return count
+
+
+def warm_helper(world: World, report: Report, cell: Cell) -> int | None:
+    """Before the profile changes, a task's start warms the helper: its workspace is registered
+    and the helper's background agent is connected to the server (defect B of the 2026-11-11
+    dogfood: a warm HTTPS relay helper read a changed profile as ``remote_unreachable`` after
+    31 s; the hold and zero-network steps before this one leave the helper stopped, so the matrix
+    never saw it). Warm means the server registered two agents since the start, the command's own
+    and the helper's background one, not only that a helper process lives. The helper's pid."""
+
+    client, server = world.client, world.server(cell)
     root = client.target_root(cell.target)
+    since = now_rfc3339()
     task, result = start_task(world, f"Acceptance {cell.name} warm")
     running = wait_until(lambda: helper_pid(root) is not None, seconds=30, interval=0.3)
+    agents = wait_until(lambda: agent_registrations(server, since) >= 2, seconds=60, interval=0.5)
+    pid = helper_pid(root)
     report.add(
         "helper warmed by a task",
-        task.ok and running,
-        f"start exit {result.returncode}; helper running: {running}",
+        task.ok and running and agents and pid is not None,
+        f"start exit {result.returncode}; helper running: {running}; the server registered the "
+        f"command's agent and the helper's background agent: {agents} "
+        f"({agent_registrations(server, since)} registrations)",
         shown(world, result),
     )
+    return pid
 
 
 def level_switch(world: World, report: Report, cell: Cell) -> bool:
@@ -715,8 +749,8 @@ def remote_cell(world: World, cell: Cell) -> Report:
         "0",
         ZERO_CODE,
     )
-    warm_helper(world, report, cell)
-    changed_profile(world, report, cell)
+    warm = warm_helper(world, report, cell)
+    changed_profile(world, report, cell, warm)
     if cell.kind in {"https", "port"}:
         logout_login(world, report, cell)
     if cell.level == "L2" and task is not None:

@@ -306,11 +306,11 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   style does, instead of reading as this computer's own service being down.
 - **A slow direct connection says so, and names the fix.** The direct style opens a new
   connection in every program, which a slow network makes slow. When a server reached that way
-  does not answer in time, every surface (commands, `--json`, agents' tools, hooks, the terminal
-  interface) now says the direct style is slow on this network and that `finishup server set NAME
-  --style relay` is the remedy (continuation `remote_direct_slow`); `finishup server test` and
-  `finishup server status` say the same when they measure it. Relay stays the default; nothing
-  changes for it.
+  cannot be reached in time, every surface (commands, `--json`, agents' tools, hooks, the terminal
+  interface, `finishup server connect` and `server status`, whose JSON carries the continuation)
+  now says so, that the direct style is slow on a slow network, and that `finishup server set NAME
+  --style relay` is the remedy (continuation `remote_direct_slow`); `finishup server test` says
+  this network is slow when it measures it. Relay stays the default; nothing changes for it.
 - **Level L2 chosen later takes effect at once.** `finishup server use NAME --level L2` on a server
   already in use at L1 now makes the running background helper serve the copy at once (it opens
   its connection again under your new choice); before, nothing was copied until the helper
