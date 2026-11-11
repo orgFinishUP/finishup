@@ -228,10 +228,12 @@ Only the target's helper declares them: `client.code_sync.CodeSyncResponder` is 
 background agent built with `remote_workspace_binding(..., code_sync=True)` for a target consented
 at L2. The MCP bridge, CLI commands and hooks never declare them; the hub sends an operation only to
 an agent that declares it, so the server never asks them, and it never replays either to another
-connection. The declaration is made when the agent opens, so a running helper follows the consent
-(defect A of the 2026-11-11 dogfood; `client.helper.Helper._follow_consent`): when the owner changes
-it without a lapse (`server use NAME --level L2` on a server already in use at L1, or back to L1),
-the helper opens each background agent again under the record as it is now. A workspace
+connection. The declaration is made when the agent opens (defect A of the 2026-11-11 dogfood):
+`server use NAME --level` that changes the level stops that server's helper before the command
+ends (its agents closed, as `server set --style` does), so the next client starts one under the new
+level and the server waits for its agent meanwhile. A running helper also follows the consent
+itself (`client.helper.Helper._follow_consent`, for a helper that did not stop in time and any other
+change made without a lapse): it opens each background agent again under the record as it is now. A workspace
 registration made under the earlier consent is not served until its registrant renews it under the
 new one: a command registers at its next run, and an MCP bridge looks at the consent every two
 seconds and renews at once. Choosing L2 closes an old agent at once, since the server would ask it

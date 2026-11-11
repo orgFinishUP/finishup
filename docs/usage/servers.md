@@ -403,7 +403,8 @@ finishup server use lab --level L1
 Run these in your own terminal. FinishUP shows what keeping a copy means, in its own words, and
 you confirm by typing the server's name. `--retention` must be one the server offers; without it
 you get the server's default. `server use lab` on its own keeps the level and retention you
-already agreed to. If the server stops offering a copy, `server use lab` refuses
+already agreed to. A new level takes effect at once: FinishUP restarts its background helper for
+that server, and your next task uses the new level. If the server stops offering a copy, `server use lab` refuses
 (`server_level_unavailable`) until you choose `--level L1`: FinishUP never narrows your choice on
 its own. `--level L1` stops future updates; the copy already sent stays until you forget it or its
 time runs out.
