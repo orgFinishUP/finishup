@@ -747,6 +747,15 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     whose id they know. The owner plans OAuth, or an identity derived from the server's URL plus
     the API key; the control-hello field that limit 15 names is not built until then. Until it is,
     one server should be used by one person, or by people who may see each other's tasks.
+17. **A new level reaches the server when the old agents are gone from it, which is best effort.**
+    `server use NAME --level` ends once the running helper says its agents follow the new level,
+    and the helper says so once each old agent's close and relay ended. The server learns that an
+    agent is gone from the connection closing (SSH) or from a courtesy unregistration that
+    FinishUP sends but does not confirm (REST: a failed or slow one is not retried, and a direct-
+    style agent's close waits for it only briefly; the server also ends an agent whose polls
+    stop). When that unregistration is lost or delayed, a task started at once can still find the
+    old agent, be refused the sync and read from this computer for its whole life, as its receipt
+    says; the next task syncs. Confirming the unregistration needs a REST contract change.
 
 ## Reverse states
 
