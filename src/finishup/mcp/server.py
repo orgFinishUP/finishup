@@ -1037,6 +1037,51 @@ async def _lease_wait(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+# How often a lease looks at its target's consent while it waits to renew (defect A of the
+# 2026-11-11 dogfood): one ``lstat``, and a read of ``target.json`` only when its stamp moved.
+_LEASE_WATCH_SECONDS: Final = 2.0
+
+
+class _ConsentWatch:
+    """Whether a target's consent is no longer the one a registration was made under.
+
+    The owner agreed again under the same profile revision (``server use NAME --level L2``, say):
+    the connection's authorization still admits it, but the helper no longer serves a
+    registration made under the earlier consent (``helper_registrations.served_workspaces``:
+    ``consent_changed``), so the bridge renews it now, under its connection's authorization as
+    it stands (a renewal it refuses ends the lease), instead of at half its lease. A record that
+    cannot be read, or is gone, also asks for the renewal, whose own checks then decide.
+    """
+
+    __slots__ = ("_digest", "_path", "_stamp")
+
+    def __init__(self, target_id: str) -> None:
+        from finishup.client.targets import target_root
+        from finishup.config.paths import SERVER_TARGET_FILE_NAME
+
+        self._path = target_root(target_id) / SERVER_TARGET_FILE_NAME
+        self._stamp: object = None
+        self._digest: str | None = None
+
+    def moved(self, registration: Registration) -> bool:
+        from finishup.client.authorization import consent_digest
+        from finishup.client.targets import TargetError, read_target
+
+        try:
+            facts = os.lstat(self._path)
+        except OSError:
+            return True
+        stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+        if stamp != self._stamp:
+            self._stamp = stamp
+            try:
+                record = read_target(self._path.parent)
+            except (TargetError, OSError):
+                return True
+            self._digest = None if record is None else consent_digest(record)
+        return self._digest is None or self._digest != registration.consent_digest
+
+
 def _connection_authorization(client: ServiceClient) -> ConnectionAuthorization | None:
     from finishup.client.authorization import ConnectionAuthorization
 
@@ -1123,7 +1168,8 @@ async def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) ->
 async def _renew_helper_lease(
     client: ServiceClient, authorization: ConnectionAuthorization, lease: _HelperLease
 ) -> None:
-    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3).
+    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3), and at once
+    when the target's consent moved under the same authorization (``_ConsentWatch``, defect A).
 
     Ends when the connection has ended (its registration released), when a renewal is refused
     (``renew`` released it: the selection, record, key, consent or hold changed), or when
@@ -1135,14 +1181,25 @@ async def _renew_helper_lease(
     from finishup.client.helper_registrations import LEASE_SECONDS, Registration, release, renew
     from finishup.config.installation import parse_rfc3339_ms
 
+    watch: _ConsentWatch | None = None
+    with contextlib.suppress(Exception):
+        watch = _ConsentWatch(lease.target_id)
     while True:
-        current = lease.registration
+        current: Registration | None = lease.registration
         if current is None:
             return
         due = parse_rfc3339_ms(current.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
-        await _lease_wait(max(0.0, (due - datetime.now(UTC)).total_seconds()))
+        left = max(0.0, (due - datetime.now(UTC)).total_seconds())
+        # At most a few seconds at a time: the consent is looked at again (defect A).
+        await _lease_wait(left if watch is None else min(left, _LEASE_WATCH_SECONDS))
         if not lease.wanted():
             return
+        if (
+            not getattr(client, "closed", False)
+            and (due - datetime.now(UTC)).total_seconds() > 0
+            and (watch is None or not watch.moved(current))
+        ):
+            continue
         if getattr(client, "closed", False):
             # The connection ended without the bridge closing it yet: its lease ends with it.
             _drop_lease(client, lease)

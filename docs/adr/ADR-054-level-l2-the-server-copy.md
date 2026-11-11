@@ -228,12 +228,16 @@ Only the target's helper declares them: `client.code_sync.CodeSyncResponder` is 
 background agent built with `remote_workspace_binding(..., code_sync=True)` for a target consented
 at L2. The MCP bridge, CLI commands and hooks never declare them; the hub sends an operation only to
 an agent that declares it, so the server never asks them, and it never replays either to another
-connection. The declaration is made when the agent opens, so a running helper follows the consent:
-when the owner changes it without a lapse (`server use NAME --level L2` on a server already in use
-at L1, or back to L1), the helper opens each background agent again under the record as it is now
-and closes the old one once the replacement is connected (at most 30 seconds later), so the server
-never finds no agent meanwhile and an agent opened at L1 never stays the one it asks to sync (defect
-A of the 2026-11-11 dogfood; `client.helper.Helper._follow_consent`). Each call is still checked
+connection. The declaration is made when the agent opens, so a running helper follows the consent
+(defect A of the 2026-11-11 dogfood; `client.helper.Helper._follow_consent`): when the owner changes
+it without a lapse (`server use NAME --level L2` on a server already in use at L1, or back to L1),
+the helper opens each background agent again under the record as it is now. A workspace
+registration made under the earlier consent is not served until its registrant renews it under the
+new one: a command registers at its next run, and an MCP bridge looks at the consent every two
+seconds and renews at once. Choosing L2 closes an old agent at once, since the server would ask it
+and refuse the sync (`operation_not_declared`), while with no agent there it waits for the new one
+within the call's bound; any other change keeps the old agent serving until its replacement is
+connected (at most 30 seconds), so work in flight on it finishes. Each call is still checked
 against the consent as it is when the call arrives (below).
 
 `code_sync_prepare` checks, in this order and before anything is read for the export (FR-7):
@@ -776,7 +780,8 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
    hook-origin field; not built.
 7. **An approved check is compared with the snapshot its own sync named; confirmed** (2026-11-11;
    layer-6 D1): the subject-state commitment returned with that check's own sync, fixed before it
-   runs, never the task's last captured snapshot (decision 13).
+   runs; only when that sync names none (the client offline, a refused sync) the task's pinned
+   snapshot's commitment (decision 13).
 8. **Identity on a shared server is the owner's later work** (2026-11-11): OAuth, or an identity
    derived from the server's URL plus the API key; not in this stack (honest limit 16).
 9. **The layer's two smaller questions, taken as recommended** (2026-11-11): every later kind of
