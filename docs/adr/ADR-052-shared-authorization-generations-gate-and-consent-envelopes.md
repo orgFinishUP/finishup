@@ -448,6 +448,14 @@ background agent, else the newest connection agent; background work to the newes
 agent, else the newest connection agent (layer 1's behaviour when there is no helper). They never
 compete.
 
+A call still unanswered on a background agent goes on at a newer background agent of the same
+handle that declares its operation and registers before the call's deadline, with the time the
+call has left (u5): a helper stopped, replaced or killed without unregistering its agent leaves it
+registered at its edge until its lease ends, and nothing answers it meanwhile; its successor's
+agent is the one certain sign of that. Every read is taken over this way, never
+`run_approved_check` (it may already have run), the same rule as a replay after a dropped
+connection. The older channel stays open, and an answer it gives later is dropped as unmatched.
+
 ### 13. The helper process and its records (layer 4)
 
 Design v2 section 3. `finishup helper run --target <id>` (`cli/helper.py`; hidden, scope
@@ -477,7 +485,10 @@ the owner's agent), its stderr in `log/helper.stderr`, and resolves every path u
   (`state/helper-epoch`, `yoetz.helper-epoch/1`, a random token), which the helper reads on its
   one-second tick and stops for; no process is ever signalled. A stop succeeds only once the lock
   is seen free (a lock held under an unreadable stamp is not "stopped"); one that does not see it
-  free in time is `target_still_connected` (`remove` then removes nothing). A helper is spawned
+  free in time is `target_still_connected` (`remove` then removes nothing). A stopping helper closes
+  its background agents, then waits at most 1.5 seconds for their connections to end on their own,
+  so an HTTPS or port target's agent is unregistered at the server (the REST stream's courtesy
+  `DELETE`, ADR-053) before what is left is cancelled (u5). A helper is spawned
   with the epoch its spawner read (`helper run --epoch`, hidden); one that finds another epoch once
   it holds the lock (a stop came while it was starting) records `stopped`/`stop_requested` and
   exits without binding or sending anything, so a stop also fences a pending start. The OpenSSH

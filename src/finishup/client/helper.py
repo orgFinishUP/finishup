@@ -59,7 +59,7 @@ import os
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Buffer, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -153,6 +153,13 @@ _FRAME_PREFIX: Final = 4
 _RESTART_WINDOW_SECONDS: Final = 30.0
 # The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
 _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
+# How long a stopping helper waits for its background agents' connections to end on their own:
+# a REST stream unregisters its agent at the server as it closes (a courtesy ``DELETE`` bounded at
+# one second, ``RestControlStream.aclose``); a dead agent left registered there is the one the
+# server asks next (the u4 dogfood finding: a task started right after a stop waited 60 s for it).
+# With the one-second tick and the last drain, a stop stays within its stopper's five-second wait
+# (``helper_runtime._STOP_SECONDS``).
+_STOP_AGENT_SECONDS: Final = 1.5
 # ``remote_unreachable`` is recorded again for clients at most this often while unchanged: a client
 # keeps waiting and retrying on it (``service.client._connect_through_helper``), whatever the record
 # says, so a fresh record changes no answer and a fast retry never makes a write and a diagnostic
@@ -720,6 +727,43 @@ def _declares_code_sync(record: ServerTarget) -> bool:
     return l2_released() and consent is not None and consent.level == "L2"
 
 
+class _ClosingStream:
+    """A background agent's upstream stream whose ``aclose`` runs as its own task.
+
+    A caller that stops waiting for the close (the agent connection's 50 ms bound) never
+    cancels it: a REST stream still sends its courtesy unregistration (``RestControlStream.
+    aclose``, itself bounded). ``closes`` holds the running close, which a stopping helper
+    awaits. Everything else is the stream's own (``failure_phase``, ``bind``...).
+    """
+
+    __slots__ = ("_closes", "_closing", "_inner")
+
+    def __init__(self, inner: ControlStream, closes: set[asyncio.Task[None]]) -> None:
+        self._inner = inner
+        self._closes = closes
+        self._closing: asyncio.Task[None] | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    @property
+    def peer_identity(self) -> object:
+        return self._inner.peer_identity
+
+    async def send_all(self, data: Buffer) -> None:
+        await self._inner.send_all(data)
+
+    async def receive(self, max_bytes: int) -> bytes:
+        return await self._inner.receive(max_bytes)
+
+    async def aclose(self) -> None:
+        if self._closing is None:
+            self._closing = asyncio.ensure_future(self._inner.aclose())
+            self._closes.add(self._closing)
+            self._closing.add_done_callback(self._closes.discard)
+        await asyncio.shield(self._closing)
+
+
 class Helper:
     """One remote target's helper: relay, background agents, drain, profile refresh, idle exit."""
 
@@ -790,7 +834,10 @@ class Helper:
         self._delivery: asyncio.Task[None] | None = None
         self._refresh = _Refresh()
         self._relays: set[asyncio.Task[None]] = set()
+        # The relays of the helper's own background agents (relay style), and the closes of the
+        # streams they dial themselves (direct style): what a stop and a new level wait for.
         self._own_relays: set[asyncio.Task[None]] = set()
+        self._agent_closes: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._stop_reason = "stop_requested"
@@ -1242,7 +1289,27 @@ class Helper:
     def _agent_dial(self) -> Dial:
         if self._style == "relay":
             return self._dial_own
-        return self._upstream.open_stream
+        return self._dial_direct
+
+    async def _dial_direct(self) -> ControlStream:
+        """A background agent's own upstream stream (direct style), whose close runs to its end.
+
+        The agent's connection closes its stream within 50 ms (``service.client``), which would
+        cut a REST stream's courtesy unregistration short; the close runs as the helper's own task
+        instead (``_ClosingStream``), and a stop waits for it (``_await_agent_ends``).
+        """
+
+        return _ClosingStream(await self._upstream.open_stream(), self._agent_closes)
+
+    async def _await_agent_ends(self, seconds: float) -> bool:
+        """Wait, at most ``seconds``, for the background agents' relays and stream closes to end on
+        their own; whether they all did."""
+
+        pending = {task for task in (*self._own_relays, *self._agent_closes) if not task.done()}
+        if not pending:
+            return True
+        _done, left = await asyncio.wait(pending, timeout=seconds)
+        return not left
 
     def _registrations_changed(self) -> bool:
         from finishup.client.helper_registrations import registrations_dir
@@ -1628,8 +1695,11 @@ class Helper:
             if listener is not None:
                 with contextlib.suppress(Exception):
                     await listener.aclose()
-            # Background agents first, so none dials again while the relays are torn down.
+            # Background agents first, so none dials again while the relays are torn down; then
+            # their connections end on their own, bounded, so a REST agent is unregistered at the
+            # server before anything is cancelled (a dead agent left there is asked first).
             await self._close_agents()
+            await self._await_agent_ends(_STOP_AGENT_SECONDS)
             self._end_relays()
             await asyncio.gather(*tuple(self._relays), return_exceptions=True)
             with contextlib.suppress(Exception):

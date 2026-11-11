@@ -5398,7 +5398,11 @@ a worker thread, never from the hub's own loop. `has_agent(handle)`, `bind_loop(
   channel under one handle serves the same worktree. When that channel drops before answering and
   another live channel for the same handle declares the operation, a read (every operation but
   `run_approved_check`, which may already have run) is sent once more to that channel; otherwise
-  the call fails `agent_disconnected` at once.
+  the call fails `agent_disconnected` at once. A read still unanswered on a background (helper)
+  channel goes on, with the time the call has left, at a newer background channel of the same
+  handle that declares the operation, as soon as one registers (a helper stopped or killed without
+  unregistering stays registered at its edge until its lease ends); the older channel stays open,
+  its later answer is dropped as unmatched, and the hub records `workspace_call superseded`.
 - **Opened workspaces.** An agent built with an `opened_handle_key` answers `open_workspace` with
   a keyed handle (`rws_` + the first 32 hex of `HMAC-SHA256(key, "yoetz/opened-workspace/v1\0" ‖
   admitted-HOME flag ‖ 0x00 ‖ its root)`), so any agent of the same client for the same worktree
