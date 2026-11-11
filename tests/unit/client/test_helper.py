@@ -1291,3 +1291,52 @@ def test_an_agent_replaced_for_a_changed_consent_closes_within_its_bound_if_neve
         assert closed == [record.authorized_at, "2026-11-11T09:00:00.000Z"]
 
     asyncio.run(run())
+
+
+def test_a_client_retrying_fast_makes_one_record_a_second_not_one_per_retry(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the defect-B fix: each fresh record also records a diagnostic, and a client kept
+    waiting (``remote_unreachable``) retries every few tens of milliseconds; an unchanged refusal
+    is recorded again at most once a second, so it is still named to a client within that time."""
+
+    from finishup.observability import logging as diagnostics
+
+    record, root = ssh_target
+    recorded: list[str] = []
+    real = diagnostics.record_public_error_without_raising
+
+    def count(**fields: str) -> str | None:
+        recorded.append(fields["reason"])
+        return real(**fields)
+
+    monkeypatch.setattr(diagnostics, "record_public_error_without_raising", count)
+    clock = Clock()
+
+    async def relay(helper: Helper) -> None:
+        client, local = _pair()
+        task = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await client.send_all(hello_frame(server_profile=TEST_REVISION))
+            async with asyncio.timeout(10):
+                assert await client.receive(65_536) == b""
+                await task
+        finally:
+            await client.aclose()
+
+    async def run() -> list[HelperStatus | None]:
+        helper = _helper(record, root, _DownUpstream(), clock=clock)
+        seen: list[HelperStatus | None] = []
+        for _retry in range(5):
+            await relay(helper)
+            seen.append(read_helper_status(root))
+            clock.now += 0.05
+        clock.now += 1.0
+        await relay(helper)
+        seen.append(read_helper_status(root))
+        return seen
+
+    seen = asyncio.run(run())
+    assert len(recorded) == 2
+    assert len({status.correlation_id for status in seen if status is not None}) == 2
+    assert all(status is not None and status.generation == 1 for status in seen)
