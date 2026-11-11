@@ -1138,3 +1138,156 @@ def test_a_clients_relay_refused_by_the_helpers_own_standing_refusal_is_named_at
     before, named = asyncio.run(run())
     assert before is not None and before.phase == "unavailable"
     assert named is not None and named.phase == before.reason
+
+
+def test_a_consent_changed_under_a_running_helper_reopens_its_agents_under_it_first(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect A (dogfood, 2026-11-11): ``server use NAME --level L2`` on a server in use at L1
+    changes the consent under the same profile revision, which ends no connection; the helper's
+    background agent, opened under the L1 record, declared no code-sync operation, so every
+    sync was refused (``operation_not_declared``) until the helper restarted. The helper follows
+    the consent: each agent is opened again under the record as it is now, and the old one
+    closes only once its replacement is connected (the server never sees no agent meanwhile)."""
+
+    from dataclasses import replace
+
+    from finishup.client import helper_registrations
+
+    record, root = ssh_target
+    assert record.consent is not None and record.consent.level == "L1"
+    row = SimpleNamespace(
+        registration=SimpleNamespace(
+            claim="claim-a",
+            worktree="/w/one",
+            registrant="r1",
+            expires_at="2026-11-11T09:00:00.000Z",
+        )
+    )
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return (row,)
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+    opened: list[tuple[str, SimpleNamespace]] = []
+    closed: list[str] = []
+
+    class Agent:
+        alive = True
+        client: object = None
+
+        def __init__(self, level: str) -> None:
+            self.level = level
+
+        async def drain(self, *, may_send: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(self.level)
+
+    async def opener(*arguments: object) -> Agent:
+        opened_under = cast(ServerTarget, arguments[1])
+        assert opened_under.consent is not None
+        agent = Agent(opened_under.consent.level)
+        opened.append((opened_under.consent.level, cast(SimpleNamespace, agent)))
+        return agent
+
+    async def run() -> None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        assert [level for level, _agent in opened] == ["L1"]
+        current = targets.read_target(root)
+        assert current is not None and current.consent is not None
+        with targets.registry_lock():
+            targets.write_target(
+                root,
+                replace(
+                    current,
+                    authorized_at="2026-11-11T09:00:00.000Z",
+                    consent=replace(
+                        current.consent, level="L2", retention_kind="days", retention_days=7
+                    ),
+                ),
+            )
+        await helper.step()
+        # Opened again under the new consent; the old agent still serves until it is replaced.
+        assert [level for level, _agent in opened] == ["L1", "L2"]
+        assert closed == []
+        await helper.step()
+        assert closed == []
+        opened[1][1].client = object()  # the replacement's connection is up
+        await helper.step()
+        assert closed == ["L1"]
+        # Nothing changed since: nothing is opened or closed again.
+        await helper.step()
+        assert len(opened) == 2 and closed == ["L1"]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert closed == ["L1", "L2"]
+
+    asyncio.run(run())
+
+
+def test_an_agent_replaced_for_a_changed_consent_closes_within_its_bound_if_never_replaced(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement that never connects (the server unreachable meanwhile) never keeps the
+    agent opened under the old consent past its bound, and closing the helper closes both."""
+
+    from dataclasses import replace
+
+    from finishup.client import helper_registrations
+
+    record, root = ssh_target
+    row = SimpleNamespace(
+        registration=SimpleNamespace(
+            claim="claim-a",
+            worktree="/w/one",
+            registrant="r1",
+            expires_at="2026-11-11T09:00:00.000Z",
+        )
+    )
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return (row,)
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+    closed: list[str] = []
+
+    class Agent:
+        alive = True
+        client: object = None
+
+        def __init__(self, stamp: str) -> None:
+            self.stamp = stamp
+
+        async def drain(self, *, may_send: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(self.stamp)
+
+    async def opener(*arguments: object) -> Agent:
+        return Agent(cast(ServerTarget, arguments[1]).authorized_at or "")
+
+    clock = Clock()
+
+    async def run() -> None:
+        helper = _helper(
+            record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener, clock=clock
+        )
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        current = targets.read_target(root)
+        assert current is not None
+        with targets.registry_lock():
+            targets.write_target(root, replace(current, authorized_at="2026-11-11T09:00:00.000Z"))
+        await helper.step()
+        assert closed == []
+        clock.now += 60.0
+        await helper.step()
+        assert closed == [record.authorized_at]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert closed == [record.authorized_at, "2026-11-11T09:00:00.000Z"]
+
+    asyncio.run(run())
