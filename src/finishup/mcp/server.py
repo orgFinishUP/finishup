@@ -2771,7 +2771,8 @@ def _holder_is_newer_than_bridge() -> bool:
         return False
     if holder is not None and holder_version_order(holder.service_version) == "newer":
         return True
-    # A server elsewhere: its helper of another build of this release, started after this bridge.
+    # A server elsewhere: its helper of another build of this release, and this bridge is not the
+    # build installed now (it predates an in-place upgrade).
     return newer_helper_build_holds_selection()
 
 

@@ -1800,8 +1800,9 @@ its next tick, then a wait until its lock is seen free; no process is ever signa
 pattern; a helper spawned before the stop exits without serving; one that does not stop is
 `target_still_connected`). `server logout` does not apply to SSH. The spawner reaps its own child
 on a daemon thread; a spawner that exits first leaves it to the system, so reaping never depends
-on the short-lived starter. A helper stamped by an older release of this client is replaced
-through the stop epoch, a newer one never. A client dialling while
+on the short-lived starter. A helper stamped by an older release of this client (or by another
+build of this release, by a client of the build installed now) is replaced through the stop
+epoch, a newer one never (ADR-052). A client dialling while
 the helper ends its idle exit starts its successor; any other stop has no successor in that
 client's wait.
 

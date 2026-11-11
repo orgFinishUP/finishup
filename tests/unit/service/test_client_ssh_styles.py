@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Buffer, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -84,6 +84,7 @@ class _HelperStandIn:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, starts: bool = True) -> None:
         self.spawns: list[str] = []
+        self.epochs: list[str | None] = []
         self.started = False
         self.daemon = ScriptedDaemon()
         self.starts = starts
@@ -92,8 +93,9 @@ class _HelperStandIn:
         monkeypatch.setattr(helper_status, "spawn_helper", self.spawn)
         monkeypatch.setattr(service_client, "connect_control", self.dial)
 
-    def spawn(self, _root: Path, target_id: str) -> object:
+    def spawn(self, _root: Path, target_id: str, *, epoch: str | None = None) -> object:
         self.spawns.append(target_id)
+        self.epochs.append(epoch)
         self.started = self.starts
         return object()
 
@@ -311,7 +313,8 @@ def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_r
     monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
     spawns: list[str] = []
 
-    def spawn(_root: Path, target_id: str) -> object:
+    def spawn(_root: Path, target_id: str, *, epoch: str | None = None) -> object:
+        del epoch
         spawns.append(target_id)
         return object()
 
@@ -336,10 +339,12 @@ def test_a_direct_style_refusal_of_the_consented_revision_starts_the_helper_to_r
 class _MultiplexedDirectStream:
     """A direct ``ssh -W`` stand-in whose close cancels its own stderr reader (an OpenSSH master
     holds a multiplexed client's stderr past its exit), and which, asked afterwards why it
-    ended, raises that reader's cancellation: the shape the real stream had."""
+    ended, raises that reader's cancellation: the shape the real stream had. ``on_close`` runs
+    as it closes (what another process did meanwhile)."""
 
-    def __init__(self, inner: ControlStream) -> None:
+    def __init__(self, inner: ControlStream, on_close: Callable[[], None] | None = None) -> None:
         self._inner = inner
+        self._on_close = on_close
         self._reader = asyncio.get_running_loop().create_task(asyncio.Event().wait())
 
     @property
@@ -353,6 +358,9 @@ class _MultiplexedDirectStream:
         await self._inner.send_all(data)
 
     async def aclose(self) -> None:
+        if self._on_close is not None:
+            on_close, self._on_close = self._on_close, None
+            on_close()
         self._reader.cancel()
         await asyncio.gather(self._reader, return_exceptions=True)
         await self._inner.aclose()
@@ -363,10 +371,15 @@ class _MultiplexedDirectStream:
 
 
 def _refusing_direct_server(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on_close: Callable[[], None] | None = None,
+    epochs: list[str | None] | None = None,
 ) -> tuple[list[str], list[str]]:
     """The direct style against a server that issues another profile revision now, over the
-    multiplexed stand-in; returns the helper spawns and the profile refreshes run here."""
+    multiplexed stand-in; returns the helper spawns and the profile refreshes run here (and
+    records each spawn's stop epoch in ``epochs``)."""
 
     from builders.server_profiles import _revision_of  # pyright: ignore[reportPrivateUsage]
     from finishup.client import server_profile
@@ -386,15 +399,17 @@ def _refusing_direct_server(
         del expected, deadline
         client_end, server_end = memory_pair()
         daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
-        return _MultiplexedDirectStream(client_end)
+        return _MultiplexedDirectStream(client_end, on_close)
 
     monkeypatch.setattr(ssh_transport, "resolve_ssh", lambda: "/usr/bin/ssh")
     monkeypatch.setattr(ssh_transport, "open_direct_stream", open_stream)
     spawns: list[str] = []
     refreshes: list[str] = []
 
-    def spawn(_root: Path, target_id: str) -> object:
+    def spawn(_root: Path, target_id: str, *, epoch: str | None = None) -> object:
         spawns.append(target_id)
+        if epochs is not None:
+            epochs.append(epoch)
         return object()
 
     def refresh(*_args: object, **_kwargs: object) -> object:
@@ -439,6 +454,91 @@ def test_a_multiplexed_direct_streams_refusal_is_typed_and_starts_the_helper_on_
     assert (root / "state" / "profile-refresh-requested").exists()
     assert spawns == [record.target_id]
     assert refreshes == []
+
+
+@pytest.mark.parametrize("meanwhile", ["server_use_local", "stopped_only"])
+def test_a_direct_refusals_refresh_helper_keeps_the_admission_and_the_pre_dial_stop_epoch(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, meanwhile: str
+) -> None:
+    """The hello was refused ``server_profile_changed``; while its stream closed, another process
+    ran ``server use local`` (the selection moves and the target's helper is stopped: its epoch
+    moves). The refresh helper is never started then: the admission the request was made under
+    no longer holds, and a helper's own admission is not bound to the selection, so it would
+    reach a server the owner deselected. A stop alone (the selection kept) still starts it, with
+    the epoch read before the dial, so that stop fences it before it serves anything."""
+
+    from finishup.client.helper_status import read_helper_epoch, stop_helper
+
+    record, root = ssh_selected
+    before = read_helper_epoch(root)
+
+    def elsewhere() -> None:
+        if meanwhile == "server_use_local":
+            targets.clear_selection()
+        assert stop_helper(root, timeout_seconds=0.2) is True
+
+    epochs: list[str | None] = []
+    spawns, refreshes = _refusing_direct_server(
+        root, monkeypatch, on_close=elsewhere, epochs=epochs
+    )
+
+    async def run() -> ControlError:
+        with pytest.raises(ControlError) as raised:
+            await connect_service(ControlClientKind.MCP_BRIDGE)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert (error.reason, error.phase) == ("service_unavailable", "server_profile_changed")
+    assert read_helper_epoch(root) != before
+    assert refreshes == []
+    if meanwhile == "server_use_local":
+        assert spawns == [] and epochs == []
+    else:
+        assert spawns == [record.target_id] and epochs == [before]
+
+
+@pytest.mark.parametrize("meanwhile", ["server_use_local", "stopped_only"])
+def test_a_relay_helper_start_keeps_the_admission_and_the_pre_dial_stop_epoch(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, meanwhile: str
+) -> None:
+    """The relay style's first dial found no helper; before it starts one, another process ran
+    ``server use local`` (or only stopped the target). Nothing is started under an admission
+    that no longer holds; a helper started after a stop alone carries the epoch read before the
+    first dial, so that stop fences it (it never serves the target the owner stopped)."""
+
+    from finishup.client.helper_status import read_helper_epoch, stop_helper
+
+    record, root = ssh_selected
+    before = read_helper_epoch(root)
+    helper = _HelperStandIn(monkeypatch)
+
+    def elsewhere() -> None:
+        if meanwhile == "server_use_local":
+            targets.clear_selection()
+        assert stop_helper(root, timeout_seconds=0.2) is True
+
+    helper.on_dial.append(elsewhere)
+
+    async def run() -> ControlError | None:
+        try:
+            client = await connect_service_on_demand(ControlClientKind.CLI, timeout_seconds=2.0)
+        except ControlError as error:
+            return error
+        await client.close()
+        return None
+
+    error = asyncio.run(run())
+    assert read_helper_epoch(root) != before
+    if meanwhile == "server_use_local":
+        assert error is not None
+        assert (error.reason, error.phase) == (
+            "service_unavailable",
+            "server_authorization_changed",
+        )
+        assert helper.spawns == []
+    else:
+        assert error is None
+        assert helper.spawns == [record.target_id] and helper.epochs == [before]
 
 
 def test_service_status_names_a_multiplexed_direct_streams_refusal_with_its_continuation(
@@ -506,62 +606,205 @@ def test_a_direct_stream_that_does_not_answer_within_the_deadline_names_remote_u
     assert error.phase == "remote_unreachable"
 
 
-@pytest.mark.parametrize("started", ["before", "after"])
-def test_a_helper_of_another_build_of_this_release_is_replaced_only_when_it_predates_this_process(
-    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, started: str
+class _OtherBuildHelper:
+    """A live helper of this release but another build holds the target (its lock stamp), and
+    does not answer this client's hello; ``supersede_helper`` and ``stop_helper`` are recorded."""
+
+    OTHER = "sha256:" + "e" * 64
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, *, started_at: str) -> None:
+        from finishup import __version__
+
+        self.helper = _HelperStandIn(monkeypatch)
+        self.helper.started = False
+        write_helper_status(root, new_status(None, "ready", None, started_at=started_at))
+        self.stamp = helper_status.HelperStamp(os.getpid(), __version__, self.OTHER)
+        self.holders: list[helper_status.HelperStamp] = [self.stamp]
+        self.lock_held: list[bool] = []
+        self.supersedes: list[helper_status.HelperStamp] = []
+        self.stops: list[Path] = []
+        self.on_supersede: Callable[[], None] | None = None
+        monkeypatch.setattr(helper_status, "helper_holder", self.holder)
+        monkeypatch.setattr(helper_status, "helper_lock_held", self.held)
+        monkeypatch.setattr(helper_status, "supersede_helper", self.supersede)
+        monkeypatch.setattr(helper_status, "stop_helper", self.stop)
+
+    def holder(self, _root: Path) -> helper_status.HelperStamp | None:
+        return self.holders[0] if self.holders else None
+
+    def held(self, _root: Path) -> bool:
+        return self.lock_held.pop(0) if self.lock_held else bool(self.holders)
+
+    def supersede(
+        self, _root: Path, holder: helper_status.HelperStamp, *, timeout_seconds: float
+    ) -> str:
+        del timeout_seconds
+        self.supersedes.append(holder)
+        if self.on_supersede is not None:
+            self.on_supersede()
+        self.holders.clear()
+        return "f" * 32
+
+    def stop(self, path: Path, *, timeout_seconds: float = 5.0) -> bool:
+        del timeout_seconds
+        self.stops.append(path)
+        self.holders.clear()
+        return True
+
+
+async def _connect_or_error(timeout_seconds: float = 2.0) -> ControlError | None:
+    try:
+        client = await connect_service_on_demand(
+            ControlClientKind.CLI, timeout_seconds=timeout_seconds
+        )
+    except ControlError as error:
+        return error
+    await client.close()
+    return None
+
+
+@pytest.mark.parametrize(
+    ("installed", "started"),
+    [
+        ("this", "before"),
+        ("this", "after"),
+        ("helper", "before"),
+        ("helper", "after"),
+        ("unreadable", "before"),
+    ],
+)
+def test_a_helper_of_another_build_of_this_release_is_replaced_only_by_the_build_installed_now(
+    ssh_selected: tuple[targets.ServerTarget, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    installed: str,
+    started: str,
 ) -> None:
-    """Two builds of one version (a test instance, a dogfood build) cannot be ordered by version.
-    The one started later is the newer installation: an older process (a bridge kept from before
-    an in-place upgrade, on its retained runtime) never replaces it, so the two never flap; a
-    process started after a helper replaces it as an older release's."""
+    """Two builds of one version (a test instance, a dogfood build) cannot be ordered by version,
+    nor by when their processes started: a bridge kept from before an in-place upgrade (on its
+    retained runtime) may start its older helper after a newer process started, at a helper's
+    idle exit. The installation orders them: the build installed now replaces the other build's
+    helper whenever it started (exactly that helper, then its own carries the epoch that stop
+    wrote), and a process that is not the build installed now (or cannot tell) never replaces
+    it, so the two never flap; it is told ``service_incompatible`` (the bridge asks to reopen)."""
 
     from datetime import UTC, datetime, timedelta
 
-    from finishup import __version__
     from finishup.config.installation import format_rfc3339_ms
+    from finishup.protocol.schemas import schema_manifest_digest
 
     record, root = ssh_selected
-    helper = _HelperStandIn(monkeypatch)
-    helper.started = False  # the running helper does not answer this client's hello
-    # Long before this test process started, or after it (whenever the session began).
     moment = (
         datetime(2020, 1, 1, tzinfo=UTC)
         if started == "before"
         else datetime.now(UTC) + timedelta(minutes=10)
     )
-    write_helper_status(root, new_status(None, "ready", None, started_at=format_rfc3339_ms(moment)))
-    stamp = helper_status.HelperStamp(os.getpid(), __version__, "sha256:" + "e" * 64)
-    holders = [stamp]
+    other = _OtherBuildHelper(root, monkeypatch, started_at=format_rfc3339_ms(moment))
+    digest = {
+        "this": schema_manifest_digest(),
+        "helper": _OtherBuildHelper.OTHER,
+        "unreadable": None,
+    }[installed]
+    monkeypatch.setattr(service_client, "_installed_manifest_digest", lambda: digest)
 
-    def holder(_root: Path) -> helper_status.HelperStamp | None:
-        return holders[0] if holders else None
+    error = asyncio.run(_connect_or_error())
+    assert other.stops == []
+    if installed == "this":
+        assert error is None
+        assert other.supersedes == [other.stamp]
+        assert other.helper.spawns == [record.target_id]
+        assert other.helper.epochs == ["f" * 32]
+    else:
+        assert error is not None and (error.reason, error.phase) == ("service_incompatible", None)
+        assert other.supersedes == [] and other.helper.spawns == []
 
-    monkeypatch.setattr(helper_status, "helper_holder", holder)
-    stops: list[Path] = []
 
-    def stop(path: Path, *, timeout_seconds: float = 5.0) -> bool:
+def test_a_replacement_decides_again_when_another_helper_took_the_target_meanwhile(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The replacement is fenced to the helper it decided about: when a helper of this build took
+    the target meanwhile (``supersede_helper`` found another holder and moved nothing), it is
+    neither stopped nor doubled; the client connects to it."""
+
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    _record, root = ssh_selected
+    other = _OtherBuildHelper(root, monkeypatch, started_at=now_stamp())
+    monkeypatch.setattr(service_client, "_installed_manifest_digest", schema_manifest_digest)
+    same = helper_status.HelperStamp(os.getpid() + 1, __version__, schema_manifest_digest())
+
+    def taken(_root: Path, holder: helper_status.HelperStamp, *, timeout_seconds: float) -> str:
         del timeout_seconds
-        stops.append(path)
-        holders.clear()
+        other.supersedes.append(holder)
+        other.holders[:] = [same]
+        other.helper.started = True
+        raise helper_status.HelperHolderChanged
+
+    monkeypatch.setattr(helper_status, "supersede_helper", taken)
+
+    assert asyncio.run(_connect_or_error()) is None
+    assert other.supersedes == [other.stamp]
+    assert other.stops == [] and other.helper.spawns == []
+
+
+def test_a_helper_holding_the_lock_before_its_stamp_is_waited_for_never_stopped_or_doubled(
+    ssh_selected: tuple[targets.ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper stamps its lock before it binds its endpoint and publishes its status; between
+    taking the lock and stamping it, its identity is unknown. A client that finds the lock held
+    and no stamp waits for it within its deadline (it neither starts another helper nor stops
+    one), and decides once the stamp is there: here a helper of this build, which answers."""
+
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    _record, root = ssh_selected
+    other = _OtherBuildHelper(root, monkeypatch, started_at=now_stamp())
+    other.holders.clear()
+    same = helper_status.HelperStamp(os.getpid(), __version__, schema_manifest_digest())
+
+    def held(_root: Path) -> bool:
+        # The helper stamps its lock, binds and answers right after the first look.
+        other.holders[:] = [same]
+        other.helper.started = True
         return True
 
-    monkeypatch.setattr(helper_status, "stop_helper", stop)
+    monkeypatch.setattr(helper_status, "helper_lock_held", held)
 
-    async def run() -> ControlError | None:
-        try:
-            client = await connect_service_on_demand(ControlClientKind.CLI, timeout_seconds=2.0)
-        except ControlError as error:
-            return error
-        await client.close()
-        return None
+    assert asyncio.run(_connect_or_error()) is None
+    assert other.helper.spawns == [] and other.stops == [] and other.supersedes == []
 
-    error = asyncio.run(run())
-    if started == "before":
-        assert error is None
-        assert stops == [root] and helper.spawns == [record.target_id]
-    else:
-        assert error is not None and error.reason == "service_incompatible"
-        assert stops == [] and helper.spawns == []
+
+def test_the_build_installed_now_is_read_from_the_installation_a_retained_runtime_copies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``_installed_manifest_digest`` reads the package files of the installation (the origin of a
+    retained runtime, which an in-place upgrade replaced), never this process's cached digest."""
+
+    import hashlib
+    import sys
+
+    import finishup
+    from finishup.adapters import release_runtime
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    # This process runs its own package: the build installed now is its own.
+    assert service_client._installed_manifest_digest() == schema_manifest_digest()  # pyright: ignore[reportPrivateUsage]
+
+    relative = Path("lib", "python3", "site-packages", "finishup")
+    origin = tmp_path / "venv"
+    retained = tmp_path / ".venv-releases" / ("0" * 64)
+    (retained / relative).mkdir(parents=True)
+    upgraded = b'{"upgraded": true}\n'
+    (origin / relative / "resources" / "schemas").mkdir(parents=True)
+    (origin / relative / "resources" / "schemas" / "manifest.json").write_bytes(upgraded)
+    monkeypatch.setattr(sys, "prefix", str(retained))
+    monkeypatch.setattr(finishup, "__file__", str(retained / relative / "__init__.py"))
+    monkeypatch.setattr(release_runtime, "installation_prefix", lambda: origin)
+    expected = "sha256:" + hashlib.sha256(upgraded).hexdigest()
+    assert service_client._installed_manifest_digest() == expected  # pyright: ignore[reportPrivateUsage]
+    (origin / relative / "resources" / "schemas" / "manifest.json").unlink()
+    assert service_client._installed_manifest_digest() is None  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("stale", [False, True])

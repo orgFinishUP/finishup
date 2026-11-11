@@ -121,11 +121,14 @@ again on 2026-11-11 at `07e94dd94`, against layer 4's `f1e3f5707`):
 - **Two builds of one version** (every build of this stack is 0.3.0; test instances and dogfood
   builds are too) cannot be ordered by version. In the run, the newer CLI replaced the older helper
   and the older bridge replaced the newer helper again on its next call, on every use. Fixed in
-  this layer for every later upgrade: a helper of this release but another build that started
-  after a process is the newer installation's and is never replaced by it; that process gets
-  `service_incompatible` and the MCP bridge asks to reopen the session instead of naming `service
-  restart`. A bridge from before this fix (layer 4's, in the run) still flaps until its session is
-  reopened: reopen sessions after an upgrade.
+  this layer for every later upgrade: the build installed now (the installation's own package
+  files; a bridge's retained runtime reads the installation it was copied from) is the newer, so
+  only a process of that build replaces a helper of another build of its release, and exactly
+  that helper (a fenced stop). Any other process gets `service_incompatible` and the MCP bridge
+  asks to reopen the session instead of naming `service restart`. (Ordering by the helper's start
+  time, this layer's first fix, let an older bridge's helper started after the newer process hold
+  the target for good.) A bridge from before this fix (layer 4's, in the run) still flaps until its
+  session is reopened: reopen sessions after an upgrade.
 - **Restart and replay.** The server's service restarted under an open bridge: the next call was
   served. A write replayed with its `request_id` after a restart returned the same accepted events
   and moved the head by one event only.

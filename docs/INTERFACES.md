@@ -4750,6 +4750,7 @@ never inside a repository, with exact field sets.
 | `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets from layer 4, HTTPS and port targets from layer 5) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper (and, for SSH, the master) stopped. |
 | `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest. The stamp is advisory (the release a client compares, the status latch); no process is signalled by it. |
 | `yoetz.helper-epoch/1` | `<target root>/state/helper-epoch` (SSH targets from the layer-4 review, HTTPS and port targets from layer 5) | `schema`, `epoch` (32 lowercase hex, random), canonical JSON and a newline; absent reads as `none`. Every stop (`server disconnect`, `remove`, `use <other>`, `set --style`, `login`, `logout`, a replacement) writes a new token; the helper stops on its next tick when it moves, and one spawned with an older token (`helper run --epoch`) exits without serving once it holds the lock. Never sent to a server. |
+| `helper-epoch.lock` | `<target root>/state/helper-epoch.lock` (layer 7) | An empty owner-only flock: the fence between a client replacing one exact helper and a helper taking the singleton lock. The helper holds it while it takes `helper.lock` and reads the epoch; a replacing client holds it while it checks that the holder it decided about still holds the target and moves the epoch (otherwise it moves nothing and decides again). Never sent to a server. |
 | `yoetz.ssh-master/1` | `<target root>/state/ssh-master.json` and `state/ssh-master.lock` (SSH targets, direct style, layer 4 review) | `schema`, `host_key` (`sha256:<64 hex>`: the consented key the master verified) and `socket` (`[device, inode]` of `run/m` when it was verified); written under the flock `ssh-master.lock` by the process that started and verified the direct style's master, removed with every `-O exit`. A master is ridden only when this record names the current consent's key and its socket. Never sent to a server. |
 | `profile-refresh-requested` | `<target root>/state/profile-refresh-requested` (SSH targets from layer 4, HTTPS and port targets from layer 5) | An empty marker a client leaves when the server refused its hello or request with `server_profile_changed`; the helper takes it and fetches the profile (at most once per 30 seconds). |
 | `helper.stderr` | `<target root>/log/helper.stderr` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper process's standard error (owner-only, `0600`, appended), made only beneath an existing target folder: what the interpreter itself prints, such as an unexpected failure. OpenSSH's diagnostics go to the helper through a pipe and only choose a closed reason; they are not written there. |
@@ -14762,10 +14763,14 @@ phrases (`classify_ssh_failure`): a host-key failure is `remote_identity_changed
 `PROFILE_REFRESH_MARKER`; `read_helper_status`, `write_helper_status`, `read_connection_style`,
 `write_connection_style`, `request_profile_refresh`, `take_profile_refresh_request`,
 `HelperLock`, `helper_holder(root) -> HelperStamp | None`, `read_helper_epoch(root)`,
-`start_fenced(root, epoch)`, `spawn_helper(root, target_id)` (a detached `python -m finishup helper
-run --target ID --epoch <epoch read now>` with the scrubbed `helper_environment()`, stderr to
-`log/helper.stderr`, reaped by a daemon thread), `stop_helper(root, *, timeout_seconds)` (moves the
-stop epoch; `True` only once the lock is seen free; never signals). Records and sockets beneath an
+`start_fenced(root, epoch)`, `spawn_helper(root, target_id, *, epoch=None)` (a detached `python -m
+finishup helper run --target ID --epoch <epoch>` with the scrubbed `helper_environment()`, stderr
+to `log/helper.stderr`, reaped by a daemon thread; `epoch` is the one its caller read before
+dialling, else the one read now), `stop_helper(root, *, timeout_seconds)` (moves the stop epoch;
+`True` only once the lock is seen free; never signals), `supersede_helper(root, holder, *,
+timeout_seconds)` (the same stop for exactly the holder decided about, under the epoch fence;
+raises `HelperHolderChanged` and moves nothing when another holds the target; returns the epoch it
+wrote once the lock is free), `helper_lock_held(root)`, `helper_start_fence(root)`. Records and sockets beneath an
 SSH target root: `state/helper.lock`, `state/helper-status.json`, `state/helper-epoch`,
 `config/connection-style.json`, `state/ssh-master.json` and `state/ssh-master.lock`,
 `state/profile-refresh-requested`, `log/helper.stderr`, and in `run/` `control.sock` (the relay's

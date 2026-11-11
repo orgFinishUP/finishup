@@ -145,6 +145,7 @@ from finishup.service.control_protocol import (
 )
 
 if TYPE_CHECKING:
+    from finishup.client.helper_status import HelperStamp
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
     from finishup.service.lifecycle import SingletonHolder
 
@@ -212,11 +213,8 @@ _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
 _CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
-# When this process started (this module is imported as it starts). A helper of this release but
-# another build that started after it belongs to a newer installation of the same version: this
-# process is the older one (an MCP bridge kept from before an in-place upgrade runs its retained
-# runtime), so it never replaces that helper (no flapping between two builds of one version).
-_PROCESS_STARTED_AT: Final = time.time()
+# The packaged schema manifest's bound when the build installed now is read from its files.
+_INSTALLED_MANIFEST_MAX_BYTES: Final = 8_388_608
 # A listening service shown to be a different FinishUP installation (or generation) sharing the one
 # per-user endpoint: it answered with another manifest or protocol, or closed on this client's
 # hello while its singleton stamp names another identity (``_unanswered_hello``). Both reasons
@@ -2704,11 +2702,19 @@ async def _reach_remote(
             workspace_binding=admission.workspace_binding,
             authorization=admission.authorization,
         )
-    from finishup.client.helper_status import read_connection_style, request_profile_refresh
+    from finishup.client.helper_status import (
+        read_connection_style,
+        read_helper_epoch,
+        request_profile_refresh,
+    )
     from finishup.client.targets import target_root
 
     root = target_root(admission.target_id)
     style = read_connection_style(root)
+    # The target's stop epoch before any dial: every helper this attempt starts carries it, so a
+    # stop made meanwhile (``server use``, ``disconnect``, ``remove``, a zero-network policy)
+    # fences it before it serves anything or reaches the server (``helper_status.start_fenced``).
+    epoch = read_helper_epoch(root)
     try:
         if style == "direct" and admission.kind in _REST_KINDS:
             return await _connect_direct_rest(
@@ -2735,12 +2741,13 @@ async def _reach_remote(
             projection_render_mode=projection_render_mode,
             output_is_controlling_tty=output_is_controlling_tty,
             deadline=deadline,
+            epoch=epoch,
         )
     except ControlError as error:
         if error.phase == "server_profile_changed":
             request_profile_refresh(root)
             if style == "direct":
-                _start_helper_to_refresh(root, admission.target_id)
+                _start_helper_to_refresh(root, admission, epoch)
         if error.reason == "service_unavailable" and error.phase is None:
             # A server elsewhere's outage always names its phase (design v2 section 8.9: hooks
             # fail open with the reason): a direct stream that did not answer within the
@@ -2770,29 +2777,58 @@ def _remote_release_mismatch() -> ControlError:
     return ControlError("service_unavailable", retryable=True, phase="remote_incompatible")
 
 
-def _helper_is_newer_build(root: Path, pid: int, version: str) -> bool:
-    """Whether the live helper ``pid`` (stamped ``version``) holding ``root`` is of this release
-    but started after this process did, so it is the newer build (``_PROCESS_STARTED_AT``).
-    Reads only; ``False`` when its status cannot tell."""
+def _installed_manifest_digest() -> str | None:
+    """The schema-manifest digest of the build installed now, read from the installation's files.
 
-    from finishup.client.helper_status import read_helper_status
-    from finishup.config.installation import parse_rfc3339_ms
+    Never this process's own (cached) digest: a process that runs a retained copy of its runtime
+    (an MCP bridge or a hook after an in-place upgrade, ``adapters.release_runtime``) reads the
+    installation it was copied from, and any other process reads its package's files again. The
+    package manager's files are the durable order of two builds of one version: the one
+    installed now is the newer, whatever process started when. ``None`` when it cannot be read.
+    """
 
-    if version != __version__:
-        return False
-    status = read_helper_status(root)
-    if status is None or status.pid != pid:
-        return False
+    import hashlib
+
+    import finishup
+    from finishup.adapters.release_runtime import installation_prefix
+
     try:
-        started = parse_rfc3339_ms(status.started_at).timestamp()
-    except (TypeError, ValueError):
+        manifest = Path(finishup.__file__).resolve().parent / "resources" / "schemas"
+        manifest /= "manifest.json"
+        here = Path(sys.prefix).resolve()
+        origin = installation_prefix()
+        if origin.resolve() != here:
+            # A retained runtime: the same package path beneath the installation it copies.
+            manifest = origin / manifest.relative_to(here)
+        with manifest.open("rb") as handle:
+            data = handle.read(_INSTALLED_MANIFEST_MAX_BYTES + 1)
+    except (OSError, ValueError):  # a ``ReleaseRuntimeError`` too: no order can be read
+        return None
+    if len(data) > _INSTALLED_MANIFEST_MAX_BYTES:
+        return None
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _stale_against_helper(holder: HelperStamp) -> bool:
+    """Whether this process must never replace ``holder``, a live helper of this release but
+    another build: this process is not the build installed now (it predates an in-place upgrade,
+    a retained runtime), or which build is installed cannot be read. Reads only.
+
+    The order is the installation's (``_installed_manifest_digest``), never a process start
+    time: a retained older bridge that starts its own helper after a newer process started (at a
+    helper's idle exit) is still the older build, and the newer one replaces that helper.
+    """
+
+    if holder.version != __version__:
         return False
-    return started > _PROCESS_STARTED_AT
+    own = _manifest_digest_for_client()
+    return holder.schema_manifest_digest != own and _installed_manifest_digest() != own
 
 
 def newer_helper_build_holds_selection() -> bool:
-    """Whether the selected server elsewhere's helper is a newer build of this release than this
-    process (this process predates an in-place upgrade). For the MCP bridge's remedy text."""
+    """Whether the selected server elsewhere's helper is of this release but another build, and
+    this process is not the build installed now (``_stale_against_helper``): this process is the
+    stale one (it predates an in-place upgrade). For the MCP bridge's remedy text."""
 
     from finishup.client.helper_status import helper_holder
 
@@ -2801,14 +2837,12 @@ def newer_helper_build_holds_selection() -> bool:
         return False
     try:
         holder = helper_holder(root)
-        if holder is None or holder.schema_manifest_digest == _manifest_digest_for_client():
-            return False
-        return _helper_is_newer_build(root, holder.pid, holder.version)
+        return holder is not None and _stale_against_helper(holder)
     except Exception:  # noqa: BLE001 - a helper that cannot be read is not newer
         return False
 
 
-def _start_helper_to_refresh(root: Path, target_id: str) -> None:
+def _start_helper_to_refresh(root: Path, admission: _RemoteAdmission, epoch: str) -> None:
     """Start the target's helper so it fetches the server's profile again (never on this path).
 
     The relay style's refusal came through the running helper, which takes the marker. The
@@ -2816,14 +2850,20 @@ def _start_helper_to_refresh(root: Path, target_id: str) -> None:
     marker alone would wait, ``server status`` would go on calling the consent current, and a
     narrowed profile would never be adjusted. The helper is client-owned and vault-less and does
     the fetch itself, detached (design v2 section 8.9: no profile refresh on a hook's path).
-    Never raises.
+
+    Only while the admission this request was made under still holds (a ``server use`` of
+    another server, a ``logout`` or a ``remove`` meanwhile starts nothing), and with the stop
+    epoch read before the dial (``epoch``): a stop since then fences the helper before it
+    reaches the server. Never raises.
     """
 
     from finishup.client.helper_status import helper_holder, spawn_helper
 
     try:
+        if admission.authorization.refusal() is not None:
+            return
         if helper_holder(root) is None:
-            spawn_helper(root, target_id)
+            spawn_helper(root, admission.target_id, epoch=epoch)
     except OSError:
         return
 
@@ -3019,24 +3059,37 @@ async def _connect_through_helper(
     projection_render_mode: ProjectionRenderMode,
     output_is_controlling_tty: bool,
     deadline: float,
+    epoch: str | None = None,
 ) -> ServiceClient:
     """The relay style: the target's helper serves ``<root>/run/control.sock``.
 
     The helper is client-owned and vault-less, so starting one is always safe: when nothing
-    answers, one is started (never a service), and a helper left by an older release of this
-    client is replaced through the target's stop epoch (never a newer one). A helper ending at its
-    idle exit is followed by a successor; any other stop (a ``server use``, ``disconnect``,
-    ``remove``, a zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
-    ends the wait at once; every ``service_unavailable`` raised here names a remote phase.
+    answers, one is started (never a service), and a helper left by an older release or build of
+    this client is replaced through the target's stop epoch (never a newer one, and only by the
+    build installed now: ``_stale_against_helper``). The replacement is fenced to the helper it
+    decided about (``helper_status.supersede_helper``): one that took the target meanwhile is
+    decided about again, never stopped blind. A helper that holds the lock but has not stamped
+    it yet is unknown: it is waited for within the deadline, never stopped and never doubled. A
+    helper ending at its idle exit is followed by a successor; any other stop (a ``server use``,
+    ``disconnect``, ``remove``, a zero-network policy) stays a stop (A-HANDOFF): every helper
+    started here carries ``epoch`` (the stop epoch read before the first dial, or the one this
+    client's own replacement wrote), and only while the admission still holds. A failure the
+    helper names (a remote phase) ends the wait at once; every ``service_unavailable`` raised
+    here names a remote phase.
     """
 
     from finishup.client.helper_status import (
+        HelperHolderChanged,
         helper_holder,
+        helper_lock_held,
+        read_helper_epoch,
         read_helper_status,
         spawn_helper,
-        stop_helper,
+        supersede_helper,
     )
 
+    if epoch is None:
+        epoch = read_helper_epoch(root)
     before = read_helper_status(root)
 
     def idle_exit_finished() -> bool:
@@ -3070,6 +3123,67 @@ async def _connect_through_helper(
             correlation_id=error.correlation_id,
         )
 
+    def spawn() -> None:
+        # The admission this attempt was made under, again: a ``server use`` of another server,
+        # a ``logout`` or a ``remove`` since starts nothing (the helper's own admission is not
+        # bound to the selection).
+        phase = admission.authorization.refusal()
+        if phase is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=phase)
+        try:
+            spawn_helper(root, admission.target_id, epoch=epoch)
+        except FileNotFoundError:
+            # The target's folder is gone (``server remove``): nothing is made again.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            ) from None
+        except OSError:
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="remote_unreachable"
+            ) from None
+
+    spawned = False
+    awaiting_stamp = False
+
+    async def settle() -> None:
+        """Replace a helper of an older release or build, start one when none holds the target,
+        or note that the holder has not stamped the lock yet (``awaiting_stamp``)."""
+
+        nonlocal awaiting_stamp, epoch, spawned
+        holder = helper_holder(root)
+        while (
+            holder is not None
+            and (
+                holder.version != __version__
+                or holder.schema_manifest_digest != _manifest_digest_for_client()
+            )
+            and holder_version_order(holder.version) != "newer"
+        ):
+            if _stale_against_helper(holder):
+                # Another build of this same release, and this process is not the build
+                # installed now: it predates an in-place upgrade (a retained runtime). It never
+                # replaces that helper; its owner reopens the session (the bridge names that).
+                raise ControlError("service_incompatible", retryable=True)
+            # A helper left by an older release or build of this client (an in-place upgrade)
+            # is client-owned: stop exactly that one (its stop epoch moves; no pid is
+            # signalled), then start this build's. One a newer release started is never
+            # replaced from here.
+            try:
+                written = await asyncio.to_thread(
+                    supersede_helper, root, holder, timeout_seconds=_remaining(deadline)
+                )
+            except HelperHolderChanged:
+                holder = helper_holder(root)
+                continue
+            if written is None:
+                raise named(ControlError("service_unavailable", retryable=True))
+            epoch = written
+            holder = helper_holder(root)
+        awaiting_stamp = holder is None and helper_lock_held(root) is True
+        if holder is None and not awaiting_stamp:
+            spawn()
+            spawned = True
+
     try:
         return await attempt()
     except _AcceptedServiceUnresponsive as error:
@@ -3081,50 +3195,17 @@ async def _connect_through_helper(
         if recorded is not None and recorded.phase != "remote_unreachable":
             # The running helper read this hello and named why it could not carry it.
             raise recorded from error
-    holder = helper_holder(root)
-    if (
-        holder is not None
-        and (
-            holder.version != __version__
-            or holder.schema_manifest_digest != _manifest_digest_for_client()
-        )
-        and holder_version_order(holder.version) != "newer"
-    ):
-        if _helper_is_newer_build(root, holder.pid, holder.version):
-            # Another build of this same release, started after this process: this process
-            # predates an in-place upgrade (a retained runtime). It never replaces the newer
-            # helper; its owner reopens the session (the bridge names that).
-            raise ControlError("service_incompatible", retryable=True)
-        # A helper left by an older release of this client (an in-place upgrade) is client-owned:
-        # stop it (its stop epoch moves; no pid is signalled), then start this release's. One a
-        # newer release started is never replaced from here.
-        if not await asyncio.to_thread(stop_helper, root, timeout_seconds=_remaining(deadline)):
-            raise named(ControlError("service_unavailable", retryable=True))
-        holder = None
-    spawned = False
-    if holder is None:
-        try:
-            spawn_helper(root, admission.target_id)
-        except FileNotFoundError:
-            # The target's folder is gone (``server remove``): nothing is made again.
-            raise ControlError(
-                "service_unavailable", retryable=True, phase="server_authorization_changed"
-            ) from None
-        except OSError:
-            raise ControlError(
-                "service_unavailable", retryable=True, phase="remote_unreachable"
-            ) from None
-        spawned = True
+    await settle()
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        if not spawned and idle_exit_finished():
+        if awaiting_stamp:
+            # A helper took the lock without a stamp yet: decide once its identity is known.
+            await settle()
+        elif not spawned and idle_exit_finished():
             # The helper that held the target was ending at its idle exit: start its successor
             # now instead of waiting on an endpoint nothing will serve again.
-            try:
-                spawn_helper(root, admission.target_id)
-            except OSError:
-                break
+            spawn()
             spawned = True
         recorded = _helper_failure(root, before)
         if recorded is not None and recorded.phase not in {None, "remote_unreachable"}:

@@ -163,7 +163,8 @@ def record_remote_target(name: str = "elsewhere") -> ServerTarget:
     return record
 
 
-def _refuse_spawn(_root: Path, _target_id: str) -> object:
+def _refuse_spawn(_root: Path, _target_id: str, *, epoch: str | None = None) -> object:
+    del epoch
     raise PermissionError("helper_not_spawned_in_unit_tests")
 
 

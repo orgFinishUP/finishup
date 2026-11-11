@@ -213,8 +213,8 @@ part of it is CLIENT and never runs or loads on a hook's path unless an SSH targ
   server's profile. It admits itself through the shared gate (`authorization.authorize_target`);
   a lapse ends every relayed connection and agent, and zero-network stops it at once.
   `client/helper_status.py` (hook-safe) is what a client needs of it: the lock, the status record
-  and its phases, start (with the stop epoch it read) and stop (the epoch, then the lock seen
-  free). `client/helper_runtime.py` is the SSH
+  and its phases, start (with the stop epoch its client read before dialling), stop (the epoch,
+  then the lock seen free) and the fenced replacement of exactly one holder. `client/helper_runtime.py` is the SSH
   `TargetRuntime` and the CLI's one-time registration.
 - `service/client.py` dispatches an admitted SSH root on its connection style (the helper's
   endpoint, or `ssh -W`), within one deadline for a hook (design v2 section 8.9), and names a

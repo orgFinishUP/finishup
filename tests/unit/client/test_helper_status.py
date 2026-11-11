@@ -305,3 +305,130 @@ def test_a_spawned_helper_carries_the_epoch_its_spawner_read(
     assert start_fenced(root, "none") and not start_fenced(root, moved)
     assert not start_fenced(root, None)
     assert original("t_0000000a", moved)[-4:] == ("--target", "t_0000000a", "--epoch", moved)
+
+
+def test_a_spawn_carries_the_epoch_its_caller_read_before_a_stop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client passes the epoch it read before its dial: a stop since then fences the helper."""
+
+    from finishup.client.helper_status import read_helper_epoch, start_fenced
+
+    seen: list[str] = []
+
+    def command(_target_id: str, epoch: str) -> tuple[str, ...]:
+        seen.append(epoch)
+        return (sys.executable, "-c", "pass")
+
+    monkeypatch.setattr(helper_status, "_helper_command", command)
+    before = read_helper_epoch(root)
+    assert stop_helper(root, timeout_seconds=1.0) is True
+    spawn_helper(root, "t_0000000a", epoch=before).wait(timeout=10)
+    assert seen == [before]
+    assert start_fenced(root, before)
+
+
+def _stamp_of(root: Path) -> helper_status.HelperStamp:
+    holder = helper_holder(root)
+    assert holder is not None
+    return holder
+
+
+def test_a_supersede_stops_exactly_the_holder_it_decided_about(root: Path) -> None:
+    """Finding 3: the replacement is fenced to the holder identity it read. Another holder now
+    (a newer helper that took the target meanwhile) is never stopped: nothing moves and the
+    caller decides again. The holder decided about is stopped through the epoch, and the epoch
+    this stop wrote is returned once the lock is free (the successor is spawned with it)."""
+
+    import fcntl
+    import json
+
+    from finishup.client.helper_status import (
+        HelperHolderChanged,
+        read_helper_epoch,
+        supersede_helper,
+    )
+
+    older = {"pid": os.getpid(), "version": "0.1.0", "schema_manifest_digest": _DIGEST}
+    descriptor = _hold_lock_stamped(root, json.dumps(older).encode() + b"\n")
+    decided = _stamp_of(root)
+    # Another helper holds the target now (here the same pid, another build).
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    newer = {**older, "schema_manifest_digest": "sha256:" + "b" * 64}
+    os.write(descriptor, json.dumps(newer).encode() + b"\n")
+    before = read_helper_epoch(root)
+    try:
+        with pytest.raises(HelperHolderChanged):
+            supersede_helper(root, decided, timeout_seconds=0.2)
+        assert read_helper_epoch(root) == before
+        # The holder decided about: the stop is asked for; its lock is still held at the bound.
+        assert supersede_helper(root, _stamp_of(root), timeout_seconds=0.2) is None
+        assert read_helper_epoch(root) != before
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    # Nothing holds it now: a supersede of a holder that ended is a changed holder, too.
+    with pytest.raises(HelperHolderChanged):
+        supersede_helper(root, decided, timeout_seconds=0.2)
+
+
+def test_a_supersede_returns_the_epoch_it_wrote_once_the_lock_is_free(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.helper_status import read_helper_epoch, supersede_helper
+
+    stamp = helper_status.HelperStamp(os.getpid(), "0.1.0", _DIGEST)
+    lock = HelperLock(root)
+    lock.acquire(version=stamp.version, schema_manifest_digest=stamp.schema_manifest_digest)
+    original = helper_status._move_helper_epoch  # pyright: ignore[reportPrivateUsage]
+
+    def move_and_exit(path: Path) -> str | None:
+        token = original(path)
+        lock.release()  # the helper reads the moved epoch on its tick and exits
+        return token
+
+    monkeypatch.setattr(helper_status, "_move_helper_epoch", move_and_exit)
+    written = supersede_helper(root, stamp, timeout_seconds=1.0)
+    assert written is not None and written == read_helper_epoch(root)
+
+
+def test_a_supersede_waits_for_the_fence_within_its_bound_and_moves_nothing_past_it(
+    root: Path,
+) -> None:
+    """While a helper is taking the lock (it holds the fence), a supersede does not decide; past
+    its bound it gives up without moving the epoch."""
+
+    from finishup.client.helper_status import (
+        helper_start_fence,
+        read_helper_epoch,
+        supersede_helper,
+    )
+
+    stamp = helper_status.HelperStamp(os.getpid(), "0.1.0", _DIGEST)
+    lock = HelperLock(root)
+    lock.acquire(version=stamp.version, schema_manifest_digest=stamp.schema_manifest_digest)
+    before = read_helper_epoch(root)
+    try:
+        with helper_start_fence(root):
+            assert supersede_helper(root, stamp, timeout_seconds=0.2) is None
+        assert read_helper_epoch(root) == before
+        assert (root / "state" / "helper-epoch.lock").stat().st_mode & 0o777 == 0o600
+    finally:
+        lock.release()
+
+
+def test_the_lock_is_seen_held_before_its_stamp_is_readable(root: Path) -> None:
+    import fcntl
+
+    from finishup.client.helper_status import helper_lock_held
+
+    assert helper_lock_held(root) is False
+    descriptor = _hold_lock_stamped(root, b"")
+    try:
+        assert helper_holder(root) is None
+        assert helper_lock_held(root) is True
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert helper_lock_held(root) is False

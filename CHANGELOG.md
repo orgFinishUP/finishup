@@ -285,8 +285,12 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **An upgrade no longer makes helpers flap.** When FinishUP is upgraded in place while an agent
   session is open, that session's MCP bridge keeps running its earlier build. Between two builds
   of one version, the bridge and the newer commands used to replace each other's background
-  helper on every use. A helper started after a process is now never replaced by it; the older
-  session is told to reopen instead of being told to run `finishup service restart`.
+  helper on every use. Now only the build that is installed replaces a helper of another build,
+  and exactly that helper; the older session is told to reopen instead of being told to run
+  `finishup service restart`.
+- **A deselected server stays stopped.** A command or hook that was connecting to a server when
+  you switched away from it (`finishup server use`), disconnected or removed it no longer starts
+  that server's background helper again afterwards.
 - **A server that was not upgraded says so.** When this computer runs a newer release than its SSH
   server, the error is now `remote_incompatible` ("install the same release on both"), not "the
   running local service … run `finishup service restart`", which repaired nothing.

@@ -467,8 +467,16 @@ the owner's agent), its stderr in `log/helper.stderr`, and resolves every path u
   exited) and never by a process name or path.
 - **Started on demand, never by `service run`.** In the relay style a connecting client that finds
   nothing answering on `<troot>/run/control.sock` spawns it and waits for it within its own
-  deadline; a holder stamped by an older release of this client is stopped through the stop epoch
-  and replaced, a newer one never. In the direct style a process that registered a workspace (the MCP
+  deadline; a holder stamped by an older release of this client, or by another build of this
+  release while this process is the build installed now, is stopped through the stop epoch and
+  replaced, a newer one never (point 4 of the layer-7 findings below). The replacement is fenced
+  to the holder decided about (`state/helper-epoch.lock`: the helper takes its lock and reads the
+  epoch under it, the replacing client checks the holder and moves the epoch under it), so a
+  helper that took the target meanwhile is decided about again, never stopped blind; a lock held
+  before its stamp is written is an unknown holder, waited for within the deadline. Every helper
+  a client starts carries the stop epoch the client read before its first dial (or the one its
+  own replacement wrote), and is started only while the client's admission still holds, so a
+  `server use`, `disconnect` or `remove` made while it dialled starts nothing. In the direct style a process that registered a workspace (the MCP
   bridge, a CLI command) starts it when none runs, as does `server connect`. A client dialling
   while the helper ends its idle exit starts its successor; any other stop (`server use`,
   `disconnect`, `remove`, zero-network) has no successor in that client's wait (A-HANDOFF).
@@ -866,14 +874,20 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    lockstep, U18: its owner upgrades it; continuation `remote_release_mismatch`), never
    `service_incompatible` with the local `service restart` remedy, unless this process is the
    stale one (point 4).
-4. **Two builds of one version are ordered by start time.** A helper left by an older release is
-   replaced through its stop epoch, and one a newer release started never is (decision 13). Two
-   builds of one version cannot be ordered by version: a helper of this release but another build
-   that started after a process belongs to the newer installation (that process runs a retained
-   runtime from before an in-place upgrade), so it is never replaced by that process, which gets
-   `service_incompatible`; the MCP bridge then asks to reopen the session. Before this, a newer CLI
-   and an older bridge replaced each other's helper on every use. A bridge from a build without
-   this rule still does until its session is reopened.
+4. **Two builds of one version are ordered by the installation.** A helper left by an older
+   release is replaced through its stop epoch, and one a newer release started never is (decision
+   13). Two builds of one version cannot be ordered by version, nor by when their processes
+   started: a bridge kept from before an in-place upgrade (on its retained runtime) may start its
+   older helper after a newer process started, at a helper's idle exit. The order is the package
+   manager's: the build installed now (the schema-manifest digest of the installation's files,
+   read again each time; a retained runtime reads the installation it was copied from) is the
+   newer. A process of the build installed now replaces a helper of another build of its
+   release; a process that is not (or cannot read which build is installed) never does, and gets
+   `service_incompatible`; the MCP bridge then asks to reopen the session. Before this, a newer
+   CLI and an older bridge replaced each other's helper on every use. A bridge from a build
+   without this rule still does until its session is reopened. (The first fix in this layer
+   compared the helper's start time with the process's; an independent review showed the older
+   bridge's own helper, started after the newer process, then held the target for good.)
 5. **The WAN gate (design v2 section 8.9) is met by the relay styles, not by direct HTTPS.** At a
    100 ms round trip the startup gate's warm connect and status stays under 650 ms at p95 through
    the helper over SSH and over HTTPS (the default for both kinds), after three rounds took out

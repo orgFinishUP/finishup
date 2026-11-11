@@ -24,7 +24,13 @@ integers and timestamps only (no host, name, path or remote text):
 * ``state/helper-epoch`` (``yoetz.helper-epoch/1``): a random token every stop replaces. A helper
   is spawned with the token its spawner read (``--epoch``); one that finds another token once it
   holds the lock (a stop came while it was starting) exits without serving anything, and a
-  running helper stops on its next tick when the token moves.
+  running helper stops on its next tick when the token moves. A client that dials first passes
+  the token it read before its dial, so a stop made while it dialled fences what it starts.
+* ``state/helper-epoch.lock``: an empty flock, the fence between a client replacing one exact
+  helper (``supersede_helper``) and a helper taking the singleton lock. A helper holds it while it
+  takes the lock and reads the epoch; a supersede holds it while it checks that the helper it
+  decided to replace still holds the target and moves the epoch. So a supersede never stops a
+  helper that took the target after the decision (it decides again instead).
 
 **The relay's repository binding** (``RELAY_BINDING``). A client that names a workspace through the
 helper's relay (its claim) first writes, on that local connection only, the repository key its own
@@ -58,6 +64,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -83,6 +90,7 @@ __all__ = [
     "PROFILE_REFRESH_MARKER",
     "RELAY_BINDING_BYTES",
     "ConnectionStyle",
+    "HelperHolderChanged",
     "HelperLock",
     "HelperLockBusy",
     "HelperPhase",
@@ -90,6 +98,8 @@ __all__ = [
     "HelperStatus",
     "helper_environment",
     "helper_holder",
+    "helper_lock_held",
+    "helper_start_fence",
     "new_status",
     "now_stamp",
     "read_connection_style",
@@ -102,6 +112,7 @@ __all__ = [
     "start_fenced",
     "starts_relay_binding",
     "stop_helper",
+    "supersede_helper",
     "take_profile_refresh_request",
     "write_connection_style",
     "write_helper_status",
@@ -115,6 +126,7 @@ CONNECTION_STYLE_NAME: Final = "connection-style.json"
 PROFILE_REFRESH_MARKER: Final = "profile-refresh-requested"
 HELPER_EPOCH_SCHEMA: Final = "yoetz.helper-epoch/1"
 HELPER_EPOCH_NAME: Final = "helper-epoch"
+_EPOCH_FENCE_NAME: Final = "helper-epoch.lock"
 # The epoch of a target root no stop has moved yet (no file).
 _NO_EPOCH: Final = "none"
 # A helper with no client for this long exits; the next client starts a new one (design v2 §3).
@@ -454,18 +466,20 @@ def read_helper_epoch(root: Path) -> str:
     return token
 
 
-def _move_helper_epoch(root: Path) -> bool:
-    """Replace the target's stop epoch with a fresh token; whether it was written. Never raises.
+def _move_helper_epoch(root: Path) -> str | None:
+    """Replace the target's stop epoch with a fresh token; the token, or ``None`` when it could
+    not be written. Never raises.
 
     The folder is never made here (a removed target stays removed).
     """
 
-    body: dict[str, JsonValue] = {"schema": HELPER_EPOCH_SCHEMA, "epoch": secrets.token_hex(16)}
+    token = secrets.token_hex(16)
+    body: dict[str, JsonValue] = {"schema": HELPER_EPOCH_SCHEMA, "epoch": token}
     try:
         _write_owner_only(root / "state" / HELPER_EPOCH_NAME, canonical_encode(body) + b"\n")
     except OSError:
-        return False
-    return True
+        return None
+    return token
 
 
 def start_fenced(root: Path, epoch: str | None) -> bool:
@@ -617,6 +631,17 @@ def helper_holder(root: Path) -> HelperStamp | None:
     return HelperStamp(pid, version, digest)
 
 
+def helper_lock_held(root: Path) -> bool | None:
+    """Whether some process holds ``root``'s helper lock (``None``: it cannot be inspected).
+
+    Held while ``helper_holder`` reads ``None`` is a helper that took the lock and has not stamped
+    it yet (or a stamp that cannot be read): its identity is unknown, so a client waits for it
+    and neither stops it nor starts another beside it.
+    """
+
+    return _lock_held(_lock_path(root))
+
+
 def helper_environment() -> dict[str, str]:
     """The scrubbed environment a helper runs with: no product variable, no secret.
 
@@ -652,7 +677,9 @@ def _reap(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
+def spawn_helper(
+    root: Path, target_id: str, *, epoch: str | None = None
+) -> subprocess.Popen[bytes]:
     """Start one detached helper for the target at ``root``; its stderr goes to ``log/helper.stderr``.
 
     The helper outlives the call (its own session) and stops on another process's word (``server
@@ -661,6 +688,9 @@ def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
     exactly the spawned pid, so a stopped helper is reaped at once instead of staying
     ``<defunct>``; nothing here waits on, or signals, a process by pattern. The log folder is made
     only beneath an existing target folder (a removed target is never made again).
+
+    ``epoch`` is the stop epoch the caller read before it decided to start one (before its dial):
+    a stop since then fences the helper. Without it, the epoch is read now.
     """
 
     log = root / "log"
@@ -669,9 +699,10 @@ def spawn_helper(root: Path, target_id: str) -> subprocess.Popen[bytes]:
             raise FileNotFoundError(errno.ENOENT, "target_missing")
     except PathSafetyError:
         raise PermissionError(errno.EPERM, "target_unsafe") from None
-    # The epoch read now travels with the helper: a stop between this spawn and its lock fences
-    # it (``start_fenced``).
-    epoch = read_helper_epoch(root)
+    # The epoch travels with the helper: a stop between that read and its lock fences it
+    # (``start_fenced``).
+    if epoch is None:
+        epoch = read_helper_epoch(root)
     with contextlib.suppress(FileExistsError):
         log.mkdir(mode=0o700)
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -706,9 +737,12 @@ def stop_helper(root: Path, *, timeout_seconds: float = 5.0) -> bool:
     not be moved while a holder runs.
     """
 
-    moved = _move_helper_epoch(root)
+    moved = _move_helper_epoch(root) is not None
+    return _wait_lock_free(root, moved=moved, deadline=time.monotonic() + timeout_seconds)
+
+
+def _wait_lock_free(root: Path, *, moved: bool, deadline: float) -> bool:
     path = _lock_path(root)
-    deadline = time.monotonic() + timeout_seconds
     while True:
         held = _lock_held(path)
         if held is False:
@@ -719,6 +753,78 @@ def stop_helper(root: Path, *, timeout_seconds: float = 5.0) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(_STOP_POLL_SECONDS)
+
+
+class HelperHolderChanged(Exception):
+    """The helper a client decided to replace no longer holds the target: nothing was stopped."""
+
+
+@contextlib.contextmanager
+def helper_start_fence(root: Path, *, deadline: float | None = None) -> Generator[None]:
+    """Hold the target's epoch fence (``state/helper-epoch.lock``, see the module text).
+
+    A helper holds it while it takes the singleton lock and reads the epoch; ``supersede_helper``
+    while it checks the holder and moves the epoch. Waits for it without a bound, or until
+    ``deadline`` (``time.monotonic``), then raises ``TimeoutError``. Raises ``OSError`` when the
+    fence cannot be opened safely (a removed target: the folder is never made here).
+    """
+
+    descriptor = os.open(
+        root / "state" / _EPOCH_FENCE_NAME,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) & 0o077
+        ):
+            raise PermissionError(errno.EPERM, "fence_unsafe")
+        while True:
+            try:
+                fcntl.flock(
+                    descriptor, fcntl.LOCK_EX if deadline is None else fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN} or deadline is None:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError from None
+                time.sleep(_STOP_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def supersede_helper(root: Path, holder: HelperStamp, *, timeout_seconds: float) -> str | None:
+    """Stop exactly the helper ``holder`` names, then wait until its lock is free.
+
+    A client of the build installed now replaces a helper of an older release or build this way
+    (``service.client``). Under the epoch fence, the target must still be held by ``holder``
+    (pid, version and digest): otherwise nothing is moved and ``HelperHolderChanged`` is raised,
+    so the caller decides again about whoever holds it now (a newer helper that took the target
+    meanwhile is never stopped). Returns the epoch this stop wrote once the lock is proven free:
+    the successor is spawned with it, so a later stop fences that successor too. ``None`` when
+    the fence or the lock is still held at the bound, or the epoch could not be moved.
+    """
+
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        with helper_start_fence(root, deadline=deadline):
+            if helper_holder(root) != holder:
+                raise HelperHolderChanged
+            token = _move_helper_epoch(root)
+    except OSError:  # the fence could not be taken in time or safely (a ``TimeoutError`` too)
+        return None
+    if token is None:
+        return None
+    return token if _wait_lock_free(root, moved=True, deadline=deadline) else None
 
 
 def new_status(
