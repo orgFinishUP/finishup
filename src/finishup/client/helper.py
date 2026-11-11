@@ -23,7 +23,9 @@ one spawned before such a stop never serves. Its roles:
 4. **Profile cache and re-check** (design v2 sections 2.3 and 8.9): the server's profile is
    fetched (``client.ssh_discovery``) and recorded (``client.server_profile.refresh_profile``) at
    start, every 10 minutes while an upstream was used, when one of its own connections is refused
-   ``server_profile_changed`` and when a client left the refresh marker; at most every 30 seconds.
+   ``server_profile_changed`` and when a client left the refresh marker; at most every 30 seconds,
+   except that a refusal of the very revision this computer's cached profile still holds proves
+   the cache stale, so that fetch waits only 2 seconds after the last one.
 
 **Admission (FR-3).** Everything above runs only under the helper's own admission through the
 shared gate (``authorization.authorize_target``: pinned to its root, steps 2 to 5 and the
@@ -47,7 +49,7 @@ import signal
 import socket
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -75,7 +77,7 @@ from finishup.client.helper_status import (
     read_connection_style,
     read_helper_epoch,
     read_helper_status,
-    take_profile_refresh_request,
+    take_named_profile_refresh_request,
     write_helper_status,
 )
 from finishup.client.ssh_transport import (
@@ -101,6 +103,7 @@ if TYPE_CHECKING:
     from finishup.client.authorization import ConnectionAuthorization
     from finishup.client.helper_registrations import Registration, ServedWorkspace
     from finishup.client.server_profile import FetchedProfile
+    from finishup.protocol.server_profile import ServerProfileRevision
     from finishup.service.client import ClientWorkspaceBinding, ServiceClient
 
 __all__ = [
@@ -118,6 +121,9 @@ DRAIN_INTERVAL_SECONDS: Final = 30.0
 REFRESH_INTERVAL_SECONDS: Final = 600.0
 # The fewest seconds between two profile fetches, whatever asked for them.
 _REFRESH_MIN_SECONDS: Final = 30.0
+# A refusal of the revision the cached profile still holds proves the cache stale: that fetch
+# waits only this long after the last one (never a hammering), not ``_REFRESH_MIN_SECONDS``.
+_STALE_REFRESH_MIN_SECONDS: Final = 2.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
 _HELLO_SECONDS: Final = 10.0
@@ -304,7 +310,7 @@ class HelperAgent:
         dial: Dial,
         *,
         transport: ConnectionTransport,
-        on_profile_changed: Callable[[], None],
+        on_profile_changed: Callable[[ServerProfileRevision | None], None],
         reconnect_wait: Callable[[float], Awaitable[None]] = _wait,
     ) -> None:
         self.registration = registration
@@ -362,7 +368,10 @@ class HelperAgent:
                 )
             except ControlError as error:
                 if error.phase == _PROFILE_CHANGED:
-                    self._on_profile_changed()
+                    # The revision this agent's hello named, which the server no longer issues.
+                    self._on_profile_changed(
+                        getattr(self._binding.authorization, "server_profile", None)
+                    )
                 await self._reconnect_wait(delay)
                 delay = min(delay * 2, _RECONNECT_MAX_SECONDS)
                 continue
@@ -428,7 +437,7 @@ async def open_helper_agent(
     dial: Dial,
     *,
     transport: ConnectionTransport,
-    on_profile_changed: Callable[[], None],
+    on_profile_changed: Callable[[ServerProfileRevision | None], None],
 ) -> HelperAgent | None:
     """The background agent for ``registration``; ``None`` when it may not be served now.
 
@@ -474,13 +483,22 @@ async def open_helper_agent(
     return agent
 
 
+def _no_revisions() -> list[ServerProfileRevision]:
+    return []
+
+
 @dataclass(slots=True)
 class _Refresh:
-    """When the profile was last fetched, and why the next fetch is due."""
+    """When the profile was last fetched, and why the next fetch is due.
+
+    ``named`` holds the revisions refused connections named since the last fetch (a client's
+    marker, the helper's own agents): one the cached profile still holds makes the fetch urgent.
+    """
 
     last: float | None = None
     requested: bool = True
     task: asyncio.Task[None] | None = None
+    named: list[ServerProfileRevision] = field(default_factory=_no_revisions)
 
 
 type Refresher = Callable[[ServerTarget], Awaitable[None]]
@@ -954,8 +972,13 @@ class Helper:
         self._registrations_stamp = stamp
         return changed
 
-    def _profile_changed(self) -> None:
+    def _profile_changed(self, named: ServerProfileRevision | None = None) -> None:
+        """One of this helper's connections was refused ``server_profile_changed``; ``named``
+        is the revision its hello named, when known."""
+
         self._refresh.requested = True
+        if named is not None:
+            self._refresh.named.append(named)
 
     async def _sync_agents(self) -> None:
         """Open an agent for each registration served now; close every other one."""
@@ -1028,14 +1051,31 @@ class Helper:
             await agent.drain(may_send=self._may_send)
 
     def _refresh_due(self) -> bool:
+        """Whether the profile fetch is due now.
+
+        Never faster than every 30 seconds (``_REFRESH_MIN_SECONDS``), which bounds the periodic
+        fetch and repeated requests, except one asked for by a refusal that named the revision
+        this computer's cached profile still holds: that refusal proves the cache stale, so the
+        fetch waits only ``_STALE_REFRESH_MIN_SECONDS`` after the last one. A request naming a
+        revision the cache no longer holds (a fetch since), or none (an older client's empty
+        marker), waits for the floor as before.
+        """
+
         state = self._refresh
         now = self._clock()
         if state.task is not None and not state.task.done():
             return False
-        if state.last is not None and now - state.last < _REFRESH_MIN_SECONDS:
-            return False
-        if take_profile_refresh_request(self._root):
+        request = take_named_profile_refresh_request(self._root)
+        if request is not None:
             state.requested = True
+            if request.revision is not None:
+                state.named.append(request.revision)
+        if state.last is not None and now - state.last < _REFRESH_MIN_SECONDS:
+            return (
+                state.requested
+                and now - state.last >= _STALE_REFRESH_MIN_SECONDS
+                and self._cache_holds(state.named)
+            )
         if state.requested:
             return True
         used = self._last_upstream_use
@@ -1045,6 +1085,22 @@ class Helper:
             and used is not None
             and now - used < self._refresh_interval
         )
+
+    def _cache_holds(self, named: list[ServerProfileRevision]) -> bool:
+        """Whether this computer's cached profile still holds one of ``named`` (stale for sure).
+
+        Read only when a named request waits on the floor; a cache that cannot be read holds
+        none."""
+
+        if not named:
+            return False
+        from finishup.client.server_profile import read_cached_profile
+
+        try:
+            cached = read_cached_profile(self._root)
+        except Exception:  # noqa: BLE001 - a cache that cannot be read decides nothing
+            return False
+        return cached is not None and cached.profile.revision in named
 
     def _may_refresh(self) -> bool:
         """Gate steps 2 to 4 only: the refresh is how the consent catches up with the server."""
@@ -1063,6 +1119,8 @@ class Helper:
         state = self._refresh
         state.last = self._clock()
         state.requested = False
+        # This fetch answers every refusal named so far; a later one names its own revision.
+        state.named.clear()
         if not self._may_refresh():
             return
         from finishup.client.targets import read_target

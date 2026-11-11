@@ -1108,3 +1108,146 @@ def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
     else:
         assert len(recorded) == 6
         assert all(each)
+
+
+@pytest.mark.parametrize(
+    ("source", "named", "expected"),
+    [
+        ("marker", "cached", [1_000.0, 1_005.0]),
+        ("agent", "cached", [1_000.0, 1_005.0]),
+        ("marker", "other", [1_000.0, 1_030.0]),
+        ("agent", "other", [1_000.0, 1_030.0]),
+        ("marker", "none", [1_000.0, 1_030.0]),
+        ("agent", "none", [1_000.0, 1_030.0]),
+    ],
+)
+def test_a_refusal_of_the_cached_revision_is_fetched_at_once_and_any_other_waits_for_the_floor(
+    ssh_target: tuple[ServerTarget, Path], source: str, named: str, expected: list[float]
+) -> None:
+    """CHECKPOINT-u5 F2: a narrowing within 30 s of the last fetch was refused on every call until
+    the 30 s floor passed. A refusal naming the revision this computer's cached profile still
+    holds proves the cache stale: fetched at the next tick. A refusal naming another revision (a
+    fetch happened since) or none (an older client's empty marker) waits for the floor, which
+    still bounds repeated requests."""
+
+    from finishup.client.server_profile import read_cached_profile
+    from finishup.protocol.server_profile import ServerProfileRevision
+
+    record, root = ssh_target
+    cached = read_cached_profile(root)
+    assert cached is not None and cached.profile.revision == TEST_REVISION
+    other = ServerProfileRevision(
+        TEST_REVISION.issuer, TEST_REVISION.revision + 1, "sha256:" + "d" * 64
+    )
+    revision = {"cached": TEST_REVISION, "other": other, "none": None}[named]
+    fetched: list[float] = []
+
+    async def run() -> list[float]:
+        clock = Clock()
+
+        async def refresher(_record: ServerTarget) -> None:
+            fetched.append(clock())
+
+        helper = _helper(
+            record, root, FakeUpstream(ScriptedDaemon()), refresher=refresher, clock=clock
+        )
+
+        async def tick(seconds: float) -> None:
+            clock.now += seconds
+            await helper.step()
+            task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+            if task is not None:
+                await task
+
+        await tick(0)  # due at start
+        clock.now += 5
+        if source == "marker":
+            request_profile_refresh(root, revision)
+        else:
+            helper._profile_changed(revision)  # pyright: ignore[reportPrivateUsage]
+        await tick(0)
+        await tick(25)  # 30 s after the first fetch
+        return fetched
+
+    assert asyncio.run(run()) == expected
+
+
+def test_a_stale_cache_is_still_fetched_at_most_every_two_seconds(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """The urgent fetch keeps a short floor of its own: refusals naming the cached revision never
+    make the helper fetch faster than every 2 seconds."""
+
+    record, root = ssh_target
+    fetched: list[float] = []
+
+    async def run() -> list[float]:
+        clock = Clock()
+
+        async def refresher(_record: ServerTarget) -> None:
+            fetched.append(clock())
+
+        helper = _helper(
+            record, root, FakeUpstream(ScriptedDaemon()), refresher=refresher, clock=clock
+        )
+
+        async def tick(seconds: float) -> None:
+            clock.now += seconds
+            await helper.step()
+            task = helper._refresh.task  # pyright: ignore[reportPrivateUsage]
+            if task is not None:
+                await task
+
+        await tick(0)
+        for _ in range(2):
+            request_profile_refresh(root, TEST_REVISION)
+            await tick(1)  # 1 s after the last fetch: not yet
+            await tick(1)  # 2 s after it: fetched
+        return fetched
+
+    assert asyncio.run(run()) == [1_000.0, 1_002.0, 1_004.0]
+
+
+def test_an_agent_refused_for_its_revision_names_it_to_the_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A background agent whose hello the server refused ``server_profile_changed`` tells the
+    helper which revision its hello named (its admission's), so the helper can tell a stale
+    cache from one already refreshed."""
+
+    from types import SimpleNamespace
+
+    from finishup.service import client as service_client
+
+    named: list[object] = []
+
+    async def refused(*_arguments: object, **_options: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase="server_profile_changed")
+
+    monkeypatch.setattr(service_client, "connect_service_via", refused)
+    authorization = SimpleNamespace(server_profile=TEST_REVISION, refusal=lambda: None)
+
+    async def run() -> None:
+        agent: HelperAgent | None = None
+
+        async def stop(_seconds: float) -> None:
+            assert agent is not None
+            agent._closing = True  # pyright: ignore[reportPrivateUsage]
+
+        agent = HelperAgent(
+            SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+            SimpleNamespace(authorization=authorization),  # pyright: ignore[reportArgumentType]
+            SimpleNamespace(close=lambda: None),
+            SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+            transport="ssh",
+            on_profile_changed=named.append,
+            reconnect_wait=stop,
+        )
+        agent.start()
+        supervisor = agent._supervisor  # pyright: ignore[reportPrivateUsage]
+        assert supervisor is not None
+        async with asyncio.timeout(10):
+            await supervisor
+
+    asyncio.run(run())
+    assert named == [TEST_REVISION]

@@ -579,8 +579,14 @@ Design v2 sections 2.1, 2.3 and 8.2. `client.ssh_discovery` (never on a hook's p
   unused helper never starts it), when one of its own agents is refused `server_profile_changed`,
   and when a client left `state/profile-refresh-requested` (`service.client` leaves that marker
   when the server refuses a hello or request with `server_profile_changed`); at most once every 30
-  seconds. A narrowing adjusts quietly (decision 10); anything else makes the next connection
-  refuse until the owner agrees again.
+  seconds. The marker (`yoetz.profile-refresh-request/1`) and an agent's refusal name the revision
+  the refused hello named. When that is the revision the cached profile still holds, the cache is
+  stale for certain: the fetch waits only 2 seconds after the last one, so a narrowing made
+  shortly after a fetch adjusts at the next tick instead of being refused for up to 30 seconds
+  (CHECKPOINT-u5 F2). A request naming another revision (a fetch happened since), or none (an
+  older client's empty marker, still accepted), keeps the 30-second floor, as does the periodic
+  fetch. A narrowing adjusts quietly (decision 10); anything else makes the next connection refuse
+  until the owner agrees again.
 
 ### 18. Transport outages on every surface; request ids across servers (layer 4)
 
