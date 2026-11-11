@@ -92,6 +92,13 @@ _REPLAYABLE_OPERATIONS: Final = frozenset(
     for operation in WorkspaceOperation
     if operation is not WorkspaceOperation.RUN_APPROVED_CHECK
 )
+# Operations a newer background agent takes over: a call still unanswered on a background channel
+# is sent again, with the time it has left, to a background channel of the same handle that
+# declares it and registered after it (a helper replaced, restarted or reconnected: the older
+# agent may be one that stopped polling and is still registered at the edge until its lease ends).
+# The older channel is left open; its late answer is dropped as unmatched. The same reads as a
+# replay: an approved check may already have run, so it is never sent twice.
+_SUPERSEDABLE_OPERATIONS: Final = _REPLAYABLE_OPERATIONS
 _COMPONENT: Final = "service.workspace_hub"
 _WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 
@@ -552,15 +559,97 @@ class WorkspaceAgentHub:
             raise WorkspaceAgentUnavailable("operation_not_declared")
         return None
 
-    def _other_live_channel(
-        self, handle: str, operation: WorkspaceOperation, previous: WorkspaceAgentChannel
+    def _newer_background(
+        self, channel: WorkspaceAgentChannel, operation: WorkspaceOperation
     ) -> WorkspaceAgentChannel | None:
-        """Another live connection that declares ``operation`` for ``handle``, right now."""
+        """The newest live background channel of ``channel``'s handle that declares ``operation``
+        and registered after ``channel``; None while there is none (or ``channel`` is gone)."""
+
+        channels = self._channels.get(channel.handle, ())
+        later = False
+        newest: WorkspaceAgentChannel | None = None
+        for item in channels:
+            if item is channel:
+                later = True
+            elif (
+                later
+                and not item.closed
+                and item.declaration.role == "background"
+                and item.declares(operation)
+            ):
+                newest = item
+        return newest
+
+    async def _await_newer_background(
+        self, channel: WorkspaceAgentChannel, operation: WorkspaceOperation
+    ) -> WorkspaceAgentChannel:
+        condition = self._condition()
+        async with condition:
+            while True:
+                newer = self._newer_background(channel, operation)
+                if newer is not None:
+                    return newer
+                await condition.wait()
+
+    async def _exchange_or_supersede(
+        self,
+        asked: list[WorkspaceAgentChannel],
+        operation: WorkspaceOperation,
+        wire: dict[str, Any],
+        size: int,
+        timeout_seconds: float,
+    ) -> WorkspaceReply:
+        """``_exchange`` on ``asked[-1]``; a supersedable call on a background channel goes on,
+        with the time it has left, on a newer background channel registered meanwhile (appended
+        to ``asked``, so a caller knows which channel it last asked).
+
+        A newer agent of the helper's role for the same handle is the one certain sign that the
+        one asked may be stale: an agent whose helper stopped without unregistering stays
+        registered at its edge until its lease ends, and nothing answers it meanwhile. The
+        call's deadline is unchanged; the older channel is left open.
+        """
+
+        channel = asked[-1]
+        if operation not in _SUPERSEDABLE_OPERATIONS or channel.declaration.role != "background":
+            return await self._exchange(channel, operation, wire, size, timeout_seconds)
+        loop = asyncio.get_running_loop()
+        until = loop.time() + timeout_seconds
+        while True:
+            left = until - loop.time()
+            if left < _MIN_CALL_SECONDS:
+                raise WorkspaceAgentUnavailable("deadline_exceeded")
+            channel = asked[-1]
+            exchange = asyncio.ensure_future(self._exchange(channel, operation, wire, size, left))
+            newer = asyncio.ensure_future(self._await_newer_background(channel, operation))
+            try:
+                await asyncio.wait((exchange, newer), return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                exchange.cancel()
+                newer.cancel()
+                await asyncio.gather(exchange, newer, return_exceptions=True)
+                raise
+            if exchange.done():
+                newer.cancel()
+                await asyncio.gather(newer, return_exceptions=True)
+                return exchange.result()
+            # Its slot is released and its answer, if one ever comes, is dropped as unmatched.
+            exchange.cancel()
+            await asyncio.gather(exchange, return_exceptions=True)
+            _record("workspace_call", "superseded")
+            asked.append(newer.result())
+
+    def _other_live_channel(
+        self, handle: str, operation: WorkspaceOperation, asked: list[WorkspaceAgentChannel]
+    ) -> WorkspaceAgentChannel | None:
+        """Another live connection that declares ``operation`` for ``handle``, right now (none
+        already ``asked``)."""
 
         live = [
             channel
             for channel in self._channels.get(handle, ())
-            if channel is not previous and not channel.closed and channel.declares(operation)
+            if not channel.closed
+            and channel.declares(operation)
+            and not any(channel is item for item in asked)
         ]
         return live[-1] if live else None
 
@@ -642,15 +731,16 @@ class WorkspaceAgentHub:
             channel = await self._channel_for(
                 handle, spec.operation, _within(wait, deadline), preferred
             )
+            asked = [channel]
             try:
-                reply = await self._exchange(
-                    channel, spec.operation, wire, size, _within(timeout_seconds, deadline)
+                reply = await self._exchange_or_supersede(
+                    asked, spec.operation, wire, size, _within(timeout_seconds, deadline)
                 )
             except WorkspaceAgentUnavailable as exc:
                 # Several connections of one client may serve a handle's one worktree (ADR-051):
                 # when the one asked drops mid-call and another is live now, a read is asked
                 # there once more.
-                other = self._other_live_channel(handle, spec.operation, channel)
+                other = self._other_live_channel(handle, spec.operation, asked)
                 if (
                     exc.reason != "agent_disconnected"
                     or spec.operation not in _REPLAYABLE_OPERATIONS

@@ -436,6 +436,14 @@ background agent, else the newest connection agent; background work to the newes
 agent, else the newest connection agent (layer 1's behaviour when there is no helper). They never
 compete.
 
+A call still unanswered on a background agent goes on at a newer background agent of the same
+handle that declares its operation and registers before the call's deadline, with the time the
+call has left (u5): a helper stopped, replaced or killed without unregistering its agent leaves it
+registered at its edge until its lease ends, and nothing answers it meanwhile; its successor's
+agent is the one certain sign of that. Every read is taken over this way, never
+`run_approved_check` (it may already have run), the same rule as a replay after a dropped
+connection. The older channel stays open, and an answer it gives later is dropped as unmatched.
+
 ### 13. The helper process and its records (layer 4)
 
 Design v2 section 3. `finishup helper run --target <id>` (`cli/helper.py`; hidden, scope
