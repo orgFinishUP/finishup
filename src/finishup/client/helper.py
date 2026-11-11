@@ -131,6 +131,9 @@ _FRAME_PREFIX: Final = 4
 _RESTART_WINDOW_SECONDS: Final = 30.0
 # The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
 _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
+# A client's refusal is recorded again at most this often for one phase and reason: a client
+# retrying fast (``remote_unreachable`` keeps it waiting) never makes a write and a diagnostic each.
+_FRESH_STATUS_SECONDS: Final = 1.0
 _RECONNECT_MIN_SECONDS: Final = 0.5
 _RECONNECT_MAX_SECONDS: Final = 30.0
 _ZERO_NETWORK: Final = "zero_network_remote_selected"
@@ -539,6 +542,9 @@ class Helper:
         self._tick = tick or (lambda: asyncio.sleep(min(_TICK_SECONDS, drain_interval)))
         self._clock = clock
         self._status: HelperStatus | None = read_helper_status(root)
+        # When this process last wrote its status again for a client (``_write_status(fresh=)``,
+        # ``_clock``); ``None`` when its last write was not one.
+        self._fresh_written: float | None = None
         self._started_at = now_stamp()
         self._admission: ConnectionAuthorization | None = None
         self._active = 0
@@ -569,17 +575,26 @@ class Helper:
         ``fresh`` (a client's own relay refused): written again even when unchanged, with its own
         correlation id, so the client that waits on this attempt sees a record made after it began
         (``service.client._helper_failure``) and names the refusal at once, instead of waiting out
-        its deadline while a background agent's earlier refusal of the same reason stands. The
-        generation moves only when the phase or the reason changes (``new_status``).
+        its deadline while a background agent's earlier refusal of the same reason stands. Written
+        again for clients at most once every ``_FRESH_STATUS_SECONDS`` while unchanged, so a
+        client that retries fast is named within that time and never makes a write and a
+        diagnostic per retry. The generation moves only when the phase or the reason changes
+        (``new_status``).
         """
 
         previous = self._status
         if (
-            not fresh
-            and previous is not None
+            previous is not None
             and previous.started_at == self._started_at
             and previous.pid == os.getpid()
             and (previous.phase, previous.reason) == (phase, reason)
+            and (
+                not fresh
+                or (
+                    self._fresh_written is not None
+                    and self._clock() - self._fresh_written < _FRESH_STATUS_SECONDS
+                )
+            )
         ):
             return
         correlation_id = None
@@ -604,6 +619,7 @@ class Helper:
             self.request_stop("target_removed")
             return
         self._status = status
+        self._fresh_written = self._clock() if fresh else None
 
     def _name_refusal_again(self) -> None:
         """A client's relay refused under the helper's standing refusal: record it again for that
