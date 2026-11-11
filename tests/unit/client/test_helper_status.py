@@ -310,7 +310,7 @@ def test_a_spawned_helper_carries_the_epoch_its_spawner_read(
 def test_the_refresh_marker_names_the_refused_revision_and_an_empty_one_names_none(
     root: Path,
 ) -> None:
-    """A refused client names the revision its hello named (CHECKPOINT-u5 F2), so the helper can
+    """A refused client names the revision its hello named (macOS dogfood), so the helper can
     tell a cache that is stale for sure; an older client's empty marker, or content that cannot be
     read, is still a request, naming none."""
 

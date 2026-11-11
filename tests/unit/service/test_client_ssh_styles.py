@@ -277,7 +277,7 @@ def test_a_server_that_refuses_the_consented_revision_asks_the_helper_to_refresh
     error = asyncio.run(run())
     assert error.phase == "server_profile_changed"
     # The marker names the revision the refused hello named (the cached one), so the helper
-    # fetches at its next tick rather than after the 30-second floor (CHECKPOINT-u5 F2).
+    # fetches at its next tick rather than after the 30-second floor (macOS dogfood).
     from builders.server_profiles import TEST_REVISION
     from finishup.client.helper_status import (
         ProfileRefreshRequest,
