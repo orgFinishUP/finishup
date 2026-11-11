@@ -32,9 +32,13 @@ from finishup.adapters.control.unix_socket import AuthenticatedUnixStream, authe
 from finishup.client import targets
 from finishup.client.authorization import authorize_target, bump_credential_generation
 from finishup.client.helper import Helper, HelperAgent
-from finishup.client.helper_status import read_helper_status, request_profile_refresh
+from finishup.client.helper_status import (
+    HelperStatus,
+    read_helper_status,
+    request_profile_refresh,
+)
 from finishup.client.targets import ServerTarget
-from finishup.ports.control import ControlMethod
+from finishup.ports.control import ControlError, ControlMethod
 from finishup.service.control_protocol import encode_control_frame
 
 
@@ -946,3 +950,87 @@ def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_
     assert (code, stopped) == (0, True)
     status = read_helper_status(root)
     assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
+
+
+class _DownUpstream(FakeUpstream):
+    """The server's endpoint refuses every channel (its service is down) and it cannot be
+    started: each relay ends unanswered, named ``remote_service_not_running``."""
+
+    def __init__(self) -> None:
+        super().__init__(ScriptedDaemon())
+        self.not_running = True
+
+    async def start_remote_service(self) -> bool:
+        self.started += 1
+        return False
+
+
+def test_a_clients_relay_refused_like_an_agents_before_it_is_named_to_that_client_at_once(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """Defect B (dogfood, 2026-11-11): a background agent's relay refused for a reason left the
+    status naming it; a client's relay then refused for the same reason wrote nothing new, so
+    the client (``service.client._helper_failure``, which takes only a record made after it
+    began) waited out its deadline and read ``remote_unreachable``. Each refusal of a client's
+    relay is recorded again for that client; the generation (what latches key on) stays."""
+
+    from finishup.service.client import _helper_failure  # pyright: ignore[reportPrivateUsage]
+
+    record, root = ssh_target
+
+    async def relay(helper: Helper, *, own: bool) -> bytes:
+        client, local = _pair()
+        task = asyncio.create_task(helper._serve_local(local, own=own))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await client.send_all(hello_frame(server_profile=TEST_REVISION))
+            async with asyncio.timeout(10):
+                answered = await client.receive(65_536)
+                await task
+        finally:
+            await client.aclose()
+        return answered
+
+    async def run() -> tuple[HelperStatus | None, ControlError | None, HelperStatus | None]:
+        helper = _helper(record, root, _DownUpstream())
+        assert await relay(helper, own=True) == b""  # the helper's background agent
+        before = read_helper_status(root)
+        assert await relay(helper, own=False) == b""  # a client's command, same refusal
+        named = _helper_failure(root, before)
+        return before, named, read_helper_status(root)
+
+    before, named, after = asyncio.run(run())
+    assert before is not None and after is not None
+    assert (before.phase, before.reason) == ("unavailable", "remote_service_not_running")
+    assert named is not None and named.phase == "remote_service_not_running"
+    assert after.generation == before.generation
+
+
+def test_a_clients_relay_refused_by_the_helpers_own_standing_refusal_is_named_at_once(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """The same for a relay the helper refuses before any dial: its admission is refused (here
+    the consent's envelope is gone) and the status already names why."""
+
+    from finishup.service.client import _helper_failure  # pyright: ignore[reportPrivateUsage]
+
+    record, root = ssh_target
+
+    async def run() -> tuple[HelperStatus | None, ControlError | None]:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()))
+        _act(root, "consent")
+        assert helper._admitted() is None  # pyright: ignore[reportPrivateUsage]
+        before = read_helper_status(root)
+        client, local = _pair()
+        task = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        try:
+            await client.send_all(hello_frame(server_profile=TEST_REVISION))
+            async with asyncio.timeout(10):
+                assert await client.receive(65_536) == b""
+                await task
+        finally:
+            await client.aclose()
+        return before, _helper_failure(root, before)
+
+    before, named = asyncio.run(run())
+    assert before is not None and before.phase == "unavailable"
+    assert named is not None and named.phase == before.reason
