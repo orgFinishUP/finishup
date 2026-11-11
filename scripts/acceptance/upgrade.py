@@ -51,11 +51,15 @@ from harness import (  # noqa: E402
     Task,
     excerpt,
     frontier_of,
+    graceful_termination,
     helper_pid,
     mcp_request,
     now_rfc3339,
     real_home,
+    redact,
     run_command,
+    tail,
+    typed_refusal,
 )
 
 PROVISION = REPO / "scripts" / "provision_test_instance.py"
@@ -91,7 +95,7 @@ def provision(base: Path, tag: str, revision: str) -> Path:
         timeout=580,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"provision {tag} failed: {result.stderr[-800:]}")
+        raise RuntimeError(f"provision {tag} failed: {tail(redact(result.stderr, base), 800)}")
     (wheel,) = (base / tag / "dist").glob("*.whl")
     return wheel
 
@@ -131,7 +135,7 @@ def install(path: Path, wheel: Path) -> subprocess.CompletedProcess[str]:
         timeout=300,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"install failed: {result.stderr[-800:]}")
+        raise RuntimeError(f"install failed: {tail(redact(result.stderr, path), 800)}")
     return result
 
 
@@ -170,6 +174,49 @@ def helper_stamp(root: Path | None) -> dict[str, Any]:
             found["ppid"] = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1]
         return found
     return {}
+
+
+def replaced_by(before: dict[str, Any], after: dict[str, Any], digest: str) -> bool:
+    """Whether the helper ``before`` named was replaced by a live helper of ``digest``'s build: a
+    replacement that failed (no helper, or the old one still there) is not one."""
+
+    return (
+        after.get("alive") is True
+        and isinstance(after.get("pid"), int)
+        and after.get("pid") != before.get("pid")
+        and after.get("digest") == digest[:19]
+    )
+
+
+# How the older build's bridge (layer 4's) names a newer helper and server it cannot speak with:
+# a structured ``SERVICE_UNAVAILABLE`` stating the installation mismatch. That build names no
+# phase or continuation; a crash, a JSON-RPC error or a deadline is never this refusal.
+OLDER_BRIDGE_MISMATCH = ("SERVICE_UNAVAILABLE", "belongs to a different FinishUP installation")
+
+
+def older_bridge_refused(result: dict[str, Any], alive: bool) -> bool:
+    """Whether the older bridge, still running, refused with its typed release mismatch."""
+
+    body = result.get("body") or {}
+    error = body.get("error") if isinstance(body, dict) else None
+    if result.get("ok") or not alive or result.get("error") or not isinstance(error, dict):
+        return False
+    code, statement = OLDER_BRIDGE_MISMATCH
+    return error.get("code") == code and statement in str(error.get("message"))
+
+
+def recorded_once(
+    before: int | None, after_first: int | None, after_replay: int | None, accepted: int
+) -> bool:
+    """A write and its replay after a restart: exactly one event accepted, the head one past its
+    sequence before the write, and the same after the replay (nothing recorded twice)."""
+
+    return (
+        accepted == 1
+        and isinstance(before, int)
+        and after_first == before + 1
+        and after_replay == after_first
+    )
 
 
 def brief(result: dict[str, Any]) -> str:
@@ -274,11 +321,14 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
     )
     cli = client.fu("service", "status", "--json", timeout=120)
     after_cli = helper_stamp(root)
+    replaced = replaced_by(old_helper, after_cli, digests["new"])
+    mismatch = typed_refusal(cli, "remote_incompatible", "remote_release_mismatch")
     report.add(
         "newer CLI against the older helper and older server",
-        cli.returncode != 0 and after_cli.get("pid") != old_helper.get("pid"),
-        f"exit {cli.returncode}; helper replaced: {after_cli.get('pid') != old_helper.get('pid')} "
-        f"(now {after_cli}); the newer helper's upstream is the older server (lockstep: refused)",
+        replaced and mismatch,
+        f"exit {cli.returncode}; replaced by a live helper of the newer build: {replaced} "
+        f"(now {after_cli}); refused typed remote_incompatible, continuation "
+        f"remote_release_mismatch: {mismatch} (the newer helper's upstream is the older server)",
         run.redact(excerpt(cli.stdout + cli.stderr, lines=12)),
     )
     second = old_bridge.tool("status", mcp_request(**status_args))
@@ -322,10 +372,12 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
         run.redact(excerpt(text, lines=10)),
     )
     fourth = old_bridge.tool("status", mcp_request(**status_args))
+    alive = old_bridge.process.poll() is None
     report.add(
         "older bridge against the newer helper and server",
-        not fourth["ok"],
-        f"{brief(fourth)} (an older bridge must refuse with a typed reason, never work half-way)",
+        older_bridge_refused(fourth, alive),
+        f"{brief(fourth)}; bridge still running: {alive} (an older bridge must refuse with its "
+        f"typed release mismatch, never work half-way, never crash)",
     )
     old_bridge.close()
 
@@ -376,19 +428,37 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
         ],
     )
     once = bridge.tool("publish_work", publish)
-    server.srv("service", "restart", "--json", timeout=120)
-    server.unlock()
+    first_head = (frontier_of(bridge.tool("status", mcp_request(**status_args))["body"]) or {}).get(
+        "sequence"
+    )
+    pid_before = server.service_pid()
+    restarted = server.srv("service", "restart", "--json", timeout=120)
+    unlocked = server.unlock()
+    pid_after = server.service_pid()
+    service_replaced = (
+        restarted.returncode == 0 and unlocked and pid_after is not None and pid_after != pid_before
+    )
     replay = bridge.tool("publish_work", publish)
     head = bridge.tool("status", mcp_request(**status_args))
     sequence = (frontier_of(head["body"]) or {}).get("sequence")
+    accepted = once["body"].get("accepted_events")
+    same = json.dumps(accepted, sort_keys=True) == json.dumps(
+        replay["body"].get("accepted_events"), sort_keys=True
+    )
+    once_only = recorded_once(
+        frontier.get("sequence"),
+        first_head,
+        sequence,
+        len(accepted) if isinstance(accepted, list) else 0,
+    )
     report.add(
         "a write replayed by its request_id after a restart is recorded once",
-        once["ok"]
-        and replay["ok"]
-        and json.dumps(once["body"].get("accepted_events"), sort_keys=True)
-        == json.dumps(replay["body"].get("accepted_events"), sort_keys=True),
-        f"first {brief(once)}; replay {brief(replay)}; head sequence {sequence} (from "
-        f"{frontier.get('sequence')}: one event)",
+        once["ok"] and replay["ok"] and same and service_replaced and once_only,
+        f"first {brief(once)}; service restarted and replaced: {service_replaced} (restart exit "
+        f"{restarted.returncode}, unlocked {unlocked}, a new service process: "
+        f"{pid_after is not None and pid_after != pid_before}); replay {brief(replay)}, same "
+        f"accepted events: {same}; head sequence {frontier.get('sequence')} → {first_head} after "
+        f"the write → {sequence} after the replay (exactly one event: {once_only})",
     )
 
     # --- 7. the bridge follows a new selection (O1) --------------------------------------------
@@ -442,8 +512,9 @@ def main(argv: list[str] | None = None) -> int:
         if os.environ.get(name):
             parser.error(f"unset {name}")
     args.instances.mkdir(mode=0o700, exist_ok=True)
-    report = Report("upgrade")
+    graceful_termination()
     run = Run("upgrade", keep=args.keep)
+    report = Report("upgrade", redactor=run.redact)
     tags: list[str] = []
     began = time.monotonic()
     try:
@@ -460,9 +531,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         scenario(report, run, old_wheel, new_wheel)
     except Exception as error:  # noqa: BLE001 - recorded
-        report.add("harness", False, f"{type(error).__name__}: {run.redact(str(error))[:600]}")
+        report.add("harness", False, f"{type(error).__name__}: {tail(run.redact(str(error)), 600)}")
     finally:
-        run.close()
+        problems = run.close()
+        report.add(
+            "cleanup proven (every process stopped, no lock held, folder removed)",
+            not problems,
+            "; ".join(problems) or "nothing left",
+        )
         for tag in tags:
             dispose(args.instances, tag)
         with contextlib.suppress(OSError):

@@ -12,10 +12,20 @@ installation: each run makes one fresh owner-only folder beneath the real home (
 never `/tmp`, which macOS resolves through a symlink), with a client home of private XDG folders,
 isolated server roots, a private unprivileged `sshd` and throwaway TLS material, stops every
 process it started by its own PID (FinishUP's helpers through `server disconnect`/`remove`, which
-move the helper's stop epoch), and removes the folder. Nothing reads or writes `~/.ssh`, the
-default FinishUP folders or a host's own configuration. Run every script from a checkout after
-`uv sync`, with both root variables unset (the client must be an ambient installation: `server
-add` refuses under a pin), and never beside another run that starts real services.
+move the helper's stop epoch), and removes the folder only once that shutdown is proven: every
+process it started exited and no lock beneath the folder is still held (a service, helper, OpenSSH
+master or retained runtime of the run would hold one). Otherwise it keeps the folder, says which
+locks are held and exits 1; it never stops anything by name. A `SIGTERM` ends a run through the
+same cleanup, and the capability test runs the harness under an outer runner that asks it to stop
+that way when its bound passes before it kills anything (and then only the harness's own process
+group). The private `sshd` runs no user rc file (`PermitUserRC no`) and gives every session a
+private `HOME` and XDG folders (checked when it starts), so neither the account's `~/.ssh/rc` nor
+its shell's startup files run before a server command. Nothing reads or writes `~/.ssh`, the
+default FinishUP folders or a host's own configuration, and every result text is redacted (the
+run's folder, the home folder, secrets) before it is cut short, printed or written. Run every
+script from a checkout after `uv sync`, with both root variables unset (the client must be an
+ambient installation: `server add` refuses under a pin), and never beside another run that starts
+real services.
 
 ## The compatibility matrix
 
@@ -38,15 +48,19 @@ design's matrix exactly:
 
 Every remote cell, in order: **add** (the handshake and the consent ceremony on a pseudo-terminal:
 OpenSSH's host-key question, the outside-read question, the typed name, the L2 disclosure);
-**style** (`server set --style direct` for the direct cells); **use**; **connect**; a claim-bound
+**style** (`server set --style direct` for the direct cells, and `server status` must report it);
+**use**; **connect**; a claim-bound
 **start → publish → check → receipt** (the receipt's `evidence_provenance` must count reads from
 the server's copy at L2 and none at L1); **L2 sync** (the server's copy records and its bounded
 `code_copy` events); the **repository hold** and **zero network** refusing a start before any
 dial (after `server disconnect`: the refusal names `repository_egress_held` /
 `zero_network_remote_selected`, the counting relay in front of the server saw no new connection, no
 helper started, the export database did not change); a **changed profile** (the server's service
-restarted with a new profile revision: the next call is refused `server_profile_changed`, `server
-status` says the consent changed, the owner agrees again with `server use`, the next call works);
+restarted with a new profile revision: the next call is refused `server_profile_changed` typed,
+`server status` says the consent changed, the call after that is refused here sending nothing (no
+new connection, no byte toward an HTTPS or port server over the helper's warm connection, no
+channel opened on the SSH server's `sshd`), the owner agrees again with `server use`, the next call
+works);
 **logout and login** (HTTPS and port: refused after `logout` with no dial, served after `login`);
 **L2 forget** (the copy records go, the task's receipt names its forgotten content); **disconnect**
 (the helper stops); **remove** (L2 with `--forget-copies`; the target folder goes). The local cells
@@ -168,10 +182,15 @@ The gate, per style, after a claim-bound task started:
 |---|---|---|
 | warm connect (claim) + compact status in a fresh process | 650 ms | the required startup gate (`cli/startup_gate_probe.py`) |
 | that whole process, interpreter start included | 3200 ms | the hook pass budget (`cli/observe_hooks.py`) |
-| cold connect on a hook's path (helper and master stopped), on demand within the hook's 1.0 s budget | 1150 ms (budget + close) | `_HOOK_SERVICE_START_BUDGET_SECONDS` |
+| cold connect, call and close on a hook's path (helper and master stopped), the connect on demand within the hook's 1.0 s budget | 1150 ms (budget + close) | `_HOOK_SERVICE_START_BUDGET_SECONDS` |
 
-The cold connect must end within its budget, served or failing open with a named phase, and the
-next call must be served. How long a cold helper takes to serve at all is reported, never gated.
+The cold hook row times the complete operation, as one deadline would bound it: the connect, the
+hook's call (one status) and its cleanup (the close). Every sample must be measured (a probe that
+crashed or timed out fails the gate; it is never counted as 0 ms), served or failing open as a
+remote outage (`remote_unreachable` or `remote_service_not_running`; any other phase fails), and
+the next call after it must be served; the hook process's wall time is reported beside it. Before
+sampling, `server set --style` must succeed and `server status` must report the style under test.
+How long a cold helper takes to serve at all is reported, never gated.
 
 ### Results (netns, Linux x86-64, 100 ms round trip, 30 samples per style)
 

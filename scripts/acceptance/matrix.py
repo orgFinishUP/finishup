@@ -53,6 +53,7 @@ from harness import (  # noqa: E402
     excerpt,
     free_port,
     frontier_of,
+    graceful_termination,
     helper_pid,
     json_of,
     make_tls,
@@ -61,6 +62,7 @@ from harness import (  # noqa: E402
     request_file,
     run_command,
     start_document,
+    typed_refusal,
     verdict_of,
     wait_until,
 )
@@ -399,20 +401,26 @@ def refusal_before_dial(
     client.py(code, *disarm.split())
 
 
-def typed_refusal(result: subprocess.CompletedProcess[str], phase: str, continuation: str) -> bool:
-    """Whether a ``--json`` call was refused as the surface names it: ``phase`` and its
-    ``continuation`` in the document, an exit code of the public taxonomy (never 1, Python's own
-    for a traceback), and no traceback."""
+def traffic(world: World, cell: Cell) -> dict[str, int]:
+    """What reached a cell's server so far: the dials and the bytes toward it through its relay
+    (bytes over a connection already open, a warm helper's, included) and, behind SSH, every
+    channel the server's own ``sshd`` saw opened. The SSH master's keep-alives move bytes on
+    their own every 15 seconds, so its bytes are not counted; its channels are."""
 
-    document = json_of(result.stdout)
-    recovery = document.get("recovery")
-    return (
-        result.returncode not in (0, 1)
-        and document.get("phase") == phase
-        and isinstance(recovery, dict)
-        and recovery.get("continuation") == continuation
-        and "Traceback" not in result.stderr
-    )
+    seen: dict[str, int] = {"dials": world.dials(cell)}
+    carrier = world.relays[cell.edge]
+    if cell.kind == "ssh":
+        assert world.sshd is not None
+        seen["server_channels"] = world.sshd.channels()
+    elif isinstance(carrier, Relay):
+        seen["bytes_toward_server"] = carrier.bytes_up
+    return seen
+
+
+def sent_between(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    """What moved between two ``traffic`` readings (every count, also one only ``after`` has)."""
+
+    return {key: after.get(key, 0) - before.get(key, 0) for key in sorted({*before, *after})}
 
 
 def changed_profile(world: World, report: Report, cell: Cell) -> None:
@@ -429,14 +437,20 @@ def changed_profile(world: World, report: Report, cell: Cell) -> None:
         return state == "changed"
 
     changed = wait_until(consent_changed, seconds=120, interval=1.0)
+    # Once the consent reads changed, the next call is refused here, before anything is sent:
+    # no dial, nothing over the warm helper's connection, no channel on the server.
+    before = traffic(world, cell)
     blocked = client.fu("service", "status", "--json", timeout=60)
+    sent = sent_between(before, traffic(world, cell))
     refused = typed_refusal(blocked, "server_profile_changed", "remote_reconsent")
+    quiet = not any(sent.values())
     report.add(
         "profile changed → refused",
-        restarted and changed and seen and refused,
+        restarted and changed and seen and refused and quiet,
         f"server restarted with a new revision: {restarted}; first call exit {first.returncode} "
         f"(typed server_profile_changed, remote_reconsent: {seen}); consent state changed: "
-        f"{changed}; next call refused typed: {refused}",
+        f"{changed}; next call refused typed: {refused}; it sent nothing: {quiet} "
+        f"({json.dumps(sent, sort_keys=True)})",
         shown(world, first) + "\n\n" + shown(world, blocked),
     )
     again = client.ceremony(
@@ -497,6 +511,16 @@ def forget(world: World, report: Report, cell: Cell, task: Task) -> None:
     )
 
 
+def effective_style(client: Client, name: str) -> str | None:
+    """The connection style ``server status NAME --json`` reports for a target (what its next
+    connection uses), ``None`` when it names none."""
+
+    document = json_of(client.fu("server", "status", name, "--json").stdout)
+    connection = (document.get("target") or {}).get("connection")
+    style = connection.get("style") if isinstance(connection, dict) else None
+    return style if isinstance(style, str) else None
+
+
 def address_of(world: World, cell: Cell) -> list[str]:
     """``server add`` arguments after the name for a remote cell (through its relay)."""
 
@@ -553,10 +577,11 @@ def remote_cell(world: World, cell: Cell) -> Report:
         return report
     if cell.style == "direct":
         result = client.fu("server", "set", name, "--style", "direct")
+        style = effective_style(client, name)
         report.add(
             "style direct",
-            result.returncode == 0,
-            f"exit {result.returncode}",
+            result.returncode == 0 and style == "direct",
+            f"exit {result.returncode}; effective style {style}",
             shown(world, result),
         )
     used = client.ceremony(
@@ -775,7 +800,10 @@ def official_cell(world: World, cell: Cell) -> Report:
 
 def run_cells(cells: list[Cell], launcher: Path, out: Path, keep: bool) -> int:
     out.mkdir(parents=True, exist_ok=True)
+    graceful_termination()
     run = Run("matrix", keep=keep)
+    # Where this run's folder is, for an outer runner that must see its cleanup proven.
+    (out / "run.json").write_text(json.dumps({"base": str(run.base)}))
     failed = 0
     try:
         world = World(run, launcher, cells)
@@ -809,8 +837,11 @@ def run_cells(cells: list[Cell], launcher: Path, out: Path, keep: bool) -> int:
             (out / f"{cell.name}.json").write_text(json.dumps(document, indent=1))
             (out / f"{cell.name}.md").write_text(cell_markdown(document))
     finally:
-        run.close()
-    return 1 if failed else 0
+        problems = run.close()
+        (out / "cleanup.json").write_text(
+            json.dumps({"proven": not problems, "problems": problems}, indent=1)
+        )
+    return 1 if failed or problems else 0
 
 
 def cell_markdown(document: dict[str, Any]) -> str:

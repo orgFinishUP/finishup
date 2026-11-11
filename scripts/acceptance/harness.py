@@ -6,7 +6,16 @@ symlink): a client home with private XDG folders, isolated FinishUP server roots
 unprivileged ``sshd``, throwaway TLS material. Every process a run starts is recorded and stopped
 by its own PID (never by pattern); the helpers FinishUP starts are stopped through FinishUP's own
 commands (``server disconnect``/``remove``, which move the helper's stop epoch). Nothing here reads
-or writes ``~/.ssh``, the default FinishUP folders or the account's host registrations.
+or writes ``~/.ssh``, the default FinishUP folders or the account's host registrations; the private
+``sshd`` runs no user rc file and gives its sessions a private home and XDG folders, so neither the
+account's ``~/.ssh/rc`` nor its shell's startup files run before a server command.
+
+A run's folder is removed only once its shutdown is proven: every process it started has exited
+and no lock beneath it is still held (a FinishUP service, helper, OpenSSH master or retained
+runtime of the run would hold one). Otherwise the folder is kept and the run says why
+(``Run.close``). A ``SIGTERM`` (``graceful_termination``) ends a run through the same cleanup.
+Every result text passes through one redaction (``redact``) before it is cut short, printed or
+written.
 
 A ``Relay`` is a TCP pass-through this process runs in a thread in front of a server's port: it
 counts the connections it accepts (the evidence that a refusal came before any dial) and can delay
@@ -18,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
+import fcntl
 import importlib.util
 import json
 import os
@@ -115,6 +126,80 @@ def now_rfc3339() -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
+def redact(text: str, *paths: Path, secrets: Iterable[str] = ()) -> str:
+    """``text`` with each of ``paths`` (``<base>`` for the first, ``<path>`` after it), the
+    account's home (``<home>``) and every secret value (``<secret>``) replaced: the one redaction
+    every result text passes through before it is cut short, printed or written."""
+
+    out = text
+    for index, path in enumerate(paths):
+        out = out.replace(str(path), "<base>" if index == 0 else "<path>")
+    out = out.replace(str(real_home()), "<home>")
+    for value in secrets:
+        if value:
+            out = out.replace(value, "<secret>")
+    return out
+
+
+def tail(text: str, size: int) -> str:
+    """The last ``size`` characters of an already redacted ``text`` (never cut before redaction:
+    a path cut in half no longer matches its placeholder)."""
+
+    return text[-size:]
+
+
+def lock_held(path: Path) -> bool | None:
+    """Whether some process holds a flock on ``path`` (a shared lease included): ``None`` when it
+    cannot be inspected. Probed with a non-blocking exclusive lock, released at once."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            return True if exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN} else None
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+# The flocks a FinishUP process of a run holds while it lives: a service's singleton lock, a
+# helper's lock and its epoch fence, an OpenSSH master's record lock, a retained runtime's lease.
+_LOCK_NAMES = ("*.lock", ".in-use")
+
+
+def held_locks(base: Path) -> list[Path]:
+    """The lock files beneath ``base`` some process still holds (or that cannot be inspected)."""
+
+    found: list[Path] = []
+    for pattern in _LOCK_NAMES:
+        for path in base.rglob(pattern):
+            if path.is_file() and not path.is_symlink() and lock_held(path) is not False:
+                found.append(path)
+    return sorted(found)
+
+
+class Terminated(SystemExit):
+    """A ``SIGTERM`` asked this run to end: raised where the run is, so its cleanup runs."""
+
+
+def graceful_termination() -> None:
+    """End this process on ``SIGTERM`` by raising ``Terminated`` (exit 143), so every ``finally``
+    (``Run.close``) runs: an outer runner that gives up on a run asks it to clean up first."""
+
+    def stop(_signum: int, _frame: object) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # once: the cleanup itself runs to its end
+        raise Terminated(143)
+
+    signal.signal(signal.SIGTERM, stop)
+
+
 # --- one run's folder and processes --------------------------------------------------------------
 
 
@@ -129,7 +214,8 @@ class Run:
         self.processes: list[subprocess.Popen[bytes]] = []
         self.relays: list[Relay] = []
         self.secrets: list[str] = []
-        self.finalizers: list[Callable[[], None]] = []
+        self.finalizers: list[Callable[[], object]] = []
+        self.cleanup_problems: list[str] = []
 
     def folder(self, name: str) -> Path:
         path = self.base / name
@@ -158,11 +244,7 @@ class Run:
         return process
 
     def redact(self, text: str) -> str:
-        out = text.replace(str(self.base), "<base>").replace(str(real_home()), "<home>")
-        for value in self.secrets:
-            if value:
-                out = out.replace(value, "<secret>")
-        return out
+        return redact(text, self.base, secrets=self.secrets)
 
     def stop(self, process: subprocess.Popen[bytes], *, seconds: float = 30.0) -> None:
         """Stop one process this run started, by its own PID."""
@@ -175,18 +257,46 @@ class Run:
                 process.kill()
                 process.wait()
 
-    def close(self) -> None:
-        # The relays first: no client of this run reaches a server again (a helper would start
-        # a stopped server service on its demand), then the finalizers, then the processes.
+    def close(self, *, seconds: float = 60.0) -> list[str]:
+        """Stop everything this run started and remove its folder once that is proven.
+
+        The relays first: no client of this run reaches a server again (a helper would start a
+        stopped server service on its demand), then the finalizers (FinishUP's own stops: a
+        finalizer that raises or answers ``False`` is a problem), then the processes by their
+        own PIDs. Then, within ``seconds``, no lock beneath the folder may still be held (the
+        FinishUP processes the run's commands started, which no PID of this run names). Returns
+        the problems (redacted); with any, the folder is kept and named, never removed.
+        """
+
+        problems: list[str] = []
         for relay in self.relays:
             relay.stop()
         for finalizer in reversed(self.finalizers):
-            with contextlib.suppress(Exception):
-                finalizer()
+            label = getattr(finalizer, "__name__", "finalizer")
+            try:
+                if finalizer() is False:
+                    problems.append(f"{label}: did not stop")
+            except Exception as error:  # noqa: BLE001 - reported, the rest still runs
+                problems.append(f"{label}: {type(error).__name__}: {self.redact(str(error))}")
         for process in reversed(self.processes):
             self.stop(process)
-        if not self.keep:
+            if process.poll() is None:
+                problems.append(f"process {process.pid} still running")
+        if not wait_until(lambda: not held_locks(self.base), seconds=seconds, interval=0.2):
+            problems.extend(
+                f"lock still held: {self.redact(str(path))}" for path in held_locks(self.base)
+            )
+        self.cleanup_problems = problems
+        if problems:
+            print(
+                f"[{self.label}] cleanup not proven, folder kept at {redact(str(self.base))}: "
+                + "; ".join(problems),
+                file=sys.stderr,
+                flush=True,
+            )
+        elif not self.keep:
             remove_tree(self.base)
+        return problems
 
 
 def remove_tree(path: Path) -> None:
@@ -231,6 +341,70 @@ def run_command(
         )
 
 
+def _group_alive(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_bounded(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path | None = None,
+    seconds: float,
+    cleanup_seconds: float = 240.0,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run one harness command (``matrix.py run``...) as an outer runner, within ``seconds``.
+
+    It runs in a process group of its own. Past the bound it is asked to end through its own
+    cleanup (``SIGTERM``: ``graceful_termination`` raises where it is, so ``Run.close`` stops
+    what it started), and given ``cleanup_seconds``; only then is its group killed. Whatever of
+    its group outlived it (the processes it started itself, never anything matched by name) is
+    killed by that group and waited for. Returns the result (exit 124 when the bound passed) and
+    what the runner had to do (``asked_to_stop``, ``group_killed``, ``leftovers_killed``).
+    """
+
+    actions: list[str] = []
+    process = subprocess.Popen(  # noqa: S603 - this checkout's own harness
+        argv,
+        env=env,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    group = process.pid
+    timed_out = False
+    try:
+        out, err = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        actions.append("asked_to_stop")
+        process.send_signal(signal.SIGTERM)
+        try:
+            out, err = process.communicate(timeout=cleanup_seconds)
+        except subprocess.TimeoutExpired:
+            actions.append("group_killed")
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGKILL)
+            out, err = process.communicate()
+    if _group_alive(group):
+        actions.append("leftovers_killed")
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group, signal.SIGKILL)
+        if not wait_until(lambda: not _group_alive(group), seconds=30, interval=0.05):
+            actions.append("leftovers_still_alive")
+    code = 124 if timed_out else process.returncode
+    return subprocess.CompletedProcess(argv, code, out, err), actions
+
+
 # --- a TCP relay that counts dials (and can delay) -----------------------------------------------
 
 
@@ -246,6 +420,10 @@ class Relay:
         self.delay = delay
         self.port = free_port()
         self.connections = 0
+        # Bytes carried toward the server (``up``) and back (``down``): traffic over a connection
+        # that was already open (a warm helper's) is seen here, which a dial count misses.
+        self.bytes_up = 0
+        self.bytes_down = 0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._server: asyncio.Server | None = None
@@ -264,7 +442,9 @@ class Relay:
         self._loop.run_until_complete(start())
         self._loop.run_forever()
 
-    async def _pump(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _pump(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, up: bool
+    ) -> None:
         queue: asyncio.Queue[tuple[float, bytes]] = asyncio.Queue()
 
         async def write() -> None:
@@ -285,6 +465,10 @@ class Relay:
         try:
             while True:
                 chunk = await reader.read(65536)
+                if up:
+                    self.bytes_up += len(chunk)
+                else:
+                    self.bytes_down += len(chunk)
                 await queue.put((time.monotonic() + self.delay, chunk))
                 if not chunk:
                     break
@@ -300,7 +484,9 @@ class Relay:
             writer.close()
             return
         try:
-            await asyncio.gather(self._pump(reader, up_writer), self._pump(up_reader, writer))
+            await asyncio.gather(
+                self._pump(reader, up_writer, up=True), self._pump(up_reader, writer, up=False)
+            )
         finally:
             for item in (writer, up_writer):
                 with contextlib.suppress(Exception):
@@ -345,15 +531,20 @@ class Report:
     title: str
     steps: list[Step] = field(default_factory=list)
     started_at: str = field(default_factory=now_rfc3339)
+    # Every detail and transcript passes through it before it is printed or stored (a run's
+    # own ``Run.redact``, which also knows its folder and secrets, where there is a run).
+    redactor: Callable[[str], str] = redact
 
     def add(self, name: str, ok: bool | None, detail: str, transcript: str = "") -> bool:
         verdict = "info" if ok is None else ("pass" if ok else "fail")
+        detail, transcript = self.redactor(detail), self.redactor(transcript)
         self.steps.append(Step(name, verdict, detail, transcript))
         marker = {"pass": "PASS", "fail": "FAIL", "info": "info", "skip": "skip"}[verdict]
         print(f"[{self.title}] {marker} {name}: {detail}", flush=True)
         return bool(ok)
 
     def skip(self, name: str, detail: str) -> None:
+        detail = self.redactor(detail)
         self.steps.append(Step(name, "skip", detail))
         print(f"[{self.title}] skip {name}: {detail}", flush=True)
 
@@ -369,7 +560,7 @@ class Report:
             "title": self.title,
             "started_at": self.started_at,
             "verdict": self.verdict,
-            "steps": [step.__dict__ for step in self.steps],
+            "steps": [dict(step.__dict__) for step in self.steps],
         }
 
 
@@ -380,6 +571,22 @@ def verdict_of(steps: Iterable[dict[str, Any]]) -> str:
     if "fail" in verdicts:
         return "fail"
     return "pass" if "pass" in verdicts else "skip"
+
+
+def typed_refusal(result: subprocess.CompletedProcess[str], phase: str, continuation: str) -> bool:
+    """Whether a ``--json`` call was refused as the surface names it: ``phase`` and its
+    ``continuation`` in the document, an exit code of the public taxonomy (never 1, Python's own
+    for a traceback), and no traceback."""
+
+    document = json_of(result.stdout)
+    recovery = document.get("recovery")
+    return (
+        result.returncode not in (0, 1)
+        and document.get("phase") == phase
+        and isinstance(recovery, dict)
+        and recovery.get("continuation") == continuation
+        and "Traceback" not in result.stderr
+    )
 
 
 def excerpt(text: str, *, lines: int = 40, width: int = 600) -> str:
@@ -621,15 +828,35 @@ class Server:
         self.run.secrets.append(path.read_text().strip())
         return path
 
+    def singleton_lock(self) -> Path:
+        return self.root / "state" / "service.lock"
+
     def service_running(self) -> bool:
-        return self.srv("service", "status", "--json").returncode == 0
+        """Whether a service of this root lives: its singleton lock is held (or cannot be
+        inspected). An incompatible or unresponsive service still holds it, so a failed
+        ``service status`` alone never reads as stopped."""
+
+        return lock_held(self.singleton_lock()) is not False
+
+    def service_pid(self) -> int | None:
+        """The live service's stamped pid while its singleton lock is held (read-only)."""
+
+        if lock_held(self.singleton_lock()) is not True:
+            return None
+        try:
+            stamp = json.loads(self.singleton_lock().read_text() or "{}")
+        except (OSError, ValueError):
+            return None
+        pid = stamp.get("pid") if isinstance(stamp, dict) else None
+        return pid if type(pid) is int else None
 
     def stop_service(self) -> bool:
-        if self.edge_kind == "native":
-            assert self.edge is not None
+        """Stop this root's service; ``True`` only once its singleton lock is seen free."""
+
+        if self.edge_kind == "native" and self.edge is not None:
             self.run.stop(self.edge)
-            return True
-        self.srv("service", "stop", "--json")
+        else:
+            self.srv("service", "stop", "--json")
         return wait_until(lambda: not self.service_running(), seconds=40, interval=0.3)
 
     def start_service(self) -> bool:
@@ -725,27 +952,10 @@ class Sshd:
             )
         (self.dir / "authorized_keys").write_bytes((self.dir / "client_key.pub").read_bytes())
         (self.dir / "authorized_keys").chmod(0o600)
-        (self.dir / "sshd_config").write_text(
-            "\n".join(
-                (
-                    f"Port {self.port}",
-                    "ListenAddress 127.0.0.1",
-                    f"HostKey {self.dir / 'host_key'}",
-                    f"AuthorizedKeysFile {self.dir / 'authorized_keys'}",
-                    f"PidFile {self.dir / 'sshd.pid'}",
-                    "PubkeyAuthentication yes",
-                    "PasswordAuthentication no",
-                    "KbdInteractiveAuthentication no",
-                    "UsePAM no",
-                    "StrictModes no",
-                    "AllowStreamLocalForwarding yes",
-                    "StreamLocalBindUnlink yes",
-                    "SetEnv PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring",
-                    "LogLevel VERBOSE",
-                    "",
-                )
-            )
-        )
+        self.session_home = self.dir / "session-home"
+        for leaf in ("", "s", "c", "d", "k"):
+            (self.session_home / leaf).mkdir(mode=0o700, exist_ok=True)
+        (self.dir / "sshd_config").write_text(sshd_config(self.dir, self.port, self.session_home))
         (self.dir / "ssh_config").write_text(
             "\n".join(
                 (
@@ -770,11 +980,82 @@ class Sshd:
         )
         if not wait_listening(self.port, seconds=15, alive=lambda: self.process.poll() is None):
             raise RuntimeError("sshd_did_not_listen")
+        # Proven, not assumed: a session's home and state folder are the private ones (the
+        # account's own shell startup files are then never read; ``PermitUserRC no`` keeps its
+        # ``~/.ssh/rc`` from running at all).
+        seen = run_command(
+            [
+                str(wrapper),
+                "-p",
+                str(self.port),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                f"{self.user}@127.0.0.1",
+                'printf "%s\\n%s\\n" "$HOME" "${XDG_STATE_HOME-}"',
+            ],
+            env={"PATH": SYSTEM_PATH, "HOME": str(self.dir)},
+            timeout=60,
+        )
+        if seen.stdout.splitlines()[:2] != [str(self.session_home), str(self.session_home / "s")]:
+            raise RuntimeError("sshd_session_not_private")
+        (self.dir / "known_hosts").unlink(missing_ok=True)
 
     def count(self, needle: str) -> int:
         if not self.log.exists():
             return 0
         return self.log.read_text(errors="replace").count(needle)
+
+    def channels(self) -> int:
+        """Every channel any client opened on this server so far (a session, a forwarded
+        stream): a call that reached the server through SSH opened at least one."""
+
+        return self.count("server_input_channel_open")
+
+
+def sshd_config(folder: Path, port: int, session_home: Path) -> str:
+    """The private sshd's configuration: loopback, key-only, this user, and a private session.
+
+    ``PermitUserRC no``: the account's ``~/.ssh/rc`` never runs. ``SetEnv`` replaces the
+    session's ``HOME`` and XDG folders (it overrides sshd's own environment), so the login
+    shell reads its startup files (``$HOME/.bashrc``...) from the private home, where there are
+    none, and nothing a server command does lands in the account's default folders.
+    """
+
+    environment = " ".join(
+        (
+            f"HOME={session_home}",
+            f"XDG_STATE_HOME={session_home / 's'}",
+            f"XDG_CONFIG_HOME={session_home / 'c'}",
+            f"XDG_DATA_HOME={session_home / 'd'}",
+            f"XDG_CACHE_HOME={session_home / 'k'}",
+            "PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring",
+        )
+    )
+    return "\n".join(
+        (
+            f"Port {port}",
+            "ListenAddress 127.0.0.1",
+            f"HostKey {folder / 'host_key'}",
+            f"AuthorizedKeysFile {folder / 'authorized_keys'}",
+            f"PidFile {folder / 'sshd.pid'}",
+            "PubkeyAuthentication yes",
+            "PasswordAuthentication no",
+            "KbdInteractiveAuthentication no",
+            "UsePAM no",
+            "StrictModes no",
+            "PermitUserRC no",
+            "PermitUserEnvironment no",
+            "AllowStreamLocalForwarding yes",
+            "StreamLocalBindUnlink yes",
+            f"SetEnv {environment}",
+            # DEBUG1 names every channel a client opens (``server_input_channel_open``): the
+            # server-side evidence that a refused call sent nothing.
+            "LogLevel DEBUG1",
+            "",
+        )
+    )
 
 
 # --- TLS -----------------------------------------------------------------------------------------

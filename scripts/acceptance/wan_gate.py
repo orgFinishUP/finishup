@@ -26,16 +26,21 @@ a claim-bound task was started:
   hook pass budget, **3200 ms p95**;
 * ``hook_cold_connect`` — after ``server disconnect`` (helper and master stopped), a hook's own
   path: ``connect_service_on_demand`` bounded by the hook's 1.0 s start budget
-  (``_HOOK_SERVICE_START_BUDGET_SECONDS``); it must end within it (gated at **1150 ms p95**, the
-  budget plus the close), served or failing open with a named phase, and the next call must be
-  served (the helper it started keeps starting);
+  (``_HOOK_SERVICE_START_BUDGET_SECONDS``), then its call (one ``status``) and its cleanup (the
+  close): the complete operation, timed from the connect to the end of the close, must end
+  within **1150 ms p95** (the budget plus the close). Every sample must be measured (a probe that
+  crashed or timed out is a failure, never 0 ms), served or failing open as a remote outage
+  (``remote_unreachable`` or ``remote_service_not_running``; any other phase is a failure), and
+  the next call must be served (the helper it started keeps starting): each miss fails the gate.
+  The hook process's own wall time is reported beside it (``hook_cold_process``);
 * ``cold_connect`` / ``cold_process`` — how long a cold connection takes to be served at all (no
   budget); reported, never gated: a cold start may fail open once;
 * ``server test`` — the warm status round trip p95 it reports, and the slowest of its new
   processes' connection and status, which it compares with the startup gate's 650 ms.
 
-Every number is reported; a style that misses a budget says so (a failed gate is a result, not an
-error). ``render`` turns result files into the markdown table the runbook keeps.
+Before sampling, ``server set --style`` must succeed and ``server status --json`` must report the
+style under test. Every number is reported; a style that misses a budget says so (a failed gate is
+a result, not an error). ``render`` turns result files into the markdown table the runbook keeps.
 """
 
 from __future__ import annotations
@@ -61,12 +66,21 @@ from harness import (  # noqa: E402
     Run,
     Task,
     base_request,
+    graceful_termination,
     helper_pid,
     json_of,
+    tail,
     tool,
     wait_until,
 )
-from matrix import Cell, World, address_of, consent_replies, start_task  # noqa: E402
+from matrix import (  # noqa: E402
+    Cell,
+    World,
+    address_of,
+    consent_replies,
+    effective_style,
+    start_task,
+)
 
 STYLES = (
     Cell("ssh-relay", "ssh", "ssh", "relay", "L1"),
@@ -84,6 +98,9 @@ STYLES = (
 BUDGETS_MS = {"warm_connect_status": 650, "hook_cold_connect": 1150, "warm_process": 3200}
 NEW_CONNECTION_LINE = re.compile(r"New connection and status: (\d+) ms at the slowest of (\d+)")
 HOOK_START_BUDGET_S = 1.0
+# The phases a cold hook may fail open with: the server or its transport not there yet. Anything
+# else (a consent, authorization or identity phase) means the measurement itself is broken.
+HOOK_FAIL_OPEN_PHASES = frozenset({"remote_unreachable", "remote_service_not_running"})
 
 PROBE = r"""
 import asyncio, json, sys, time
@@ -117,7 +134,14 @@ async def main():
         out["failed_after_ms"] = round((time.monotonic() - start) * 1000, 1)
     finally:
         if client is not None:
-            await client.close()
+            closing = time.monotonic()
+            try:
+                await client.close()
+            except Exception as error:
+                out["close_error"] = type(error).__name__
+            out["close_ms"] = round((time.monotonic() - closing) * 1000, 1)
+        # The complete operation: connect, call and cleanup, served or failed.
+        out["total_ms"] = round((time.monotonic() - start) * 1000, 1)
     print(json.dumps(out))
 asyncio.run(main())
 """
@@ -197,6 +221,58 @@ def gate(result: dict[str, Any]) -> dict[str, Any]:
     return {"checks": checks, "pass": all(item["pass"] for item in checks.values())}
 
 
+def judge_hook_sample(timing: dict[str, Any]) -> dict[str, Any]:
+    """One cold hook sample: its complete duration (connect, call, close) and whether it counts.
+
+    ``problem`` is ``None`` for a sample that was measured and was served, or failed open naming
+    a remote outage (``HOOK_FAIL_OPEN_PHASES``); otherwise why it fails the gate: no measurement
+    (the probe crashed or timed out: never 0 ms), another failure, a call answered not ok, or a
+    close that raised.
+    """
+
+    total = timing.get("total_ms")
+    measured = float(total) if isinstance(total, (int, float)) and total > 0 else None
+    served = measured is not None and timing.get("ok") is True and "error" not in timing
+    phase: str | None = None
+    problem: str | None = None
+    if measured is None:
+        problem = "not_measured"
+    elif "error" in timing:
+        kind, _, rest = str(timing["error"]).partition(":")
+        reason, _, phase = rest.partition(":")
+        if (kind, reason) != ("ControlError", "service_unavailable") or (
+            phase not in HOOK_FAIL_OPEN_PHASES
+        ):
+            problem = f"failed_as:{timing['error']}"
+    elif not served:
+        problem = "call_not_ok"
+    if problem is None and timing.get("close_error"):
+        problem = f"close_failed:{timing['close_error']}"
+    return {"total_ms": measured, "served": served, "phase": phase, "problem": problem}
+
+
+def hook_summary(judged: list[dict[str, Any]], recovered: int) -> dict[str, Any]:
+    """The ``hook_cold_connect`` record: every measured sample's complete duration, and a failure
+    for each sample that does not count and each next call that was not served."""
+
+    values = [item["total_ms"] for item in judged if item["total_ms"] is not None]
+    problems = [item["problem"] for item in judged if item["problem"] is not None]
+    unrecovered = len(judged) - recovered
+    return {
+        **summary(values),
+        "n": len(judged),
+        "failures": len(problems) + unrecovered,
+        "problems": sorted(set(problems)),
+        "served_within_budget": sum(
+            1
+            for item in judged
+            if item["served"] and (item["total_ms"] or 0.0) <= BUDGETS_MS["hook_cold_connect"]
+        ),
+        "failed_open_phases": sorted({item["phase"] for item in judged if item["phase"]}),
+        "next_call_served": recovered,
+    }
+
+
 def probe(world: World, task: Task, budget: float = 0.0) -> tuple[dict[str, Any], float]:
     request = {
         **base_request(),
@@ -212,7 +288,7 @@ def probe(world: World, task: Task, budget: float = 0.0) -> tuple[dict[str, Any]
     try:
         return json.loads(lines[-1]), wall
     except (IndexError, ValueError):
-        return {"error": world.run.redact((result.stdout + result.stderr)[-300:])}, wall
+        return {"error": tail(world.run.redact(result.stdout + result.stderr), 300)}, wall
 
 
 def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
@@ -222,19 +298,28 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
         ["server", "add", name, *address_of(world, cell)], consent_replies(name)
     )
     if added.exit_code != 0:
-        return {"error": "add_failed", "transcript": world.run.redact(added.transcript[-800:])}
+        return {"error": "add_failed", "transcript": tail(world.run.redact(added.transcript), 800)}
     if cell.style == "direct":
-        client.fu("server", "set", name, "--style", "direct")
+        chosen = client.fu("server", "set", name, "--style", "direct")
+        if chosen.returncode != 0:
+            return {
+                "error": "style_not_set",
+                "detail": tail(world.run.redact(chosen.stdout + chosen.stderr), 600),
+            }
     used = client.ceremony(
         ["server", "use", name], [Reply(r"Type the target name", name, secret=False)]
     )
     if used.exit_code != 0:
         return {"error": "use_failed"}
+    # Sampled only once the style under test is the one its connections use.
+    style = effective_style(client, name)
+    if style != cell.style:
+        return {"error": "style_not_effective", "detail": f"server status names {style}"}
     task, started = start_task(world, f"WAN gate {cell.name}")
     if not task.ok:
-        return {"error": "start_failed", "detail": world.run.redact(started.stderr[-600:])}
+        return {"error": "start_failed", "detail": tail(world.run.redact(started.stderr), 600)}
     root = client.target_root(name)
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"style": style}
     warm: list[float] = []
     parts: dict[str, list[float]] = {"import": [], "connect": [], "status": [], "process": []}
     warm_failures = 0
@@ -255,24 +340,20 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
     # the hook's 1.0 s start budget): it must end within that budget, served or failing open
     # with a named phase, and leave the helper starting for the next hook. Then the time until
     # a cold connection is served at all (no budget).
-    hook: list[float] = []
-    hook_served = 0
+    judged: list[dict[str, Any]] = []
+    hook_process: list[float] = []
     recovered = 0
     cold: list[float] = []
     cold_process: list[float] = []
     cold_failures = 0
-    phases: list[str] = []
     for _ in range(max(3, samples // 2)):
         client.fu("server", "disconnect", name)
         wait_until(lambda: helper_pid(root) is None, seconds=15)
-        timing, _wall = probe(world, task, budget=HOOK_START_BUDGET_S)
-        hook.append(float(timing.get("failed_after_ms") or timing.get("connect_ms") or 0.0))
-        if timing.get("ok"):
-            hook_served += 1
-        else:
-            phases.append(str(timing.get("error")))
+        timing, wall = probe(world, task, budget=HOOK_START_BUDGET_S)
+        judged.append(judge_hook_sample(timing))
+        hook_process.append(wall)
         again, _ = probe(world, task)
-        recovered += bool(again.get("ok"))
+        recovered += again.get("ok") is True and "error" not in again
         client.fu("server", "disconnect", name)
         wait_until(lambda: helper_pid(root) is None, seconds=15)
         timing, wall = probe(world, task)
@@ -282,13 +363,8 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
             continue
         cold.append(timing["connect_ms"])
         cold_process.append(wall)
-    out["hook_cold_connect"] = {
-        **summary(hook),
-        "failures": 0,
-        "served_within_budget": hook_served,
-        "failed_open_phases": sorted(set(phases)),
-        "next_call_served": recovered,
-    }
+    out["hook_cold_connect"] = hook_summary(judged, recovered)
+    out["hook_cold_process"] = summary(hook_process)
     out["cold_connect"] = {**summary(cold), "failures": cold_failures}
     out["cold_process"] = {**summary(cold_process), "failures": cold_failures}
     tested = client.fu("server", "test", name, timeout=120)
@@ -301,7 +377,7 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
         # What it compares with the startup gate's bound: a new process's connection and status.
         "new_connection_slowest_ms": int(measured.group(1)) if measured else None,
         "warned": "Warning:" in tested.stdout,
-        "last_line": (tested.stdout.strip().splitlines() or [""])[-1],
+        "last_line": world.run.redact((tested.stdout.strip().splitlines() or [""])[-1]),
     }
     out["gate"] = gate(out)
     client.fu("server", "disconnect", name)
@@ -312,6 +388,7 @@ def measure_style(world: World, cell: Cell, samples: int) -> dict[str, Any]:
 
 def inside(args: argparse.Namespace) -> int:
     one_way = args.rtt_ms / 2000.0
+    graceful_termination()
     run = Run("wan")
     results: dict[str, Any] = {
         "mode": args.mode,
@@ -330,14 +407,17 @@ def inside(args: argparse.Namespace) -> int:
             try:
                 results["styles"][cell.name] = measure_style(world, cell, args.samples)
             except Exception as error:  # noqa: BLE001 - recorded as that style's result
-                results["styles"][cell.name] = {"error": f"{type(error).__name__}: {error}"}
+                results["styles"][cell.name] = {
+                    "error": tail(run.redact(f"{type(error).__name__}: {error}"), 600)
+                }
             results["styles"][cell.name]["seconds"] = round(time.monotonic() - began, 1)
             results["styles"][cell.name]["cpu_calibration_ms"] = calibration()
             print(cell.name, json.dumps(results["styles"][cell.name].get("gate")), flush=True)
     finally:
-        run.close()
-    args.out.write_text(json.dumps(results, indent=1))
-    return 0
+        problems = run.close()
+        results["cleanup"] = {"proven": not problems, "problems": problems}
+        args.out.write_text(json.dumps(results, indent=1))
+    return 1 if problems else 0
 
 
 def in_namespace(args: argparse.Namespace) -> int:
@@ -387,7 +467,8 @@ def render(paths: list[Path]) -> str:
 
     rows = [
         "| RTT | Mode | Commit | Style | warm connect+status p50/p95 (≤650) | connect / status p50 | "
-        "warm process p95 (≤3200) | hook cold connect p50/p95 (≤1150), served / failed open as | "
+        "warm process p95 (≤3200) | hook cold connect, call and close p50/p95 (≤1150), served / "
+        "failed open as; process p95 | "
         "cold served p50 | `server test` round trip p95; new connection slowest | "
         "import p50, CPU calibration | Gate |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
@@ -404,6 +485,8 @@ def render(paths: list[Path]) -> str:
             warm, process = result["warm_connect_status"], result["warm_process"]
             hook, cold = result["hook_cold_connect"], result["cold_connect"]
             phases = ", ".join(p.split(":")[-1] or "(none)" for p in hook["failed_open_phases"])
+            problems = "; failures: " + ", ".join(hook["problems"]) if hook.get("problems") else ""
+            hook_process = (result.get("hook_cold_process") or {}).get("p95")
             parts = result.get("warm_parts") or {}
             connect = (parts.get("connect") or {}).get("p50")
             status = (parts.get("status") or {}).get("p50")
@@ -412,9 +495,11 @@ def render(paths: list[Path]) -> str:
                 f"| {document['rtt_ms']:g} ms | {document['mode']} | {document.get('commit', '–')} | "
                 f"{style} | {warm['p50']:.0f} / {warm['p95']:.0f} | {_ms(connect)} / {_ms(status)}"
                 f" | {process['p95']:.0f} | "
-                f"{hook['p50']:.0f} / {hook['p95']:.0f}, {hook['served_within_budget']}/{hook['n']}"
+                f"{_ms(hook['p50'])} / {_ms(hook['p95'])}, "
+                f"{hook['served_within_budget']}/{hook['n']}"
                 f" served{', failed open: ' + phases if phases else ''}; next call served "
-                f"{hook['next_call_served']}/{hook['n']} | {cold['p50']:.0f} | "
+                f"{hook['next_call_served']}/{hook['n']}{problems}; process {_ms(hook_process)} | "
+                f"{_ms(cold['p50'])} | "
                 f"{_server_test_cell(result['server_test'])} | "
                 f"{_ms(imported)}, {_ms(result.get('cpu_calibration_ms'))} | "
                 f"{'pass' if result['gate']['pass'] else 'fail'} |"

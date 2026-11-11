@@ -38,7 +38,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from harness import REPO, Report, real_home, run_command  # noqa: E402
+from harness import REPO, Report, real_home, redact, run_command, tail  # noqa: E402
 from upgrade import dispose  # noqa: E402
 
 PROVISION = REPO / "scripts" / "provision_test_instance.py"
@@ -69,8 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--base", type=Path, default=real_home() / ".yz-l7h")
     args = parser.parse_args(argv)
-    report = Report("hosts")
     args.base.mkdir(mode=0o700, exist_ok=True)
+    report = Report("hosts", redactor=lambda text: redact(text, args.base))
     tag = "hosts"
     created = run_command(
         [
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout=580,
     )
     if created.returncode != 0:
-        report.add("provision", False, created.stderr[-600:])
+        report.add("provision", False, tail(redact(created.stderr, args.base), 600))
         args.out.write_text(json.dumps(report.to_json(), indent=1))
         return 1
     launcher = args.base / tag / "runtime" / "bin" / "finishup"
@@ -260,7 +260,8 @@ def main(argv: list[str] | None = None) -> int:
             report.add(
                 "Cursor agent: the host starts the bridge and lists FinishUP's tools",
                 "ready" in listed.stdout and {"start", "check", "receipt"} <= set(names),
-                f"`mcp list`: {listed.stdout.strip()[-60:]}; tools: {', '.join(names)}",
+                f"`mcp list`: {tail(redact(listed.stdout.strip(), args.base), 60)}; tools: "
+                f"{', '.join(names)}",
             )
             rows = [
                 hook_run(

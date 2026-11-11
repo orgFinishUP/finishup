@@ -3,7 +3,10 @@
 The real runs (the matrix, the WAN gate, the upgrade) start services; these cases pin what decides
 their verdicts: the cells are exactly the design's section 1.2 matrix, a cell fails when any step
 failed, the WAN gate's percentile and budgets, its table, and the relay that counts dials and
-injects the userspace delay.
+injects the userspace delay; and what keeps a run honest and contained: the private ``sshd``'s
+session, a cold hook sample that only counts when measured and failing open as an outage, a run's
+cleanup that keeps its folder until its shutdown is proven, a ``SIGTERM`` that ends a run through
+that cleanup, one redaction before anything is cut short, and the upgrade steps' own predicates.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ def _load(name: str) -> Any:
 harness = _load("harness")
 matrix = _load("matrix")
 wan_gate = _load("wan_gate")
+upgrade = _load("upgrade")
 
 
 def test_the_cells_are_the_design_matrix_and_nothing_else() -> None:
@@ -273,6 +277,8 @@ def test_the_relay_counts_each_dial_and_carries_bytes_both_ways() -> None:
                 assert client.recv(64) == b"ping"
             thread.join(5)
             assert relay.connections == expected
+            # Bytes each way (traffic over an open connection, which a dial count misses).
+            assert (relay.bytes_up, relay.bytes_down) == (4 * expected, 4 * expected)
     finally:
         relay.stop()
         server.close()
@@ -296,3 +302,321 @@ def test_the_relay_holds_every_chunk_for_its_delay_in_each_direction() -> None:
     finally:
         relay.stop()
         server.close()
+
+
+def test_the_private_sshd_runs_no_user_rc_and_gives_sessions_a_private_home(tmp_path: Path) -> None:
+    """Harness finding 1: the account's ``~/.ssh/rc`` and shell startup files never run before a
+    server command, and nothing a session does lands in the account's default folders."""
+
+    session = tmp_path / "session-home"
+    lines = harness.sshd_config(tmp_path, 2222, session).splitlines()
+    assert "PermitUserRC no" in lines and "PermitUserEnvironment no" in lines
+    (setenv,) = [line for line in lines if line.startswith("SetEnv ")]
+    assignments = dict(item.split("=", 1) for item in setenv.split()[1:])
+    assert assignments["HOME"] == str(session)
+    assert {assignments[f"XDG_{name}_HOME"] for name in ("STATE", "CONFIG", "DATA", "CACHE")} == {
+        str(session / leaf) for leaf in ("s", "c", "d", "k")
+    }
+    assert "ListenAddress 127.0.0.1" in lines and "PasswordAuthentication no" in lines
+
+
+@pytest.mark.parametrize(
+    ("timing", "problem", "served"),
+    [
+        ({"ok": True, "total_ms": 900.0}, None, True),
+        (
+            {"error": "ControlError:service_unavailable:remote_unreachable", "total_ms": 1010.0},
+            None,
+            False,
+        ),
+        ({"error": "RuntimeError::", "total_ms": 40.0}, "failed_as:RuntimeError::", False),
+        (
+            {"error": "ControlError:service_unavailable:server_profile_changed", "total_ms": 300.0},
+            "failed_as:ControlError:service_unavailable:server_profile_changed",
+            False,
+        ),
+        ({"error": "a probe that crashed and printed no timing"}, "not_measured", False),
+        ({"ok": True}, "not_measured", False),
+        ({"ok": True, "total_ms": 0}, "not_measured", False),
+        ({"ok": False, "total_ms": 500.0}, "call_not_ok", False),
+        ({"ok": True, "total_ms": 500.0, "close_error": "OSError"}, "close_failed:OSError", True),
+    ],
+)
+def test_a_cold_hook_sample_counts_only_when_measured_and_served_or_failing_open_as_an_outage(
+    timing: dict[str, Any], problem: str | None, served: bool
+) -> None:
+    """Harness finding 2: a crashed or timed-out probe is never 0 ms, and only an outage phase
+    is a fail-open."""
+
+    judged = wan_gate.judge_hook_sample(timing)
+    assert (judged["problem"], judged["served"]) == (problem, served)
+    if problem == "not_measured":
+        assert judged["total_ms"] is None
+
+
+def test_the_hook_gate_fails_on_any_sample_that_does_not_count_or_an_unserved_next_call() -> None:
+    good = [wan_gate.judge_hook_sample({"ok": True, "total_ms": 800.0}) for _ in range(3)]
+    passing = {
+        "warm_connect_status": {"p95": 500, "failures": 0},
+        "warm_process": {"p95": 1500, "failures": 0},
+        "hook_cold_connect": wan_gate.hook_summary(good, recovered=3),
+    }
+    assert wan_gate.gate(passing)["pass"] is True
+    unserved = {**passing, "hook_cold_connect": wan_gate.hook_summary(good, recovered=2)}
+    assert wan_gate.gate(unserved)["pass"] is False
+    crashed = [*good[:2], wan_gate.judge_hook_sample({"error": "no timing"})]
+    summary = wan_gate.hook_summary(crashed, recovered=3)
+    # The crashed sample is not a 0 ms sample pulling the percentile down: it is a failure.
+    assert summary["n"] == 3 and summary["p50"] == 800.0 and summary["failures"] == 1
+    assert summary["problems"] == ["not_measured"]
+    assert wan_gate.gate({**passing, "hook_cold_connect": summary})["pass"] is False
+
+
+def test_the_complete_cold_operation_is_what_the_hook_gate_times() -> None:
+    """Harness finding 8: the probe times connect, call and close (``total_ms``), not the connect
+    alone."""
+
+    assert '"total_ms"' in wan_gate.PROBE and "await client.close()" in wan_gate.PROBE
+    assert wan_gate.PROBE.index("await client.close()") < wan_gate.PROBE.index('"total_ms"')
+    slow_close = wan_gate.judge_hook_sample({"ok": True, "connect_ms": 200.0, "total_ms": 2400.0})
+    assert slow_close["total_ms"] == 2400.0
+    summary = wan_gate.hook_summary([slow_close], recovered=1)
+    assert summary["served_within_budget"] == 0
+    style = {
+        "warm_connect_status": {"p95": 500, "failures": 0},
+        "warm_process": {"p95": 1500, "failures": 0},
+        "hook_cold_connect": summary,
+    }
+    assert wan_gate.gate(style)["checks"]["hook_cold_connect"]["pass"] is False
+
+
+class _FakeClient:
+    """``Client`` for the WAN gate's checks before sampling: each ``fu`` answers from a script."""
+
+    def __init__(self, answers: dict[tuple[str, ...], tuple[int, str]]) -> None:
+        self.answers = answers
+        self.calls: list[tuple[str, ...]] = []
+
+    def ceremony(self, _arguments: list[str], _replies: list[Any]) -> Any:
+        return type("Ceremony", (), {"exit_code": 0, "transcript": ""})()
+
+    def fu(self, *arguments: str, timeout: float = 180) -> subprocess.CompletedProcess[str]:
+        del timeout
+        self.calls.append(arguments)
+        code, out = self.answers.get(arguments[:2], (0, "{}"))
+        return subprocess.CompletedProcess(["finishup", *arguments], code, out, "")
+
+
+def _style_document(style: str) -> str:
+    return json.dumps({"target": {"connection": {"style": style}}})
+
+
+@pytest.mark.parametrize(
+    ("set_code", "reported", "error"),
+    [(1, "relay", "style_not_set"), (0, "relay", "style_not_effective"), (0, None, None)],
+)
+def test_a_style_is_sampled_only_once_it_was_set_and_is_the_effective_one(
+    monkeypatch: pytest.MonkeyPatch, set_code: int, reported: str | None, error: str | None
+) -> None:
+    """Harness finding 9: a failed ``server set --style direct`` (the target still relay) never
+    yields numbers reported as direct."""
+
+    status = _style_document(reported or "direct")
+    client = _FakeClient({("server", "set"): (set_code, ""), ("server", "status"): (0, status)})
+    run = harness.Run("style-check")
+    try:
+        world = type("World", (), {"client": client, "run": run})()
+
+        def no_address(_world: object, _cell: object) -> list[str]:
+            return []
+
+        monkeypatch.setattr(wan_gate, "address_of", no_address)
+
+        def started(_world: object, _title: str) -> tuple[Any, Any]:
+            return harness.Task(None, None, None), subprocess.CompletedProcess([], 1, "", "")
+
+        monkeypatch.setattr(wan_gate, "start_task", started)
+        cell = wan_gate.STYLES[1]
+        assert cell.style == "direct"
+        result = wan_gate.measure_style(world, cell, 1)
+    finally:
+        run.close()
+    # With the style effective, sampling begins (here the task start is what fails).
+    assert result["error"] == (error or "start_failed")
+    assert matrix.effective_style(client, cell.target) == (reported or "direct")
+
+
+def test_cleanup_keeps_the_folder_while_a_lock_beneath_it_is_held(tmp_path: Path) -> None:
+    """Harness finding 3: a finalizer that fails is reported, and the folder is removed only once
+    no lock beneath it is held (a service, helper or retained runtime of the run alive)."""
+
+    import fcntl
+    import os
+
+    run = harness.Run("cleanup-check")
+    lock = run.folder("srv") / "state"
+    lock.mkdir(mode=0o700)
+    held = lock / "service.lock"
+    descriptor = os.open(held, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+    def stop_service() -> bool:
+        return False
+
+    def disconnect_all() -> None:
+        raise RuntimeError(f"failed under {harness.real_home()}")
+
+    run.finalizers += [stop_service, disconnect_all]
+    try:
+        problems = run.close(seconds=0.2)
+        assert run.base.exists()
+        assert "stop_service: did not stop" in problems
+        assert any(
+            p.startswith("disconnect_all: RuntimeError: failed under <home>") for p in problems
+        )
+        assert "lock still held: <base>/srv/state/service.lock" in problems
+        assert harness.held_locks(run.base) == [held]
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    run.finalizers.clear()
+    assert run.close(seconds=0.2) == []
+    assert not run.base.exists()
+
+
+def test_a_service_that_holds_its_lock_is_running_whatever_its_status_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harness finding 3: an incompatible or unresponsive service (``service status`` fails) that
+    still holds its singleton lock is not stopped."""
+
+    import fcntl
+    import os
+
+    run = harness.Run("service-check")
+    try:
+        server = harness.Server(run, "srv", Path("/nonexistent/finishup"), code_copy=False)
+        (server.root / "state").mkdir(mode=0o700)
+
+        def incompatible(*_arguments: str, **_options: object) -> Any:
+            return subprocess.CompletedProcess([], 1, "", "service_incompatible")
+
+        monkeypatch.setattr(server, "srv", incompatible)
+        assert server.service_running() is False
+        descriptor = os.open(server.singleton_lock(), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            os.write(descriptor, json.dumps({"pid": os.getpid()}).encode())
+            assert server.service_running() is True
+            assert server.service_pid() == os.getpid()
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        assert server.service_running() is False and server.service_pid() is None
+    finally:
+        run.close(seconds=0.2)
+
+
+def test_a_run_past_its_bound_is_asked_to_stop_and_cleans_up_through_its_finally(
+    tmp_path: Path,
+) -> None:
+    """Harness finding 4: the outer runner's timeout ends the harness through its own cleanup
+    (``SIGTERM``), so the processes it started stop and its folder goes; never a bare kill."""
+
+    import os
+
+    script = tmp_path / "fake_run.py"
+    script.write_text(
+        "import json, signal, sys\n"
+        f"sys.path.insert(0, {str(_SCRIPTS)!r})\n"
+        "import harness\n"
+        "harness.graceful_termination()\n"
+        "run = harness.Run('fake')\n"
+        "child = run.spawn([sys.executable, '-c', 'import signal; signal.pause()'], env={})\n"
+        "print(json.dumps({'base': str(run.base), 'child': child.pid}), flush=True)\n"
+        "try:\n"
+        "    signal.pause()\n"
+        "finally:\n"
+        "    run.close(seconds=5)\n"
+    )
+    result, actions = harness.run_bounded(
+        [sys.executable, str(script)], env=dict(os.environ), seconds=5.0, cleanup_seconds=60.0
+    )
+    assert (result.returncode, actions) == (124, ["asked_to_stop"])
+    started = json.loads(result.stdout.splitlines()[0])
+    assert not Path(started["base"]).exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(started["child"], 0)
+
+
+def test_one_redaction_comes_before_anything_is_cut_short_or_stored(tmp_path: Path) -> None:
+    """Harness finding 10: provisioning output and exception text name no home folder."""
+
+    home = str(harness.real_home())
+    text = f"error: cannot build {home}/.yz-l7i/new/src: {home}/secret-key"
+    cut = harness.tail(harness.redact(text, tmp_path, secrets=["secret-key"]), 30)
+    assert home not in cut and "<home>" in cut and "secret-key" not in cut
+    report = harness.Report("redaction")
+    report.add("provision", False, text, transcript=f"in {home}")
+    stored = report.to_json()["steps"][0]
+    assert home not in stored["detail"] and home not in stored["transcript"]
+    run = harness.Run("redaction")
+    try:
+        assert run.redact(f"{run.base}/x {home}/y") == "<base>/x <home>/y"
+    finally:
+        run.close(seconds=0.2)
+
+
+def test_traffic_counts_every_kind_that_moved() -> None:
+    assert matrix.sent_between(
+        {"dials": 3, "server_channels": 7}, {"dials": 3, "server_channels": 7}
+    ) == {
+        "dials": 0,
+        "server_channels": 0,
+    }
+    moved = matrix.sent_between(
+        {"dials": 3, "bytes_toward_server": 10}, {"dials": 3, "bytes_toward_server": 12}
+    )
+    assert moved == {"bytes_toward_server": 2, "dials": 0} and any(moved.values())
+
+
+def test_a_helper_counts_as_replaced_only_by_a_live_helper_of_the_newer_build() -> None:
+    """Harness finding 6: a failed replacement (no helper, the old one, another build) fails."""
+
+    new = "sha256:" + "b" * 64
+    old = {"pid": 10, "digest": ("sha256:" + "a" * 64)[:19], "alive": True}
+    assert upgrade.replaced_by(old, {"pid": 11, "digest": new[:19], "alive": True}, new)
+    assert not upgrade.replaced_by(old, {}, new)  # nothing holds it now
+    assert not upgrade.replaced_by(old, {"pid": None, "alive": False}, new)
+    assert not upgrade.replaced_by(old, {"pid": 11, "digest": new[:19], "alive": False}, new)
+    assert not upgrade.replaced_by(old, {**old}, new)
+    assert not upgrade.replaced_by(old, {"pid": 11, "digest": old["digest"], "alive": True}, new)
+
+
+def test_the_older_bridge_refusal_must_be_its_typed_release_mismatch() -> None:
+    message = (
+        "The running local FinishUP service belongs to a different FinishUP installation than "
+        "this bridge (control schema-manifest or protocol mismatch)"
+    )
+    typed = {
+        "ok": False,
+        "body": {"error": {"code": "SERVICE_UNAVAILABLE", "message": message}},
+        "error": None,
+    }
+    assert upgrade.older_bridge_refused(typed, alive=True)
+    assert not upgrade.older_bridge_refused(typed, alive=False)  # it crashed after answering
+    crashed = {"ok": False, "body": {}, "error": {"message": "bridge_exited"}}
+    assert not upgrade.older_bridge_refused(crashed, alive=False)
+    other = {"ok": False, "body": {"error": {"code": "VAULT_LOCKED", "message": "locked"}}}
+    assert not upgrade.older_bridge_refused(other, alive=True)
+    assert not upgrade.older_bridge_refused({"ok": True, "body": {}}, alive=True)
+
+
+def test_a_replayed_write_is_recorded_once_only_with_one_event_and_an_unmoved_head() -> None:
+    """Harness finding 7: equal responses alone do not prove one durable event."""
+
+    assert upgrade.recorded_once(3, 4, 4, 1)
+    assert not upgrade.recorded_once(3, 4, 5, 1)  # the replay recorded again
+    assert not upgrade.recorded_once(3, 3, 3, 1)  # nothing durable
+    assert not upgrade.recorded_once(3, 5, 5, 2)
+    assert not upgrade.recorded_once(None, 4, 4, 1)
