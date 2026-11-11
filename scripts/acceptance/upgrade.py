@@ -206,13 +206,15 @@ def older_bridge_refused(result: dict[str, Any], alive: bool) -> bool:
 
 
 def recorded_once(
-    before: int | None, after_first: int | None, after_replay: int | None, accepted: int
+    before: int | None, after_first: int | None, after_replay: int | None, accepted: int | None
 ) -> bool:
-    """A write and its replay after a restart: exactly one event accepted, the head one past its
-    sequence before the write, and the same after the replay (nothing recorded twice)."""
+    """A write and its replay after a restart: the ledger head one past its sequence before the
+    write, and the same after the replay (the durable proof: nothing recorded twice). Where the
+    response lists its accepted events (``accepted``; ``None`` when the bridge's reduced
+    envelope does not), there is exactly one."""
 
     return (
-        accepted == 1
+        accepted in (None, 1)
         and isinstance(before, int)
         and after_first == before + 1
         and after_replay == after_first
@@ -449,7 +451,7 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
         frontier.get("sequence"),
         first_head,
         sequence,
-        len(accepted) if isinstance(accepted, list) else 0,
+        len(accepted) if isinstance(accepted, list) else None,
     )
     report.add(
         "a write replayed by its request_id after a restart is recorded once",
@@ -458,7 +460,8 @@ def scenario(report: Report, run: Run, old_wheel: Path, new_wheel: Path) -> None
         f"{restarted.returncode}, unlocked {unlocked}, a new service process: "
         f"{pid_after is not None and pid_after != pid_before}); replay {brief(replay)}, same "
         f"accepted events: {same}; head sequence {frontier.get('sequence')} → {first_head} after "
-        f"the write → {sequence} after the replay (exactly one event: {once_only})",
+        f"the write → {sequence} after the replay (exactly one event: {once_only}; accepted "
+        f"events listed: {len(accepted) if isinstance(accepted, list) else 'not in the envelope'})",
     )
 
     # --- 7. the bridge follows a new selection (O1) --------------------------------------------
