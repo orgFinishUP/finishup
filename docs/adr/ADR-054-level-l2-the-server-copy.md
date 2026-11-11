@@ -734,6 +734,12 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     forgotten or expire. The store and the puller charge per account already; carrying the key's
     principal to the service (a control-hello field from both REST edges, the owner's for SSH) is
     the follow-up.
+16. **Identity on a shared server is the owner's follow-up, not built in this stack** (the owner's
+    answer, 2026-11-11). An API key is not yet a wall between people on one server: every key's
+    uploads share one quota (limit 15), and anyone holding a key to that server can read a task
+    whose id they know. The owner plans OAuth, or an identity derived from the server's URL plus
+    the API key; the control-hello field that limit 15 names is not built until then. Until it is,
+    one server should be used by one person, or by people who may see each other's tasks.
 
 ## Reverse states
 
@@ -764,6 +770,22 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
    (`yoetz/code-copy-kek/v1`) are accepted because relocking makes them unreadable (decision 6).
 5. **The `[server]` table lands as config 1.4.0** (decision 16): 1.3.0 is released in v0.3.0 and
    frozen.
+6. **A task-start sync under a call deadline is confirmed** (2026-11-11; layer-6 review item C4).
+   It waits until 1.5 s before the call's deadline, then finishes in the background, and the
+   client's agent reads the base (decision 13, "A task-start base under a call deadline"). Its
+   cost stays as written: in a large repository a task attached at SessionStart keeps its git
+   reads with the client for its whole life. A strict "never wait on a hook" needs a design-gated
+   hook-origin field; not built.
+7. **An approved check is compared with the snapshot its own sync named; confirmed** (2026-11-11;
+   layer-6 D1): the subject-state commitment returned with that check's own sync, fixed before it
+   runs, never the task's last captured snapshot (decision 13).
+8. **Identity on a shared server is the owner's later work** (2026-11-11): OAuth, or an identity
+   derived from the server's URL plus the API key; not in this stack (honest limit 16).
+9. **The layer's two smaller questions, taken as recommended** (2026-11-11): every later kind of
+   excerpt derived from a copy joins the same erasure (the `content_forgotten` event and marker of
+   decision 15) when it is added, never a separate path; and the server flows stay in the commands
+   for this stack (the terminal interface cannot add an SSH or HTTPS server or choose L2: a later
+   layer, named in the acceptance runbook's gaps).
 
 ## Consequences
 
