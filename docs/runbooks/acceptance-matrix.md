@@ -77,19 +77,23 @@ installation has a vault, a server elsewhere is refused while its live policy ca
 (`network_policy_unreadable`, ADR-051 decision 8); the local cells therefore run on a client home
 of their own.
 
-### Results (Linux x86-64, 2026-11-11, `07e94dd94`)
+### Results (Linux x86-64, 2026-11-11, `ebcbf76fb`)
 
 All 23 cells passed every step: 2 local, 4 SSH, 16 REST (both edges, both styles, both levels,
 `local_port` and self-hosted `https`) and the official stand-in (the conformance kit's 9 cases).
-Each cell took 15 to 50 seconds. The first run (2026-11-10, `53fa8e2a2`) passed as well; a run on
-the merged head in between failed `ssh-direct-L1` (below).
+Each cell took 15 to 57 seconds, and every group's cleanup was proven (no process left, no lock
+held, the folder removed). This run used the reviewed harness: in all 20 remote cells the call
+refused after the consent changed sent nothing (0 dials; 0 bytes toward the HTTPS and port
+servers over the helper's warm connection; 0 channels opened on the SSH server). Earlier runs
+(2026-11-10 `53fa8e2a2`, 2026-11-11 `07e94dd94`) passed as well; a run on the merged head in
+between failed `ssh-direct-L1` (below).
 
 | Cell group | add | use | task | hold / zero network | re-consent | logout | L2 sync / forget | out |
 |---|---|---|---|---|---|---|---|---|
 | `local`, `named-local` | pass | pass | pass | pass (nothing refused) | n/a | n/a | n/a | pass |
-| `ssh-*` (4) | pass | pass | pass | pass, 0 dials | pass | n/a | pass (L2) | pass |
-| `port-*` (8) | pass | pass | pass | pass, 0 dials | pass | pass, 0 dials | pass (L2) | pass |
-| `https-*` (8) | pass | pass | pass | pass, 0 dials | pass | pass, 0 dials | pass (L2) | pass |
+| `ssh-*` (4) | pass | pass | pass | pass, 0 dials | pass, nothing sent | n/a | pass (L2) | pass |
+| `port-*` (8) | pass | pass | pass | pass, 0 dials | pass, nothing sent | pass, 0 dials | pass (L2) | pass |
+| `https-*` (8) | pass | pass | pass | pass, 0 dials | pass, nothing sent | pass, 0 dials | pass (L2) | pass |
 | `official` | refuses (none named) | | | | | | | kit 9/9 |
 
 Defects the matrix found, fixed in this layer with unit tests: in the direct style the refresh
@@ -116,21 +120,24 @@ A pinned instance cannot play either computer (a client must be ambient; an inst
 upgraded in place). The client and an SSH server (isolated root, private `sshd`), relay style.
 
 What a running process does across an in-place upgrade (first run 2026-11-10; the same results
-again on 2026-11-11 at `07e94dd94`, against layer 4's `f1e3f5707`):
+again on 2026-11-11 at `07e94dd94` and, with the reviewed harness, at `5b5a56008`, against layer
+4's `f1e3f5707`; every step passed and the run's cleanup was proven):
 
 - **An MCP bridge keeps its own code.** A bridge runs from a retained copy of its runtime
   (`.<venv>-releases/<digest>/`), so after the upgrade it, and every helper it starts, is still the
   older build.
-- **The newer CLI replaces the older helper** (through its stop epoch, no pid signalled) and,
-  while the server is still the older release, is refused with `remote_incompatible`
+- **The newer CLI replaces the older helper** (through its stop epoch, no pid signalled; the run
+  checks a live helper of the newer build holds the target afterwards) and, while the server is
+  still the older release, is refused with `remote_incompatible`
   (continuation `remote_release_mismatch`: install the same release on both; self-hosted servers
   keep release lockstep). Before this layer it said "the running local service … run `finishup
   service restart`", which repairs nothing for a server elsewhere.
 - **The server's owner upgrades it and runs `finishup service restart`;** the vault is unlocked
   again there. The newer CLI then works without a new consent (the profile revision's issuer is
   kept).
-- **The older bridge** is refused with a typed reason (`service_incompatible`) against the newer
-  helper and server, never served half-way. A **newer bridge** reattaches (`start` mode `attach`)
+- **The older bridge** is refused with its build's typed release mismatch against the newer helper
+  and server (`SERVICE_UNAVAILABLE`, "belongs to a different FinishUP installation"; layer 4's
+  build names no phase or continuation), keeps running, and is never served half-way. A **newer bridge** reattaches (`start` mode `attach`)
   to the task the older one started.
 - **Two builds of one version** (every build of this stack is 0.3.0; test instances and dogfood
   builds are too) cannot be ordered by version. In the run, the newer CLI replaced the older helper
@@ -144,8 +151,11 @@ again on 2026-11-11 at `07e94dd94`, against layer 4's `f1e3f5707`):
   the target for good.) A bridge from before this fix (layer 4's, in the run) still flaps until its
   session is reopened: reopen sessions after an upgrade.
 - **Restart and replay.** The server's service restarted under an open bridge: the next call was
-  served. A write replayed with its `request_id` after a restart returned the same accepted events
-  and moved the head by one event only.
+  served. A write replayed with its `request_id` after a restart (the restart succeeded and a new
+  service process holds the server) returned the same accepted events (one), and the ledger head
+  moved by exactly one event: 3 after the earlier steps, 4 after the write, still 4 after the
+  replay. (The reviewed harness's first two runs failed this step on its own predicate, which read
+  the frontier's sequence, a decimal string, as a number; fixed in the harness.)
 - **A new selection (O1).** After `server use local`, the open bridge's next requests reached this
   computer's own service (the remote connection ended; a request in flight would end
   `server_authorization_changed`, outcome unknown). Back with `server use lab`, the bridge kept the
@@ -194,42 +204,35 @@ How long a cold helper takes to serve at all is reported, never gated.
 
 ### Results (netns, Linux x86-64, 100 ms round trip, 30 samples per style)
 
-Measured on the third engineering round's head (`5ab459ce6`) and, in the same hour, with that
-round's two changes taken out again (`-dirty`: the code of `32c74325d`); the import time and the
-CPU calibration (a fixed workload, milliseconds) show how loaded the computer was, so runs made at
-different times can be compared.
+Measured on 2026-11-11 at `ebcbf76fb` with the reviewed harness ("fixed": the cold hook row is the
+complete operation, connect, status and close; every sample must be measured; only an outage phase
+counts as failing open; every next call must be served; the style is verified before sampling),
+and in the same hour with the harness of `dbaf7ae52` ("earlier": the cold hook row is the connect
+alone) against the same code. The import time and the CPU calibration (a fixed workload,
+milliseconds) show how loaded the computer was.
 
-| Code | Style | warm p50 / p95 (≤ 650) | connect / status p50 | warm process p95 (≤ 3200) | cold hook connect p50 / p95 (≤ 1150) | `server test`: new connection, slowest | import p50, calibration | Gate |
-|---|---|---|---|---|---|---|---|---|
-| after | ssh relay | 405 / 424 | 244 / 161 | 1205 | 1002 / 1003, fails open `remote_unreachable`, next served 15/15 | 347 | 486, 58 | pass |
-| after | https relay | 356 / 440 | 154 / 202 | 1208 | 1002 / 1002, fails open `remote_unreachable`, next served 15/15 | 280 | 516, 59 | pass |
-| after | ssh direct | 444 / 475 | 274 / 164 | 1400 | 1003 / 1004, fails open `remote_unreachable`, next served 15/15 | 500 | 571, 61 | pass |
-| after (again) | ssh direct | 470 / 673 | 298 / 171 | 2020 | 1002 / 1003, as above | 401 | 632, 53 | **fail** |
-| after | https direct | 873 / 936 | 678 / 199 | 2009 | 685 / 796, served 15/15 | 884 (warned) | 600, 60 | **fail** |
-| before | ssh relay | 437 / 479 | 249 / 188 | 1304 | 1003 / 1187, fails open `remote_unreachable`, next served 15/15 | 493 | 515, 64 | **fail** (cold) |
-| before | https relay | 442 / 551 | 170 / 264 | 1975 | 1002 / 1039, as above | 294 | 557, 55 | pass |
-| before | ssh direct | 420 / 433 | 249 / 170 | 1126 | 1002 / 1003, as above | 358 | 473, 54 | pass |
-| before | https direct | 852 / 889 | 643 / 208 | 1688 | 648 / 837, served 15/15 | 1500 (warned) | 504, 58 | **fail** |
+| Harness | Style | warm p50 / p95 (≤ 650) | connect / status p50 | warm process p95 (≤ 3200) | cold hook p50 / p95 (≤ 1150) | hook process p95 | `server test`: new connection, slowest | import p50, calibration | Gate |
+|---|---|---|---|---|---|---|---|---|---|
+| fixed | ssh relay | 430 / 454 | 256 / 174 | 1409 | 1002 / 1113, fails open `remote_unreachable` 15/15, next served 15/15 | 2035 | 365 | 577, 67 | pass |
+| earlier | ssh relay | 447 / 536 | – | 1566 | 1002 / 1064 (connect only), as above | – | – | 597, 55 | pass |
+| fixed | ssh direct | 433 / 468 | 270 / 161 | 1337 | 1002 / 1004, fails open `remote_unreachable` 15/15, next served 15/15 | 2028 | 396 | 542, 57 | pass |
+| earlier | ssh direct | 412 / 433 | – | 1176 | 1002 / 1003 (connect only), as above | – | – | 503, 56 | pass |
+| fixed | https relay | 365 / 390 | 159 / 204 | 1250 | 1002 / 1003, fails open `remote_unreachable` 15/15, next served 15/15 | 1768 | 280 | 525, 55 | pass |
+| earlier | https relay | 364 / 381 | – | 1186 | 1002 / 1003 (connect only), as above | – | – | 525, 56 | pass |
+| fixed | https direct | 802 / 826 | 625 / 176 | 1589 | 808 / 827, served 15/15 (connect, status, close) | 1578 | 743 (warned) | 477, 54 | **fail** |
+| earlier | https direct | 811 / 858 | – | 1671 | 639 / 671 (connect only), served 15/15 | – | 861 (warned) | 482, 62 | **fail** |
 
-Both relay styles, the default for both kinds, meet the gate with room to spare. The two changes:
-the server resolved each of the computer's mount points again for every store a status read opens
-(and for every control connection of an isolated root's service), which was most of a warm status
-read's server time (45 to 56 ms, now 18 to 23); and the REST client kept an idle connection only 5
-seconds, so the HTTPS relay answered every hook after a pause by opening a new TCP and TLS
-connection first. That second cost is invisible to the back-to-back samples above: after an
-8-second pause a warm HTTPS relay's connect and status took 650 to 750 ms before and about 350 ms
-after (5 samples each, the same harness's probe).
-
-The SSH direct style meets the gate at p50 and lands on either side of it at p95 with the
-computer's load (475 and 673 ms in two runs of the same code): each process starts its own `ssh -W`
-and opens its own channel, three round trips and a process start before the answer. Direct HTTPS
-**fails**: each new process makes a TCP connection and a TLS handshake, asks for its session and
-then for the status (four round trips, 400 ms at this delay) and loads the HTTPS client and does
-its own hello work first, so it cannot reach 650 ms at this round trip without fewer round trips
-(an owner decision: a longer budget for the direct style on a WAN, or relay only over a WAN). The
-cold hook path behaves as defined in every style: it ends within its budget, served or failing open
-naming `remote_unreachable`, and the next call is served. The numbers are re-measured by the script
-above; earlier rounds' tables are in the layer reports.
+The reviewed harness changes no verdict: both relay styles (the default for both kinds) and direct
+SSH meet the gate, and direct HTTPS fails it on the warm connect and status (each new process
+makes a TCP connection and a TLS handshake, asks for its session and then for the status: four
+round trips, 400 ms at this delay). Timing the cold hook's call and close as well adds about 170 ms
+where the hook is served (direct HTTPS: 671 → 827 ms at p95, still within 1150); where it fails
+open at its 1.0 s deadline nothing more runs, so the complete operation ends at the deadline (1002
+to 1113 ms). No sample was missing, no fail-open named anything but `remote_unreachable`, and every
+next call was served. Direct SSH, marginal at p95 in the earlier rounds (475 and 673 ms), passed
+in both harnesses this time (468 and 433 ms): it remains load-sensitive. A longer budget for the
+direct styles on a WAN, or relay only over a WAN, is the owner decision the gaps name; the earlier
+rounds' tables (and the before/after of the third engineering round) are in the layer reports.
 
 ## Hosts on Linux
 
@@ -271,7 +274,7 @@ gate runs report-only there (its table in the summary, its JSON uploaded).
 | macOS: every cell (launchd reaping of the helper, `/private/tmp`, the Homebrew launcher path, `getpeereid` on the relay, the system trust store through Python's default verify paths, the XDG variables being ignored for FinishUP's folders, case-insensitive file systems and `O_NOFOLLOW` per component in the exporter) | maintainer, on the macOS dogfood run (#1308 follow-up) |
 | WSL 2: every cell (a distribution that stops takes the helper and service with it; systemd/linger for a session-bound endpoint; Windows-side versus Linux OpenSSH; a listener reached from Windows only as WSL forwards it) | maintainer, on a Windows machine with WSL 2 (#1308 follow-up) |
 | Host model sessions (Codex, Claude Code, Cursor) against a server elsewhere, at L1 and L2 | maintainer's dogfood run (needs host credentials) |
-| The WAN gate at 100 ms: direct HTTPS fails (four round trips per process) and direct SSH is marginal at p95; both relay styles pass | owner decision (report): the direct styles' budget on a WAN, or relay only over a WAN |
+| The WAN gate at 100 ms: direct HTTPS fails (four round trips per process; 826 ms p95 with the reviewed harness) and direct SSH is load-sensitive at p95; both relay styles pass | owner decision (report): the direct styles' budget on a WAN, or relay only over a WAN |
 | The terminal interface's server flows (consent at L2, `server code`, `server remove`'s question, SSH and HTTPS add) | a later layer (ADR-051, ADR-054) |
 | A check left in flight across a server restart over a remote connection (frozen operation recovery end to end) | the harness's next revision |
 | Remote cells with a live everyday policy (the everyday installation's service running, its policy zero network) | the harness's next revision; unit and integration tests cover the live read |

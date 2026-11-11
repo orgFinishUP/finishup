@@ -898,7 +898,10 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    finds the helper's connection warm. Direct SSH meets it at p50 and is marginal at p95 with the
    computer's load; direct HTTPS does not (four round trips in every new process: TCP, TLS, the
    session and the status). The cold hook path ends within its budget and fails open naming
-   `remote_unreachable` in every style. The direct styles' budget on a WAN, or relay only over a
+   `remote_unreachable` in every style, timed through the hook's call and its close (re-measured
+   with the independently reviewed harness, which counts a sample only when it was measured and
+   served or failed open as an outage, and needs every next call served: no verdict changed).
+   The direct styles' budget on a WAN, or relay only over a
    WAN, is an owner decision. `server test` compares what the gate times with the
    gate's 650 ms: a new connection and one status in each of five new processes
    (`client.connection_timing`, after the imports; never this folder's claim), the slowest of
