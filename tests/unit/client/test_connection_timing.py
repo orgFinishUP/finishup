@@ -141,7 +141,7 @@ def test_each_new_process_is_timed_one_after_another(monkeypatch: pytest.MonkeyP
             "remote_unreachable",
         ),
         (b'{"error": "target_unknown", "phase": null}', "target_unknown", None),
-        (b'{"error": "Not A Token /home/x", "phase": null}', "service_unavailable", None),
+        (b'{"error": "Not A Token /srv/x", "phase": null}', "service_unavailable", None),
         (b'{"error": "service_unavailable", "phase": "/a/path"}', "service_unavailable", None),
         (b'{"ms": -1}', "service_unavailable", None),
         (b'{"ms": "12"}', "service_unavailable", None),
