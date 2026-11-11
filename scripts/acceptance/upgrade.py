@@ -205,20 +205,24 @@ def older_bridge_refused(result: dict[str, Any], alive: bool) -> bool:
     return error.get("code") == code and statement in str(error.get("message"))
 
 
+def _sequence(value: object) -> int | None:
+    """A frontier's sequence: the protocol writes it as a decimal string."""
+
+    if type(value) is int:
+        return value
+    return int(value) if isinstance(value, str) and value.isdigit() else None
+
+
 def recorded_once(
-    before: int | None, after_first: int | None, after_replay: int | None, accepted: int | None
+    before: object, after_first: object, after_replay: object, accepted: int | None
 ) -> bool:
     """A write and its replay after a restart: the ledger head one past its sequence before the
     write, and the same after the replay (the durable proof: nothing recorded twice). Where the
-    response lists its accepted events (``accepted``; ``None`` when the bridge's reduced
-    envelope does not), there is exactly one."""
+    response lists its accepted events (``accepted``; ``None`` when the bridge's envelope does
+    not), there is exactly one."""
 
-    return (
-        accepted in (None, 1)
-        and isinstance(before, int)
-        and after_first == before + 1
-        and after_replay == after_first
-    )
+    start, first, replayed = _sequence(before), _sequence(after_first), _sequence(after_replay)
+    return accepted in (None, 1) and start is not None and first == start + 1 and replayed == first
 
 
 def brief(result: dict[str, Any]) -> str:

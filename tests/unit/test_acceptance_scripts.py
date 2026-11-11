@@ -635,7 +635,7 @@ def test_a_replayed_write_is_recorded_once_only_with_one_event_and_an_unmoved_he
     """Harness finding 7: equal responses alone do not prove one durable event."""
 
     assert upgrade.recorded_once(3, 4, 4, 1)
-    # The bridge's reduced envelope lists no accepted events: the ledger head is the proof.
+    # An envelope that lists no accepted events: the ledger head is the proof.
     assert upgrade.recorded_once(3, 4, 4, None)
     assert not upgrade.recorded_once(3, 4, 5, 1)  # the replay recorded again
     assert not upgrade.recorded_once(3, 4, 5, None)
@@ -643,3 +643,7 @@ def test_a_replayed_write_is_recorded_once_only_with_one_event_and_an_unmoved_he
     assert not upgrade.recorded_once(3, 5, 5, 2)
     assert not upgrade.recorded_once(3, 4, 4, 0)  # a listed answer with no event
     assert not upgrade.recorded_once(None, 4, 4, 1)
+    # The protocol writes a frontier's sequence as a decimal string.
+    assert upgrade.recorded_once("3", "4", "4", 1)
+    assert not upgrade.recorded_once("3", "4", "5", 1)
+    assert not upgrade.recorded_once("x", "4", "4", 1)
