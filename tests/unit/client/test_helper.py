@@ -1124,7 +1124,7 @@ def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
 def test_a_refusal_of_the_cached_revision_is_fetched_at_once_and_any_other_waits_for_the_floor(
     ssh_target: tuple[ServerTarget, Path], source: str, named: str, expected: list[float]
 ) -> None:
-    """CHECKPOINT-u5 F2: a narrowing within 30 s of the last fetch was refused on every call until
+    """macOS dogfood: a narrowing within 30 s of the last fetch was refused on every call until
     the 30 s floor passed. A refusal naming the revision this computer's cached profile still
     holds proves the cache stale: fetched at the next tick. A refusal naming another revision (a
     fetch happened since) or none (an older client's empty marker) waits for the floor, which
