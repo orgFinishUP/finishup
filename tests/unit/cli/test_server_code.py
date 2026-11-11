@@ -1050,9 +1050,11 @@ def test_server_use_that_changes_the_level_ends_once_that_servers_helper_follows
         return SimpleNamespace(record=record, left_lines=tuple, left_open=False)
 
     monkeypatch.setattr(server_cli, "use_target", use)
-    monkeypatch.setattr(
-        helper_status, "helper_holder", lambda _root: None if helper == "none" else object()
-    )
+
+    def holder(_root: Path) -> object:
+        return None if helper == "none" else object()
+
+    monkeypatch.setattr(helper_status, "helper_holder", holder)
     monkeypatch.setattr(server_cli, "_FOLLOW_SECONDS", 0.3)
     monkeypatch.setattr(server_cli.time, "sleep", waited.append)
     result = CliRunner().invoke(server_cli.server_app, ["use", "lab", "--level", after])
