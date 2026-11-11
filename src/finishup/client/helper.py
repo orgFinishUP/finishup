@@ -140,6 +140,8 @@ _REFRESH_MIN_SECONDS: Final = 30.0
 _AGENT_SYNC_SECONDS: Final = 30.0
 # How long an agent opened under an earlier consent keeps serving while its replacement connects.
 _RETIRE_SECONDS: Final = 30.0
+# The bound on closing the agents a new level replaces at once (``_replace_agents``).
+_CLOSE_SECONDS: Final = 3.0
 _HELLO_SECONDS: Final = 10.0
 # One upstream attempt, from the master's start to the server's first answer to the hello: a
 # server that accepts the channel and never answers ends the relay here, its stream closed.
@@ -1309,9 +1311,9 @@ class Helper:
                 if self._last_upstream_use is None:
                     self._last_upstream_use = self._clock()
 
-    def _follow_consent(self) -> ServerTarget | None:
-        """Take the target's record as it is now; the record before it when the owner's consent
-        changed, else ``None``.
+    def _follow_consent(self) -> tuple[ServerTarget | None, bool]:
+        """Take the target's record as it is now: the record before it when the owner's consent
+        changed (else ``None``), and whether the record was read now.
 
         Every background agent is opened under the record (its consent decides, among others,
         whether it answers the server's code-sync calls, ADR-054). A consent the owner changed
@@ -1329,22 +1331,38 @@ class Helper:
         try:
             facts = os.lstat(self._root / SERVER_TARGET_FILE_NAME)
         except OSError:
-            return None
+            return None, False
         stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
         if stamp == self._record_stamp:
-            return None
+            return None, False
         self._record_stamp = stamp
         try:
             current = read_target(self._root)
         except TargetError:
-            return None
+            return None, False
         if current is None or current.target_id != self._record.target_id:
-            return None
+            return None, False
         previous = self._record
         self._record = current
-        return previous if consent_digest(current) != consent_digest(previous) else None
+        changed = consent_digest(current) != consent_digest(previous)
+        return (previous if changed else None), True
 
-    def _replace_agents(self, previous: ServerTarget) -> None:
+    async def _follow(self) -> None:
+        """Follow the owner's consent (``_follow_consent``, ``_replace_agents``), then say which
+        consent the agents follow now (``helper_status.write_followed_consent``), once each
+        agent that declared less than it is closed: ``server use`` waits for that after a new
+        level, so its command ends only once no such agent is left for the server to ask."""
+
+        from finishup.client.authorization import consent_digest
+        from finishup.client.helper_status import write_followed_consent
+
+        previous, read = self._follow_consent()
+        if previous is not None:
+            await self._replace_agents(previous)
+        if read:
+            write_followed_consent(self._root, consent_digest(self._record))
+
+    async def _replace_agents(self, previous: ServerTarget) -> None:
         """Every agent opened under the earlier consent (``previous``'s) is replaced.
 
         The next agent sync opens each one again under the record now, for each workspace whose
@@ -1360,16 +1378,25 @@ class Helper:
 
         now = self._clock()
         widened = _declares_code_sync(self._record) and not _declares_code_sync(previous)
+        closing: list[HelperAgent] = []
         for key, agent in self._agents.items():
             older = self._retiring.pop(key, None)
             if older is not None:
                 self._spawn_close(older[0])
             if widened:
-                self._spawn_close(agent)
+                closing.append(agent)
             else:
                 self._retiring[key] = (agent, now)
         self._agents.clear()
         self._last_sync = None
+        if closing:
+            # Closed before the helper says it follows the new consent (``_follow``), bounded so a
+            # close that hangs never holds the tick.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(_CLOSE_SECONDS):
+                    await asyncio.gather(
+                        *(agent.aclose() for agent in closing), return_exceptions=True
+                    )
 
     async def _close_replaced(self) -> None:
         """Close each replaced agent whose replacement is connected, is not wanted, or that
@@ -1521,8 +1548,8 @@ class Helper:
             return True
         if admission is None:
             await self._close_agents()
-        elif (previous := self._follow_consent()) is not None:
-            self._replace_agents(previous)
+        else:
+            await self._follow()
         now = self._clock()
         if self._registrations_changed() or (
             self._last_sync is None or now - self._last_sync >= _AGENT_SYNC_SECONDS
