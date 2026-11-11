@@ -1062,6 +1062,12 @@ class Helper:
                 # A client waits on this attempt's own record; a background agent's refusal of the
                 # same reason may already stand (defect B, dogfood 2026-11-11).
                 self._write_status("unavailable", error.reason, fresh=not own)
+                if error.reason == _PROFILE_CHANGED:
+                    # A REST server refused the consented revision: the stream ended unanswered,
+                    # so no client (the helper's own agents included) sees the typed refusal an
+                    # SSH relay passes on. Fetch the profile again now (at most every 30 s) so the
+                    # consent reads what changed (defect B).
+                    self._profile_changed()
                 return
             self._last_upstream_use = self._clock()
             self._write_status("ready", None)
