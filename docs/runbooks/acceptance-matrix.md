@@ -168,31 +168,44 @@ The gate, per style, after a claim-bound task started:
 The cold connect must end within its budget, served or failing open with a named phase, and the
 next call must be served. How long a cold helper takes to serve at all is reported, never gated.
 
-### Results (netns, Linux x86-64, `53fa8e2a2`)
+### Results (netns, Linux x86-64, 100 ms round trip, 30 samples per style)
 
-| RTT | Style | warm p50 / p95 (≤ 650) | warm process p95 (≤ 3200) | cold hook connect p95 (≤ 1150) | cold served p50 | `server test` p95 | Gate |
-|---|---|---|---|---|---|---|---|
-| 100 ms | ssh relay | 537 / 673 | 1481 | 1002, fails open `remote_unreachable`, next call served 7/7 | 2250 | 116 | **fail** |
-| 100 ms | ssh direct | 592 / 753 | 1763 | 1003, fails open `remote_unreachable`, next served 7/7 | 1562 | 122 | **fail** |
-| 100 ms | https relay | 491 / 536 | 1313 | 1149, fails open `remote_unreachable`, next served 7/7 | 1356 | 151 | pass |
-| 100 ms | https direct | 884 / 967 | 1917 | 683, served 7/7 | 651 | 146 | **fail** |
-| 0 ms | ssh relay | 244 / 254 | 996 | 1002, 2/4 served | 1048 | 13 | pass |
-| 0 ms | ssh direct | 280 / 303 | 1094 | 352, served 4/4 | 361 | 13 | pass |
-| 0 ms | https relay | 292 / 468 | 1614 | 1002, 3/4 served | 938 | 45 | pass |
-| 0 ms | https direct | 499 / 880 | 3567 | 930, served 4/4 | 290 | 44 | fail |
+Measured on the third engineering round's head (`5ab459ce6`) and, in the same hour, with that
+round's two changes taken out again (`-dirty`: the code of `32c74325d`); the import time and the
+CPU calibration (a fixed workload, milliseconds) show how loaded the computer was, so runs made at
+different times can be compared.
 
-At a 100 ms round trip the gate **fails** for three of the four styles: the warm startup-gate path
-costs about 250 ms of client work plus about two round trips for the claim-bound connect and one
-and a half for the status call, so it lands just above 650 ms for SSH and well above it for direct
-HTTPS (a new TLS handshake and a key read in every process). The relay over HTTPS passes. The cold
-hook path behaves as defined in every style: it ends within its budget, fails open naming
-`remote_unreachable` (before this layer the direct styles named no phase, which hooks rendered as
-this computer's service being down; fixed), and the helper it started serves the next call. `server
-test` reports round trips of 116 to 151 ms and says "within the hook budgets" (it warns above
-200 ms) while the startup gate itself exceeds 650 ms at this round trip: its warning threshold is
-too lax for a claim-bound connect. Which budget the startup gate gets on a WAN (or fewer round
-trips on the connect), and `server test`'s threshold, are owner decisions (report); the numbers are
-re-measured by the script above.
+| Code | Style | warm p50 / p95 (≤ 650) | connect / status p50 | warm process p95 (≤ 3200) | cold hook connect p50 / p95 (≤ 1150) | `server test`: new connection, slowest | import p50, calibration | Gate |
+|---|---|---|---|---|---|---|---|---|
+| after | ssh relay | 405 / 424 | 244 / 161 | 1205 | 1002 / 1003, fails open `remote_unreachable`, next served 15/15 | 347 | 486, 58 | pass |
+| after | https relay | 356 / 440 | 154 / 202 | 1208 | 1002 / 1002, fails open `remote_unreachable`, next served 15/15 | 280 | 516, 59 | pass |
+| after | ssh direct | 444 / 475 | 274 / 164 | 1400 | 1003 / 1004, fails open `remote_unreachable`, next served 15/15 | 500 | 571, 61 | pass |
+| after (again) | ssh direct | 470 / 673 | 298 / 171 | 2020 | 1002 / 1003, as above | 401 | 632, 53 | **fail** |
+| after | https direct | 873 / 936 | 678 / 199 | 2009 | 685 / 796, served 15/15 | 884 (warned) | 600, 60 | **fail** |
+| before | ssh relay | 437 / 479 | 249 / 188 | 1304 | 1003 / 1187, fails open `remote_unreachable`, next served 15/15 | 493 | 515, 64 | **fail** (cold) |
+| before | https relay | 442 / 551 | 170 / 264 | 1975 | 1002 / 1039, as above | 294 | 557, 55 | pass |
+| before | ssh direct | 420 / 433 | 249 / 170 | 1126 | 1002 / 1003, as above | 358 | 473, 54 | pass |
+| before | https direct | 852 / 889 | 643 / 208 | 1688 | 648 / 837, served 15/15 | 1500 (warned) | 504, 58 | **fail** |
+
+Both relay styles, the default for both kinds, meet the gate with room to spare. The two changes:
+the server resolved each of the computer's mount points again for every store a status read opens
+(and for every control connection of an isolated root's service), which was most of a warm status
+read's server time (45 to 56 ms, now 18 to 23); and the REST client kept an idle connection only 5
+seconds, so the HTTPS relay answered every hook after a pause by opening a new TCP and TLS
+connection first. That second cost is invisible to the back-to-back samples above: after an
+8-second pause a warm HTTPS relay's connect and status took 650 to 750 ms before and about 350 ms
+after (5 samples each, the same harness's probe).
+
+The SSH direct style meets the gate at p50 and lands on either side of it at p95 with the
+computer's load (475 and 673 ms in two runs of the same code): each process starts its own `ssh -W`
+and opens its own channel, three round trips and a process start before the answer. Direct HTTPS
+**fails**: each new process makes a TCP connection and a TLS handshake, asks for its session and
+then for the status (four round trips, 400 ms at this delay) and loads the HTTPS client and does
+its own hello work first, so it cannot reach 650 ms at this round trip without fewer round trips
+(an owner decision: a longer budget for the direct style on a WAN, or relay only over a WAN). The
+cold hook path behaves as defined in every style: it ends within its budget, served or failing open
+naming `remote_unreachable`, and the next call is served. The numbers are re-measured by the script
+above; earlier rounds' tables are in the layer reports.
 
 ## Hosts on Linux
 
@@ -231,7 +244,7 @@ gate runs report-only there (its table in the summary, its JSON uploaded).
 | macOS: every cell (launchd reaping of the helper, `/private/tmp`, the Homebrew launcher path, `getpeereid` on the relay, the system trust store through Python's default verify paths, the XDG variables being ignored for FinishUP's folders, case-insensitive file systems and `O_NOFOLLOW` per component in the exporter) | maintainer, on the macOS dogfood run (#1308 follow-up) |
 | WSL 2: every cell (a distribution that stops takes the helper and service with it; systemd/linger for a session-bound endpoint; Windows-side versus Linux OpenSSH; a listener reached from Windows only as WSL forwards it) | maintainer, on a Windows machine with WSL 2 (#1308 follow-up) |
 | Host model sessions (Codex, Claude Code, Cursor) against a server elsewhere, at L1 and L2 | maintainer's dogfood run (needs host credentials) |
-| The WAN gate fails at 100 ms for SSH relay and direct and HTTPS direct; `server test`'s 200 ms threshold | owner decision (report), then the layer that changes the budget or the connect |
+| The WAN gate at 100 ms: direct HTTPS fails (four round trips per process) and direct SSH is marginal at p95; both relay styles pass | owner decision (report): the direct styles' budget on a WAN, or relay only over a WAN |
 | The terminal interface's server flows (consent at L2, `server code`, `server remove`'s question, SSH and HTTPS add) | a later layer (ADR-051, ADR-054) |
 | A check left in flight across a server restart over a remote connection (frozen operation recovery end to end) | the harness's next revision |
 | Remote cells with a live everyday policy (the everyday installation's service running, its policy zero network) | the harness's next revision; unit and integration tests cover the live read |

@@ -874,11 +874,18 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    `service_incompatible`; the MCP bridge then asks to reopen the session. Before this, a newer CLI
    and an older bridge replaced each other's helper on every use. A bridge from a build without
    this rule still does until its session is reopened.
-5. **The WAN gate (design v2 section 8.9) is measured, not yet met.** At a 100 ms round trip the
-   startup gate's warm connect and status exceeds 650 ms at p95 for the SSH styles and for direct
-   HTTPS (relay HTTPS meets it); the cold hook path ends within its budget and fails open naming
-   `remote_unreachable` in every style. The budget on a WAN, or fewer round trips on the
-   claim-bound connect, is an owner decision. `server test` compares what the gate times with the
+5. **The WAN gate (design v2 section 8.9) is met by the relay styles, not by direct HTTPS.** At a
+   100 ms round trip the startup gate's warm connect and status stays under 650 ms at p95 through
+   the helper over SSH and over HTTPS (the default for both kinds), after three rounds took out
+   round trips and work on that path: the hello leaves before the session's other envelopes are
+   parsed, the schema documents are walked once, the server resolves the computer's mount points
+   once per mount table instead of for every store a status read opens, and the one REST client
+   keeps an idle connection 25 seconds (under the edge's 30) instead of 5, so a hook after a pause
+   finds the helper's connection warm. Direct SSH meets it at p50 and is marginal at p95 with the
+   computer's load; direct HTTPS does not (four round trips in every new process: TCP, TLS, the
+   session and the status). The cold hook path ends within its budget and fails open naming
+   `remote_unreachable` in every style. The direct styles' budget on a WAN, or relay only over a
+   WAN, is an owner decision. `server test` compares what the gate times with the
    gate's 650 ms: a new connection and one status in each of five new processes
    (`client.connection_timing`, after the imports; never this folder's claim), the slowest of
    them. It used to compare one warm status round trip with 200 ms, which missed the connection's
