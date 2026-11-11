@@ -334,13 +334,29 @@ counted on its own, section 2.4) and its revision.
   was sent, so never "nothing was sent"), and so is every later request on that connection, never
   sent; every other call already sent over it ends as `server_authorization_changed`, whose
   outcome is unknown and which is never resent.
+- **Which continuation a changed profile names** (after the macOS dogfood of 2026-11-11). Every
+  surface resolves the continuation of `server_profile_changed` by the target's consent as this
+  computer holds it (`targets.profile_change_continuation`, read through
+  `targets.remote_root_continuation` for the active root; hook-safe, file reads only). When the
+  consent step already refuses on what this computer holds (a wider or changed profile, another
+  issuer, a level above the consent, a consent missing or unreadable), it is `remote_reconsent`:
+  only the owner agrees again. When it still admits the cached profile, the refusal was the
+  server's, naming a revision this computer has not fetched: what changed is not known yet, and
+  the refresh such a refusal asks for may show only a narrowing this computer adjusts to by
+  itself. It is then `remote_profile_checking`: FinishUP is checking what changed, so the agent
+  repeats the same request (the server did no work for it) and follows the next refusal's
+  continuation, never asking the owner on the first, ambiguous one. That token is attached by the
+  client that knows the target's state, never through a reason code; the registry keeps
+  `server_profile_changed` → `remote_reconsent`. A command naming a target (`server connect
+  NAME`, `server status NAME`) resolves by that record.
 - **Consent only on the trusted console.** With a kind open (a later layer; tests here) and a
   profile source for it (none in this release), `server add` and `server use` check the address
   and remote paths (SRV-11), this computer's zero-network state (SRV-3), fetch the profile, refuse
   before any console what this release cannot agree to, show the versioned disclosure with what
   the profile means in this release's own words only (design v2 section 8.8), ask the add-time
   outside-read question, and take the typed name; the terminal interface reads it on its loop
-  thread (SRV-6). Agents only ever get the `remote_reconsent` directive.
+  thread (SRV-6). Agents only ever get the `remote_reconsent` directive (or
+  `remote_profile_checking`, which asks them only to repeat the request).
 - **The per-repository override map** is the per-target `repositories.json` of decision 5's hold:
   with one remote level its only override is L0 (`keep`); layer 6 adds L1/L2 entries with their
   own consent.
@@ -418,6 +434,7 @@ through them (or carry `ConnectionAuthorization` itself, FR-2). The protocol reg
 reason code and one continuation; `REMOTE_CONNECTION_PHASES` and the admitted `phase` safe details
 (`AUTHORIZATION_REFUSAL_PHASES`) gain the hold and the changed authorization, and every surface
 renders all six phases alike. Layer 3 adds `server_profile_changed` and `server_level_unavailable`
-(eight phases), the continuations `remote_reconsent` and `server_level_decision_required`, the
+(eight phases), the continuations `remote_reconsent` and `server_level_decision_required` (and
+`remote_profile_checking`, attached by the client, decision 10), the
 control error code `server_profile_changed`, the `server_profile` method and the `server-profile`
 schema.

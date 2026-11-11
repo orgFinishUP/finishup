@@ -892,6 +892,23 @@ _DIRECTIVES: Final = (
             "terminal. Never agree for them."
         ),
     ),
+    # The same phase while this computer's copy of that server's profile still agrees with the
+    # consent: the server names a revision this computer has not fetched, so whether the owner
+    # must agree again is not known yet. Attached by ``targets.remote_root_continuation``, never
+    # through a reason code (ADR-052 decision 10).
+    RecoveryDirective(
+        token="remote_profile_checking",
+        directive=(
+            "The selected FinishUP server elsewhere changed what it offers, so this request was "
+            "refused before that server did any work for it. FinishUP is checking what changed; "
+            "repeat the same request in a few seconds."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "If the next refusal says remote_reconsent, only the owner agrees again; if this one "
+            "repeats, tell them. Never agree for them."
+        ),
+    ),
     RecoveryDirective(
         token="server_level_decision_required",
         directive=(
