@@ -502,7 +502,9 @@ process to the default service.
   server. The five transport outages (`remote_unreachable`, `remote_auth_failed`,
   `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) reach the
   SessionStart texts, MCP results and the CLI with their own continuations, never a local service
-  to start.
+  to start. In the direct style `remote_unreachable` carries `remote_direct_slow` instead: the
+  direct style is slow on that network and `finishup server set NAME --style relay` is the remedy
+  (layer 7, the owner's WAN-gate decision; same code path on every host, ADR-052 decision 24.5).
 - **HTTPS and port servers (layer 5, ADR-053).** Supported, same code path as every host and as SSH;
   no registration change. Claude Code's hooks, its MCP bridge and CLI calls from its shell reach an
   HTTPS or port server through the same helper (relay, the default: they keep dialling a Unix

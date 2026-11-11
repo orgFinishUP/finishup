@@ -2492,6 +2492,33 @@ def _key_refused_line(kind: str, name: str) -> str:
     return f"The server answered and refused this client's key; {fix}."
 
 
+# What a direct-style connection that did not answer in time looks like in a probe: the
+# connection's own deadline (``remote_unreachable``) or the probe's bound (``timeout``).
+_DIRECT_TIMEOUT_PHASES: Final = frozenset({"remote_unreachable", "timeout"})
+
+
+def _direct_style(target: Mapping[str, JsonValue]) -> bool:
+    connection = target.get("connection")
+    return isinstance(connection, Mapping) and connection.get("style") == "direct"
+
+
+def direct_style_slow_line(name: str, *, answered: bool) -> str:
+    """The plain line of a slow direct-style connection and its remedy (the owner's decision,
+    2026-11-11): the direct style opens a connection per program, which a slow network makes
+    slow; ``finishup server set NAME --style relay`` keeps one for every program instead."""
+
+    head = (
+        "The direct style is slow on this network"
+        if answered
+        else f"{name} did not answer in time in the direct style, which is slow on this network"
+    )
+    return (
+        f"{head}: each program here opens its own connection to that server. Run 'finishup "
+        f"server set {name} --style relay' (the default) so this computer's FinishUP helper keeps "
+        "one connection for every program."
+    )
+
+
 def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
     """The owner display of a status document, a remote target's outside reads included.
 
@@ -2540,6 +2567,8 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
         )
     lines.extend(consent_lines(target))
     lines.extend(connection_lines(target))
+    if _direct_style(target) and probe["phase"] in _DIRECT_TIMEOUT_PHASES:
+        lines.append(direct_style_slow_line(str(target["name"] or "NAME"), answered=False))
     lines.extend(outside_read_lines(target))
     lines.extend(repository_lines(target))
     if document["selection_overridden"]:
@@ -2776,6 +2805,9 @@ def server_test(
             err=True,
         )
         raise typer.Exit(_UNAVAILABLE)
+    target = cast(dict[str, JsonValue], document["target"])
+    direct = _direct_style(target)
+    target_name = str(target["name"] or "NAME")
     # What the required startup gate times (design v2 section 8.9): a new process's connection
     # and a status, after its imports. The round trip above is one warm status only; a new
     # connection adds its handshake's round trips (and, relayed, the server's new channel) and
@@ -2787,6 +2819,8 @@ def server_test(
         typer.echo(
             f"A new connection did not answer a status call ({error.reason}{phase}).", err=True
         )
+        if direct and error.phase in _DIRECT_TIMEOUT_PHASES:
+            typer.echo(direct_style_slow_line(target_name, answered=False), err=True)
         raise typer.Exit(_UNAVAILABLE) from None
     bound = round(STARTUP_GATE_SECONDS * 1000)
     slowest = max(times)
@@ -2799,6 +2833,8 @@ def server_test(
             f"Warning: {slowest} ms is above the {bound} ms the required startup gate allows for "
             "a connection and a status; agent tools would likely be denied."
         )
+        if direct:
+            typer.echo(direct_style_slow_line(target_name, answered=True))
     else:
         typer.echo(
             f"Within the startup gate's {bound} ms for a new connection and status; a task's "

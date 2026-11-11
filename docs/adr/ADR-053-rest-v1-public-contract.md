@@ -563,7 +563,8 @@ advertises.
    needs a receipt-document version bump.
 9. The server copy and its code sync over REST are built and released in layer 6 (ADR-054),
    offered only by a server whose owner enables it. Layer 7 measured the WAN timing gate (not met
-   for direct HTTPS at a 100 ms round trip; ADR-052 decision 24) and ran an upgrade over running
+   for direct HTTPS at a 100 ms round trip; the owner accepted it as a reported result for the
+   direct styles, with the relay remedy shown to the user: ADR-052 decision 24) and ran an upgrade over running
    helpers. Not built: adding an HTTPS server from the terminal interface; OAuth credential
    sources; an official service (another repository).
 

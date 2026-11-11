@@ -53,7 +53,9 @@ outcome is unknown; later requests use the current selection. `remote_reconsent`
 server offers or needs changed since the user agreed to use it, so the request was refused before
 that server did any work for it. `server_level_decision_required`: it requires more than they
 agreed to, so nothing was sent. For both, only the user agrees again, with `finishup server use`
-in their own terminal. Never switch servers, agree for the user
+in their own terminal. `remote_direct_slow`: the server did not answer in time in the direct
+style, which is slow on that network; tell the user that `finishup server set NAME --style relay`
+is the remedy. Never switch servers or styles, agree for the user
 or change a privacy policy for the user.
 
 Typed continuation pointers resolve to these small topics: startup and identity to

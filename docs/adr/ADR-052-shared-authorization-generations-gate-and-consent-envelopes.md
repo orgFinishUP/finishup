@@ -901,8 +901,21 @@ gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each hold
    `remote_unreachable` in every style, timed through the hook's call and its close (re-measured
    with the independently reviewed harness, which counts a sample only when it was measured and
    served or failed open as an outage, and needs every next call served: no verdict changed).
-   The direct styles' budget on a WAN, or relay only over a
-   WAN, is an owner decision. `server test` compares what the gate times with the
+   **The owner decided (2026-11-11): accept it and tell the user.** No budget changes. Relay stays
+   the default and must pass the gate; the direct styles stay available, and for them the gate is
+   a measured, reported result (`scripts/acceptance/wan_gate.py` marks them `reported: within` or
+   `reported: over`, never pass or fail). When FinishUP meets or measures a slow direct
+   connection it says so plainly and names `finishup server set NAME --style relay` as the
+   remedy: a direct-style `remote_unreachable` carries the continuation `remote_direct_slow`
+   instead of `remote_server_test` on every surface that names it (CLI text and `--json`, MCP,
+   hooks, the terminal interface and the menu: `targets.remote_root_continuation`, attached by the
+   client that knows the style, never through a reason code); `server status` adds the line when
+   a direct probe did not answer in time (the probe now keeps the phase its connection named);
+   `server test` adds it when a direct new connection misses the gate's 650 ms or does not answer.
+   A refusal, a refused key or a changed identity keeps its own way back. Receipts are not
+   involved: a connection that did not answer records nothing. The owner's words: "if it has
+   issues it should bring them to the user; it's agentic, so with bad internet it won't work
+   anyway." `server test` compares what the gate times with the
    gate's 650 ms: a new connection and one status in each of five new processes
    (`client.connection_timing`, after the imports; never this folder's claim), the slowest of
    them. It used to compare one warm status round trip with 200 ms, which missed the connection's

@@ -5783,7 +5783,12 @@ From layer 4 an SSH server's transport raises the five outage phases, and every 
 admitted `AUTHORIZATION_REFUSAL_PHASES` admits all of `REMOTE_CONNECTION_PHASES`, each outage with
 its fixed `refusal_summary` and its own continuation (`remote_server_test`,
 `remote_credential_repair`, `remote_identity_verify`, `remote_service_start_required`,
-`remote_release_mismatch`), never a local service to start (ADR-052 decision 18).
+`remote_release_mismatch`), never a local service to start (ADR-052 decision 18). From layer 7,
+`remote_unreachable` while the root is a server elsewhere reached in the direct style resolves to
+`remote_direct_slow` instead (`targets.DIRECT_STYLE_SLOW_CONTINUATION`, chosen by
+`targets.remote_root_continuation` from the target's `config/connection-style.json`, never
+through a reason code): the direct style is slow on this network, and `finishup server set NAME
+--style relay` is the remedy (the owner's WAN-gate decision, ADR-052 decision 24.5).
 The check-time change gains the
 unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`, so
 `check_time_change_unavailable_workspace_agent_unavailable` and

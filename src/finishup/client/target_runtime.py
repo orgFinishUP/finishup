@@ -244,7 +244,9 @@ class LocalTargetRuntime:
                 outcome: ProbeOutcome = (
                     "not_running" if error.reason == "service_unavailable" else "unavailable"
                 )
-                return ProbeResult(outcome, reason=error.reason)
+                # A server elsewhere names why it could not be reached (``remote_unreachable``,
+                # say): kept, so 'server status' can name it and its way back.
+                return ProbeResult(outcome, reason=error.reason, phase=error.phase)
             except TimeoutError:
                 return ProbeResult("unavailable", reason="service_unavailable", phase="timeout")
             samples: list[float] = []

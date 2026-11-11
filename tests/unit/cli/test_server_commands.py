@@ -2096,3 +2096,103 @@ def test_server_test_names_a_new_connection_that_did_not_answer(
         in tested.stderr
     )
     assert "Within" not in tested.stdout
+
+
+def _direct(name: str = "lab") -> None:
+    from finishup.client.helper_status import write_connection_style
+
+    lab = targets.find_target(name)
+    assert lab is not None
+    write_connection_style(targets.target_root(lab.target_id), "direct")
+
+
+_RELAY_REMEDY = (
+    "Run 'finishup server set lab --style relay' (the default) so this computer's FinishUP "
+    "helper keeps one connection for every program."
+)
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_test_says_the_direct_style_is_slow_here_and_names_the_relay_style(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """The owner's WAN-gate decision (2026-11-11): the direct style stays available and relay
+    stays the default; when 'server test' measures a direct connection slower than the startup
+    gate allows, it says so plainly and names the relay style as the remedy. A relayed target
+    that is slow is not told to switch to the style it already uses."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    if style == "direct":
+        _direct()
+    runtime.new_connection_times = (540, 610, 826, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Warning: 826 ms is above the 650 ms" in tested.stdout
+    if style == "direct":
+        assert (
+            "The direct style is slow on this network: each program here opens its own "
+            "connection to that server. " + _RELAY_REMEDY
+        ) in tested.stdout
+    else:
+        assert "--style relay" not in tested.output
+
+
+def test_server_test_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    _direct()
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "lab did not answer in time in the direct style, which is slow on this network: each "
+        "program here opens its own connection to that server. " + _RELAY_REMEDY
+    ) in tested.stderr
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "named"),
+    [
+        ("direct", "remote_unreachable", True),
+        ("direct", "timeout", True),
+        ("direct", "remote_auth_failed", False),
+        ("relay", "remote_unreachable", False),
+    ],
+)
+def test_server_status_says_a_direct_connection_that_did_not_answer_in_time_is_slow_here(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, named: bool
+) -> None:
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    document = _status_json("lab")
+    assert cast(dict[str, JsonValue], document["probe"])["phase"] == phase
+    text = "\n".join(server_cli.status_lines(document))
+    assert (_RELAY_REMEDY in text) is named
+
+
+def test_a_remote_probe_keeps_the_phase_its_connection_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'server status' of a server elsewhere names why it could not be reached: the probe keeps
+    the connection's phase (it dropped it, so a direct timeout read as a stopped service)."""
+
+    from finishup.client import target_runtime
+    from finishup.ports.control import ControlError
+
+    async def refuse(*_arguments: object, **_options: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
+
+    monkeypatch.setattr("finishup.service.client.connect_service", refuse)
+    result = target_runtime.LocalTargetRuntime().probe(None)
+    assert (result.outcome, result.reason, result.phase) == (
+        "not_running",
+        "service_unavailable",
+        "remote_unreachable",
+    )

@@ -935,6 +935,19 @@ _DIRECTIVES: Final = (
         nudge="Never fall back to another server or a local service for this request.",
     ),
     RecoveryDirective(
+        token="remote_direct_slow",
+        directive=(
+            "The selected server did not answer in time in the direct style (a connection per "
+            "program), which is slow on this network. Ask the owner to run 'finishup server set "
+            "NAME --style relay', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Never change the style or switch servers for the owner; 'finishup server test' shows "
+            "each step."
+        ),
+    ),
+    RecoveryDirective(
         token="remote_credential_repair",
         directive=(
             "The selected FinishUP server refused this client's credentials. Ask the owner to run "
