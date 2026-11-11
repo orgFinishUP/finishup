@@ -2096,4 +2096,3 @@ def test_server_test_names_a_new_connection_that_did_not_answer(
         in tested.stderr
     )
     assert "Within" not in tested.stdout
-
