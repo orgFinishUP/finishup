@@ -465,7 +465,10 @@ the owner's agent), its stderr in `log/helper.stderr`, and resolves every path u
   (`state/helper-epoch`, `yoetz.helper-epoch/1`, a random token), which the helper reads on its
   one-second tick and stops for; no process is ever signalled. A stop succeeds only once the lock
   is seen free (a lock held under an unreadable stamp is not "stopped"); one that does not see it
-  free in time is `target_still_connected` (`remove` then removes nothing). A helper is spawned
+  free in time is `target_still_connected` (`remove` then removes nothing). A stopping helper closes
+  its background agents, then waits at most 1.5 seconds for their connections to end on their own,
+  so an HTTPS or port target's agent is unregistered at the server (the REST stream's courtesy
+  `DELETE`, ADR-053) before what is left is cancelled (u5). A helper is spawned
   with the epoch its spawner read (`helper run --epoch`, hidden); one that finds another epoch once
   it holds the lock (a stop came while it was starting) records `stopped`/`stop_requested` and
   exits without binding or sending anything, so a stop also fences a pending start. The OpenSSH
