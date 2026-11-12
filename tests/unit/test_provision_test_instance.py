@@ -416,7 +416,16 @@ def test_a_launcher_not_pinned_to_this_disposable_root_is_refused_unchanged(
 
 
 @pytest.mark.parametrize(
-    "where", ["missing-parent", "existing-copy", "regular-file", "open-folder", "inside-tag"]
+    "where",
+    [
+        "missing-parent",
+        "existing-copy",
+        "regular-file",
+        "open-folder",
+        "read-only-folder",
+        "inside-tag",
+        "parent-not-writable",
+    ],
 )
 def test_an_unusable_log_destination_is_refused_before_the_service_is_stopped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, where: str
@@ -436,6 +445,14 @@ def test_an_unusable_log_destination_is_refused_before_the_service_is_stopped(
     elif where == "open-folder":
         destination.mkdir(mode=0o755)
         destination.chmod(0o755)
+    elif where == "read-only-folder":
+        destination.mkdir(mode=0o500)
+        destination.chmod(0o500)
+    elif where == "parent-not-writable":
+        if os.geteuid() == 0:
+            pytest.skip("the superuser can write any folder")
+        (tmp_path / "locked").mkdir(mode=0o500)
+        destination = tmp_path / "locked" / "logs"
     else:
         # Disposal removes the whole tag folder, retained logs included.
         destination = layout["root"] / "retained"
@@ -711,5 +728,79 @@ def test_an_enumeration_that_times_out_after_the_withdrawal_puts_the_launchers_b
 
     monkeypatch.setattr(_MODULE, "_processes_using", slow)
     with pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use_unverifiable: "):
+        _dispose(layout)
+    _unchanged(layout)
+
+
+def test_without_any_way_to_enumerate_disposal_refuses_even_with_no_lease_held(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+
+    def unknown(_root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(_MODULE, "_processes_using", unknown)
+    with pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use_unverifiable: "):
+        _dispose(layout)
+    _unchanged(layout)
+
+
+def test_finishing_an_unmarked_remainder_still_refuses_while_a_host_runs_a_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 3: the path that finishes after the identity marker went checks for
+    runtime users too, not only the service lock."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    (layout["state"] / "state" / "instance-identity.json").unlink()
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+    with (
+        _other_process(_lease(layout)),
+        pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use: "),
+    ):
+        _dispose(layout)
+    assert layout["state"].is_dir()
+
+
+def test_a_resumed_disposal_rewrites_a_missing_progress_record_before_deleting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    (layout["root"] / _MODULE._PROGRESS).unlink()
+    runner = _Runner(layout, _status())
+    runner.dispose_exit = 1
+    runner.dispose_out = {}
+    seen: list[bool] = []
+    runner.on_dispose = lambda: seen.append((layout["root"] / _MODULE._PROGRESS).is_file())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with pytest.raises(_MODULE.ProvisionError, match="^instance_dispose_incomplete: "):
+        _dispose(layout)
+    assert seen == [True]
+
+
+def test_a_rollback_before_any_deletion_also_drops_this_run_s_progress_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 3: a record written but not synced must not make the next run treat
+    the instance as begun."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+    real = _MODULE._write_progress
+
+    def written_then_failed(path: Path, body: dict[str, object]) -> None:
+        real(path, body)
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(_MODULE, "_write_progress", written_then_failed)
+    with pytest.raises(OSError, match="fsync"):
         _dispose(layout)
     _unchanged(layout)

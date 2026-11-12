@@ -549,9 +549,8 @@ def _refuse_in_use(tag_root: Path, releases: Path, status: dict[str, object]) ->
     users = _processes_using(tag_root)
     held = _held_leases(releases)
     if users is None:
-        if held:
-            raise _fail(_IN_USE if pid is None else _UNVERIFIABLE)
-        return
+        # Without a way to enumerate, nothing can be shown to be unused.
+        raise _fail(_IN_USE if held and pid is None else _UNVERIFIABLE)
     allowed = {os.getpid()}
     if pid is not None:
         tree = _process_tree(pid)
@@ -692,11 +691,13 @@ def _check_logs_destination(logs: Path, tag_root: Path, installation_id: object)
         if (
             not stat.S_ISDIR(facts.st_mode)
             or facts.st_uid != os.geteuid()
-            or stat.S_IMODE(facts.st_mode) & 0o077
+            or stat.S_IMODE(facts.st_mode) != 0o700
         ):
-            problem = "it exists and is not a folder only you can read and write"
+            problem = "it exists and is not a folder only you can read and write (mode 700)"
         elif (logs / str(installation_id)).exists():
             problem = "it already holds a copy of this instance's logs"
+    elif not os.access(logs.parent, os.W_OK | os.X_OK):
+        problem = "it cannot be created in its parent folder"
     if problem is not None:
         raise _fail(
             f"retain_logs_invalid: --retain-logs cannot be used: {problem}; nothing was changed"
@@ -789,6 +790,8 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
                     },
                 )
             except BaseException:
+                # Nothing was stopped or removed: drop this run's progress record, put them back.
+                progress.unlink(missing_ok=True)
                 os.rename(withdrawn, bin_dir)
                 raise
     elif resumed and state.exists() and marker.is_file() and _pinned_to(runtime) is not None:
@@ -801,6 +804,17 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
             if logs is not None:
                 _check_logs_destination(logs, layout["root"], status.get("installation_id"))
             _checked(layout["root"], releases, status)
+            if _read_progress(progress) is None:
+                # An earlier run stopped before its record was complete; write it before any
+                # deletion, so another interruption can still be finished.
+                _write_progress(
+                    progress,
+                    {
+                        "state": str(state),
+                        "installation_id": status.get("installation_id"),
+                        "identity": list(_directory_identity(state) or ()),
+                    },
+                )
     elif resumed and _held_leases(releases) and not state.exists():
         raise _fail(_STILL_RUNNING)
     ran = _runtime_launcher(runtime, _WITHDRAWN_BIN)
@@ -824,6 +838,9 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
             )
         if _lock_held(state / "state" / "service.lock"):
             raise _fail("instance_service_running: a service still holds the remaining root")
+        users = _processes_using(layout["root"])
+        if users is None or set(users) - {os.getpid()} or _held_leases(releases):
+            raise _fail(_STILL_RUNNING)
         shutil.rmtree(state)
         outcome = {"disposed": True, "state": "removed", "resumed": True}
     elif state.exists():

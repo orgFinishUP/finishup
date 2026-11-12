@@ -170,8 +170,8 @@ state and the pin. The script works in four steps:
    - the root is persistent or disposable (`instance_not_disposable`);
    - a `--retain-logs` folder is usable (`retain_logs_invalid`):
      - it lies outside the instance's folder, which disposal removes;
-     - its parent exists;
-     - if it exists, it is a folder only you can read and write;
+     - its parent exists, and lets you create it there;
+     - if it exists, it is a folder only you can read and write (mode 700);
      - it holds no copy of these logs yet;
    - no process other than the instance's own service and its children uses the runtime
      (`runtime_in_use`).
@@ -181,9 +181,9 @@ state and the pin. The script works in four steps:
    holds a retained runtime copy's lease for its whole life. A command that serves nothing holds
    no lease, so it is seen only while it has one of the runtime's files open or mapped; that part
    is best effort. The script reads `/proc` on Linux and `lsof` on macOS.
-   - **When that cannot be determined:** `runtime_in_use_unverifiable`, for example a held lease
-     that no visible process accounts for. Stop the service with the launcher (`service stop`),
-     close the host sessions, and retry.
+   - **When that cannot be determined:** `runtime_in_use_unverifiable`. Examples: there is no
+     `/proc` or `lsof`, a held lease no visible process accounts for, or a listing that times out.
+     Stop the service with the launcher (`service stop`), close the host sessions, and retry.
    - **What it cannot see:**
      - another account's processes, and processes this account cannot inspect;
      - a command that holds no lease and keeps none of the runtime's files open or mapped;
