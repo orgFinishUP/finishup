@@ -244,7 +244,8 @@ same.
 **Not changed, open for the owner.** Two paths remain, both changes to decisions 2 and 4 that
 this amendment does not make.
 - `finishup instance dispose` run directly still removes the pin from the runtime that ran it
-  (decision 4, "Reverse states"), and that runtime then resolves ambient.
+  (decision 4, "Reverse states"), and that runtime then resolves ambient, or the owner's server
+  selection on a build with server targets.
 - A process already running from a pinned runtime reads the pin each time it resolves its root,
   so it would resolve ambient once the pin is gone. The script refuses while one runs. In the
   product, the process would have to keep the root it started with.

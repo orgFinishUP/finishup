@@ -373,8 +373,8 @@ state and the pin. The script works in four steps:
 - `dispose` refuses roots without a persistent or disposable marker: it cannot remove the everyday
   install or an unlabeled ADR-026 root.
 - `finishup instance dispose --root <root>` run directly removes the pin from the runtime that ran
-  it (ADR-028 decision 4). That runtime then runs ambient, so a test instance's own runtime must
-  be disposed through this script.
+  it (ADR-028 decision 4). That runtime then runs ambient, or against the server the owner has
+  selected, so a test instance's own runtime must be disposed through this script.
 - A FinishUP process already running from the runtime reads the pin each time it resolves its
   root. Disposal therefore refuses while one runs (step 1). Making such a process keep the root it
   started with is a question for the owner (ADR-028 amendment of 2026-11-12).
