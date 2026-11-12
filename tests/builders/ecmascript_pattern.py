@@ -18,16 +18,20 @@ and raises ``ECMAPatternError`` for what such an engine refuses:
   ``(?:``, ``(?=``, ``(?!``, ``(?<=``, ``(?<!`` and ``(?<name>``, a duplicate or invalid group name;
 - a class range whose end is a class escape (``[\\w-a]``) or that runs backwards.
 
-What it does not check: whether a ``\\p{…}`` property name is one the engine knows; ES2025
-duplicate group names in separate alternatives (refused here, stricter than such engines);
-whether the pattern means the same in Python and in ECMAScript (``$`` before a final newline,
-``\\d``/``\\w``/``\\s`` on non-ASCII text, which differ between them); and the ``v`` flag's grammar.
-A test that can run a real engine checks the same patterns with it as well.
+What it does not check: whether a ``\\p{…}`` property name is one the engine knows; whether the
+pattern means the same in Python and in ECMAScript (``$`` before a final newline,
+``\\d``/``\\w``/``\\s`` on non-ASCII text, which differ between them); and the ``v`` flag's
+stricter class grammar (``v`` is not what JSON Schema validators use, and the advertised schemas do
+not follow it). It is stricter than a current engine, refusing what such an engine may accept:
+ES2025 modifier groups (``(?i:…)``), duplicate group names in separate alternatives, and group
+names outside ASCII or written with ``\\u`` escapes. A test that can run a real engine checks the
+same patterns with it as well.
 """
 
 from __future__ import annotations
 
 import re
+import string
 from typing import Final
 
 __all__ = ["ECMAPatternError", "check_unicode_pattern"]
@@ -214,7 +218,7 @@ class _Parser:
             return _CONTROL[mark]
         if mark == "c":
             letter = self.peek()
-            if letter is None or not ("a" <= letter.lower() <= "z"):
+            if letter is None or letter not in string.ascii_letters:
                 raise self.fail("\\c needs an ASCII letter")
             self.at += 1
             return ord(letter) % 32
