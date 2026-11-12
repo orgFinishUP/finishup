@@ -182,22 +182,28 @@ contributor tooling under decision 5, now disposes in this order:
 1. **Check, changing nothing.**
    - One disposal of a tag runs at a time.
    - The launcher must be pinned to this root and installation, the root marked persistent or
-     disposable, and a `--retain-logs` destination usable.
+     disposable, and a `--retain-logs` destination usable and outside the instance.
    - No process other than the instance's own service tree may have a file of the instance open or
-     mapped. That covers bridges, hooks and upgrades through their retained runtime leases, and
-     commands that serve nothing through the runtime's mapped modules. The script reads `/proc` on
-     Linux and `lsof` elsewhere.
-   - An unaccounted held lease, or no way to enumerate, refuses as
+     mapped. The script reads `/proc` on Linux and `lsof` elsewhere.
+   - That reliably covers every serving process (bridges, hooks, upgrades and the service hold a
+     retained runtime lease for life). It covers lease-free commands only while they keep a
+     runtime file open or mapped, which is best effort.
+   - An unaccounted held lease, or an enumeration that fails, refuses as
      `runtime_in_use_unverifiable`.
-   - Not seen: another account's processes, and hosts registered but not running.
+   - Not seen: processes of another account or that cannot be inspected, and hosts registered but
+     not running.
 2. **Withdraw the launchers.** `runtime/bin` is renamed in one step, so no registration can start
    the runtime. The pin stays. The check runs again before anything is stopped; on a refusal the
    launchers are put back.
 3. **Remove the root** through the runtime's own `dispose_instance`, keeping the pin. A runtime
    whose pin names a removed root fails closed (decision 2).
-   - Only a typed refusal, raised before any deletion, puts the launchers back.
-   - Any other failure leaves them withdrawn. A rerun finishes from a progress record written
-     beside the root, even after the identity marker is gone.
+   - A typed refusal, raised before any deletion, puts the launchers back, but only in the run
+     that withdrew them and only if no earlier run began.
+   - Any other failure leaves them withdrawn. A rerun checks for hosts again before it touches
+     anything.
+   - The rerun finishes from a progress record written atomically before this step, even after
+     the identity marker is gone. The record binds the root folder's device and inode, so it never
+     authorizes removing a replacement at the same path.
 4. **Prune** the retained runtimes, then **remove** the withdrawn launchers and the runtime with its
    pin, last.
 

@@ -177,7 +177,7 @@ class _Runner:
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         runtime = self.layout["runtime"]
-        if args[1:3] == ["instance", "status"]:
+        if args[-3:] == ["instance", "status", "--json"]:
             self.calls.append("status")
             return subprocess.CompletedProcess(args, 0, json.dumps(self.status).encode(), b"")
         script = args[-2] if len(args) >= 2 and args[-2].startswith("import") else args[-1]
@@ -415,7 +415,9 @@ def test_a_launcher_not_pinned_to_this_disposable_root_is_refused_unchanged(
     _unchanged(layout)
 
 
-@pytest.mark.parametrize("where", ["missing-parent", "existing-copy"])
+@pytest.mark.parametrize(
+    "where", ["missing-parent", "existing-copy", "regular-file", "open-folder", "inside-tag"]
+)
 def test_an_unusable_log_destination_is_refused_before_the_service_is_stopped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, where: str
 ) -> None:
@@ -426,8 +428,17 @@ def test_an_unusable_log_destination_is_refused_before_the_service_is_stopped(
     destination = tmp_path / "logs"
     if where == "missing-parent":
         destination = tmp_path / "absent" / "logs"
+    elif where == "existing-copy":
+        (destination / _INSTALLATION).mkdir(parents=True, mode=0o700)
+        destination.chmod(0o700)
+    elif where == "regular-file":
+        destination.write_text("", encoding="utf-8")
+    elif where == "open-folder":
+        destination.mkdir(mode=0o755)
+        destination.chmod(0o755)
     else:
-        (destination / _INSTALLATION).mkdir(parents=True)
+        # Disposal removes the whole tag folder, retained logs included.
+        destination = layout["root"] / "retained"
     with pytest.raises(_MODULE.ProvisionError, match="^retain_logs_invalid: "):
         _dispose(layout, retain_logs=str(destination))
     assert runner.calls == ["status"]
@@ -599,3 +610,106 @@ def test_create_over_a_half_disposed_tag_refuses_before_touching_it(
     # Nothing was removed: the next dispose finishes what the earlier one started.
     assert (layout["runtime"] / _MODULE._WITHDRAWN_BIN / "finishup").is_file()
     assert (layout["runtime"] / _MODULE._PIN_NAME).is_file()
+
+
+def _withdrawn_midway(layout: dict[str, Path]) -> None:
+    """What an earlier run that stopped after withdrawing the launchers leaves behind."""
+
+    os.rename(layout["runtime"] / "bin", layout["runtime"] / _MODULE._WITHDRAWN_BIN)
+    identity = list(_MODULE._directory_identity(layout["state"]) or ())
+    _MODULE._write_progress(
+        layout["root"] / _MODULE._PROGRESS,
+        {"state": str(layout["state"]), "installation_id": _INSTALLATION, "identity": identity},
+    )
+
+
+def test_a_resumed_disposal_checks_for_hosts_again_before_touching_the_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 2: a bridge that started before an interrupted run withdrew the
+    launchers is still found when a later run resumes, before anything is stopped."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    runner = _Runner(layout, _status(pid=None))
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with (
+        _other_process(_lease(layout)),
+        pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use: "),
+    ):
+        _dispose(layout)
+    assert runner.calls == ["status"]
+    assert (layout["state"] / "state" / "instance-identity.json").is_file()
+
+
+def test_a_typed_refusal_on_a_resumed_disposal_never_puts_the_launchers_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 2: a typed refusal precedes deletion within one run, not across runs;
+    after an earlier run began, the launchers stay withdrawn."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    runner = _Runner(layout, _status())
+    runner.dispose_exit = 3
+    runner.dispose_out = {"refused": "instance_root_invalid"}
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with pytest.raises(_MODULE.ProvisionError, match="^instance_dispose_incomplete: "):
+        _dispose(layout)
+    assert not (layout["runtime"] / "bin").exists()
+    assert (layout["runtime"] / _MODULE._WITHDRAWN_BIN).is_dir()
+
+
+def test_a_progress_record_never_authorizes_removing_a_replacement_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 2: the record names one folder by device and inode, not by path."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    os.rename(layout["state"], tmp_path / "moved-aside")
+    layout["state"].mkdir()
+    (layout["state"] / "unrelated.txt").write_text("keep\n", encoding="utf-8")
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+    with pytest.raises(_MODULE.ProvisionError, match="^instance_not_disposable: "):
+        _dispose(layout)
+    assert (layout["state"] / "unrelated.txt").is_file()
+
+
+def test_a_damaged_progress_record_refuses_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    (layout["state"] / "state" / "instance-identity.json").unlink()
+    (layout["root"] / _MODULE._PROGRESS).write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+    with pytest.raises(_MODULE.ProvisionError, match="^instance_not_disposable: "):
+        _dispose(layout)
+    assert layout["state"].is_dir()
+
+
+def test_an_enumeration_that_times_out_after_the_withdrawal_puts_the_launchers_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex review, round 2: any failure of the second check, not only a refusal, restores."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+    calls: list[int] = []
+
+    def slow(_root: Path) -> dict[int, set[str]]:
+        calls.append(1)
+        if len(calls) == 2:
+            raise subprocess.TimeoutExpired(["lsof"], 180)
+        return {}
+
+    monkeypatch.setattr(_MODULE, "_processes_using", slow)
+    with pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use_unverifiable: "):
+        _dispose(layout)
+    _unchanged(layout)

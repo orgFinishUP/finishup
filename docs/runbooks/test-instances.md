@@ -168,20 +168,26 @@ state and the pin. The script works in four steps:
    script runs the snapshot's own `instance status` and requires:
    - the launcher is pinned to this very root and installation (`instance_not_pinned`);
    - the root is persistent or disposable (`instance_not_disposable`);
-   - a `--retain-logs` folder is usable: its parent exists and it holds no copy of these logs yet
-     (`retain_logs_invalid`);
+   - a `--retain-logs` folder is usable (`retain_logs_invalid`):
+     - it lies outside the instance's folder, which disposal removes;
+     - its parent exists;
+     - if it exists, it is a folder only you can read and write;
+     - it holds no copy of these logs yet;
    - no process other than the instance's own service and its children uses the runtime
      (`runtime_in_use`).
 
-   "Uses" means any process with a file of the instance open or mapped: a host's MCP bridge, a
-   hook or an upgrade (each holds a retained runtime copy's lease), and a command that serves
-   nothing but runs the runtime (it maps the runtime's modules). The script reads `/proc` on Linux
-   and `lsof` on macOS.
+   "Uses" means any process with a file of the instance open or mapped. That reliably covers
+   every serving process: a host's MCP bridge, a hook, an upgrade and the service, each of which
+   holds a retained runtime copy's lease for its whole life. A command that serves nothing holds
+   no lease, so it is seen only while it has one of the runtime's files open or mapped; that part
+   is best effort. The script reads `/proc` on Linux and `lsof` on macOS.
    - **When that cannot be determined:** `runtime_in_use_unverifiable`, for example a held lease
      that no visible process accounts for. Stop the service with the launcher (`service stop`),
      close the host sessions, and retry.
-   - **What it cannot see:** another account's processes, and a host that is registered but not
-     running.
+   - **What it cannot see:**
+     - another account's processes, and processes this account cannot inspect;
+     - a command that holds no lease and keeps none of the runtime's files open or mapped;
+     - a host that is registered but not running.
    - **Every refusal here changes nothing.** The instance stays in place and pinned, and its
      service keeps running.
 2. **Withdraw the launchers.** `runtime/bin` is renamed to `runtime/.bin-withdrawn` in one step,
@@ -197,8 +203,14 @@ state and the pin. The script works in four steps:
      when the holder does not release within the window. The launchers are put back, and the
      instance is still in place and pinned: stop that runtime's service and retry.
    - **Any other failure** (`instance_dispose_incomplete`) may have removed part of the instance,
-     so the launchers stay withdrawn. Run `dispose` again: it finishes from the progress record it
-     wrote (`.disposing.json`), even if the root's identity marker is already gone.
+     so the launchers stay withdrawn.
+   - **Run `dispose` again.** It checks for hosts again before it stops or removes anything. Once a
+     run has begun, the launchers are never put back, even on a typed refusal.
+   - **The progress record.** The rerun finishes from the record written before step 3
+     (`.disposing.json`), even if the root's identity marker is already gone. The record is
+     written atomically and synced, and it names the root folder by device and inode, so it never
+     authorizes removing another folder at that path. A missing or damaged record refuses
+     (`instance_not_disposable`) rather than guessing.
 4. **Prune and remove.** The script prunes unused retained release runtimes with the runtime's own
    lease-aware cleanup, then removes the withdrawn launchers, the runtime with its pin, and the
    wheel.
