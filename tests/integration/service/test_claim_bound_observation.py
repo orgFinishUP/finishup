@@ -275,7 +275,11 @@ async def _start(connection: ServiceClient, client: _Client) -> Any:  # noqa: AN
             "external_ref": "claim-bound-observation",
         }
     )
-    started = (await connection.start(start_request_for_connection(request, connection))).root
+    started = (
+        await connection.start(
+            start_request_for_connection(request, connection, serving=client.path)
+        )
+    ).root
     assert started.ok is True, started
     return started
 
@@ -534,6 +538,7 @@ async def test_a_row_naming_a_replaced_session_of_the_claims_task_is_delivered(
                         }
                     ),
                     connection,
+                    serving=client.path,
                 )
             )
         ).root
