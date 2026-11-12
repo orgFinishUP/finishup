@@ -735,6 +735,13 @@ The review of layer 4 (Codex, findings B1 to B5) made these binding:
 13. Real OpenSSH was exercised on Linux only (the capability tests against a private `sshd`, and an
     end-to-end run); macOS and WSL 2 have no recorded run (layer 7), and PR CI does not run the
     capability tests.
+14. A changed profile reaches this computer through a refusal, and its fetch takes time. In the
+    direct style a helper that serves no workspace learns of a narrowing only from a client's
+    refusal; its fetch over SSH (an OpenSSH connection and the server's own `finishup` start) took
+    3 to 4 seconds on Linux, so a request repeated sooner than that may be refused
+    `remote_profile_checking` again. A helper whose background agent is connected usually learns
+    first and adjusts before the next call. The 2-second wait after the last fetch (decision 17)
+    bounds how often refusals can make it fetch.
 
 ## Reverse states
 
