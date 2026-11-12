@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -123,6 +124,49 @@ def _tree_of(prepared: PreparedExport, tmp_path: Path) -> dict[str, str]:
 
 def _content(tmp_path: Path, name: str) -> bytes:
     return git_bytes(tmp_path / "receiver", "show", f"refs/heads/s:{name}")
+
+
+def _base_content(tmp_path: Path, name: str) -> bytes:
+    return git_bytes(tmp_path / "receiver", "show", f"refs/heads/s^:{name}")
+
+
+# A file system may refuse a name that is not valid UTF-8 (APFS on macOS: EILSEQ; ext4 with
+# strict case folding: EINVAL), and fold case (APFS, NTFS through WSL). Git still holds such names
+# in its index, as a repository made on Linux and cloned there does; the cases below are built that
+# way where the file system cannot hold them, so every system runs them (macOS run, 2026-11-12).
+
+
+def _unsafe_name_in_worktree(root: Path, raw: bytes, data: bytes) -> str | None:
+    """A file named ``raw`` (not valid UTF-8) in the worktree, or None where the file system
+    refuses the name."""
+
+    name = os.fsdecode(raw)
+    try:
+        (root / name).write_bytes(data)
+    except OSError as error:
+        if error.errno in {errno.EILSEQ, errno.EINVAL}:
+            return None
+        raise
+    return name
+
+
+def _in_git_only(root: Path, name: str, data: bytes) -> str:
+    """``name`` in git's index only, with no file in the worktree; its blob id."""
+
+    blob = git_bytes(root, "hash-object", "-w", "--stdin", stdin=data).decode().strip()
+    git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
+    return blob
+
+
+def _folds_case(root: Path) -> bool:
+    """Whether ``root``'s file system treats two names that differ only by case as one file."""
+
+    probe = root / ".Case-Probe"
+    probe.write_bytes(b"")
+    try:
+        return (root / ".case-probe").exists()
+    finally:
+        probe.unlink()
 
 
 # --- names and content ------------------------------------------------------------------------------
@@ -268,21 +312,26 @@ def test_a_known_secret_is_held_out_until_the_owner_allows_that_exact_content(
     assert changed.manifest.lists["held_for_content"] == ("config/aws.ini",)
 
 
+@pytest.mark.parametrize("held_in", ["worktree", "git_only"])
 def test_an_excluded_or_unsafe_base_file_is_never_read_from_git(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held_in: str
 ) -> None:
-    unsafe = os.fsdecode(b"\xff-latin.txt")
+    unsafe_data = b"u" * 20_000
     root = _repository(
         tmp_path,
         {"a.txt": b"a\n", "certs/big.pem": b"p" * 20_000, "dump/data.sql": b"d" * 20_000},
     )
-    (root / unsafe).write_bytes(b"u" * 20_000)
-    git(root, "add", "-A")
+    if held_in == "worktree":
+        if _unsafe_name_in_worktree(root, b"\xff-latin.txt", unsafe_data) is None:
+            pytest.skip("this file system refuses names that are not valid UTF-8 (git_only runs)")
+        git(root, "add", "-A")
+    else:
+        _in_git_only(root, os.fsdecode(b"\xff-latin.txt"), unsafe_data)
     git(root, "commit", "-q", "-m", "unsafe")
     excluded = {
         git(root, "rev-parse", f"HEAD:{name}") for name in ("certs/big.pem", "dump/data.sql")
     }
-    excluded.add(git(root, "hash-object", unsafe))
+    excluded.add(git_bytes(root, "hash-object", "--stdin", stdin=unsafe_data).decode().strip())
     requested: list[str] = []
     original = code_export._Exporter._cat_blobs  # pyright: ignore[reportPrivateUsage]
 
@@ -324,7 +373,9 @@ def test_an_excluded_worktree_file_is_never_opened_hashed_or_looked_up(
     (root / "private").mkdir()
     (root / "private" / "asset.bin").write_bytes(content)
     (root / "local.pem").write_bytes(b"untracked key\n")
-    (root / os.fsdecode(b"\xfe-untracked.txt")).write_bytes(b"u\n")
+    if _unsafe_name_in_worktree(root, b"\xfe-untracked.txt", b"u\n") is None:
+        # This file system refuses the name; git still holds it (a clone of a Linux repository).
+        _in_git_only(root, os.fsdecode(b"\xfe-untracked.txt"), b"u\n")
     opened: list[bytes] = []
     hashed: list[bytes] = []
     looked_up: list[str] = []
@@ -496,11 +547,56 @@ def test_special_and_multiply_linked_files_are_never_read(tmp_path: Path) -> Non
 
 
 def test_case_collisions_keep_the_first_name_only(tmp_path: Path) -> None:
-    root = _repository(tmp_path, {"README": b"upper\n", "readme": b"lower\n", "z.txt": b"z\n"})
+    root = _repository(tmp_path, {"README": b"upper\n", "z.txt": b"z\n"})
+    if _folds_case(root):
+        # Two names that differ only by case are one file here: git's index still holds both.
+        _in_git_only(root, "readme", b"lower\n")
+        git(root, "commit", "-q", "-m", "case")
+    else:
+        (root / "readme").write_bytes(b"lower\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "case")
     prepared = _export(root, tmp_path)
     tree = _tree_of(prepared, tmp_path)
     assert set(tree) == {"README", "z.txt"}
     assert prepared.manifest.lists["case_collision"] == ("readme",)
+
+
+def test_two_index_names_one_file_on_disk_send_that_file_once_under_the_first_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the export does on a case-insensitive file system (APFS) when git's index holds two
+    names that differ only by case, run on every system by reading both names from one file.
+
+    A checkout there writes ``README`` and then ``readme`` into the same file, so the disk holds
+    ``readme``'s bytes under the name ``README``. The base (read from git) keeps ``README``'s own
+    blob; the current tree keeps the first name with the bytes on disk, so the copy shows
+    ``README`` changed, as ``git status`` does on that file system. The other name is held and
+    listed (``case_collision``), never sent; an excluded name is held under every case, since
+    exclusions match case-insensitively."""
+
+    root = _repository(tmp_path, {"README": b"upper\n", "z.txt": b"z\n"})
+    _in_git_only(root, "readme", b"lower\n")
+    _in_git_only(root, ".env", b"TOKEN=held\n")
+    _in_git_only(root, ".ENV", b"TOKEN=held\n")
+    git(root, "commit", "-q", "-m", "case")
+    (root / "README").write_bytes(b"lower\n")  # what the case-insensitive checkout left
+    read = code_export._read_beneath  # pyright: ignore[reportPrivateUsage]
+    opened: list[bytes] = []
+
+    def one_file_for_both(root_fd: int, relative: bytes, limit: int) -> object:
+        opened.append(relative)
+        return read(root_fd, b"README" if relative.lower() == b"readme" else relative, limit)
+
+    monkeypatch.setattr(code_export, "_read_beneath", one_file_for_both)
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert set(tree) == {"README", "z.txt"}
+    assert _content(tmp_path, "README") == b"lower\n"
+    assert _base_content(tmp_path, "README") == b"upper\n"
+    assert prepared.manifest.lists["case_collision"] == ("readme",)
+    assert {".ENV", ".env"} <= set(prepared.manifest.lists["excluded"])
+    assert b".env" not in opened and b".ENV" not in opened
 
 
 def test_lfs_files_are_sent_as_their_pointers_only(tmp_path: Path) -> None:
@@ -602,7 +698,9 @@ def test_lfs_pointers_are_recognized_without_any_attribute(
 
 def test_names_that_are_not_safe_tree_entries_are_counted_not_sent(tmp_path: Path) -> None:
     root = _repository(tmp_path, {"a.txt": b"a\n"})
-    (root / os.fsdecode(b"\xff-latin.txt")).write_bytes(b"x\n")
+    if _unsafe_name_in_worktree(root, b"\xff-latin.txt", b"x\n") is None:
+        # This file system refuses the name; git still holds it (a clone of a Linux repository).
+        _in_git_only(root, os.fsdecode(b"\xff-latin.txt"), b"x\n")
     prepared = _export(root, tmp_path)
     assert set(_tree_of(prepared, tmp_path)) == {"a.txt"}
     assert prepared.manifest.counts["unrepresentable"] == 1
