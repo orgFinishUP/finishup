@@ -446,6 +446,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "workspace_agent_unavailable",
     "workspace_binding_conflict",
     "workspace_ref_not_portable",
+    "workspace_ref_not_served",
     "workspace_task_exists",
     "zero_network_remote_selected",
 )
@@ -519,8 +520,9 @@ assert AUTHORIZATION_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
 # (``zero_network_remote_selected``) and the remote kinds this release keeps closed
 # (``remote_kind_unavailable``); then the repository hold and the owner's kept choice
 # (``repository_egress_held``, ``repository_egress_kept``) and the end of a connection whose
-# authorization changed (``server_authorization_changed``, ADR-052).
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 374
+# authorization changed (``server_authorization_changed``, ADR-052); rule R's
+# ``workspace_ref_not_served`` (run u8).
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 375
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -699,7 +701,11 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "server_reauthorization_required",
         "server_selection_overridden",
         "workspace_binding_correction",
+        # Rule R (run u8): a start named a folder its connection to a server elsewhere does not
+        # serve. The command form is the reason's default; the MCP bridge attaches its own.
+        "workspace_folder_run_required",
         "workspace_handle_required",
+        "workspace_not_served_tell_user",
         "zero_network_local_server_required",
         "repository_send_decision_required",
         "repository_kept_on_this_computer",
@@ -884,6 +890,7 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         # lives, the selected server target, and the phases of a failed remote connection.
         "workspace_binding_conflict": "workspace_binding_correction",
         "workspace_ref_not_portable": "workspace_handle_required",
+        "workspace_ref_not_served": "workspace_folder_run_required",
         "requires_server_host": "server_host_command_required",
         "target_root_is_remote": "remote_target_no_local_service",
         "target_reauthorization_required": "server_reauthorization_required",

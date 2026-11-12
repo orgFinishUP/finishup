@@ -215,7 +215,10 @@ async def test_a_claim_bound_connection_sends_no_path_and_answers_workspace_call
                 "external_ref": "host-session:1",
             }
         )
-        assert start_request_for_connection(start, client).workspace_ref == handle
+        assert (
+            start_request_for_connection(start, client, serving=os.fspath(repository)).workspace_ref
+            == handle
+        )
     finally:
         await client.close()
 
