@@ -530,8 +530,14 @@ def agent_events(server: Server, since: str) -> tuple[int, int]:
 # sync for all of it, and its reads were then answered from a stale copy: macOS dogfood).
 STOPPED_START_SECONDS = 15.0
 # After a narrowing the first start may be refused once (the server's refusal is the first news of
-# it); the profile is then fetched within about 2 seconds and the start is served within this.
-NARROWED_SERVED_SECONDS = 10.0
+# it); the profile is then fetched within seconds, and the start repeated a few seconds later is
+# served within this of the server being ready: one refused attempt, the repeat's wait and one
+# whole start with its sync.
+NARROWED_SERVED_SECONDS = 15.0
+# The second narrowing is ready at most this long after the helper's fetch for the first, so the
+# old 30-second floor would have held for 8 more seconds: long enough for the repeated start to be
+# refused again, which "refused at most once" then catches.
+NARROWED_WITHIN_SECONDS = 22.0
 # How long a caller waits before it repeats a request refused remote_profile_checking ("repeat
 # the same request in a few seconds").
 REPEAT_SECONDS = 3.0
@@ -625,68 +631,92 @@ def stopped_helper_tasks(world: World, report: Report, cell: Cell) -> None:
     """Four ways this client stops or loses what it runs for a server, each followed by a task at
     once (macOS dogfood: a stopped helper's REST agent stayed registered at the server, which sent
     the next start's sync to it and waited out the 60-second prepare deadline, then answered the
-    task's reads from a stale copy). Each start is bounded by ``STOPPED_START_SECONDS``, its
-    receipt counts reads of the server's copy and ``stale_copy_read 0``, and the server recorded
-    no sync that ended ``deadline_exceeded`` or ``agent_disconnected``."""
+    task's reads from a stale copy). Before each, a task starts a fresh helper whose background
+    agent the server registered; the action must succeed, and a stop (not the kill) must leave the
+    server recording that agent unregistered. Each start is then bounded by
+    ``STOPPED_START_SECONDS``, its receipt counts reads of the server's copy and
+    ``stale_copy_read 0``, and the server recorded no sync that ended ``deadline_exceeded`` or
+    ``agent_disconnected``."""
 
     client, server = world.client, world.server(cell)
     name = cell.target
     root = client.target_root(name)
     target_id = "" if root is None else root.name
+    other_style = "relay" if cell.style == "direct" else "direct"
 
-    def warm() -> bool:
-        """The helper runs (a call starts it when the last step left none); its background agent
-        registers on its first tick, which the caller leaves time for."""
+    def warm(label: str) -> tuple[bool, str]:
+        """A fresh helper, started by a task, whose background agent the server registered."""
 
-        if own_helper(root, target_id) is None:
-            client.fu("service", "status", "--json", timeout=120)
-        return wait_until(lambda: own_helper(root, target_id) is not None, seconds=30)
+        client.fu("server", "disconnect", name)
+        wait_until(lambda: helper_pid(root) is None, seconds=15)
+        since = now_rfc3339()
+        task, result = start_task(world, f"Acceptance {cell.name} before {label}")
 
-    def use_again() -> str:
+        def registered() -> bool:
+            done, gone = agent_events(server, since)
+            return done >= 2 and gone >= 1 and done - gone >= 1
+
+        agent = wait_until(registered, seconds=60, interval=0.5)
+        running = own_helper(root, target_id) is not None
+        done, gone = agent_events(server, since)
+        return (
+            task.ok and agent and running,
+            f"warmed: start exit {result.returncode}, helper running {running}, its background "
+            f"agent registered at the server {agent} ({done} registered, {gone} unregistered)",
+        )
+
+    def use_again() -> tuple[bool, str]:
         other = client.fu("server", "use", "local")
         back = client.ceremony(
             ["server", "use", name], [Reply(r"Type the target name", name, secret=False)]
         )
-        return f"server use local exit {other.returncode}; server use {name} exit {back.exit_code}"
+        return (
+            other.returncode == 0 and back.exit_code == 0,
+            f"server use local exit {other.returncode}; server use {name} exit {back.exit_code}",
+        )
 
-    def set_direct() -> str:
-        result = client.fu("server", "set", name, "--style", "direct")
-        return f"server set --style direct exit {result.returncode}"
+    def set_style() -> tuple[bool, str]:
+        result = client.fu("server", "set", name, "--style", other_style)
+        return result.returncode == 0, f"server set --style {other_style} exit {result.returncode}"
 
-    def kill_helper() -> str:
+    def kill_helper() -> tuple[bool, str]:
         pid = own_helper(root, target_id)
         if pid is None:
-            return "no helper of this run to kill"
+            return False, "no helper of this run to kill"
         os.kill(pid, signal.SIGKILL)
         gone = wait_until(lambda: helper_pid(root) is None, seconds=10, interval=0.1)
-        return f"helper killed (SIGKILL): {gone}"
+        return gone, f"helper killed (SIGKILL): {gone}"
 
-    def disconnect() -> str:
+    def disconnect() -> tuple[bool, str]:
         result = client.fu("server", "disconnect", name)
-        return f"server disconnect exit {result.returncode}"
+        return result.returncode == 0, f"server disconnect exit {result.returncode}"
 
     triggers = [
-        ("server disconnect", disconnect),
-        ("server set --style direct", set_direct),
-        ("server use local, then this server again", use_again),
-        ("helper killed", kill_helper),
+        ("server disconnect", disconnect, True),
+        (f"server set --style {other_style}", set_style, True),
+        ("server use local, then this server again", use_again, True),
+        ("helper killed", kill_helper, False),
     ]
-    for label, action in triggers:
-        warmed = warm()
-        time.sleep(2.0)  # the helper's background agent registers on its first tick
+    for label, action, unregisters in triggers:
+        warmed, warmth = warm(label)
         since = now_rfc3339()
-        done = action()
+        acted, done = action()
+        # A stop unregisters the helper's agent at the server before it ends (its REST stream's
+        # courtesy DELETE); a killed helper cannot, and its agent is left to the server's lease.
+        unregistered = agent_events(server, since)[1]
+        cleaned = unregistered >= 1 if unregisters else True
         ok, detail, transcript = copy_task(world, cell, label)
         events = server.copy_events(since)
         offline = [e for e in events if "deadline_exceeded" in e or "agent_disconnected" in e]
         report.add(
             f"{label} → task at once",
-            warmed and ok and not offline,
-            f"helper warm before: {warmed}; {done}; {detail}; copy events: "
-            f"{', '.join(events) or 'none'}",
+            warmed and acted and cleaned and ok and not offline,
+            f"{warmth}; {done}; agents the server unregistered by then: {unregistered}"
+            f"{' (one at least expected)' if unregisters else ' (none can be)'}; {detail}; copy "
+            f"events: {', '.join(events) or 'none'}",
             transcript,
         )
-        if label == "server set --style direct" and cell.style != "direct":
+        if label.startswith("server set --style"):
             client.fu("server", "set", name, "--style", cell.style)
     # The warm step that follows starts its own helper, as after the zero-network step before.
     client.fu("server", "disconnect", name)
@@ -777,11 +807,13 @@ def narrowed_twice(world: World, report: Report, cell: Cell) -> None:
     checking = all(item == "server_profile_changed/remote_profile_checking" for item in refusals)
     after = consented_revision()
     moved = after is not None and after != before
+    # The old 30-second floor would still hold long enough to refuse the repeated start too: a
+    # pass here cannot come from the floor running out.
     report.add(
         "narrowing 2 within 30 s → refused at most once, then served",
         restarted
         and since_fetch is not None
-        and since_fetch < 30.0
+        and since_fetch < NARROWED_WITHIN_SECONDS
         and served is not None
         and served <= NARROWED_SERVED_SECONDS
         and len(refusals) <= 1
@@ -789,7 +821,8 @@ def narrowed_twice(world: World, report: Report, cell: Cell) -> None:
         and moved,
         f"server restarted narrower: {restarted}; ready "
         + (f"{since_fetch:.1f} s" if since_fetch is not None else "unknown time")
-        + " after the helper's profile fetch for narrowing 1; refusals before the start was "
+        + " after the helper's profile fetch for narrowing 1 (under "
+        + f"{NARROWED_WITHIN_SECONDS:.0f} s required); refusals before the start was "
         + f"served: {refusals or 'none'}; served "
         + (f"{served:.1f} s after the server was ready" if served is not None else "never")
         + f" (bound {NARROWED_SERVED_SECONDS:.0f} s); the consent followed the new revision by "
