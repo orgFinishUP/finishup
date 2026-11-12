@@ -13,6 +13,7 @@ from finishup.ports.change_capture import TaskChangeBase
 from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
 from finishup.ports.workspace_agent import (
     WORKSPACE_OPERATION_NAMES,
+    CodeSyncReadArguments,
     RunApprovedCheckArguments,
     WorkspaceAgentUnavailable,
     WorkspaceOnlyArguments,
@@ -685,3 +686,311 @@ async def test_a_frame_is_written_whole_when_its_caller_stops_waiting() -> None:
     release.set()
     await _until(lambda: len(finished) == 2)
     assert finished == ["written", "written"]
+
+
+async def test_an_agent_whose_authorization_lapsed_mid_task_leaves_the_typed_gap(
+    tmp_path: object,
+) -> None:
+    """ADR-052: an agent whose own connection's authorization lapses (its repository held, the
+    selection moved) answers ``workspace_unavailable`` between the connection's checks; the hub
+    types that loss, and a check that needed the read records the existing
+    ``workspace_agent_unavailable`` gap every receipt format names (no new receipt field)."""
+
+    import os
+    import subprocess
+    from pathlib import Path
+
+    from finishup.application import check_change
+    from finishup.client.workspace_agent import WorkspaceAgentHandler
+    from finishup.domain.receipts import (
+        check_time_change_gap_sentence,
+        check_time_change_unavailable_reason_gap,
+    )
+    from finishup.ports.control import WorkspaceLocator
+
+    root = Path(str(tmp_path)) / "project"
+    root.mkdir()
+    subprocess.run(
+        ("git", "init", "--quiet"),
+        cwd=root,
+        check=True,
+        env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "HOME": os.fspath(root)},
+    )
+
+    class _Authorization:
+        def __init__(self) -> None:
+            self.phase: str | None = None
+
+        def refusal(self) -> str | None:
+            return self.phase
+
+    authorization = _Authorization()
+    agent = WorkspaceAgentHandler(
+        WorkspaceLocator(os.fspath(root.resolve())),
+        protected=(os.fspath(Path(str(tmp_path)) / "state"),),
+        own_authorization=authorization,
+    )
+    hub = _hub()
+    await _register(
+        hub,
+        lambda call: agent.answer(call, workspace_handle=_HANDLE),
+        declaration=agent.declaration,
+    )
+    # Before the lapse the agent answers from the workspace.
+    await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=5.0)
+
+    authorization.phase = "repository_egress_held"
+    with pytest.raises(WorkspaceAgentUnavailable) as lapsed:
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=5.0)
+    assert (lapsed.value.reason, lapsed.value.agent_reason) == (
+        "agent_unavailable",
+        "workspace_unavailable",
+    )
+    reason = check_change._agent_loss_reason(lapsed.value)  # pyright: ignore[reportPrivateUsage]
+    assert reason == "workspace_agent_unavailable"
+    sentence = check_time_change_gap_sentence(check_time_change_unavailable_reason_gap(reason))
+    assert sentence is not None and "workspace agent on the client machine" in sentence
+    assert os.fspath(root) not in sentence
+
+
+# --- ADR-052: a connection's agent and the helper's background agent never compete -------------
+
+
+def _background(*operations: str) -> WorkspaceAgentDeclaration:
+    names = operations or WORKSPACE_OPERATION_NAMES
+    return WorkspaceAgentDeclaration(
+        tuple(sorted(names, key=str.encode)), 6_291_456, role="background"
+    )
+
+
+async def test_background_work_goes_to_the_helpers_agent_over_a_newer_connection() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    connection: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert (len(helper), len(connection)) == (1, 0)
+
+
+async def test_a_live_call_goes_to_its_own_connections_agent_never_the_helpers() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    own: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    channel = await _register(hub, lambda call: _ok(call, _BASE), sent=own)
+
+    with live_call_scope(channel):
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0)
+
+    assert (len(helper), len(own)) == (0, 1)
+
+
+async def test_a_live_call_whose_connection_offered_no_agent_goes_to_the_helper() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    other: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background())
+    await _register(hub, lambda call: _ok(call, _BASE), sent=other)
+
+    with live_call_scope(None):
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0)
+
+    assert (len(helper), len(other)) == (1, 0)
+
+
+async def test_with_no_helper_background_work_is_answered_by_a_connection_as_before() -> None:
+    hub = _hub()
+    connection: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    base = await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert base == _BASE and len(connection) == 1
+
+
+async def test_a_helper_that_does_not_declare_the_operation_leaves_it_to_a_connection() -> None:
+    hub = _hub()
+    helper: list[WorkspaceCall] = []
+    connection: list[WorkspaceCall] = []
+    await _register(
+        hub, lambda call: _ok(call, _BASE), sent=helper, declaration=_background("capture")
+    )
+    await _register(hub, lambda call: _ok(call, _BASE), sent=connection)
+
+    await hub.call(
+        _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=2.0, background=True
+    )
+
+    assert (len(helper), len(connection)) == (0, 1)
+
+
+# --- ADR-054: only the helper syncs; a call waits (bounded) for the helper's agent --------------
+
+_COPY_OPERATIONS = frozenset({"code_sync_prepare", "code_sync_read"})
+_READ = CodeSyncReadArguments(_HANDLE, "0" * 32, 0, 4)
+
+
+def _connection_agent() -> WorkspaceAgentDeclaration:
+    return _declaration(
+        *(name for name in WORKSPACE_OPERATION_NAMES if name not in _COPY_OPERATIONS)
+    )
+
+
+async def test_a_sync_waits_for_the_helpers_agent_while_only_the_connection_is_up() -> None:
+    hub = _hub(wait=5.0)
+    own: list[WorkspaceCall] = []
+    helper: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=own, declaration=_connection_agent())
+    pending = asyncio.create_task(
+        hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    )
+    for _ in range(8):  # let the call reach its wait (a refusal would finish it here)
+        await asyncio.sleep(0)
+    assert not pending.done()  # waiting for the helper's agent, not refused
+    await _register(hub, lambda call: _ok(call, b"abcd"), sent=helper, declaration=_background())
+
+    assert await asyncio.wait_for(pending, 5.0) == b"abcd"
+    assert (len(own), len(helper)) == (0, 1)
+
+
+async def test_a_helper_agent_that_does_not_declare_the_sync_is_refused_at_once() -> None:
+    hub = _hub(wait=5.0)
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=_connection_agent())
+    level_l1_helper = _background(
+        *(name for name in WORKSPACE_OPERATION_NAMES if name not in _COPY_OPERATIONS)
+    )
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=level_l1_helper)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "operation_not_declared"
+    assert loop.time() - began < 2.0
+
+
+async def test_a_helper_that_never_comes_is_not_declared_and_no_client_is_offline() -> None:
+    hub = _hub(wait=0.2)
+    channel = await _register(hub, lambda call: _ok(call, _BASE), declaration=_connection_agent())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "operation_not_declared"
+    await hub.unregister(channel)
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "no_agent"
+    # Every other operation keeps its exact answer: refused at once, never waited for.
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=_declaration("capture"))
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=1.0)
+    assert caught.value.reason == "operation_not_declared"
+
+
+# --- a newer helper agent takes over a call an older one left unanswered (macOS dogfood) -------
+
+
+async def test_a_call_left_on_a_silent_helper_agent_goes_on_at_a_newer_one() -> None:
+    """A helper stopped without unregistering its agent (the edge keeps it until its lease ends):
+    the call goes on at the replacement's agent once it registers, with the time it has left,
+    not after the whole deadline. The older channel stays open; its late answer is dropped."""
+
+    hub = _hub()
+    stale: list[WorkspaceCall] = []
+    fresh: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, sent=stale, declaration=_background())
+    pending = asyncio.create_task(
+        hub.call(
+            _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=60.0, background=True
+        )
+    )
+    await _until(lambda: older.pending_count > 0)
+    await asyncio.sleep(0.2)  # the replacement registers some time into the call
+    await _register(hub, lambda call: _ok(call, _BASE), sent=fresh, declaration=_background())
+
+    assert await asyncio.wait_for(pending, 2.0) == _BASE
+    assert [call.operation for call in fresh] == ["read_task_base"]
+    assert fresh[0].deadline_ms <= stale[0].deadline_ms - 150  # the deadline is unchanged
+    assert older.pending_count == 0 and not older.closed
+    hub.deliver(older, _ok(stale[0], _BASE))  # its late answer is unmatched, and dropped
+
+
+async def test_an_approved_check_is_never_sent_to_a_newer_helper_agent() -> None:
+    hub = _hub()
+    fresh: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, declaration=_background())
+    arguments = RunApprovedCheckArguments(
+        "rws_" + "0" * 32,
+        ApprovedCheckApproval(
+            approval_id="unit",
+            argv=("/usr/bin/true",),
+            allow_network=False,
+            timeout_seconds=10.0,
+            approval_commitment=approval_commitment(
+                "unit", ("/usr/bin/true",), allow_network=False
+            ),
+        ),
+        "sha256:" + "4" * 64,
+        None,
+    )
+    pending = asyncio.create_task(
+        hub.call(
+            _HANDLE,
+            WorkspaceOperation.RUN_APPROVED_CHECK,
+            arguments,
+            timeout_seconds=0.3,
+            background=True,
+        )
+    )
+    await _until(lambda: older.pending_count > 0)
+    await _register(hub, lambda call: _ok(call, None), sent=fresh, declaration=_background())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.wait_for(pending, 5.0)
+    assert caught.value.reason == "deadline_exceeded"
+    assert fresh == []
+
+
+async def test_only_a_newer_helper_agent_declaring_the_operation_takes_a_call_over() -> None:
+    """A connection's agent never competes with the helper's (ADR-052 decision 12), and a helper
+    agent that does not declare the operation cannot answer it."""
+
+    hub = _hub()
+    others: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, declaration=_background())
+    pending = asyncio.create_task(
+        hub.call(
+            _HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=0.3, background=True
+        )
+    )
+    await _until(lambda: older.pending_count > 0)
+    await _register(hub, lambda call: _ok(call, _BASE), sent=others)
+    await _register(
+        hub, lambda call: _ok(call, _BASE), sent=others, declaration=_background("capture")
+    )
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.wait_for(pending, 5.0)
+    assert caught.value.reason == "deadline_exceeded"
+    assert others == []
+
+
+async def test_a_code_sync_read_is_never_taken_over_by_a_newer_helper_agent() -> None:
+    """ADR-054: a read names a snapshot only the agent that prepared it holds; a prepare is taken
+    over (``test_code_copy``), a read waits out its own deadline on the agent asked."""
+
+    hub = _hub()
+    fresh: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, declaration=_background())
+    pending = asyncio.create_task(
+        hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=0.3)
+    )
+    await _until(lambda: older.pending_count > 0)
+    await _register(hub, lambda call: _ok(call, b"abcd"), sent=fresh, declaration=_background())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.wait_for(pending, 5.0)
+    assert caught.value.reason == "deadline_exceeded"
+    assert fresh == []

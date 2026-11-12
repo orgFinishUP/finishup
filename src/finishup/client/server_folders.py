@@ -20,12 +20,12 @@ claim-bound sessions, even where the server's own input-root policy names no roo
 mode alone.
 
 The owner chooses the mode with ``finishup server folders mode NAME local|listed``; adding a
-server elsewhere asks it too, once such a server can be added (the remote kinds are closed in
-this release). There is no default per kind. An HTTPS target at an official FinishUP endpoint
-(``OFFICIAL_ENDPOINT_HOSTS``, matched by exact hostname, and only while it trusts the system
-certificate store) is not asked and is ``local`` while its owner has recorded no mode. Any other
-target with no mode recorded is ``listed`` (``not_chosen``), and a record that cannot be read is
-``listed`` with no folder: both fail closed.
+server elsewhere (SSH, HTTPS or a port) asks it too. There is no default per kind. An HTTPS
+target at an official FinishUP endpoint (``OFFICIAL_ENDPOINT_ORIGINS``, matched by scheme, host,
+port and path prefix, and only while it trusts the system certificate store) is not asked and is
+``local`` while its owner has recorded no mode. Any other target with no mode recorded is
+``listed`` (``not_chosen``), and a record that cannot be read is ``listed`` with no folder: both
+fail closed.
 
 The record is ``<target root>/config/folders.json`` (``yoetz.server-folders/1``): an owner-only
 regular file of canonical JSON with exactly ``schema``, ``target_id`` (the root's own id) and
@@ -63,13 +63,14 @@ __all__ = [
     "FOLDERS_FILE_NAME",
     "FOLDERS_SCHEMA",
     "MAX_FOLDERS",
-    "OFFICIAL_ENDPOINT_HOSTS",
+    "OFFICIAL_ENDPOINT_ORIGINS",
     "OUTSIDE_READ_MODES",
     "OUTSIDE_READ_MODE_LINES",
     "OUTSIDE_READ_QUESTION",
     "ClearOutcome",
     "FolderError",
     "FolderRecord",
+    "OfficialOrigin",
     "OutsideReadMode",
     "OutsideReadSource",
     "OutsideReads",
@@ -82,6 +83,7 @@ __all__ = [
     "mode_of",
     "official_address",
     "official_endpoint",
+    "official_preset_url",
     "outside_reads_of",
     "outside_reads_reader",
     "read_folders",
@@ -132,12 +134,53 @@ OUTSIDE_READ_MODE_LINES: Final[Mapping[OutsideReadMode, str]] = MappingProxyType
     }
 )
 
-# Hostnames of official FinishUP endpoints, whose HTTPS targets are 'local' without being asked,
-# as FinishUP on this computer would read. Reviewed by the maintainer, who adds each exact,
-# lowercase hostname here when an official hosted endpoint exists. Empty today: none exists yet.
-# A target matches only by its exact hostname, and only while it trusts the system certificate
-# store: one added with --ca-file or --tls-pin never counts as official by its hostname alone.
-OFFICIAL_ENDPOINT_HOSTS: Final[frozenset[str]] = frozenset()
+
+@dataclass(frozen=True, slots=True)
+class OfficialOrigin:
+    """One release-pinned canonical origin of an official FinishUP service (design v2 §8.8).
+
+    Scheme, host, port and path prefix: never a hostname alone. A base URL matches when its scheme
+    is ``https``, its lowercase host and its port (443 when absent) are these, and its path is the
+    prefix or lies beneath it with no ``.`` or ``..`` segment (which a client library resolves
+    away before sending, so ``/api/../other`` would reach a path outside the prefix).
+    """
+
+    host: str
+    port: int = 443
+    path_prefix: str = ""
+    scheme: str = "https"
+
+    def url(self) -> str:
+        port = "" if self.port == 443 else f":{self.port}"
+        return f"{self.scheme}://{self.host}{port}{self.path_prefix}"
+
+    def matches(self, base_url: str) -> bool:
+        try:
+            parts = urlsplit(base_url)
+            port = parts.port or (443 if parts.scheme == "https" else None)
+        except ValueError:
+            return False
+        path = parts.path.rstrip("/")
+        if any(segment in {".", ".."} for segment in path.split("/")):
+            return False
+        return (
+            parts.scheme == self.scheme == "https"
+            and (parts.hostname or "").lower() == self.host
+            and port == self.port
+            and (path == self.path_prefix or path.startswith(self.path_prefix + "/"))
+        )
+
+
+# The canonical origins of official FinishUP services, pinned by this release (design v2 §2.4 and
+# §8.8; the official service itself is built elsewhere, U8). Reviewed by the maintainer, who adds
+# one here when an official hosted service exists. **Empty today: none exists yet.** An HTTPS
+# target is official only when its base URL matches one of them and it trusts the system
+# certificate store (one added with --ca-file or --tls-pin never counts), never by the server's
+# own ``official`` claim. Being official gives ``finishup server add official`` its URL, the
+# reviewed outside-read default (``local`` while the owner recorded no mode; a mode the owner
+# recorded survives any change to this list) and the label "FinishUP official service". It never
+# skips the consent.
+OFFICIAL_ENDPOINT_ORIGINS: Final[tuple[OfficialOrigin, ...]] = ()
 
 
 class FolderError(Exception):
@@ -185,19 +228,21 @@ def official_address(
 ) -> bool:
     """Whether a target of ``kind`` at ``base_url`` is an official FinishUP endpoint.
 
-    Only an ``https`` target whose exact hostname is in ``OFFICIAL_ENDPOINT_HOSTS`` and that
-    trusts the system certificate store: one with its own ``ca_file`` or ``tls_pin`` never counts
-    by hostname. Adding such a target asks this before the target exists, to skip the mode
-    question.
+    Only an ``https`` target whose base URL matches an origin in ``OFFICIAL_ENDPOINT_ORIGINS``
+    (scheme, host, port and path prefix) and that trusts the system certificate store: one with its
+    own ``ca_file`` or ``tls_pin`` never counts. Adding such a target asks this before the target
+    exists, to skip the mode question.
     """
 
     if kind != "https" or base_url is None or ca_file is not None or tls_pin is not None:
         return False
-    try:
-        host = urlsplit(base_url).hostname
-    except ValueError:
-        return False
-    return host is not None and host in OFFICIAL_ENDPOINT_HOSTS
+    return any(origin.matches(base_url) for origin in OFFICIAL_ENDPOINT_ORIGINS)
+
+
+def official_preset_url() -> str | None:
+    """The URL ``finishup server add official`` fills in: the first pinned origin, or none."""
+
+    return OFFICIAL_ENDPOINT_ORIGINS[0].url() if OFFICIAL_ENDPOINT_ORIGINS else None
 
 
 def official_endpoint(record: ServerTarget) -> bool:

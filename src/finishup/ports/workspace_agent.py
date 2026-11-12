@@ -94,6 +94,12 @@ from finishup.protocol.canonical import (
     parse_canonical_integer_string,
     strict_json_parse,
 )
+from finishup.protocol.server_copy import (
+    CopyError,
+    SnapshotManifest,
+    manifest_from_json,
+    manifest_to_json,
+)
 
 __all__ = [
     "MAX_WORKSPACE_DEADLINE_MS",
@@ -115,6 +121,10 @@ __all__ = [
     "CaptureArguments",
     "CaptureMetadataArguments",
     "CheckPolicyRead",
+    "CodeSyncPrepareArguments",
+    "CodeSyncPrepared",
+    "CodeSyncReadArguments",
+    "MAX_CODE_SYNC_CHUNK_BYTES",
     "ClassifyUndeclaredReferencesArguments",
     "CountChangeLinesArguments",
     "InspectArguments",
@@ -163,6 +173,15 @@ MAX_WORKSPACE_DEADLINE_MS: Final = 300_000
 
 _KIB: Final = 1024
 _MIB: Final = 1024 * 1024
+# Level L2's sync (ADR-054): a prepared bundle is read in chunks that fit one frame as base64.
+MAX_CODE_SYNC_CHUNK_BYTES: Final = 3 * _MIB
+MAX_CODE_SYNC_BUNDLE_BYTES: Final = 64 * _MIB
+_MAX_CODE_SYNC_HAVE: Final = 16
+_OBJECT_ID: Final = re.compile(r"^[0-9a-f]{40}$")
+_COMMIT: Final = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_ISSUER: Final = re.compile(r"^[0-9a-f]{32}$")
+_SYNC_ID: Final = re.compile(r"^[0-9a-f]{32}$")
+_SHA256_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Bounds the adapters enforce, mirrored as reviewed literals (the adapters are service modules a
 # port does not import); a test holds each equal to its source.
 _MAX_REQUESTED_PATH_PROBES: Final = 64  # git_change_capture._MAX_REQUESTED_PATH_PROBES
@@ -314,6 +333,10 @@ WORKSPACE_AGENT_UNAVAILABLE_REASONS: Final[frozenset[str]] = frozenset(
         "hub_unavailable",
         # The control call this call served was cancelled or ran out of time; it was abandoned.
         "call_cancelled",
+        # Level L2 (ADR-054): the task's evidence is pinned to the server's copy, and the copy
+        # could not serve this read (its checkout or snapshot could not be read). The read is a
+        # gap, never answered with the client's live bytes instead.
+        "code_copy_unavailable",
     }
 )
 
@@ -374,9 +397,12 @@ class WorkspaceOperation(str, Enum):  # noqa: UP042 - exact wire enum
     LIST_CHANGED_PATHS = "list_changed_paths"
     INSPECT = "inspect"
     RUN_APPROVED_CHECK = "run_approved_check"
+    # copy: level L2's sync, answered only by the helper's background agent (ADR-054).
+    CODE_SYNC_PREPARE = "code_sync_prepare"
+    CODE_SYNC_READ = "code_sync_read"
 
 
-type WorkspaceOperationFamily = Literal["git", "reads", "observation"]
+type WorkspaceOperationFamily = Literal["git", "reads", "observation", "copy"]
 type WorkspaceReplyOutcome = Literal["ok", "unavailable", "refused", "failed"]
 
 WORKSPACE_OPERATION_NAMES: Final[tuple[str, ...]] = tuple(
@@ -389,6 +415,13 @@ WORKSPACE_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
     {
         "arguments_invalid",
         "check_not_approved",
+        # Level L2's sync (ADR-054): checked by the helper before anything is read for export.
+        "code_copy_not_consented",
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+        "server_profile_changed",
+        "zero_network_remote_selected",
         "operation_not_declared",
         "operation_unknown",
         "root_not_admitted",
@@ -403,6 +436,9 @@ WORKSPACE_UNAVAILABLE_REASONS: Final[frozenset[str]] = frozenset(
     | {limitation.value for limitation in SubjectStateLimitation}
     | {
         "agent_busy",
+        "code_copy_too_large",
+        "code_export_failed",
+        "code_sync_unknown",
         "deadline_exceeded",
         "handle_unknown",
         "policy_absent",
@@ -749,11 +785,17 @@ class OutsideInputsRead:
     input was admitted to the agent. Reported only for a value the local outside-input candidate
     rule would look at, outside the claimed workspace and FinishUP's own directories; never which
     folder, never a path the server did not send.
+
+    ``fenced`` is how many of the call's ``values`` the agent left unread because they reached a
+    repository this client's owner holds from the server (ADR-052 O7; ``client.repository_hold``):
+    a count only, never which value or which repository. Required on the wire (control 2.10.0,
+    unreleased, changes in lockstep), at most the call's value bound.
     """
 
     inputs: tuple[TaskInputFile, ...] = field(repr=False)
     unlisted: tuple[int, ...] = ()
     listed: tuple[int, ...] = ()
+    fenced: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,11 +808,13 @@ class OutsideSnapshotsRead:
     not anything is there now and whether or not a local read would read it, since the server
     would send its copy, not the file (ADR-051 decision 5). Never narrowed by this machine's
     files, it tells the server no more than ``listed`` does, beside the mode; empty in ``local``
-    mode. A task-start snapshot simply keeps no copy of such a value."""
+    mode. A task-start snapshot simply keeps no copy of such a value. ``fenced`` is as for
+    ``OutsideInputsRead``."""
 
     reads: tuple[OutsideSnapshotRead, ...] = field(repr=False)
     unlisted: tuple[int, ...] = ()
     listed: tuple[int, ...] = ()
+    fenced: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,6 +879,98 @@ class OpenWorkspaceArguments:
     def __post_init__(self) -> None:
         _handle(self.workspace)
         _bool(self.admitted_home_project)
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSyncPrepareArguments:
+    """Build a sanitized snapshot of the claimed workspace for the server's copy (level L2).
+
+    ``purpose`` is the boundary that needs it (``base``: the task base; ``check``: a check);
+    ``have`` the snapshot commits the server's copy holds (the have-set an incremental bundle is
+    made against); ``base_commit`` the original commit the task started from (``None``: the
+    current ``HEAD``); the revision triple is the profile revision the server issues now, which
+    the helper compares with the one its owner consented to before anything is read.
+    """
+
+    workspace: str
+    purpose: Literal["base", "check"]
+    have: tuple[str, ...]
+    base_commit: str | None
+    issuer: str
+    revision: int
+    profile_digest: str
+
+    def __post_init__(self) -> None:
+        _handle(self.workspace)
+        if self.purpose not in {"base", "check"} or type(self.have) is not tuple:
+            raise _fail()
+        if len(self.have) > _MAX_CODE_SYNC_HAVE or list(self.have) != sorted(set(self.have)):
+            raise _fail()
+        if any(type(item) is not str or not _OBJECT_ID.match(item) for item in self.have):
+            raise _fail()
+        if self.base_commit is not None and (
+            type(self.base_commit) is not str or not _COMMIT.match(self.base_commit)
+        ):
+            raise _fail()
+        if type(self.issuer) is not str or not _ISSUER.match(self.issuer):
+            raise _fail()
+        _int(self.revision, 1, 2**53 - 1)
+        if type(self.profile_digest) is not str or not _SHA256_DIGEST.match(self.profile_digest):
+            raise _fail()
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSyncPrepared:
+    """A snapshot ready to read (``code_sync_read``), or ``unchanged`` when the copy holds it.
+
+    ``retention_kind``/``retention_days`` are the retention the owner consented to, which the
+    server applies to the copy.
+    """
+
+    unchanged: bool
+    sync_id: str | None
+    manifest: SnapshotManifest
+    size: int
+    sha256: str | None
+    retention_kind: Literal["task_close", "days", "until_forgotten"]
+    retention_days: int | None
+
+    def __post_init__(self) -> None:
+        _bool(self.unchanged)
+        if type(self.manifest) is not SnapshotManifest:
+            raise _fail()
+        if self.unchanged:
+            if self.sync_id is not None or self.size != 0 or self.sha256 is not None:
+                raise _fail()
+        else:
+            if type(self.sync_id) is not str or not _SYNC_ID.match(self.sync_id):
+                raise _fail()
+            _int(self.size, 1, MAX_CODE_SYNC_BUNDLE_BYTES)
+            if type(self.sha256) is not str or not _SHA256_DIGEST.match(self.sha256):
+                raise _fail()
+        if self.retention_kind not in {"task_close", "days", "until_forgotten"}:
+            raise _fail()
+        if (self.retention_kind == "days") != (type(self.retention_days) is int):
+            raise _fail()
+        if self.retention_days is not None:
+            _int(self.retention_days, 0, 36_500)
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSyncReadArguments:
+    """Read ``length`` bytes at ``offset`` of a prepared snapshot bundle."""
+
+    workspace: str
+    sync_id: str
+    offset: int
+    length: int
+
+    def __post_init__(self) -> None:
+        _handle(self.workspace)
+        if type(self.sync_id) is not str or not _SYNC_ID.match(self.sync_id):
+            raise _fail()
+        _int(self.offset, 0, MAX_CODE_SYNC_BUNDLE_BYTES - 1)
+        _int(self.length, 1, MAX_CODE_SYNC_CHUNK_BYTES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1519,10 +1655,18 @@ def _decode_unlisted(value: object) -> tuple[int, ...]:
     )
 
 
+def _fenced_valid(value: object) -> int:
+    """How many of a call's ``values`` reached a held repository's fence (ADR-052 O7): an
+    integer from zero to the argument bound."""
+
+    return _int(value, 0, _MAX_PATH_LIST)
+
+
 def _encode_outside_read(value: OutsideInputsRead) -> JsonValue:
     if type(value) is not OutsideInputsRead:
         raise _fail()
     return {
+        "fenced": _fenced_valid(value.fenced),
         "inputs": _encode_task_inputs(value.inputs),
         "listed": list(_unlisted_valid(value.listed)),
         "unlisted": list(_unlisted_valid(value.unlisted)),
@@ -1530,11 +1674,12 @@ def _encode_outside_read(value: OutsideInputsRead) -> JsonValue:
 
 
 def _decode_outside_read(value: object) -> OutsideInputsRead:
-    fields_ = _object(value, frozenset({"inputs", "listed", "unlisted"}))
+    fields_ = _object(value, frozenset({"fenced", "inputs", "listed", "unlisted"}))
     return OutsideInputsRead(
         _decode_task_inputs(fields_["inputs"]),
         _decode_unlisted(fields_["unlisted"]),
         _decode_unlisted(fields_["listed"]),
+        _fenced_valid(fields_["fenced"]),
     )
 
 
@@ -1594,6 +1739,7 @@ def _encode_snapshots_read(value: OutsideSnapshotsRead) -> JsonValue:
     if type(value) is not OutsideSnapshotsRead:
         raise _fail()
     return {
+        "fenced": _fenced_valid(value.fenced),
         "listed": list(_unlisted_valid(value.listed)),
         "reads": _encode_snapshot_reads(value.reads),
         "unlisted": list(_unlisted_valid(value.unlisted)),
@@ -1601,11 +1747,12 @@ def _encode_snapshots_read(value: OutsideSnapshotsRead) -> JsonValue:
 
 
 def _decode_snapshots_read(value: object) -> OutsideSnapshotsRead:
-    fields_ = _object(value, frozenset({"listed", "reads", "unlisted"}))
+    fields_ = _object(value, frozenset({"fenced", "listed", "reads", "unlisted"}))
     return OutsideSnapshotsRead(
         _decode_snapshot_reads(fields_["reads"]),
         _decode_unlisted(fields_["unlisted"]),
         _decode_unlisted(fields_["listed"]),
+        _fenced_valid(fields_["fenced"]),
     )
 
 
@@ -1721,6 +1868,101 @@ def _decode_lstat(value: object) -> tuple[LstatFacts | None, ...]:
 
 
 # --- codecs: observation --------------------------------------------------------------------
+
+
+def _encode_sync_prepare(value: CodeSyncPrepareArguments) -> dict[str, JsonValue]:
+    return {
+        "base_commit": value.base_commit,
+        "have": list(value.have),
+        "issuer": value.issuer,
+        "profile_digest": value.profile_digest,
+        "purpose": value.purpose,
+        "revision": value.revision,
+        "workspace": value.workspace,
+    }
+
+
+def _decode_sync_prepare(source: dict[str, object]) -> CodeSyncPrepareArguments:
+    fields_ = _object(
+        source,
+        frozenset(
+            {"base_commit", "have", "issuer", "profile_digest", "purpose", "revision", "workspace"}
+        ),
+    )
+    return CodeSyncPrepareArguments(
+        workspace=_handle(fields_["workspace"]),
+        purpose=cast(Literal["base", "check"], fields_["purpose"]),
+        have=tuple(cast(list[str], _list(fields_["have"], _MAX_CODE_SYNC_HAVE))),
+        base_commit=cast(str | None, fields_["base_commit"]),
+        issuer=cast(str, fields_["issuer"]),
+        revision=_int(fields_["revision"], 1, 2**53 - 1),
+        profile_digest=cast(str, fields_["profile_digest"]),
+    )
+
+
+def _encode_sync_prepared(value: CodeSyncPrepared) -> JsonValue:
+    if type(value) is not CodeSyncPrepared:
+        raise _fail()
+    return {
+        "manifest": manifest_to_json(value.manifest),
+        "retention": {"days": value.retention_days, "kind": value.retention_kind},
+        "sha256": value.sha256,
+        "size": value.size,
+        "sync_id": value.sync_id,
+        "unchanged": value.unchanged,
+    }
+
+
+def _decode_sync_prepared(value: object) -> CodeSyncPrepared:
+    fields_ = _object(
+        value, frozenset({"manifest", "retention", "sha256", "size", "sync_id", "unchanged"})
+    )
+    retention = _object(fields_["retention"], frozenset({"days", "kind"}))
+    try:
+        manifest = manifest_from_json(cast(JsonValue, fields_["manifest"]))
+    except CopyError:
+        raise _fail() from None
+    return CodeSyncPrepared(
+        unchanged=_bool(fields_["unchanged"]),
+        sync_id=cast(str | None, fields_["sync_id"]),
+        manifest=manifest,
+        size=_int(fields_["size"], 0, MAX_CODE_SYNC_BUNDLE_BYTES),
+        sha256=cast(str | None, fields_["sha256"]),
+        retention_kind=cast(Literal["task_close", "days", "until_forgotten"], retention["kind"]),
+        retention_days=cast(int | None, retention["days"]),
+    )
+
+
+def _encode_sync_read(value: CodeSyncReadArguments) -> dict[str, JsonValue]:
+    return {
+        "length": value.length,
+        "offset": value.offset,
+        "sync_id": value.sync_id,
+        "workspace": value.workspace,
+    }
+
+
+def _decode_sync_read(source: dict[str, object]) -> CodeSyncReadArguments:
+    fields_ = _object(source, frozenset({"length", "offset", "sync_id", "workspace"}))
+    return CodeSyncReadArguments(
+        workspace=_handle(fields_["workspace"]),
+        sync_id=cast(str, fields_["sync_id"]),
+        offset=_int(fields_["offset"], 0, MAX_CODE_SYNC_BUNDLE_BYTES - 1),
+        length=_int(fields_["length"], 1, MAX_CODE_SYNC_CHUNK_BYTES),
+    )
+
+
+def _encode_sync_chunk(value: bytes) -> JsonValue:
+    if type(value) is not bytes or not value or len(value) > MAX_CODE_SYNC_CHUNK_BYTES:
+        raise _fail()
+    return _b64(value)
+
+
+def _decode_sync_chunk(value: object) -> bytes:
+    decoded = _unb64(value, MAX_CODE_SYNC_CHUNK_BYTES)
+    if not decoded:
+        raise _fail()
+    return decoded
 
 
 def _encode_open(value: OpenWorkspaceArguments) -> dict[str, JsonValue]:
@@ -2362,6 +2604,28 @@ _SPECS: Final[tuple[WorkspaceOperationSpec[Any, Any], ...]] = (
         _decode_run_args,
         _encode_run,
         _decode_run,
+    ),
+    WorkspaceOperationSpec[CodeSyncPrepareArguments, CodeSyncPrepared](
+        WorkspaceOperation.CODE_SYNC_PREPARE,
+        "copy",
+        CodeSyncPrepareArguments,
+        4 * _KIB,
+        _MIB,
+        _encode_sync_prepare,
+        _decode_sync_prepare,
+        _encode_sync_prepared,
+        _decode_sync_prepared,
+    ),
+    WorkspaceOperationSpec[CodeSyncReadArguments, bytes](
+        WorkspaceOperation.CODE_SYNC_READ,
+        "copy",
+        CodeSyncReadArguments,
+        _KIB,
+        4 * _MIB + _KIB,
+        _encode_sync_read,
+        _decode_sync_read,
+        _encode_sync_chunk,
+        _decode_sync_chunk,
     ),
 )
 

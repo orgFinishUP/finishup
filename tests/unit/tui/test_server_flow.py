@@ -31,7 +31,8 @@ pytestmark = pytest.mark.anyio
 _ROWS = (
     ServerRow("local", "local", None, None, True),
     ServerRow("work", "local", "t_1a2b3c4d", None, False),
-    ServerRow("lab", "ssh", "t_9f8e7d6c", "ssh://owner@lab.example:22", False),
+    # An HTTPS server: the closed example (the tests that use it close HTTPS in process).
+    ServerRow("lab", "https", "t_9f8e7d6c", "https://lab.example", False),
 )
 
 
@@ -92,9 +93,14 @@ async def test_switching_to_a_named_local_server_needs_no_terminal_handoff() -> 
     assert isinstance(selection, SelectionView)
 
 
-async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen() -> None:
-    """The remote kinds are closed in this release: "Use lab" asks for no confirmation and hands
-    nothing over; the refusal is reported with its reason and the selection is unchanged."""
+async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed kind (HTTPS, closed in this process: every kind is open from layer 5): "Use lab"
+    asks for no confirmation and hands nothing over; the refusal is reported with its reason and
+    the selection is unchanged."""
+
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
 
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["use:lab"])
@@ -198,7 +204,11 @@ async def test_adding_offers_only_a_server_on_this_computer(
     from finishup.client import server_folders
 
     if official:
-        monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
+        monkeypatch.setattr(
+            server_folders,
+            "OFFICIAL_ENDPOINT_ORIGINS",
+            (server_folders.OfficialOrigin("fu.example"),),
+        )
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["add", "add:local"])
 
@@ -353,9 +363,18 @@ async def test_the_real_runtime_refuses_a_remote_record_and_leaves_one_quietly(
 
     monkeypatch.setattr("finishup.cli.trusted_console.TrustedForegroundConsole", no_console)
     with ambient_home(monkeypatch) as home:
+        # Every remote kind is open from layer 5: HTTPS is closed in this process as the example,
+        # with no runtime for it.
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
+        from finishup.client import target_runtime
+
+        loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+        loaders.pop("https", None)
+        monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
         with targets.registry_lock():
+            # An HTTPS server: closed in this process.
             record, _root = targets.new_remote_target(
-                "lab", "ssh", user="owner", host="lab.example", port=22
+                "lab", "https", base_url="https://lab.example"
             )
             targets.write_selection(record)
         reset_selection_memo()
@@ -443,3 +462,76 @@ async def test_the_real_runtime_status_shows_what_a_remote_server_may_read_outsi
             "Repair it on this computer with 'finishup server folders remove devbox --all'" in line
             for line in lines
         )
+
+
+@pytest.mark.parametrize("answer", ["typed", "interrupted"])
+async def test_the_typed_confirmation_of_a_remote_server_is_read_on_the_loop_thread(
+    monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """SRV-6, brought back with the consent flow of a kind a later layer opens (ADR-052):
+    ``/server`` "Use NAME" runs the switch in a worker thread (the policy read runs its own event
+    loop, and the profile is fetched there), but the disclosure and the typed confirmation run on
+    the loop thread with Python's default Ctrl-C handler, so an interrupt cancels it as
+    ``authorization_declined`` and the interface keeps running."""
+
+    import signal
+    import threading
+
+    from builders.server_profiles import fetched
+    from builders.server_targets import ambient_home, open_remote_kinds
+    from finishup.cli import server as server_cli
+    from finishup.client import server_profile, targets
+    from finishup.config.paths import reset_selection_memo
+    from finishup.tui.runtime import FinishUpRuntime
+
+    seen: dict[str, object] = {}
+
+    def policy_read() -> bool:
+        seen["policy_on_main"] = threading.current_thread() is threading.main_thread()
+        return False
+
+    class Source:
+        def fetch(self, record: Any) -> Any:  # noqa: ANN401
+            seen["fetch_on_main"] = threading.current_thread() is threading.main_thread()
+            return fetched(record)
+
+    def confirm(_name: str, _kind: str, lines: tuple[str, ...], **_question: object) -> None:
+        seen["confirm_on_main"] = threading.current_thread() is threading.main_thread()
+        seen["default_handler"] = signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        seen["lines"] = lines
+        if answer == "interrupted":
+            raise KeyboardInterrupt
+
+    def loop_handler(_signum: int, _frame: object) -> None:
+        raise AssertionError("the loop's own handler never answers the prompt")
+
+    monkeypatch.setattr(server_cli, "_zero_network_in_force", policy_read)
+    monkeypatch.setattr(server_cli, "_confirm_on_trusted_console", confirm)
+    previous = signal.signal(signal.SIGINT, loop_handler)  # what an event loop runner installs
+    try:
+        with ambient_home(monkeypatch) as home:
+            open_remote_kinds(monkeypatch, "ssh", consent=False)
+            monkeypatch.setitem(server_profile.PROFILE_SOURCES, "ssh", Source)
+            with targets.registry_lock():
+                record, _root = targets.new_remote_target(
+                    "lab", "ssh", user="owner", host="lab.example", port=22
+                )
+            reset_selection_memo()
+            runtime = FinishUpRuntime(cwd=home)
+            if answer == "typed":
+                switch = await runtime.use_server("lab")
+                assert switch.indicator == f"ssh {record.target_id}"
+                assert targets.read_selected_target_id() == record.target_id
+                stored = targets.read_target(targets.target_root(record.target_id))
+                assert stored is not None and stored.consent is not None
+            else:
+                with pytest.raises(RuntimeError_) as raised:
+                    await runtime.use_server("lab")
+                assert raised.value.reason == "authorization_declined"
+                assert targets.read_selected_target_id() is None
+            assert signal.getsignal(signal.SIGINT) is loop_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert seen["policy_on_main"] is False and seen["fetch_on_main"] is False
+    assert seen["confirm_on_main"] is True and seen["default_handler"] is True
+    assert any("Level of use" in line for line in seen["lines"])  # type: ignore[union-attr]

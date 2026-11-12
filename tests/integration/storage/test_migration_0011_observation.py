@@ -192,6 +192,7 @@ def test_schema_ten_upgrade_preserves_rows_and_installs_capture_ticket_shape() -
         "0017",
         "0018",
         "0019",
+        "0020",
     )
     assert db.execute("PRAGMA user_version").fetchone() == (current,)
     assert verify_schema_identity(db).state == "current"

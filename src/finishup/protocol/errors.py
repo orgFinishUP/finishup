@@ -15,6 +15,7 @@ __all__ = [
     "ADMITTED_CONTINUATION_TOKENS",
     "PROTOCOL_REASON_CODES",
     "REASON_CODE_CONTINUATIONS",
+    "AUTHORIZATION_REFUSAL_PHASES",
     "REMOTE_CONNECTION_PHASES",
     "REMOTE_ROOT_REFUSAL_PHASES",
     "SAFE_DETAIL_KEYS",
@@ -374,6 +375,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "remote_kind_unavailable",
     "remote_service_not_running",
     "remote_unreachable",
+    "repository_egress_held",
+    "repository_egress_kept",
     "repository_identity_mismatch",
     "repository_identity_required",
     "request_identity_conflict",
@@ -410,6 +413,9 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "selector_conflict",
     "semantic_provenance_json_shape_invalid",
     "semantic_redacted_values_invalid",
+    "server_authorization_changed",
+    "server_level_unavailable",
+    "server_profile_changed",
     "service_draining",
     "service_generation_changed",
     "service_handshake_failed",
@@ -473,8 +479,18 @@ SERVICE_START_TIMEOUT_PHASE: str = "handshake_timeout"
 # (``target_reauthorization_required``) before anything is sent, refuses to start a local
 # service for a remote target's root (``target_root_is_remote``), and refuses any connection to a
 # remote target while this computer last reported a zero-network privacy policy
-# (``zero_network_remote_selected``, maintainer decision of 2026-11-07). Every phase is retryable:
-# the same request succeeds once that phase's own repair is made.
+# (``zero_network_remote_selected``, maintainer decision of 2026-11-07). It also holds a
+# repository whose privacy policy on this computer allows no network use from a server elsewhere
+# until the owner allows it (``repository_egress_held``), and names the owner's choice to keep it
+# on this computer (``repository_egress_kept``), maintainer decision of 2026-11-07, round 4. An
+# open connection the client admitted ends, whatever changed in what it was authorized under, with
+# ``server_authorization_changed`` (ADR-052). It refuses a server that requires a level the owner
+# did not agree to (``server_level_unavailable``) before anything is sent, and one whose profile
+# changed since the owner consented (``server_profile_changed``) before that server did any work
+# for the request: before anything is sent, or by the server's own refusal of the hello or request
+# (ADR-052, the owner's answer O5); any other call already sent over a connection the server
+# refused ends as ``server_authorization_changed``. Every phase is retryable: the same request
+# succeeds once that phase's own repair is made.
 REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
     {
         "remote_auth_failed",
@@ -482,6 +498,11 @@ REMOTE_CONNECTION_PHASES: frozenset[str] = frozenset(
         "remote_incompatible",
         "remote_service_not_running",
         "remote_unreachable",
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+        "server_level_unavailable",
+        "server_profile_changed",
         "target_reauthorization_required",
         "target_root_is_remote",
         "zero_network_remote_selected",
@@ -494,12 +515,32 @@ REMOTE_ROOT_REFUSAL_PHASES: frozenset[str] = frozenset(
     {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
 )
 assert REMOTE_ROOT_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
+# Every phase the client's shared authorization gate refuses or ends a connection to a server
+# elsewhere with (``client.authorization.AUTHORIZATION_REFUSALS``, ADR-052): the three above, the
+# repository hold and the owner's kept choice, a changed authorization, and the consent step's two
+# profile refusals. A ``phase`` safe detail admits each, so a structured error and its text name
+# which refusal it was.
+AUTHORIZATION_REFUSAL_PHASES: frozenset[str] = REMOTE_ROOT_REFUSAL_PHASES | frozenset(
+    {
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+        "server_level_unavailable",
+        "server_profile_changed",
+    }
+)
+assert AUTHORIZATION_REFUSAL_PHASES <= REMOTE_CONNECTION_PHASES
 # #1244: the four delivery_* continuation refusals; #1190: review_mode_parent_is_check; ADR-051:
 # the twelve workspace-binding, server-target and remote-connection reasons, plus the stale
 # disclosure refusal (``target_reauthorization_required``), the zero-network refusal
 # (``zero_network_remote_selected``) and the remote kinds this release keeps closed
-# (``remote_kind_unavailable``); rule R's ``workspace_ref_not_served`` (run u8).
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 372
+# (``remote_kind_unavailable``); then the repository hold and the owner's kept choice
+# (``repository_egress_held``, ``repository_egress_kept``) and the end of a connection whose
+# authorization changed (``server_authorization_changed``, ADR-052); then a server whose profile
+# changed since the owner consented, or that requires a level they did not agree to
+# (``server_profile_changed``, ``server_level_unavailable``, ADR-052, the owner's answer O5).
+# +1 rule R's ``workspace_ref_not_served`` (run u8).
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 377
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -671,6 +712,11 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         # root's source (``targets.remote_root_continuation``), never through a reason code.
         "remote_root_override_clear",
         "remote_server_test",
+        # ``remote_unreachable`` while the target is reached in the direct style: that style opens
+        # a connection per program, so on a slow network the remedy is the relay style (the
+        # owner's WAN-gate decision, 2026-11-11). Attached by the client that knows the target's
+        # style (``targets.remote_root_continuation``), never through a reason code.
+        "remote_direct_slow",
         "remote_service_start_required",
         "remote_target_no_local_service",
         "server_host_command_required",
@@ -684,6 +730,16 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "workspace_handle_required",
         "workspace_not_served_tell_user",
         "zero_network_local_server_required",
+        "repository_send_decision_required",
+        "repository_kept_on_this_computer",
+        "server_connection_renew",
+        "remote_reconsent",
+        # A server elsewhere refused the profile revision a request named while this computer's
+        # copy of its profile still agrees with the consent: what changed is not known yet, so
+        # the owner is not asked. Attached by the client that knows the target's state
+        # (``targets.remote_root_continuation``), never through a reason code.
+        "remote_profile_checking",
+        "server_level_decision_required",
     }
 )
 
@@ -878,6 +934,17 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         # The remote kinds (ssh, https, local_port) are closed in this release: a server on this
         # computer is the only one that can be added or selected.
         "remote_kind_unavailable": "server_on_this_computer_required",
+        # A repository whose privacy policy on this computer allows no network use, while a
+        # server elsewhere is selected: held until the owner decides, or kept here as they chose.
+        "repository_egress_held": "repository_send_decision_required",
+        "repository_egress_kept": "repository_kept_on_this_computer",
+        # An open connection to a server elsewhere ended because what it was authorized under
+        # changed (ADR-052): FinishUP stopped sending over it; repeat the request.
+        "server_authorization_changed": "server_connection_renew",
+        # What the selected server elsewhere offers or needs changed since the owner consented,
+        # or it requires a level they did not agree to (ADR-052, O5): only the owner agrees again.
+        "server_profile_changed": "remote_reconsent",
+        "server_level_unavailable": "server_level_decision_required",
     }
 )
 if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:
@@ -1042,12 +1109,13 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         # stages (``finishup.service.startup_failure``) name where a spawned service failed (#1040).
         if value in {"replay", "model", "digest", "projection", "handler", "unknown"}:
             return value
-        # A remote root refused before anything was sent (ADR-051) names which refusal it was.
+        # A connection the authorization gate refused or ended (ADR-051, ADR-052) names which
+        # refusal it was; one to a server elsewhere that could not be reached names why.
         if (
             value in SERVICE_STARTUP_PHASES
             or value in SERVICE_HANDSHAKE_PHASES
             or value == SERVICE_START_TIMEOUT_PHASE
-            or value in REMOTE_ROOT_REFUSAL_PHASES
+            or value in REMOTE_CONNECTION_PHASES
         ):
             return value
         return None

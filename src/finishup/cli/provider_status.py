@@ -650,6 +650,41 @@ class MachineScopeError(Exception):
         return _MACHINE_SCOPE_REMEDIATIONS[self.reason]
 
 
+def _read_installation_marker(marker: Path) -> tuple[os.stat_result, bytes]:
+    """The marker's ``lstat`` facts and at most one byte past its bound, without blocking.
+
+    A session-start hook reaches this (the repository hold's live read), so nothing here may be
+    unbounded: a link is never followed, a FIFO or device is never opened for a read that would
+    wait, an oversized file is refused before any byte is read, and the bytes read come from the
+    regular file the facts describe. Raises ``FileNotFoundError`` when there is none and
+    ``OSError`` for anything else this refuses.
+    """
+
+    facts = marker.lstat()
+    if not stat.S_ISREG(facts.st_mode) or facts.st_size > _MAX_INSTALLATION_MARKER_BYTES:
+        raise OSError("installation_marker_invalid")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(marker, flags | getattr(os, "O_CLOEXEC", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            facts.st_dev,
+            facts.st_ino,
+        ):
+            raise OSError("installation_marker_invalid")
+        chunks: list[bytes] = []
+        remaining = _MAX_INSTALLATION_MARKER_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(descriptor)
+    return facts, b"".join(chunks)
+
+
 def machine_scope_request() -> JsonObject:
     """Build the ``privacy_get_effective`` body for this installation's machine scope.
 
@@ -668,8 +703,7 @@ def machine_scope_request() -> JsonObject:
         raise MachineScopeError("installation_bundle_unavailable") from exc
     marker = root / "installation-state.json"
     try:
-        facts = marker.lstat()
-        encoded = marker.read_bytes()
+        facts, encoded = _read_installation_marker(marker)
     except FileNotFoundError as exc:
         raise MachineScopeError("installation_marker_missing") from exc
     except OSError as exc:
@@ -840,6 +874,13 @@ async def provider_status_report(
                     effective = None
                 if isinstance(effective, Mapping):
                     plain = cast(Mapping[str, object], dict(effective))
+                    # ADR-051 decision 8 (2026-11-07, round 4): on this computer's everyday root,
+                    # remember what its FinishUP just said of this repository's own policy.
+                    from finishup.cli.zero_network_selection import remember_repository_setup
+
+                    await remember_repository_setup(
+                        Path.cwd() if workspace_locator is None else workspace_locator, plain
+                    )
                     raw_grant = plain.get("grant_state")
                     raw_migration = plain.get("migration_state")
                     if raw_grant in {"granted", "missing"}:

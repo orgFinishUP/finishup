@@ -12,7 +12,39 @@ from builders import clock as clock_builder_module
 from builders import events as event_builder_module
 from builders import ids as id_builder_module
 from builders import operations as operation_builder_module
+from credential_store_guard import cached_platform_stores, forget_cached_backend, pin_fail_backend
 from fixture_loader import FixtureLoader, build_fixture_loader
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Pin keyring to its fail backend before any test can load a credential store.
+
+    Set in the environment, so it holds in this process and in every child process that inherits
+    it: no test reaches the developer's platform credential store (``credential_store_guard``).
+    """
+
+    del config
+    pin_fail_backend()
+
+
+@pytest.fixture(autouse=True)
+def _no_platform_credential_store() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Fail the test that left a platform credential store in keyring's process-wide cache.
+
+    keyring caches the first backend it loads, so a test that discovered one would hand it to
+    every later test in the process (and, on macOS, store test keys in the login keychain). The
+    cache is dropped before failing, so only the test that loaded it fails.
+    """
+
+    yield
+    found = cached_platform_stores()
+    if found:
+        forget_cached_backend()
+        pytest.fail(
+            f"this test loaded a platform credential store ({', '.join(found)}); inject a "
+            "stand-in instead (see tests/credential_store_guard.py)",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -168,6 +200,24 @@ def _no_real_server_selection_read(  # pyright: ignore[reportUnusedFunction]
     # it puts ``_read_after_change`` back with its own stand-in for the service.
     monkeypatch.setattr(zero_network_module, "_after_change_state", lambda: "unreadable")
 
+    # The same for each repository's own policy (2026-11-07, round 4): after a change, and for the
+    # owner's 'server' commands, a repository is read again only through a test's own stand-in.
+    def _no_repository_read(_worktree: str) -> str:
+        return "unreadable"
+
+    monkeypatch.setattr(zero_network_module, "_repository_reader", _no_repository_read)
+    try:
+        import finishup.client.everyday_repository as everyday_repository_module
+    except ImportError:
+        return
+
+    async def _no_live_read(*_args: object, **_kwargs: object) -> object:
+        return everyday_repository_module.EverydayReads("unreadable", "unreadable")
+
+    # A session start asks this computer's FinishUP about the session's repository only through a
+    # test's own stand-in for the service.
+    monkeypatch.setattr(everyday_repository_module, "_live_read", _no_live_read)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_everyday_policy_marker(  # pyright: ignore[reportUnusedFunction]
@@ -236,6 +286,33 @@ def _isolated_rejected_finishup_calls(  # pyright: ignore[reportUnusedFunction]
     root = tmp_path_factory.mktemp("rejected-yoetz-calls")
     root.chmod(0o700)
     monkeypatch.setattr(rejections_module, "state_dir", lambda: Path(root))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_openssh(  # pyright: ignore[reportUnusedFunction]
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never run the real OpenSSH from a test outside ``tests/capability`` (ADR-052).
+
+    SSH servers are open from layer 4: a test that reaches an SSH target's transport without a
+    stand-in would otherwise run ``ssh`` against a test host name (a DNS lookup, a connection).
+    The product finds ``ssh`` through ``ssh_transport.resolve_ssh``; here it answers that none is
+    installed, so the attempt fails closed as ``remote_unreachable``. A test that stands in for
+    OpenSSH passes its own program, or patches this resolver itself; the capability tests run the
+    real one against a private ``sshd``.
+    """
+
+    if "capability" in request.path.parts:
+        return
+    try:
+        import finishup.client.ssh_transport as ssh_transport
+    except ImportError:
+        return
+
+    def no_openssh() -> str:
+        raise ssh_transport.UpstreamUnavailable("remote_unreachable")
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", no_openssh)
 
 
 @pytest.fixture(scope="session")

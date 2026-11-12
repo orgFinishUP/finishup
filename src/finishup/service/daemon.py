@@ -14,7 +14,8 @@ import signal
 import stat
 import struct
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -110,7 +111,7 @@ from finishup.domain.privacy import (
     LocalDisclosureSink,
 )
 from finishup.domain.values import JsonValue as DomainJsonValue
-from finishup.domain.values import frontier_from_json
+from finishup.domain.values import freeze_json, frontier_from_json
 from finishup.observability.logging import (
     LogMode,
     configure_logging,
@@ -174,7 +175,8 @@ from finishup.protocol.models import (
 )
 from finishup.protocol.publish_boilerplate import server_filled_from_json
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
-from finishup.protocol.schemas import use_full_schema_catalog
+from finishup.protocol.schemas import schema_manifest_digest, use_full_schema_catalog
+from finishup.protocol.server_profile import ServerProfile, ServerProfileRevision
 from finishup.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckReadWindow, CheckWaits
 from finishup.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
@@ -246,6 +248,7 @@ from finishup.service.installation_recovery import (
     PreparedInstallationSnapshot,
 )
 from finishup.service.lifecycle import (
+    IDLE_STOP_SECONDS,
     SINGLETON_LOCK_NAME,
     Admission,
     LifecycleError,
@@ -261,6 +264,11 @@ from finishup.service.owner_view import (
 )
 from finishup.service.ready_composition import build_ready_application_factory
 from finishup.service.secret_ingress import SecretIngressService
+from finishup.service.server_profile import (
+    ProfileUnavailable,
+    ServerProfileSource,
+    code_copy_offer,
+)
 from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRouteMemory
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -417,6 +425,12 @@ _STRUCTURAL_METHODS = frozenset(
         ControlMethod.SERVICE_STATUS,
         ControlMethod.SERVICE_LOCK,
         ControlMethod.SERVICE_STOP,
+        # What this server offers (ADR-052): no ledger, no vault, answered while locked.
+        ControlMethod.SERVER_PROFILE,
+        # Level L2 (ADR-054): the claimed repository's copy, its status and forget; no ledger,
+        # and forget is answered even under another revision (reducing what is kept is always
+        # allowed).
+        ControlMethod.CODE_COPY,
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
@@ -897,6 +911,46 @@ class _StagedReconcileTracker:
         return True
 
 
+class _RestEdge(Protocol):
+    """The native REST edge a composition may serve (``service.rest_native.NativeRestEdge``)."""
+
+    async def start(self, daemon: ServiceDaemon) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRestBindings:
+    """What this daemon gives its native REST backend (ADR-053, ``service.rest_native``).
+
+    ``dispatch`` serves one call as the control socket does (presentation facts never come from
+    the network: the fail-safe machine-readable projection), bound to the consented revision, with
+    the calling connection's own registered agent channel, if any, preferred for its handle;
+    ``resolve_claim`` keys a claim with the installation MAC exactly as a claim-bound hello is
+    keyed (never a path); ``hub`` is the same agent hub claim-bound connections register with;
+    ``activity`` holds idle relock for one request or one registered agent, as an open control
+    connection does; ``profile`` is this service's own profile.
+    """
+
+    status: Callable[[], ServiceStatus]
+    current_revision: Callable[[], ServerProfileRevision | None]
+    profile: Callable[[], ServerProfile]
+    dispatch: Callable[
+        [
+            ControlClientKind,
+            ControlCallRequest,
+            RepositoryPrivacyContext | None,
+            bool,
+            ServerProfileRevision,
+            object,
+        ],
+        Awaitable[ControlResult],
+    ]
+    resolve_claim: Callable[[WorkspaceClaim], Awaitable[RepositoryPrivacyContext | None]]
+    hub: WorkspaceAgentHub
+    activity: Callable[[], AbstractAsyncContextManager[None]]
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceComposition:
     """One generation's service-owned components, redacted by construction."""
@@ -941,6 +995,15 @@ class ServiceComposition:
     # An edge that admits only claims (a network gateway, say) closes a hello that names a
     # workspace path on this machine. Off by default: local clients name their path.
     refuse_workspace_locators: bool = False
+    # What this server offers a client elsewhere and the profile revision it issued at start
+    # (ADR-052). With none, the ``server_profile`` method is refused and no hello is held to a
+    # revision (a composition that predates profiles). A source that offers no profile (its
+    # configuration cannot be stated exactly) refuses that method too, and every hello that names
+    # a revision or a claim.
+    server_profile: ServerProfileSource | None = None
+    # The native REST edge (ADR-053): set only when the owner runs ``finishup service rest run
+    # --edge native``. None keeps the service exactly as before: no network listener of any kind.
+    rest_edge: _RestEdge | None = None
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -1233,7 +1296,10 @@ class ServiceDaemon:
         heartbeat = asyncio.create_task(watchdog.run())
         stop_wait = asyncio.create_task(self._stop_event.wait())
         stop_reason = "shutdown_requested"
+        rest_edge = self._composition.rest_edge
         try:
+            if rest_edge is not None:
+                await rest_edge.start(self)
             done, _pending = await asyncio.wait(
                 {idle, stop_wait}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -1242,6 +1308,10 @@ class ServiceDaemon:
                 stop_reason = "idle_shutdown"
         finally:
             try:
+                if rest_edge is not None:
+                    # Stop answering the network before the drain; its calls end cancelled.
+                    with contextlib.suppress(Exception):
+                        await rest_edge.close()
                 await self.stop(stop_reason)
             finally:
                 watchdog.close()
@@ -1252,6 +1322,55 @@ class ServiceDaemon:
                     if task is not None:
                         await asyncio.gather(task, return_exceptions=True)
 
+    def native_rest_bindings(self) -> NativeRestBindings:
+        """What this daemon gives its native REST backend (ADR-053, ``NativeRestBindings``)."""
+
+        async def dispatch(
+            client_kind: ControlClientKind,
+            request: ControlCallRequest,
+            context: RepositoryPrivacyContext | None,
+            claim_unkeyed: bool,
+            revision: ServerProfileRevision,
+            channel: object = None,
+        ) -> ControlResult:
+            # A call naming its connection's registered agent prefers that agent, as a call on
+            # the agent's own control connection does (``live_call_scope``, design v2 §8.5).
+            with live_call_scope(cast(WorkspaceAgentChannel | None, channel)):
+                return await self.dispatch(
+                    client_kind,
+                    request,
+                    repository_privacy_context=context,
+                    claim_unkeyed=claim_unkeyed,
+                    bound_profile=revision,
+                    _defer_stop=True,
+                )
+
+        @contextlib.asynccontextmanager
+        async def activity() -> AsyncGenerator[None]:
+            lifecycle = self._composition.lifecycle
+            await lifecycle.client_connected()
+            try:
+                yield
+            finally:
+                with contextlib.suppress(LifecycleError):
+                    await lifecycle.client_disconnected()
+
+        def profile() -> ServerProfile:
+            source = self._composition.server_profile
+            if source is None:
+                raise ProfileUnavailable("review_provider_unrepresentable")
+            return source.profile(self.status(), schema_manifest_digest())
+
+        return NativeRestBindings(
+            status=self.status,
+            current_revision=self.current_profile_revision,
+            profile=profile,
+            dispatch=dispatch,
+            resolve_claim=self._resolve_claim_context,
+            hub=self._composition.workspace_hub,
+            activity=activity,
+        )
+
     async def dispatch(
         self,
         client_kind: ControlClientKind,
@@ -1260,6 +1379,7 @@ class ServiceDaemon:
         projection_context: ClientProjectionContext | None = None,
         repository_privacy_context: RepositoryPrivacyContext | None = None,
         claim_unkeyed: bool = False,
+        bound_profile: ServerProfileRevision | None = None,
         _defer_stop: bool = False,
     ) -> ControlResult:
         """Validate, admit, execute, project, and correlate one ordinary call.
@@ -1268,6 +1388,11 @@ class ServiceDaemon:
         (ADR-051): it names no workspace, so no call that needs the ready service is served on it
         as if it were unbound; each is answered ``vault_locked`` and its client replaces the
         connection.
+
+        ``bound_profile`` is the server-profile revision the connection's hello was admitted under
+        (ADR-052): a call that does work is refused ``server_profile_changed`` before anything is
+        done once this service issues another; the structural methods and ``server_profile`` are
+        still answered, so the client can learn what changed.
         """
 
         try:
@@ -1293,8 +1418,28 @@ class ServiceDaemon:
                 # Only the validation prefix maps to frame_invalid. Runtime TypeError/ValueError
                 # from method dispatch must reach the correlated internal_error branch below.
                 return self._error_result(request, ControlError("frame_invalid"))
-            if request.method is ControlMethod.SERVICE_STATUS:
-                body: object = self.status()
+            if (
+                bound_profile is not None
+                and request.method not in _STRUCTURAL_METHODS
+                and bound_profile != self.current_profile_revision()
+            ):
+                # Before any work: this connection's consent is not the server's profile now.
+                return self._error_result(request, ControlError("server_profile_changed"))
+            if request.method is ControlMethod.SERVER_PROFILE:
+                source = self._composition.server_profile
+                if source is None or source.revision is None:
+                    # No profile: a composition without one, or a configuration the profile
+                    # cannot state exactly (it never offers one that understates it, ADR-052).
+                    raise ControlError("method_forbidden")
+                body: object = freeze_json(source.document(self.status(), schema_manifest_digest()))
+            elif request.method is ControlMethod.CODE_COPY:
+                body = freeze_json(
+                    await asyncio.to_thread(
+                        self._code_copy, request, repository_privacy_context, client_kind
+                    )
+                )
+            elif request.method is ControlMethod.SERVICE_STATUS:
+                body = self.status()
             elif request.method is ControlMethod.SERVICE_LOCK:
                 await self.lock("explicit_lock")
                 body = self.status()
@@ -2185,7 +2330,12 @@ class ServiceDaemon:
         if not vault.ready:
             return None
         key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
-        return claim_repository_privacy_context(claim, key)
+        context = claim_repository_privacy_context(claim, key)
+        copies = self._composition.workspace_hub.code_copies
+        if copies is not None:
+            # Level L2 (ADR-054): the copy of a claimed workspace is keyed by its commitment.
+            copies.remember(context.workspace_handle, context.commitment, claim.worktree)
+        return context
 
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
@@ -2208,6 +2358,11 @@ class ServiceDaemon:
                             else self._resolve_repository_context
                         ),
                         claim_context_resolver=self._resolve_claim_context,
+                        profile_revision=(
+                            None
+                            if self._composition.server_profile is None
+                            else self.current_profile_revision
+                        ),
                     )
             except TimeoutError:
                 return
@@ -2218,6 +2373,7 @@ class ServiceDaemon:
                 if exc.reason in {
                     "manifest_mismatch",
                     "protocol_mismatch",
+                    "server_profile_changed",
                     "workspace_binding_conflict",
                 }:
                     record_public_error_without_raising(
@@ -2302,7 +2458,9 @@ class ServiceDaemon:
                 session.admit(request)
                 if not isinstance(request, ControlCallRequest):
                     target = calls.get(request.target_rpc_id)
-                    if target is not None:
+                    if target is not None and session.is_running(request.target_rpc_id):
+                        # Only a call not answered yet: one whose result is being written (the
+                        # cancel crossed it) finishes writing it; the connection goes on.
                         target.cancel(EXPLICIT_CONTROL_CANCEL)
                     continue
                 task = asyncio.create_task(
@@ -2442,6 +2600,7 @@ class ServiceDaemon:
                     projection_context=projection_context,
                     claim_unkeyed=session.workspace_binding == "client_claim"
                     and session.workspace_handle is None,
+                    bound_profile=session.server_profile,
                     _defer_stop=True,
                 )
             else:
@@ -2450,6 +2609,7 @@ class ServiceDaemon:
                     request,
                     projection_context=projection_context,
                     repository_privacy_context=session.repository_privacy_context,
+                    bound_profile=session.server_profile,
                     _defer_stop=True,
                 )
         session.correlate(result)
@@ -2582,6 +2742,64 @@ class ServiceDaemon:
         ):
             raise ControlError("service_generation_changed", retryable=True)
 
+    def current_profile_revision(self) -> ServerProfileRevision | None:
+        """The server-profile revision this service issues now (ADR-052); ``None`` for none."""
+
+        source = self._composition.server_profile
+        return None if source is None else source.revision
+
+    def _code_copy(
+        self,
+        request: ControlCallRequest,
+        context: RepositoryPrivacyContext | None,
+        client_kind: ControlClientKind,
+    ) -> dict[str, JsonValue]:
+        """``code_copy`` (level L2, ADR-054): the claimed repository's copy, ``status`` or
+        ``forget``. Only a claim-bound connection names a repository, and only a service that
+        keeps copies answers; forget is idempotent and says exactly what it deleted."""
+
+        copies = self._composition.workspace_hub.code_copies
+        if (
+            copies is None
+            or client_kind is ControlClientKind.MCP_BRIDGE
+            or context is None
+            or context.identity_kind != "client_claim"
+        ):
+            raise ControlError("method_forbidden")
+        action = cast("Mapping[str, object]", request.body).get("action")
+        from finishup.service.code_copy import COPY_PRINCIPAL
+
+        commitment = context.commitment
+        if action == "forget":
+            report = copies.forget(commitment)
+            return {
+                "action": "forget",
+                "copy": None,
+                "forgot": {
+                    key: value for key, value in report.to_json().items() if key != "reason"
+                },
+            }
+        if action != "status":
+            raise ControlError("frame_invalid")
+        repository = copies.store.repository_id(commitment)
+        summary = next(
+            (item for item in copies.store.copies(COPY_PRINCIPAL) if item.repository == repository),
+            None,
+        )
+        return {
+            "action": "status",
+            "copy": None
+            if summary is None
+            else {
+                "snapshots": summary.snapshots,
+                "stored_bytes": summary.stored_bytes,
+                "created_at": summary.created_at,
+                "last_sync_at": summary.last_sync_at,
+                "retention": {"kind": summary.retention_kind, "days": summary.retention_days},
+            },
+            "forgot": None,
+        }
+
     @staticmethod
     def _validate_client_method(client_kind: ControlClientKind, method: ControlMethod) -> None:
         if client_kind is ControlClientKind.MCP_BRIDGE and method not in _WORKFLOW_METHODS:
@@ -2642,6 +2860,17 @@ class ServiceDaemon:
             Callable[[], Awaitable[object]] | None,
             getattr(application, "recover_lineage", None),
         )
+        copies = self._composition.workspace_hub.code_copies
+        lineage = getattr(application, "lineage", None)
+        if copies is not None and lineage is not None:
+            # Level L2 (ADR-054): a ``task_close`` copy expires once no task pinned to it is open.
+            copies.attach_task_closed(
+                _lineage_task_closed(getattr(lineage, "store", None), asyncio.get_running_loop())
+            )
+        if copies is not None:
+            # U20: a forgotten or expired copy's tasks record that their content was forgotten
+            # and lose the excerpts they derived from it; pending ones are retried until done.
+            copies.attach_erasure(_copy_erasure(application, asyncio.get_running_loop()))
         if (
             not callable(recommendation_refresh)
             and not callable(observation_sweep)
@@ -5394,6 +5623,117 @@ def _refuse_remote_target_root(root: Path | None) -> None:
         raise LifecycleError("target_root_is_remote")
 
 
+def _attach_code_copies(
+    hub: WorkspaceAgentHub, source: ServerProfileSource, state: Path, vault: object
+) -> None:
+    """Give the hub the copy puller of a service whose profile offers level L2 (ADR-054): the
+    encrypted store under the state directory, its keys derived by the vault, opened now
+    (removing what a crash left), the checkouts reads are served from (every one left by a
+    previous run removed now), and its expiry run now and every ten minutes.
+
+    A service whose owner withdrew the offer still keeps the copies an earlier offer left: it
+    attaches the store without serving it (nothing is synced or read from it), so those copies
+    can still be listed, forgotten and expire, and their tasks' excerpts erased. A way in that
+    can be closed must not strand what it let in."""
+
+    offer = source.code_copy
+    if vault is None:
+        return
+    serving = source.keeps_copies and offer is not None
+    if not serving and not (state / "code-copies").is_dir():
+        return
+    from finishup.service.code_checkout import CopyCheckouts
+    from finishup.service.code_copy import CodeCopies, VaultCopyKeyring
+    from finishup.service.code_store import CodeStore, StoreLimits
+
+    keyring = VaultCopyKeyring(
+        lambda: cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+    )
+    # Without an offer nothing is admitted, so the caps only bound reads of what is kept.
+    limits = (
+        StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes)
+        if offer is not None and serving
+        else StoreLimits(max_file_bytes=1 << 30, max_repo_bytes=1 << 30)
+    )
+    store = CodeStore(state / "code-copies", keyring, limits)
+    store.open()
+    checkouts = CopyCheckouts(state / "code-copies" / "checkouts", store)
+    checkouts.sweep()
+    copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts, serving=serving)
+    copies.start_expiry()
+    hub.attach_code_copies(copies)
+
+
+def _copy_erasure(application: object, loop: asyncio.AbstractEventLoop) -> Callable[[object], bool]:
+    """Erase one forgotten task's derived content (``CodeCopies.attach_erasure``, ADR-054 U20).
+
+    Runs E's ``forget_task_content`` on the service loop from the erasure's own thread: the
+    task's ledger records ``content_forgotten`` first, then its content objects are erased. True
+    only when nothing is left to retry for that task; anything else (a slow or failed run, a call
+    from the loop itself, a closed loop) keeps the pending record, retried at the next forget,
+    expiry or service start.
+    """
+
+    from finishup.application.content_forgetting import forget_task_content
+
+    def erase(pending: object) -> bool:
+        if loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                forget_task_content(
+                    cast(Any, application),
+                    cast(str, getattr(pending, "task_id")),
+                    forget_id=cast(str, getattr(pending, "forget_id")),
+                    reason=getattr(pending, "reason"),
+                    provenance=getattr(pending, "account"),
+                ),
+                loop,
+            )
+            report = future.result(timeout=120.0)
+        except Exception:  # noqa: BLE001 - retried later; nothing is claimed done
+            return False
+        return getattr(report, "complete", False) is True
+
+    return erase
+
+
+def _lineage_task_closed(store: object, loop: asyncio.AbstractEventLoop) -> Callable[[str], bool]:
+    """Whether a task's work is no longer open, from the lineage catalog (``task_close``
+    retention, ADR-054): asked from the copy expiry's thread on the service loop; anything it
+    cannot say (no such task, a read that fails or is slow, a call from the loop itself) is open,
+    so the copy stays."""
+
+    from finishup.domain.coordination import WorkState
+
+    get_task = getattr(store, "get_task", None)
+
+    def closed(task_id: str) -> bool:
+        if not callable(get_task) or loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                cast(Callable[[str], Coroutine[object, object, object]], get_task)(task_id), loop
+            )
+            snapshot = future.result(timeout=10.0)
+        except Exception:  # noqa: BLE001 - unknown is open
+            return False
+        state = getattr(snapshot, "work_state", None)
+        return state is not None and state is not WorkState.OPEN
+
+    return closed
+
+
 async def _production_composition(
     *,
     _config: FinishUpConfig | None = None,
@@ -5401,8 +5741,14 @@ async def _production_composition(
     _binders: _ListenerBinders | None = None,
     _ready_application_factory: _ReadyApplicationFactory | None = None,
     _startup_bundle_upgrade: _StartupBundleUpgrade | None = None,
+    rest_edge: _RestEdge | None = None,
 ) -> ServiceComposition:
-    """Build the real locked-first service graph without opening ready-only state."""
+    """Build the real locked-first service graph without opening ready-only state.
+
+    ``rest_edge`` is the native REST edge the owner runs this service with (ADR-053): the service
+    then does not stop when idle (it is a network server its supervisor runs); idle relock is
+    unchanged.
+    """
 
     config = _config or load_config({}, os.environ, None)
     root = active_root()
@@ -5462,6 +5808,9 @@ async def _production_composition(
         endpoint_cleanup=listeners.close,
         close_ready_composition=ready_close_relay,
         holder_identity=holder_identity,
+        # A service serving the native REST edge is a network server its owner's supervisor runs
+        # (ADR-053): it never stops for idleness (about 31 years); every other bound is unchanged.
+        idle_stop_seconds=float(IDLE_STOP_SECONDS) if rest_edge is None else float(2**30),
     )
     secret_memory: LocalSecretMemory | None = None
     vault: VaultService | None = None
@@ -5575,6 +5924,10 @@ async def _production_composition(
         observation_gate = asyncio.Lock()
         # One hub: the daemon registers agent connections, the ready application calls them.
         workspace_hub = WorkspaceAgentHub()
+        # Level L2 (ADR-054): the offer ``[server.code_copy]`` makes; a service whose profile
+        # offers L2 keeps copies, and none otherwise.
+        profile_source = ServerProfileSource.load(config, paths.state, code_copy_offer(config))
+        _attach_code_copies(workspace_hub, profile_source, paths.state, vault)
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -5654,6 +6007,9 @@ async def _production_composition(
             observation_gate=observation_gate,
             owner_view_grants=owner_view_grants,
             workspace_hub=workspace_hub,
+            # What this server offers a client elsewhere, and its revision (ADR-052).
+            server_profile=profile_source,
+            rest_edge=rest_edge,
         )
     except BaseException:
         await listeners.close()
@@ -5910,10 +6266,13 @@ def _unnamed_refusal_token(exc: Exception) -> str | None:
     return None
 
 
-async def run_service(startup_correlation_id: str | None = None) -> Never:
+async def run_service(
+    startup_correlation_id: str | None = None, *, rest_edge: _RestEdge | None = None
+) -> Never:
     """Run one foreground service process until a signal requests bounded shutdown.
 
-    ``startup_correlation_id`` is the id a spawning process will look a startup failure up under.
+    ``startup_correlation_id`` is the id a spawning process will look a startup failure up under;
+    ``rest_edge`` the native REST edge it serves (``finishup service rest run --edge native``).
     """
 
     # The long-lived service keeps validating against the full schema catalog it has always built;
@@ -5925,7 +6284,11 @@ async def run_service(startup_correlation_id: str | None = None) -> Never:
         config = load_config({}, os.environ, None)
         configure_logging(config.logging, LogMode.SERVICE)
         stage = "composition"
-        composition = await _production_composition(_config=config)
+        composition = await (
+            _production_composition(_config=config)
+            if rest_edge is None
+            else _production_composition(_config=config, rest_edge=rest_edge)
+        )
         stage = "activation"
         daemon = ServiceDaemon(_composition=composition)
         await daemon.serve()

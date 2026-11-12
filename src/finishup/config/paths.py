@@ -55,6 +55,7 @@ __all__ = [
     "reset_selection_memo",
     "runtime_dir",
     "selection_override",
+    "selection_override_active",
     "runtime_pin_path",
     "service_generation_path",
     "setup_marker_path",
@@ -578,8 +579,10 @@ def _selected_root(probe: _PathProbe) -> Path | None:
     everyday service silently. Ambiguous ambient naming reads no selection: every ambient path
     already fails closed with ``installation_root_ambiguous`` there.
 
-    The memo keeps a process on the target it started with (an MCP bridge never switches), never
-    on one removed since: every answer, remembered or overridden, still needs the root's record,
+    The memo keeps a process on the target it started with (an MCP bridge never switches between
+    servers on this computer; one whose connection to a server elsewhere ended because its
+    authorization changed resets it with ``reset_selection_memo``, ADR-052), never on one removed
+    since: every answer, remembered or overridden, still needs the root's record,
     and once ``finishup server remove`` deleted it the answer fails closed exactly as a fresh read
     would. No path helper therefore recreates a removed target's folder (SRV-1).
     """
@@ -666,6 +669,20 @@ def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -
         yield
     finally:
         _SELECTION_OVERRIDE.reset(token)
+
+
+def selection_override_active(*, _probe: _PathProbe | None = None) -> bool:
+    """Whether a ``selection_override`` block decides this context's selection now.
+
+    Such a block names its root on purpose (one named target, probed or stopped from a process
+    whose own selection names another): the selection file does not, so an authorization made
+    under it is bound to that root, not to the selection (ADR-052).
+    """
+
+    probe = _probe_or_default(_probe)
+    key = str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)
+    override = _SELECTION_OVERRIDE.get()
+    return override is not None and override[0] == key
 
 
 def active_root(*, _probe: _PathProbe | None = None) -> Path | None:
@@ -953,8 +970,23 @@ def _decode_mount_field(value: str) -> str:
     return result
 
 
-def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
-    matches: list[tuple[int, str]] = []
+type _MountPoints = tuple[tuple[Path, str], ...]
+
+# The last mount table read and its mount points, each resolved once. Every store opened, and
+# every connection to an isolated root's service, verifies its folder, and resolving each of the
+# computer's mount points again for each folder was most of a warm status read's time (a lstat
+# chain per mount point, dozens of them). The table's own text is the key: a mount or unmount is
+# another text and is resolved afresh. The kernel names each mount point by its current path, so
+# the same text resolves the same way.
+_resolved_mount_table: tuple[str, _MountPoints] | None = None
+
+
+def _resolved_mount_points(mount_table: str) -> _MountPoints:
+    global _resolved_mount_table
+    remembered = _resolved_mount_table
+    if remembered is not None and remembered[0] == mount_table:
+        return remembered[1]
+    points: list[tuple[Path, str]] = []
     for line in mount_table.splitlines():
         fields = line.split()
         if len(fields) < 3:
@@ -964,8 +996,20 @@ def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
             resolved_mount = mount_point.resolve(strict=False)
         except OSError:
             resolved_mount = mount_point
-        if _is_beneath(path, resolved_mount):
-            matches.append((len(resolved_mount.parts), fields[2]))
+        points.append((resolved_mount, fields[2]))
+    resolved = tuple(points)
+    _resolved_mount_table = (mount_table, resolved)
+    return resolved
+
+
+def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
+    # ``_is_beneath`` without a raised error per mount point: the path or one of its parents.
+    beneath = {path, *path.parents}
+    matches = [
+        (len(mount_point.parts), filesystem)
+        for mount_point, filesystem in _resolved_mount_points(mount_table)
+        if mount_point in beneath
+    ]
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]

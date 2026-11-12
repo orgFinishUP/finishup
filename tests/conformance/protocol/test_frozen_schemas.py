@@ -27,7 +27,9 @@ _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
 # +1 each: the review-packet-row 2.0.0 provider contract (robust lane row contract).
 # ADR-049: +1 member, decision-recorded 1.1.0 (an event schema, not a request/result version).
 _EXPECTED_MEMBER_COUNT = (
-    254  # ADR-051 decision 5 +2 check-recorded 1.7.0, receipt-document 1.4.0;
+    264  # ADR-054 +1 config 1.4.0 (the [server] table), +1 content-forgotten 1.0.0 (U20);
+    # ADR-053 +7 REST v1 documents; ADR-052 +1 server-profile 1.0.0;
+    # ADR-051 decision 5 +2 check-recorded 1.7.0, receipt-document 1.4.0;
     # ADR-051 +1 version-manifest 2.4.0; #1239 +1 contact-expectation-declared 1.0.0;
 )
 # ADR-051 decision D4 +1 receipt-result 1.5.0 (the optional ``workspace_provenance`` member);
@@ -37,9 +39,11 @@ _EXPECTED_MEMBER_COUNT = (
 # +1 privacy-policy 1.3.0;
 # #1119 +2 host-connection batch report and ai-status 1.0.0;
 # ADR-051 +4 control envelopes 2.10.0, +1 isolation-report 1.1.0, +1 server-target-status 1.0.0
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 58  # #1118 reviewer-reply; #1119 batch, ai-status;
-# ADR-051 server-target-status
-_EXPECTED_EVENT_VERSION_COUNT = 30  # #1239 +1 contact-expectation-declared
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 66  # #1118 reviewer-reply; #1119 batch, ai-status;
+# ADR-051 server-target-status; ADR-052 server-profile; ADR-053 the seven rest-* documents
+_EXPECTED_EVENT_VERSION_COUNT = (
+    31  # #1239 +1 contact-expectation-declared; ADR-054 +1 content-forgotten
+)
 
 
 def _schema_module() -> Any:

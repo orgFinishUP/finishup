@@ -4287,6 +4287,14 @@ async def _run_setup_wizard(
     zero_network = await find_zero_network_selection_async()
     if zero_network is not None:
         _append_next_step(next_steps, zero_network.next_step())
+    else:
+        from finishup.cli.zero_network_selection import find_repository_hold_async
+
+        # ADR-051 decision 8, round 4: this project's repository held from, or kept here for,
+        # the selected server elsewhere; from the records alone.
+        held = await find_repository_hold_async(codex_project)
+        if held is not None:
+            _append_next_step(next_steps, held.next_step())
 
     mutating_run = interactive or accept
     # A privacy step this run attempted for AI-powered review and that was declined or failed
@@ -4679,6 +4687,13 @@ async def setup_status(*, json_output: bool) -> int:
     zero_network = await find_zero_network_selection_async()
     if zero_network is not None:
         typer.echo(zero_network.line(), err=True)
+    else:
+        from finishup.cli.zero_network_selection import find_repository_hold_async
+
+        # And this folder's repository, held from or kept here for that server (round 4).
+        held = await find_repository_hold_async()
+        if held is not None:
+            typer.echo(held.line(), err=True)
     return 0
 
 

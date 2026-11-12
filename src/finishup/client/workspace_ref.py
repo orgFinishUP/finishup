@@ -258,15 +258,34 @@ def start_request_for_connection(
     """``portable_start_request`` for the connection about to send ``request``.
 
     The binding and handle are the ones ``ServiceClient`` reports from its hello; ``serving`` is
-    the workspace locator the caller made that connection from. A connection that reports none (a
-    stand-in, or a client older than workspace binding) is treated as unbound, so the request goes
-    out as written, exactly as before.
+    the workspace locator the caller made that connection from. Where the connection reports the
+    worktree its claim was made for (``remote_workspace``), that worktree is the one served, so
+    the rule compares against exactly what the server reads. A connection to a server elsewhere
+    that carries no claim (made from a folder in no repository) serves no worktree, so it sends
+    no path at all. A connection that reports none of this (a stand-in, or a client older than
+    workspace binding) is treated as unbound, so the request goes out as written, exactly as
+    before.
     """
 
     binding = getattr(connection, "workspace_binding", "none")
     handle = getattr(connection, "workspace_handle", None)
     if type(binding) is not str or binding not in WORKSPACE_BINDINGS:
         binding = "none"
+    remote_workspace: object = getattr(connection, "remote_workspace", None)
+    if type(remote_workspace) is tuple:
+        claimed = cast(tuple[object, ...], remote_workspace)
+        if len(claimed) == 2 and type(claimed[1]) is str:
+            serving = claimed[1]
+    reference = request.workspace_ref
+    if (
+        binding != "client_claim"
+        and getattr(connection, "authorization", None) is not None
+        and reference is not None
+        and reference.startswith("/")
+    ):
+        # A server elsewhere, and this connection claims no workspace: it serves no folder, and a
+        # path sent as written would name a folder of this computer to that server.
+        raise WorkspaceRefNotServed(surface=surface)
     return portable_start_request(
         request,
         workspace_binding=cast(WorkspaceBinding, binding),

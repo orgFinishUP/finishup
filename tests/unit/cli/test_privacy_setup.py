@@ -558,7 +558,7 @@ def _install_setup_stubs(
         del workspace_locator
         return PendingProposal("pvp_1")
 
-    async def decide(_proposal: str) -> PrivacyDecisionResult:
+    async def decide(_proposal: str, **_kwargs: object) -> PrivacyDecisionResult:
         return PrivacyDecisionResult("committed", "sha256:" + "c" * 64)
 
     def confirm(prompt: str, *, default: bool = False) -> bool:

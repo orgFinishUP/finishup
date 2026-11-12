@@ -63,7 +63,7 @@ def _install(
         widening = any(change.widens for change in privacy_policy_changes(policy, candidate))
         return _PROPOSAL if widening else None
 
-    async def decide(proposal_id: str) -> object:
+    async def decide(proposal_id: str, **_kwargs: object) -> object:
         decided.append(proposal_id)
         return SimpleNamespace(status=decision)
 

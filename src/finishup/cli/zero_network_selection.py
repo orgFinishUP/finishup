@@ -36,6 +36,13 @@ the web (``ssh``, ``https``, ``local_port``).
   header show the item (``find_zero_network_selection``) while this computer is, or last reported
   being, zero-network and a remote server is, or may be, selected.
 
+The same surfaces show, in the same shape, a repository whose own privacy policy on this computer
+allows no network use while a server elsewhere is selected (ADR-051 decision 8, round 4;
+``client.repository_hold``): held from that server until the owner decides, or kept on this
+computer as they chose (``find_repository_hold``, ``RepositoryHoldItem``). It is shown only where
+the hold is what stops a connection (the gate's earlier steps admit the server, ADR-052); in this
+release no remote kind is open, so it is never shown.
+
 The selection is read from its owner-only file afresh, never from this process's memo, so a
 process that resolved its root before the selection changed still sees what new hooks and agent
 sessions use. A process whose root an isolation variable or runtime pin decides changes and reads
@@ -51,16 +58,19 @@ is not affected.
 
 from __future__ import annotations
 
+import os
 import sys
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 import typer
 
 if TYPE_CHECKING:
+    from finishup.client.everyday_repository import EverydayReads, RepositoryState
     from finishup.client.targets import ServerTarget
     from finishup.domain.values import JsonObject
     from finishup.protocol.canonical import JsonValue
@@ -72,20 +82,28 @@ __all__ = [
     "SWITCH_COMMAND",
     "NetworkState",
     "PolicyRead",
+    "RepositoryHoldItem",
     "ZeroNetworkChangeStopped",
     "ZeroNetworkSelection",
     "after_policy_change",
     "after_policy_change_async",
     "candidate_forbids_network",
     "everyday_network_state",
+    "everyday_repository_state",
+    "find_repository_hold",
+    "find_repository_hold_async",
     "find_zero_network_selection",
     "find_zero_network_selection_async",
     "guard_policy_change",
     "interactive_terminal",
+    "live_repository_state",
     "machine_readable_answer",
     "machine_readable_requested",
     "read_selection_on_disk",
     "remember_reported_policy",
+    "remember_repository_setup",
+    "repository_hold_line",
+    "still_holds",
     "still_selected",
 ]
 
@@ -97,9 +115,13 @@ type PolicyRead = Literal["live", "last_reported"]
 REMOTE_SELECTED: Final = "zero_network_remote_selected"
 SELECTION_UNREADABLE: Final = "zero_network_selection_unreadable"
 SWITCH_COMMAND: Final = "finishup server use local"
+# A running MCP bridge keeps a server on this computer it started with; a connection it made to
+# a server elsewhere ends once the selection changes, and the bridge follows the new selection on
+# its next request (ADR-052, the owner's answer O1).
 OPEN_SESSIONS_LINE: Final = (
     "New hooks and CLI calls use it now. Restart open agent sessions: a running FinishUP MCP "
-    "bridge keeps the server it started with."
+    "bridge keeps a server on this computer it started with, and ends a connection to a server "
+    "elsewhere to follow the new selection."
 )
 
 # Written once, when the everyday installation's vault is initialized.
@@ -223,6 +245,221 @@ class ZeroNetworkSelection:
         }
 
 
+_HOLD_ADD: Final = "finishup server repositories add"
+_HOLD_KEEP: Final = "finishup server repositories keep"
+_HOLD_REMOVE: Final = "finishup server repositories remove"
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryHoldItem:
+    """This folder's repository is held from the selected server elsewhere, or kept here.
+
+    ADR-051 decision 8, round 4: its privacy policy on this computer allows no network use, so
+    nothing of it is sent to that server (``reason`` ``repository_egress_held``) until the owner
+    allows it, or keeps it here without being asked again (``repository_egress_kept``). The same
+    shape as ``ZeroNetworkSelection``: facts, consequence, the way out. ``key`` is the client's
+    report key, kept for a record-only re-check (``still_holds``); it never leaves this computer.
+    Every field shown is a generated id, a closed token or a fixed-shape UTC time.
+    """
+
+    reason: Literal["repository_egress_held", "repository_egress_kept"]
+    target_id: str
+    kind: str
+    key: str
+    cause: str | None = None
+    policy_read: PolicyRead = "last_reported"
+    reported_at: str | None = None
+    decided_at: str | None = None
+
+    @property
+    def server(self) -> str:
+        return f"{self.target_id} ({self.kind})"
+
+    def _policy(self) -> str:
+        reported = (
+            f", as this computer last reported at {self.reported_at}"
+            if self.policy_read == "last_reported" and self.reported_at is not None
+            else ""
+        )
+        return f"This repository's privacy policy on this computer allows no network use{reported}"
+
+    def lines(self) -> tuple[str, ...]:
+        """The facts, what they mean, and the way out, as owner-display lines."""
+
+        if self.reason == "repository_egress_kept":
+            chosen = "" if self.decided_at is None else f" at {self.decided_at}"
+            return (
+                f"{self._policy()}, and you chose{chosen} to keep its work on this computer for "
+                f"{self.kind} {self.target_id}, so FinishUP sends nothing from it there and does "
+                "not ask again.",
+                f"To send it anyway, run '{_HOLD_ADD}' in this repository (it asks you to confirm "
+                f"in your terminal); '{_HOLD_REMOVE}' asks again.",
+            )
+        lines = [
+            f"{self._policy()}, so FinishUP sends nothing from it to {self.kind} {self.target_id}.",
+            "Its starts, checks and observations wait here until you decide.",
+        ]
+        if self.cause == "grant_changed":
+            lines.append(
+                "You chose for it before, but its privacy policy here changed since, so FinishUP "
+                "asks again."
+            )
+        lines.append(
+            f"To send it anyway, run '{_HOLD_ADD}' in this repository (it asks you to confirm in "
+            f"your terminal); to keep it here without being asked again, '{_HOLD_KEEP}'."
+        )
+        return tuple(lines)
+
+    def line(self) -> str:
+        """One bounded line: the closed reason, then the facts."""
+
+        return f"{self.reason}: " + " ".join(self.lines())
+
+    def next_step(self) -> str:
+        """A setup next step: the command, with the closed reason in parentheses."""
+
+        if self.reason == "repository_egress_kept":
+            return (
+                f"run '{_HOLD_ADD}' in this repository to send its work to the selected server "
+                f"{self.server}: you chose to keep it on this computer ({self.reason})"
+            )
+        return (
+            f"run '{_HOLD_ADD}' in this repository to send its work to the selected server "
+            f"{self.server} anyway, or '{_HOLD_KEEP}' to keep it here: its privacy policy on "
+            f"this computer allows no network use ({self.reason})"
+        )
+
+    def heading(self) -> str:
+        """A short title for the terminal interface's ``/server``."""
+
+        if self.reason == "repository_egress_kept":
+            return "This repository's work is kept on this computer"
+        return "This repository's work is held from the selected server"
+
+    def indicator_suffix(self) -> str:
+        """What the terminal interface's header adds after the selected server."""
+
+        if self.reason == "repository_egress_kept":
+            return " · this repository kept here"
+        return " · this repository held"
+
+    def fact(self) -> dict[str, JsonValue]:
+        """The machine-readable item (closed tokens, a generated id and fixed-shape times)."""
+
+        return {
+            "reason": self.reason,
+            "target_id": self.target_id,
+            "kind": self.kind,
+            "cause": self.cause,
+            "policy_read": self.policy_read,
+            "reported_at": self.reported_at,
+            "decided_at": self.decided_at,
+        }
+
+
+def _repository_key(worktree: str) -> str | None:
+    import asyncio
+    import contextvars
+
+    from finishup.client.everyday_repository import repository_key_for
+
+    try:
+        return contextvars.Context().run(asyncio.run, repository_key_for(worktree))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _hold_item(record: ServerTarget, key: str, *, live: bool) -> RepositoryHoldItem | None:
+    from finishup.client.authorization import gate
+    from finishup.client.repository_hold import HELD, decide
+    from finishup.client.targets import TargetError, target_root
+
+    try:
+        # The hold is the gate's last step (ADR-052): it is shown only where it is what stops a
+        # connection. Zero-network has its own item, and in this release every remote kind is
+        # closed, so an earlier step refuses and no item is shown.
+        gate(record)
+    except TargetError:
+        return None
+    decision = decide(target_root(record.target_id), record.target_id, key)
+    phase = decision.phase
+    if phase is None:
+        return None
+    return RepositoryHoldItem(
+        "repository_egress_held" if phase == HELD else "repository_egress_kept",
+        record.target_id,
+        record.kind,
+        key,
+        decision.cause,
+        "live" if live else "last_reported",
+        decision.reported_at,
+        decision.decided_at,
+    )
+
+
+def find_repository_hold(
+    folder: str | os.PathLike[str] | None = None, *, live: bool = False
+) -> RepositoryHoldItem | None:
+    """The item while the repository of ``folder`` (the current folder when None) is held from
+    the selected server elsewhere, or kept on this computer for it; ``None`` otherwise.
+
+    From the records alone (``repository_hold.decide``) unless ``live``, which first asks this
+    computer's FinishUP about the repository when it can answer (``live_repository_state``, which
+    records what it says). ``None`` with nothing selected, a server on this computer, an isolation
+    variable or pin, a folder outside any repository, or a repository not held. The selection is
+    read from its file afresh. Runs its own event loop for the repository's one Git read; call
+    ``find_repository_hold_async`` from a running one. Never raises.
+    """
+
+    if _explicit_source():
+        return None
+    try:
+        selected = _remote_on_disk()
+        if selected is None or isinstance(selected, str):
+            return None
+        worktree = _worktree_of(None if folder is None else Path(os.fspath(folder)))
+        if worktree is None:
+            return None
+        state = live_repository_state(worktree) if live else None
+        key = _repository_key(worktree)
+        if key is None:
+            return None
+        return _hold_item(selected, key, live=state in {"no_network", "network_permitted"})
+    except Exception:  # noqa: BLE001 - a display never fails on this question
+        return None
+
+
+async def find_repository_hold_async(
+    folder: str | os.PathLike[str] | None = None, *, live: bool = False
+) -> RepositoryHoldItem | None:
+    """``find_repository_hold`` from a running event loop (in a worker thread)."""
+
+    import asyncio
+
+    return await asyncio.to_thread(find_repository_hold, folder, live=live)
+
+
+def still_holds(item: RepositoryHoldItem) -> bool:
+    """Whether ``item`` still applies: the same server is selected on disk, and the records still
+    hold (or keep) the repository from it. File reads only, for a cached item."""
+
+    if _explicit_source():
+        return False
+    selected = _selection_on_disk()
+    if (
+        selected is None
+        or isinstance(selected, str)
+        or not selected.is_remote
+        or selected.target_id != item.target_id
+    ):
+        return False
+    try:
+        current = _hold_item(selected, item.key, live=False)
+    except Exception:  # noqa: BLE001 - a header never fails on this question
+        return False
+    return current is not None and current.reason == item.reason
+
+
 class ZeroNetworkChangeStopped(ValueError):
     """A privacy change that would make this computer zero-network was not applied.
 
@@ -284,20 +521,9 @@ def _everyday_installation_exists() -> bool:
     read) fails closed: it counts as set up.
     """
 
-    import os
+    from finishup.client.everyday_repository import everyday_installation_exists
 
-    from finishup.config.load import load_config
-    from finishup.config.models import ConfigError
-    from finishup.config.paths import PathSafetyError, bundle_root
-
-    try:
-        config = load_config({}, os.environ, None)
-        (bundle_root(_data_dir=config.storage.data_dir) / _INSTALLATION_MARKER).lstat()
-    except FileNotFoundError:
-        return False
-    except (ConfigError, OSError, PathSafetyError):
-        return True
-    return True
+    return everyday_installation_exists()
 
 
 def everyday_network_state() -> NetworkState:
@@ -373,6 +599,62 @@ def everyday_network_state() -> NetworkState:
     if remember:
         record_reported_policy(zero_network=not permitted)
     return "network_permitted" if permitted else "zero_network"
+
+
+def everyday_repository_state(
+    locator: str, *, budget_seconds: float = _POLICY_READ_SECONDS
+) -> RepositoryState:
+    """What this computer's own FinishUP says of the repository at worktree ``locator`` now.
+
+    ADR-051 decision 8, maintainer decision of 2026-11-07, round 4: ``no_network`` when the
+    repository's own grant composes to no network egress (so it is held from a server elsewhere
+    until the owner decides), ``network_permitted`` when it has no grant or its grant permits it,
+    ``no_policy`` for a computer whose everyday FinishUP was never set up, ``unreadable``
+    otherwise (the service is stopped, locked or slow, this computer forbids all network use, or
+    an isolation variable or pin decides this process's root). Each answer is recorded
+    (``client.everyday_repository.read_everyday_repository``), the machine-scope marker with it.
+    ``locator`` is the worktree's top. Runs its own event loop in a fresh ``contextvars``
+    context, never connecting on demand: call it off any running loop.
+    """
+
+    return _everyday_reads(locator, budget_seconds=budget_seconds).repository
+
+
+def _everyday_reads(locator: str, *, budget_seconds: float = _POLICY_READ_SECONDS) -> EverydayReads:
+    import asyncio
+    import contextvars
+
+    from finishup.client.everyday_repository import EverydayReads, read_everyday_repository
+
+    if _explicit_source():
+        return EverydayReads("unreadable", "unreadable")
+
+    async def read() -> EverydayReads:
+        return await read_everyday_repository(
+            locator,
+            budget_seconds=budget_seconds,
+            installation_exists=_everyday_installation_exists,
+        )
+
+    try:
+        return contextvars.Context().run(asyncio.run, read())
+    except (OSError, RuntimeError, ValueError):
+        return EverydayReads("unreadable", "unreadable")
+
+
+async def remember_repository_setup(locator: str | os.PathLike[str], setup: object) -> bool:
+    """Record a ``privacy_get_setup`` answer this computer's FinishUP just gave a client command.
+
+    Only on the everyday root, never under an isolation variable or pin
+    (``client.everyday_repository.remember_repository_setup``). Never raises.
+    """
+
+    from finishup.client.everyday_repository import remember_repository_setup as remember
+
+    try:
+        return await remember(locator, setup)
+    except Exception:  # noqa: BLE001 - remembering never fails the command that answered
+        return False
 
 
 def remember_reported_policy(response: Mapping[str, object]) -> bool:
@@ -739,6 +1021,15 @@ def _read_after_change() -> NetworkState:
 _after_change_state = _read_after_change
 
 
+def _read_repository(worktree: str) -> RepositoryState:
+    return everyday_repository_state(worktree)
+
+
+# The live read of one repository (after a change, and for the owner's 'server' commands); the
+# test suite replaces it the same way, so no test reaches a real service.
+_repository_reader = _read_repository
+
+
 def _after_change_read() -> NetworkState:
     from finishup.config.paths import PathSafetyError
 
@@ -746,6 +1037,68 @@ def _after_change_read() -> NetworkState:
         return _after_change_state()
     except (OSError, PathSafetyError, ValueError):
         return "unreadable"
+
+
+def live_repository_state(worktree: str) -> RepositoryState:
+    """``everyday_repository_state`` for an owner command or a change made here; never raises."""
+
+    from finishup.config.paths import PathSafetyError
+
+    try:
+        return _repository_reader(worktree)
+    except (OSError, PathSafetyError, ValueError):
+        return "unreadable"
+
+
+def _worktree_of(workspace_locator: Path | None) -> str | None:
+    """The worktree top of ``workspace_locator`` (the current folder when None), or None."""
+
+    from finishup.adapters.workspace_binding import canonical_workspace_locator
+
+    try:
+        folder = os.getcwd() if workspace_locator is None else os.fspath(workspace_locator)
+        return canonical_workspace_locator(folder)
+    except (OSError, ValueError):
+        return None
+
+
+# How long the sweep after a decision of an unknown repository may take, in all.
+_SWEEP_SECONDS: Final = 3.0
+
+
+def _sweep_permitted_reports(*, skip: str | None, clock: Callable[[], float] | None = None) -> None:
+    """Read again every repository last reported to allow network use; forget the rest.
+
+    After a decision whose repository is not known here (``privacy decide-policy`` from any
+    folder), a repository recorded as allowing network use may now allow none. Each is read again
+    through its most recent recorded worktree while this computer's service is up, within
+    ``_SWEEP_SECONDS`` in all; an entry not read in time (or whose folders are gone) is forgotten,
+    so it is unknown, never a stale "allows network use", and a session start asks again.
+    """
+
+    import time
+
+    from finishup.client.everyday_policy import forget_repository_reports, read_repository_reports
+
+    reading = read_repository_reports()
+    if isinstance(reading, str):
+        return
+    monotonic = time.monotonic if clock is None else clock
+    deadline = monotonic() + _SWEEP_SECONDS
+    stale: list[str] = []
+    for report in sorted(reading, key=lambda item: item.reported_at, reverse=True):
+        if report.no_network:
+            continue
+        worktree = next((path for path in report.worktrees if os.path.isdir(path)), None)
+        if worktree is not None and worktree == skip:
+            continue
+        if worktree is None or monotonic() >= deadline:
+            stale.append(report.key)
+            continue
+        if live_repository_state(worktree) == "unreadable":
+            stale.append(report.key)
+    if stale:
+        forget_repository_reports(stale)
 
 
 def _say_if_both(state: NetworkState) -> None:
@@ -758,29 +1111,126 @@ def _say_if_both(state: NetworkState) -> None:
         typer.echo(_item(selected).line(), err=True)
 
 
-def after_policy_change() -> None:
+def repository_hold_line(worktree: str, record: ServerTarget) -> str | None:
+    """The owner line when the repository at ``worktree`` is held or kept for remote ``record``.
+
+    Generated ids and closed kinds only; ``None`` when it is neither (not reported, allowed, or
+    allowing network use), and when an earlier step of the gate refuses ``record`` (every remote
+    kind is closed in this release). File reads and one Git read.
+    """
+
+    import asyncio
+    import contextvars
+
+    from finishup.client.authorization import gate
+    from finishup.client.everyday_repository import repository_key_for
+    from finishup.client.repository_hold import decide
+    from finishup.client.targets import TargetError, target_root
+
+    try:
+        # The hold is the gate's last step (ADR-052): it is named only where it is what stops a
+        # connection. While the remote kinds are closed an earlier step refuses every server
+        # elsewhere, and 'server repositories add' cannot act, so nothing is said of the hold.
+        gate(record)
+    except TargetError:
+        return None
+    try:
+        key = contextvars.Context().run(asyncio.run, repository_key_for(worktree))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if key is None:
+        return None
+    decision = decide(target_root(record.target_id), record.target_id, key)
+    server = f"{record.target_id} ({record.kind})"
+    if decision.state == "held":
+        return (
+            "This repository's privacy policy on this computer allows no network use, so FinishUP "
+            f"holds its work for the selected server {server}; 'finishup server repositories "
+            "add' in this repository sends it anyway, and 'finishup server repositories keep' "
+            "keeps it here without asking again."
+        )
+    if decision.state == "kept":
+        return (
+            "This repository's privacy policy on this computer allows no network use, and its "
+            f"work is kept on this computer for the selected server {server}, as you chose; "
+            "'finishup server repositories add' in this repository sends it anyway."
+        )
+    return None
+
+
+def _say_if_held(worktree: str | None, state: RepositoryState | None) -> None:
+    line = _held_line(worktree, state)
+    if line is not None:
+        typer.echo(line, err=True)
+        typer.echo(OPEN_SESSIONS_LINE, err=True)
+
+
+def _after_change(
+    state: NetworkState, workspace_locator: Path | None, *, sweep: bool
+) -> tuple[str | None, RepositoryState | None]:
+    from finishup.client.targets import remote_target_recorded
+
+    # The repository reads stay dormant until a server elsewhere is recorded (ADR-052, O3): until
+    # then a policy change reads this computer's policy alone, as before the hold existed.
+    if state in {"zero_network", "no_policy"} or not remote_target_recorded():
+        return None, None
+    worktree = _worktree_of(workspace_locator)
+    repository = None if worktree is None else live_repository_state(worktree)
+    if sweep and state == "network_permitted":
+        _sweep_permitted_reports(skip=worktree)
+    return worktree, repository
+
+
+def after_policy_change(workspace_locator: Path | None = None, *, sweep: bool = False) -> None:
     """After a committed change of this computer's privacy policy: remember what it is now.
 
     Reads this computer's policy again (``everyday_network_state``, which records the marker), so
     the zero-network state is remembered for when this computer's service can no longer be asked.
-    Only for a process on this computer's everyday installation: a change made on a remote server
-    is that server's. If a remote server was selected meanwhile, says so on stderr. Runs its own
-    event loop; call ``after_policy_change_async`` from a running one.
+    Then reads the repository whose folder is ``workspace_locator`` (the current folder when
+    None) again (``everyday_repository_state``), so a repository whose own policy now allows no
+    network use is held from a server elsewhere (ADR-051 decision 8, 2026-11-07, round 4). With
+    ``sweep`` (a decision whose repository is not known here) every repository last reported to
+    allow network use is read again too. Only for a process on this computer's everyday
+    installation: a change made on a remote server is that server's. If a remote server was
+    selected meanwhile, says on stderr that it is refused, or that this repository's work is held
+    for it. Runs its own event loop; call ``after_policy_change_async`` from a running one.
     """
 
     if not _on_everyday_root():
         return
-    _say_if_both(_after_change_read())
+    state = _after_change_read()
+    worktree, repository = _after_change(state, workspace_locator, sweep=sweep)
+    _say_if_both(state)
+    _say_if_held(worktree, repository)
 
 
-async def after_policy_change_async() -> None:
-    """``after_policy_change`` from a running event loop (the read in a worker thread)."""
+async def after_policy_change_async(
+    workspace_locator: Path | None = None, *, sweep: bool = False
+) -> None:
+    """``after_policy_change`` from a running event loop (the reads in a worker thread)."""
 
     import asyncio
 
     if not _on_everyday_root():
         return
-    _say_if_both(await asyncio.to_thread(_after_change_read))
+    state = await asyncio.to_thread(_after_change_read)
+    worktree, repository = await asyncio.to_thread(
+        _after_change, state, workspace_locator, sweep=sweep
+    )
+    _say_if_both(state)
+    held = await asyncio.to_thread(_held_line, worktree, repository)
+    if held is not None:
+        typer.echo(held, err=True)
+        typer.echo(OPEN_SESSIONS_LINE, err=True)
+
+
+def _held_line(worktree: str | None, state: RepositoryState | None) -> str | None:
+    if worktree is None or state != "no_network":
+        return None
+    selected = _remote_on_disk()
+    if selected is None or isinstance(selected, str):
+        return None
+    return repository_hold_line(worktree, selected)
 
 
 @contextmanager

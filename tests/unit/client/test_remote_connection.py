@@ -227,3 +227,57 @@ async def test_a_claim_bound_connection_sends_no_path_and_answers_workspace_call
     assert sent
     assert os.fsencode(repository) not in sent
     assert b"private-project" not in sent
+
+
+@pytest.mark.anyio
+async def test_a_claim_bound_connection_reaches_the_scripted_service_in_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared builder's scripted service records a claim-bound session's every frame."""
+
+    from tests.builders.control_relay import ScriptedDaemon, as_json, memory_pair
+
+    repository = _repository(tmp_path)
+    locator = WorkspaceLocator(os.fspath(repository))
+    claim = await workspace_claim(locator, bytes(range(32)))
+    handler = WorkspaceAgentHandler(locator, protected=(os.fspath(tmp_path / "state"),))
+    daemon = ScriptedDaemon()
+    # No admission names a profile revision here (a prebuilt binding from a local root), so the
+    # scripted service issues none and admits the claim as layer 1 did (ADR-052).
+    daemon.profile_revision = None
+    client_end, server_end = memory_pair()
+
+    async def connect() -> AuthenticatedUnixStream:
+        return cast(AuthenticatedUnixStream, client_end)
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    serving = asyncio.create_task(daemon.serve(server_end))
+    client = await connect_service(
+        ControlClientKind.CLI, workspace_binding=ClientWorkspaceBinding(claim, handler)
+    )
+    try:
+        status = await client.service_status()
+        assert status.service_instance_id == "svc_00000000-0000-4000-8000-0000000000a1"
+        await asyncio.wait_for(daemon.replied.wait(), timeout=10)
+    finally:
+        await client.close()
+        await serving
+
+    assert daemon.connections == 1
+    frames = daemon.received()
+    hello = as_json(frames[0])
+    assert hello["workspace_claim"] == {
+        "schema_version": "1.0.0",
+        "identity_kind": claim.identity_kind,
+        "digest": claim.digest,
+        "worktree": claim.worktree,
+    }
+    assert "workspace_locator" not in hello
+    assert hello["workspace_agent"] is not None
+    # The agent answered the scripted service's one workspace call on this connection.
+    assert [reply["call_id"] for reply in daemon.replies] == [
+        "rpc_00000000-0000-4000-8000-00000000c0de"
+    ]
+    everything = b"".join(frames)
+    assert os.fsencode(repository) not in everything
+    assert b"private-project" not in everything

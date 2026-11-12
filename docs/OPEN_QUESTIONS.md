@@ -223,8 +223,18 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   machine over SSH, and web-hosted servers over HTTPS — and the client workspace agent that lets
   such a server read the agent's working tree are decided by
   [ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903), which
-  delivers them in layers. Layer 1 opens named local servers only; every remote kind stays closed
-  (`remote_kind_unavailable`) and stays in this deferral until the layer that opens it lands.
+  delivers them in layers. Layer 1 opens named local servers only; layer 4 opens a server on
+  another machine over SSH (ADR-052: the helper, relay and direct styles); layer 5 opens HTTPS
+  servers, on the web and on ports of this computer, over REST v1
+  ([ADR-053](adr/ADR-053-rest-v1-public-contract.md): the gateway and native server edges, API
+  keys with scopes and principals, discovery and the official origin preset), so they leave this
+  deferral. The compatibility window (U18, design v2 question Q5) is decided there: the REST API
+  manifest, of which the core server serves exactly its own release's (a window of one).
+  Layer 2 ([ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
+  adds the shared authorization gate, generations, consent-envelope types and the repository
+  egress hold, all closed with the kinds; its remaining follow-ups (the helper's background
+  agents and the direct clients carrying the authorization, profile binding, sync under the gate,
+  a receipt count of fenced reads, and the lifecycle acceptance rows) are listed there by layer.
   Multi-user or team hosting, remote human-control ceremonies and the rest of the multi-user
   bullet below stay deferred.)* *(Narrowed 2026-09-05: this bullet
   formerly also deferred Codex app-server integration and additional first-party harnesses. The exact digest-bound Codex
@@ -245,8 +255,9 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   because the `status` result they cause discloses only what that call would already have returned
   under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
   cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
-  Remote service exposure is decided for single-owner servers by ADR-051 (Proposed) and not yet open
-  (its layer 1 keeps every remote kind closed); host registrations are unchanged by it. No adapter
+  Remote service exposure is decided for single-owner servers by ADR-051 (Proposed); SSH servers
+  open in layer 4, HTTPS and port servers in layer 5 (ADR-053); host registrations are unchanged by
+  it. No adapter
   silently installs or configures hooks; every hook install goes through the host's explicit plugin
   ceremony.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
@@ -254,7 +265,8 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   independent concurrent service writers; the single-user persistent local service and
   authenticated local IPC are v0.1 requirements. *(2026-11-05: ADR-051 (Proposed) defines how
   one owner will reach their own FinishUP service on another machine over SSH or HTTPS through the
-  ordinary control channel; its layer 1 keeps that closed. Multi-user hosting, remote unlock,
+  ordinary control channel; layer 4 opens SSH and layer 5 HTTPS (ADR-053; key principals keep
+  each key's claims apart, groundwork only). Multi-user hosting, remote unlock,
   consent and owner-view ceremonies, and the native installers stay deferred here.)*
 - Standalone public `finishup doctor` CLI command and support-bundle schema. *(2026-09-05: the
   terminal interface's read-only `/doctor` report and `finishup service diagnostics` (one durable

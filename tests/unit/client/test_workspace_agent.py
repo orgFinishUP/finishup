@@ -14,7 +14,7 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -289,7 +289,10 @@ def test_the_declaration_offers_the_catalog_and_the_frame_bound(
     repository: Path, protected: Path
 ) -> None:
     handler = _handler(repository, protected)
-    assert handler.declaration.operations == WORKSPACE_OPERATION_NAMES
+    # Every operation but level L2's sync, which only the helper's background agent offers.
+    assert handler.declaration.operations == tuple(
+        name for name in WORKSPACE_OPERATION_NAMES if not name.startswith("code_sync_")
+    )
     assert handler.declaration.max_reply_bytes == 6_291_456
     narrowed = _handler(repository, protected, operations=("read_task_base", "capture"))
     assert narrowed.declaration.operations == ("capture", "read_task_base")
@@ -2518,3 +2521,314 @@ def test_an_injected_trust_source_is_asked_for_the_exact_policy_digest(
     ) == ("refused", "check_not_approved")
     policy, _raw = load_observation_check_policy(repository)
     assert asked == [policy.raw_digest]
+
+
+# --- repositories held from the server (ADR-051 decision 8, round 4) -------------------------
+
+
+class _Hold:
+    """This agent's own connection check (``own_authorization``): refused while holding."""
+
+    def __init__(self) -> None:
+        self.holding = False
+
+    def refusal(self) -> str | None:
+        return "repository_egress_held" if self.holding else None
+
+
+def _held_handler(
+    repository: Path,
+    protected: Path,
+    held: Sequence[str] | Callable[[], tuple[str, ...]],
+    *,
+    mode: OutsideReadMode = "local",
+    folders: Sequence[Path | str] = (),
+    own_authorization: _Hold | None = None,
+) -> WorkspaceAgentHandler:
+    admitted = OutsideReads(mode, tuple(os.fspath(folder) for folder in folders))
+    if callable(held):
+        reader = held
+    else:
+        fixed = tuple(held)
+
+        def reader() -> tuple[str, ...]:
+            return fixed
+
+    return WorkspaceAgentHandler(
+        WorkspaceLocator(os.fspath(repository)),
+        protected=(os.fspath(protected),),
+        check_sandbox=_ReadySandbox(),
+        outside_reads=lambda: admitted,
+        held_roots=reader,
+        own_authorization=own_authorization,
+    )
+
+
+@pytest.fixture
+def held_repository(tmp_path: Path) -> Path:
+    """Another repository, beside the claimed one, whose policy here allows no network use."""
+
+    root = (tmp_path / "held").resolve()
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "secret.md").write_text("HELD_MARKER\n", encoding="utf-8")
+    return root
+
+
+def test_a_held_repository_is_fenced_from_every_other_repositorys_reads(
+    repository: Path, protected: Path, shared: Path, held_repository: Path, tmp_path: Path
+) -> None:
+    root = os.fspath(tmp_path.resolve())
+    held = os.fspath(held_repository)
+    secret = f"{held}/docs/secret.md"
+    spec = f"{shared}/spec.md"
+    unfenced = _held_handler(repository, protected, ())
+    fenced = _held_handler(repository, protected, (held,))
+    excluded = (os.fspath(repository), os.fspath(protected), held)
+
+    # Outside task inputs, in mode local: the held repository reads as nothing, as FinishUP's own
+    # directories do; the rest is read exactly as before.
+    arguments = ReadOutsideInputsArguments((root,), (secret, spec), limit=4)
+    before = _ok(unfenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments)
+    assert [item.path for item in before.inputs] == [secret, spec]
+    after = _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments)
+    assert [item.path for item in after.inputs] == [spec]
+    # ADR-052 O7: the one value the fence kept unread is counted, never named.
+    assert after == OutsideInputsRead(
+        read_outside_inputs((root,), (secret, spec), limit=4, excluded=excluded), fenced=1
+    )
+    assert before.fenced == 0
+    # A reviewer read and a listing beneath an admitted root never enter it.
+    assert _ok(
+        unfenced,
+        WorkspaceOperation.READ_TEXT_BENEATH,
+        ReadTextBeneathArguments(root, "held/docs/secret.md"),
+    )
+    assert (
+        _ok(
+            fenced,
+            WorkspaceOperation.READ_TEXT_BENEATH,
+            ReadTextBeneathArguments(root, "held/docs/secret.md"),
+        )
+        is None
+    )
+    assert _ok(
+        fenced, WorkspaceOperation.LIST_BENEATH, ListBeneathArguments(root, "")
+    ) == list_beneath(root, "", excluded=excluded, expired=_never)
+    assert _ok(fenced, WorkspaceOperation.LIST_BENEATH, ListBeneathArguments(root, "")) != _ok(
+        unfenced, WorkspaceOperation.LIST_BENEATH, ListBeneathArguments(root, "")
+    )
+    # Metadata: reported as not found.
+    facts = _ok(fenced, WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments((secret,)))
+    assert facts == (None,)
+    assert _ok(
+        unfenced, WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments((secret,))
+    ) == (LstatFacts.from_stat_result(os.lstat(secret)),)
+
+
+def test_a_symlinked_component_never_reaches_a_held_repository(
+    repository: Path, protected: Path, held_repository: Path, tmp_path: Path
+) -> None:
+    """``lstat`` follows every link but the last: a server naming a held repository through a
+    link to it, or to a folder inside it, learns nothing more than through its own name."""
+
+    area = tmp_path.resolve()
+    (area / "alias").symlink_to(held_repository)
+    (area / "inside").symlink_to(held_repository / "docs")
+    (area / "plain.txt").write_text("PLAIN\n", encoding="utf-8")
+    (area / "link.txt").symlink_to(held_repository / "docs" / "secret.md")
+    held = os.fspath(held_repository)
+    fenced = _held_handler(repository, protected, (held,))
+    unfenced = _held_handler(repository, protected, ())
+    through = (f"{area}/alias/docs/secret.md", f"{area}/inside/secret.md", f"{area}/alias/docs")
+    for path in through:
+        arguments = LstatCandidatesArguments((path,))
+        # Without the fence the link does reach the held repository's metadata.
+        assert _ok(unfenced, WorkspaceOperation.LSTAT_CANDIDATES, arguments) == (
+            LstatFacts.from_stat_result(os.lstat(path)),
+        )
+        assert _ok(fenced, WorkspaceOperation.LSTAT_CANDIDATES, arguments) == (None,)
+    # Everything else is answered as before: a plain file, and a link itself (its own metadata,
+    # never what it names).
+    plain, link = f"{area}/plain.txt", f"{area}/link.txt"
+    assert _ok(
+        fenced, WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments((plain, link))
+    ) == (
+        LstatFacts.from_stat_result(os.lstat(plain)),
+        LstatFacts.from_stat_result(os.lstat(link)),
+    )
+    # In listed mode a read beneath a root no folder admits says whether what it reaches exists
+    # (``root_not_admitted``) or reads as nothing: through the link, it is not even said to exist.
+    listed_fenced = _held_handler(repository, protected, (held,), mode="listed")
+    listed_unfenced = _held_handler(repository, protected, (), mode="listed")
+    arguments = ReadTextBeneathArguments(os.fspath(area), "alias/docs/secret.md")
+    assert _refused(listed_unfenced, WorkspaceOperation.READ_TEXT_BENEATH, arguments) == (
+        "refused",
+        "root_not_admitted",
+    )
+    assert _ok(listed_fenced, WorkspaceOperation.READ_TEXT_BENEATH, arguments) is None
+    # Something that exists outside the fence is still named, exactly as before.
+    plain_arguments = ReadTextBeneathArguments(os.fspath(area), "plain.txt")
+    assert _refused(listed_fenced, WorkspaceOperation.READ_TEXT_BENEATH, plain_arguments) == (
+        "refused",
+        "root_not_admitted",
+    )
+
+
+def test_a_listed_folder_holding_a_held_repository_never_admits_it(
+    repository: Path, protected: Path, tmp_path: Path
+) -> None:
+    # A listed folder never holds the home directory, so this one sits beside it.
+    area = (tmp_path / "area").resolve()
+    (area / "held" / "docs").mkdir(parents=True)
+    (area / "held" / "docs" / "secret.md").write_text("HELD_MARKER\n", encoding="utf-8")
+    root = os.fspath(area)
+    held = os.fspath(area / "held")
+    secret = f"{held}/docs/secret.md"
+    unfenced = _held_handler(repository, protected, (), mode="listed", folders=(root,))
+    fenced = _held_handler(repository, protected, (held,), mode="listed", folders=(root,))
+    arguments = ReadOutsideInputsArguments((root,), (secret,), limit=4)
+    assert [
+        item.path
+        for item in _ok(unfenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).inputs
+    ] == [secret]
+    # Not read, not counted as kept back and not named as listed: exactly as FinishUP's own state,
+    # but counted as fenced (ADR-052 O7), also where only the listed folder, walked beside the
+    # server's roots, would reach it.
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments) == OutsideInputsRead(
+        (), fenced=1
+    )
+    beside = ReadOutsideInputsArguments((os.fspath(tmp_path.resolve() / "other"),), (secret,), 4)
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, beside) == OutsideInputsRead(
+        (), fenced=1
+    )
+    assert _ok(unfenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, beside).fenced == 0
+    # A read root inside it is refused as one in FinishUP's own directories is.
+    assert _refused(
+        fenced,
+        WorkspaceOperation.READ_TEXT_BENEATH,
+        ReadTextBeneathArguments(held, "docs/secret.md"),
+    ) == ("refused", "root_not_admitted")
+
+
+@pytest.mark.parametrize("mode", ["local", "listed"])
+def test_an_outside_read_counts_the_values_a_held_repository_fenced(
+    repository: Path,
+    protected: Path,
+    shared: Path,
+    held_repository: Path,
+    tmp_path: Path,
+    mode: OutsideReadMode,
+) -> None:
+    """ADR-052 O7: how many of the server's values the agent left unread because they reached a
+    held repository, by its own spelling or through a link to it, for both outside reads and in
+    both modes. A value the read would never look at for another reason (beneath no root the read
+    walks, inside the claimed workspace, hidden, FinishUP's own directories, a word) is not
+    counted, and an agent with nothing held counts nothing."""
+
+    area = tmp_path.resolve()
+    (area / "alias").symlink_to(held_repository)
+    root = os.fspath(area)
+    held = os.fspath(held_repository)
+    folders = (os.fspath(shared),) if mode == "listed" else ()
+    fenced = _held_handler(repository, protected, (held,), mode=mode, folders=folders)
+    unfenced = _held_handler(repository, protected, (), mode=mode, folders=folders)
+    values = (
+        f"{held}/docs/secret.md",  # by its own spelling
+        f"{root}/alias/docs/secret.md",  # through a link to it
+        f"{held}/docs/absent.md",  # held, whether or not anything is there
+        f"{shared}/spec.md",  # outside the fence
+        f"{held}/.hidden",  # never a candidate
+        f"{repository}/README.md",  # the claimed workspace
+        f"{protected}/state.db",  # FinishUP's own directories, not a held repository
+        "secret.md",  # a word, never located beneath a root
+    )
+    inputs = ReadOutsideInputsArguments((root,), values, limit=4)
+    snapshots = SnapshotOutsideInputsArguments(
+        (root,), values, limit=4, max_bytes=65_536, budget_ms=5_000
+    )
+    for operation, arguments in (
+        (WorkspaceOperation.READ_OUTSIDE_INPUTS, inputs),
+        (WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS, snapshots),
+    ):
+        answer = _ok(fenced, operation, arguments)
+        assert answer.fenced == 3
+        assert _ok(unfenced, operation, arguments).fenced == 0
+    # Beneath no root the read walks nor a listed folder, a held value is never read anyway.
+    elsewhere = ReadOutsideInputsArguments((os.fspath(shared),), values[:3], limit=4)
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, elsewhere).fenced == 0
+
+
+def test_the_held_repositories_are_read_on_every_call_and_a_failure_fences_nothing_more(
+    repository: Path, protected: Path, held_repository: Path, tmp_path: Path
+) -> None:
+    root = os.fspath(tmp_path.resolve())
+    secret = f"{held_repository}/docs/secret.md"
+    answers: list[tuple[str, ...] | None] = [(), (os.fspath(held_repository),), None, ()]
+    asked: list[int] = []
+
+    def reader() -> tuple[str, ...]:
+        asked.append(1)
+        found = answers[len(asked) - 1]
+        if found is None:
+            raise OSError("record")
+        return found
+
+    handler = _held_handler(repository, protected, reader)
+    arguments = ReadOutsideInputsArguments((root,), (secret,), limit=4)
+    reads = [
+        len(_ok(handler, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).inputs) for _ in answers
+    ]
+    # Not held, held (a report arrived), unreadable (unknown is not held), released again.
+    assert reads == [1, 0, 1, 1]
+    assert len(asked) == len(answers)
+
+
+def test_a_held_repository_that_is_or_holds_or_lies_in_the_workspace_is_not_fenced(
+    repository: Path, protected: Path, tmp_path: Path
+) -> None:
+    """Critic gap 7: fencing the claimed workspace itself (a held repository at HOME holding it,
+    say) would silently empty its own reads; one nested inside it is governed by the claimed
+    repository's grant, as a local capture of it is."""
+
+    (repository / "vendor" / "nested").mkdir(parents=True)
+    (repository / "vendor" / "nested" / "lib.txt").write_text("NESTED\n", encoding="utf-8")
+    outer = os.fspath(tmp_path.resolve())
+    nested = os.fspath(repository / "vendor" / "nested")
+    handler = _held_handler(repository, protected, (outer, os.fspath(repository), nested))
+    plain = _held_handler(repository, protected, ())
+    for arguments in (
+        ReadTextBeneathArguments(_HANDLE, "tracked.txt"),
+        ListBeneathArguments(_HANDLE, "vendor/nested"),
+    ):
+        operation = (
+            WorkspaceOperation.READ_TEXT_BENEATH
+            if isinstance(arguments, ReadTextBeneathArguments)
+            else WorkspaceOperation.LIST_BENEATH
+        )
+        assert _ok(handler, operation, arguments) == _ok(plain, operation, arguments)
+        assert _ok(handler, operation, arguments)
+    # The outer held folder fences nothing beside the workspace either: it holds the workspace.
+    other = tmp_path / "beside.txt"
+    other.write_text("BESIDE\n", encoding="utf-8")
+    values = (os.fspath(other.resolve()),)
+    arguments = ReadOutsideInputsArguments((outer,), values, limit=4)
+    assert len(_ok(handler, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).inputs) == 1
+
+
+def test_an_agent_whose_own_repository_is_held_answers_nothing_of_it(
+    repository: Path, protected: Path
+) -> None:
+    hold = _Hold()
+    handler = _held_handler(repository, protected, (), own_authorization=hold)
+    arguments = WorkspaceOnlyArguments(_HANDLE)
+    assert _ok(handler, WorkspaceOperation.READ_TASK_BASE, arguments)
+    hold.holding = True
+    for operation, value in (
+        (WorkspaceOperation.READ_TASK_BASE, arguments),
+        (WorkspaceOperation.READ_TEXT_BENEATH, ReadTextBeneathArguments(_HANDLE, "tracked.txt")),
+        (WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments(("/srv/x",))),
+    ):
+        assert _refused(handler, operation, value) == ("unavailable", "workspace_unavailable")
+    # Allowed again ('server repositories add'): answered as before.
+    hold.holding = False
+    assert _ok(handler, WorkspaceOperation.READ_TASK_BASE, arguments)

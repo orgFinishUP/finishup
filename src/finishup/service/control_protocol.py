@@ -63,12 +63,19 @@ from finishup.protocol.schemas import (
     schema_manifest_digest,
     validate_schema_instance,
 )
+from finishup.protocol.server_profile import (
+    ProfileError,
+    ServerProfileRevision,
+    revision_from_json,
+    revision_to_json,
+)
 
 __all__ = [
     "CONTROL_FRAME_READ_DEADLINE_SECONDS",
     "CONTROL_PROTOCOL_VERSION",
     "MAX_ACTIVE_REQUESTS_PER_SESSION",
     "MAX_CONTROL_FRAME_BYTES",
+    "MAX_FINISHED_CALLS_REMEMBERED",
     "MAX_ORDINARY_CONTROL_FRAME_BYTES",
     "BoundedControlQueue",
     "ControlFrame",
@@ -78,6 +85,7 @@ __all__ = [
     "client_handshake",
     "decode_control_frame",
     "encode_control_frame",
+    "hello_result_for",
     "is_workspace_call_frame",
     "is_workspace_reply_frame",
     "parse_control_request",
@@ -88,6 +96,8 @@ __all__ = [
     "read_control_frame",
     "schema_for_method",
     "server_handshake",
+    "service_status_from_wire",
+    "service_status_wire",
     "validate_request",
     "validate_result",
     "workspace_call_frame",
@@ -101,6 +111,9 @@ CONTROL_PROTOCOL_VERSION: Final = "1.0"
 MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
+# How many answered calls a session remembers, newest kept, so a cancel that crossed its call's
+# answer on the wire (the peer sent it before it read the answer) is a no-op, not a mismatch.
+MAX_FINISHED_CALLS_REMEMBERED: Final = 256
 # The largest single ``ControlStream.receive`` a frame reader requests. The authenticated Unix
 # stream refuses a larger request (``receive_size_invalid``), so a frame above it is read in
 # bounded chunks. Asking for the whole remaining frame at once made every frame over 64 KiB
@@ -145,6 +158,9 @@ _ERROR_REASONS: Final = frozenset(
         # A hello named both a workspace path and a workspace claim, or offered a workspace
         # agent without a claim to answer for (ADR-051).
         "workspace_binding_conflict",
+        # A remote client's hello named a server-profile revision other than the one the service
+        # issues now, or a claim with none (ADR-052): not admitted.
+        "server_profile_changed",
     }
 )
 _COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
@@ -241,6 +257,10 @@ def _new_pending_calls() -> dict[str, _PendingCall]:
     return {}
 
 
+def _new_finished_calls() -> dict[str, None]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class ControlSession:
     """Peer-bound negotiated session with bounded request correlation state."""
@@ -276,8 +296,18 @@ class ControlSession:
         default=None, repr=False, compare=False
     )
     workspace_worktree: str | None = field(default=None, repr=False, compare=False)
+    # The server-profile revision this session is bound to (ADR-052): the one a remote client's
+    # hello named and the service admitted as current. Every later request on the session is
+    # re-checked against the revision the service issues then; ``None`` for a session that named
+    # none (every local client).
+    server_profile: ServerProfileRevision | None = field(default=None, repr=False, compare=False)
     _active: dict[str, _PendingCall] = field(
         default_factory=_new_pending_calls, init=False, repr=False, compare=False
+    )
+    # The rpc ids of calls answered on this session, oldest first, at most
+    # ``MAX_FINISHED_CALLS_REMEMBERED``: a late cancel naming one is a no-op.
+    _finished: dict[str, None] = field(
+        default_factory=_new_finished_calls, init=False, repr=False, compare=False
     )
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -357,7 +387,12 @@ class ControlSession:
         return len(self._active)
 
     def admit(self, request: ControlRequest) -> None:
-        """Admit one call under the per-session authority and 32-call cap."""
+        """Admit one call under the per-session authority and 32-call cap.
+
+        A cancel must name a call of this session: one still running, or one answered recently
+        (the cancel crossed its answer on the wire, so there is nothing left to cancel and the
+        session goes on). A cancel naming any other call is ``correlation_mismatch``.
+        """
 
         if self._closed:
             raise ControlProtocolError("session_closed")
@@ -369,7 +404,10 @@ class ControlSession:
         if isinstance(request, ControlCancelRequest):
             if request.rpc_id in self._active:
                 raise ControlProtocolError("duplicate_rpc_id")
-            if request.target_rpc_id not in self._active:
+            if (
+                request.target_rpc_id not in self._active
+                and request.target_rpc_id not in self._finished
+            ):
                 raise ControlProtocolError("correlation_mismatch")
             return
         if request.method not in self.allowed_methods:
@@ -395,9 +433,18 @@ class ControlSession:
         ):
             raise ControlProtocolError("correlation_mismatch")
         del self._active[result.rpc_id]
+        self._finished[result.rpc_id] = None
+        while len(self._finished) > MAX_FINISHED_CALLS_REMEMBERED:
+            del self._finished[next(iter(self._finished))]
+
+    def is_running(self, rpc_id: str) -> bool:
+        """Whether ``rpc_id`` names a call of this session that is not answered yet."""
+
+        return rpc_id in self._active
 
     def close(self) -> None:
         self._active.clear()
+        self._finished.clear()
         object.__setattr__(self, "_closed", True)
 
     def __reduce__(self) -> Never:
@@ -609,7 +656,9 @@ def _decode_control_payload(payload: bytes) -> ControlFrame:
     """Decode one frame body whose length prefix the caller has already checked."""
 
     try:
-        parsed = strict_json_parse(payload)
+        # ``canonical_encode`` makes the parse's profile walk itself (the same checks in the
+        # same order), and every refusal is ``frame_invalid`` either way: one walk, not two.
+        parsed = strict_json_parse(payload, validate=False)
         if canonical_encode(parsed) != payload or not isinstance(parsed, Mapping):
             _fail("frame_invalid")
         schema_name = _schema_name_for_frame(parsed)
@@ -771,6 +820,18 @@ def _service_status_from_wire(value: object) -> ServiceStatus:
         )
     except (KeyError, TypeError, ValueError):
         raise ControlProtocolError("frame_invalid") from None
+
+
+def service_status_wire(status: ServiceStatus) -> JsonObject:
+    """``status`` as its validated ``service-status`` wire object (the REST session, ADR-053)."""
+
+    return _status_wire(status)
+
+
+def service_status_from_wire(value: object) -> ServiceStatus:
+    """A ``service-status`` wire object as the typed status; ``frame_invalid`` otherwise."""
+
+    return _service_status_from_wire(value)
 
 
 def parse_control_request(frame: ControlFrame) -> ControlRequest:
@@ -1006,6 +1067,7 @@ def _workspace_agent_from_wire(value: object) -> WorkspaceAgentDeclaration:
             operations=tuple(sorted(cast(tuple[str, ...], source["operations"]), key=str.encode)),
             max_reply_bytes=cast(int, source["max_reply_bytes"]),
             schema_version=cast(Literal["1.0.0"], source["schema_version"]),
+            role=cast(Literal["connection", "background"], source.get("role", "connection")),
         )
     except (KeyError, TypeError, ValueError):
         raise ControlProtocolError("protocol_mismatch") from None
@@ -1021,12 +1083,23 @@ def _allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
     return _WORKFLOW_METHODS if kind is ControlClientKind.MCP_BRIDGE else _ALL_METHODS
 
 
+# Methods newer than every released hello-result schema (ADR-052: ``server_profile``). The
+# manifest-mismatch answer goes to a peer of another installation, which must still decode it to
+# name ``manifest_mismatch`` (#436), so it lists only the methods a released peer knows.
+_UNRELEASED_METHODS: Final = frozenset({ControlMethod.SERVER_PROFILE, ControlMethod.CODE_COPY})
+
+
+def _released_allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
+    return tuple(method for method in _allowed_for(kind) if method not in _UNRELEASED_METHODS)
+
+
 def _hello_result_wire(
     service_status: ServiceStatus,
     allowed: tuple[ControlMethod, ...],
     *,
     workspace_binding: WorkspaceBinding | None = None,
     workspace_handle: str | None = None,
+    server_profile: ServerProfileRevision | None = None,
 ) -> dict[str, JsonValue]:
     """The hello-result; without a binding it keeps the frozen pre-2.10 shape.
 
@@ -1047,7 +1120,37 @@ def _hello_result_wire(
         wire["workspace_binding"] = workspace_binding
     if workspace_handle is not None:
         wire["workspace_handle"] = workspace_handle
+    if server_profile is not None:
+        # The revision the service issues now (ADR-052), answered to a remote client's hello.
+        wire["server_profile"] = revision_to_json(server_profile)
     return wire
+
+
+def hello_result_for(
+    service_status: ServiceStatus,
+    client_kind: ControlClientKind,
+    *,
+    workspace_binding: WorkspaceBinding,
+    workspace_handle: str | None,
+    server_profile: ServerProfileRevision | None,
+) -> dict[str, JsonValue]:
+    """The hello-result this release's service answers ``client_kind`` with (ADR-053).
+
+    The REST mapping (``client.rest_stream``) answers a client's hello with it from the REST
+    session, so a ``ServiceClient`` over REST negotiates exactly as over the control socket. The
+    schema manifest named is this release's own: over REST, compatibility is the REST API manifest
+    the mapping already checked.
+    """
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    return _hello_result_wire(
+        service_status,
+        _allowed_for(client_kind),
+        workspace_binding=workspace_binding,
+        workspace_handle=workspace_handle,
+        server_profile=server_profile,
+    )
 
 
 def _manifest_digest() -> str:
@@ -1080,6 +1183,7 @@ async def client_handshake(
     workspace_agent: WorkspaceAgentDeclaration | None = None,
     projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
     output_is_controlling_tty: bool = False,
+    server_profile: ServerProfileRevision | None = None,
 ) -> ControlSession:
     """Negotiate an ordinary peer-authenticated client session.
 
@@ -1087,6 +1191,11 @@ async def client_handshake(
     or by a ``workspace_claim`` (for a server on another machine), never both; a
     ``workspace_agent`` is offered only beside a claim. The session records the binding and
     handle the service answered with.
+
+    ``server_profile`` is the profile revision a remote client consented to (ADR-052). A hello
+    that names one, or a claim, must be answered with exactly that revision; any other answer
+    (another revision, or none) is ``server_profile_changed`` and the session is not made: the
+    service did not admit it, and nothing more is sent.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -1097,6 +1206,8 @@ async def client_handshake(
         raise TypeError("workspace_claim_invalid")
     if workspace_agent is not None and type(workspace_agent) is not WorkspaceAgentDeclaration:
         raise TypeError("workspace_agent_invalid")
+    if server_profile is not None and type(server_profile) is not ServerProfileRevision:
+        raise TypeError("server_profile_invalid")
     if (workspace_locator is not None and workspace_claim is not None) or (
         workspace_agent is not None and workspace_claim is None
     ):
@@ -1133,27 +1244,34 @@ async def client_handshake(
             "worktree": workspace_claim.worktree,
         }
     if workspace_agent is not None:
-        hello["workspace_agent"] = {
+        agent_wire: dict[str, JsonValue] = {
             "schema_version": workspace_agent.schema_version,
             "operations": list(workspace_agent.operations),
             "max_reply_bytes": workspace_agent.max_reply_bytes,
         }
+        if workspace_agent.role != "connection":
+            agent_wire["role"] = workspace_agent.role
+        hello["workspace_agent"] = agent_wire
+    if server_profile is not None:
+        hello["server_profile"] = revision_to_json(server_profile)
     hello["presentation_context"] = {
         "render_mode": projection_render_mode.value,
         "output_is_controlling_tty": output_is_controlling_tty,
     }
     try:
         # Every frame of the session is validated against one of these envelopes. A process
-        # without the full catalog parses their schemas here, before the hello, where the hello
-        # used to build the whole catalog, so no schema work lands in a caller's later delivery
-        # budget (#1083).
+        # without the full catalog parses their schemas here, inside the handshake, where the
+        # hello used to build the whole catalog, so no schema work lands in a caller's later
+        # delivery budget (#1083): the hello's own envelope before it is encoded, the others
+        # while it is in flight (the service, or a server elsewhere one or more round trips
+        # away, answers meanwhile), before its answer is read (design v2 section 8.9).
+        prepare_schemas(("control-hello", _CONTROL_SCHEMA_VERSION))
+        await write_control_frame(stream, hello)
         prepare_schemas(
-            ("control-hello", _CONTROL_SCHEMA_VERSION),
             ("control-hello-result", _CONTROL_SCHEMA_VERSION),
             ("control-request", _CONTROL_REQUEST_SCHEMA_VERSION),
             ("control-result", _CONTROL_RESULT_SCHEMA_VERSION),
         )
-        await write_control_frame(stream, hello)
         # A service that rejects this hello (schema-manifest or protocol mismatch, or a hello
         # shape its decoder does not know) closes without answering. Name that outcome so the
         # client can treat the listening peer as incompatible instead of merely malformed.
@@ -1163,6 +1281,11 @@ async def client_handshake(
             _fail("protocol_mismatch")
         if result["schema_manifest_digest"] != _manifest_digest():
             _fail("manifest_mismatch")
+        if server_profile is not None or workspace_claim is not None:
+            # A remote client's session is made only under the revision it consented to; the
+            # service answers its current one and closes on any other (ADR-052).
+            if _answered_profile(result.get("server_profile")) != server_profile:
+                _fail("server_profile_changed")
         status = _service_status_from_wire(result["status"])
         if (
             status.service_version != result["service_version"]
@@ -1202,11 +1325,23 @@ async def client_handshake(
             workspace_handle=cast(str | None, raw_handle),
             workspace_agent=workspace_agent,
             workspace_worktree=None if workspace_claim is None else workspace_claim.worktree,
+            server_profile=server_profile,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
             raise
         await _close_after_failure(stream, exc)
+
+
+def _answered_profile(value: object) -> ServerProfileRevision | None:
+    """The revision a hello-result names; ``None`` when it names none."""
+
+    if value is None:
+        return None
+    try:
+        return revision_from_json(cast(JsonValue, value))
+    except ProfileError:
+        raise ControlProtocolError("protocol_mismatch") from None
 
 
 async def server_handshake(
@@ -1220,8 +1355,16 @@ async def server_handshake(
     | None = None,
     claim_context_resolver: Callable[[WorkspaceClaim], Awaitable[RepositoryPrivacyContext | None]]
     | None = None,
+    profile_revision: Callable[[], ServerProfileRevision | None] | None = None,
 ) -> ControlSession:
     """Negotiate a server session only after transport peer authentication.
+
+    ``profile_revision`` (a service that issues server-profile revisions, ADR-052) answers the
+    revision it issues now. A hello that names a revision, or names a claim, is admitted only
+    when it names exactly that one: otherwise the service answers its current revision and
+    closes (``server_profile_changed``) before the claim is keyed, an agent is registered or a
+    request is read. The admitted session is bound to it. A hello with neither (every local
+    client) is unchanged.
 
     A hello carrying both a locator and a claim, or an agent without a claim, is refused as
     ``workspace_binding_conflict``. ``claim_context_resolver`` turns a claim into the
@@ -1244,7 +1387,7 @@ async def server_handshake(
             # decodes the frozen 2.x shape names `manifest_mismatch` instead of
             # treating a silent close as `frame_invalid`. The session is not admitted.
             await write_control_frame(
-                stream, _hello_result_wire(service_status, _allowed_for(kind))
+                stream, _hello_result_wire(service_status, _released_allowed_for(kind))
             )
             _fail("manifest_mismatch")
         raw_presentation = hello.get("presentation_context")
@@ -1264,6 +1407,20 @@ async def server_handshake(
             raw_agent is not None and raw_claim is None
         ):
             _fail("workspace_binding_conflict")
+        bound_profile: ServerProfileRevision | None = None
+        raw_profile = hello.get("server_profile")
+        if profile_revision is not None and (raw_profile is not None or raw_claim is not None):
+            current = profile_revision()
+            presented = _answered_profile(raw_profile)
+            if current is None or presented != current:
+                # Before anything is keyed, registered or read: the consent this client was
+                # admitted under is not the server's profile now (ADR-052).
+                await write_control_frame(
+                    stream,
+                    _hello_result_wire(service_status, _allowed_for(kind), server_profile=current),
+                )
+                _fail("server_profile_changed")
+            bound_profile = current
         repository_context: RepositoryPrivacyContext | None = None
         workspace_binding: WorkspaceBinding = (
             "client_claim"
@@ -1314,6 +1471,7 @@ async def server_handshake(
                 allowed,
                 workspace_binding=workspace_binding,
                 workspace_handle=workspace_handle,
+                server_profile=bound_profile,
             ),
         )
         return ControlSession(
@@ -1331,6 +1489,7 @@ async def server_handshake(
             workspace_handle=workspace_handle,
             workspace_agent=workspace_agent,
             workspace_worktree=workspace_worktree,
+            server_profile=bound_profile,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):

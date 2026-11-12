@@ -306,6 +306,16 @@ connects anywhere, and a server that another FinishUP build recorded for one of 
 used. Before such a server can be used, this document will say what travels to it and what does
 not, and you will confirm each server yourself.
 
+Two protections for those servers are already built in this release. A project whose own privacy
+policy on this computer allows no network use will be held from a server elsewhere until you
+allow it from your own terminal, or keep it on this computer; the hold covers what FinishUP itself
+reads and claims for the project, not what an agent in another folder reads and its hooks capture.
+And every connection to a server elsewhere ends once the server choice, the server's record or its
+key changes. To decide the first, FinishUP keeps an owner-only record of what this computer's
+policy said of each project (whether it allows network use, since when, and up to eight of its
+folders), outside the vault; it starts only when you first add a server elsewhere, and removing
+your last such server deletes it.
+
 ## How to inspect or report a privacy problem
 
 Everything FinishUP decides about your data is designed to be inspectable locally. Privacy policy

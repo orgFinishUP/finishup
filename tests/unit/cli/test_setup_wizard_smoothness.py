@@ -1013,3 +1013,53 @@ def test_setup_names_a_remote_server_still_selected_under_zero_network(
     (report,) = reports
     assert item.next_step() in cast(list[str], report["next_steps"])
     assert "finishup server use local" in item.next_step()
+
+
+def test_setup_names_a_repository_held_from_a_server_elsewhere(
+    monkeypatch: pytest.MonkeyPatch, home: Path, tmp_path: Path
+) -> None:
+    """ADR-051 decision 8, round 4: the project's repository is held from the selected server
+    elsewhere; the wizard's next steps name the way out, as they name the zero-network one."""
+
+    from finishup.cli import zero_network_selection
+
+    run = _codex_only(monkeypatch, home, tmp_path, "local_only")
+    project = tmp_path / "project"
+    project.mkdir()
+    item = zero_network_selection.RepositoryHoldItem(
+        "repository_egress_held", "t_1a2b3c4d", "ssh", "sha256:" + "0" * 64, "not_allowed"
+    )
+    asked_for: list[object] = []
+    reports: list[dict[str, object]] = []
+
+    def prompt(text: str, *_args: object, **kwargs: object) -> str:
+        run.asked.append(text)
+        if text.startswith("Project folder"):
+            return str(project)
+        default = kwargs.get("default")
+        return "1" if default is None else str(default)
+
+    async def ready(**_kwargs: object) -> dict[str, object]:
+        return {"reachable": True, "state": "ready"}
+
+    def held(folder: object = None, *, live: bool = False) -> object:
+        asked_for.append((folder, live))
+        return item
+
+    monkeypatch.setattr("typer.prompt", prompt)
+    monkeypatch.setattr(wizard, "_service_reachability", ready)
+
+    def capture(report: dict[str, object], **_kwargs: object) -> None:
+        reports.append(report)
+
+    monkeypatch.setattr(wizard, "_emit_human_report", capture)
+    monkeypatch.setattr(zero_network_selection, "find_zero_network_selection", lambda: None)
+    monkeypatch.setattr(zero_network_selection, "find_repository_hold", held)
+
+    assert _codex_wizard() == 0
+
+    (report,) = reports
+    assert item.next_step() in cast(list[str], report["next_steps"])
+    assert "finishup server repositories add" in item.next_step()
+    # From the records alone, for the project the wizard set up.
+    assert [live for _folder, live in cast(list[tuple[object, bool]], asked_for)] == [False]

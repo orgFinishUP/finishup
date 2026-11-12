@@ -294,3 +294,13 @@ structural, capture, or materialization work available to that host. Failures, m
 ambiguous shell remain individually retained. This is a current support boundary; use an explicit
 MCP status or receipt route when that non-amplifying self-read path is available, and account for
 local CLI reads in coverage and capacity.
+
+## Observations for a server elsewhere
+
+While a FinishUP server elsewhere is selected (over SSH, or over HTTPS on the web or on a port of
+this computer), observations of a project whose privacy policy on this computer
+allows no network use wait on this computer, and do not count as delivered. If you allow the project for that
+server, the observations recorded while it was held are sent, without the content captured while
+it was held; if you keep it on this computer, they stay here. Observations an agent's hooks capture
+while it works in another project are that project's, and are sent as that project's are. See
+[FinishUP servers](servers.md).

@@ -63,11 +63,15 @@ __all__ = [
     "TaskChangeBaseStorePort",
     "check_workspace_source_scope",
     "current_check_workspace_source",
+    "current_evidence_task",
+    "evidence_task_of",
+    "evidence_bindings",
     "decode_check_change",
     "decode_task_change_base",
     "drop_space_cut_words",
     "encode_check_change",
     "encode_task_change_base",
+    "evidence_task_scope",
     "task_input_file_from_wire",
     "task_input_file_wire",
     "metadata_path_representable",
@@ -1109,6 +1113,66 @@ def check_workspace_source_scope(source: CheckWorkspaceSource | None) -> Generat
 
 def current_check_workspace_source() -> CheckWorkspaceSource | None:
     return _CHECK_WORKSPACE_SOURCE.get()
+
+
+_EVIDENCE_TASK: ContextVar[str | None] = ContextVar("evidence_task", default=None)
+_EVIDENCE_BINDINGS: ContextVar[dict[object, object] | None] = ContextVar(
+    "evidence_bindings", default=None
+)
+
+
+@contextmanager
+def evidence_task_scope(task_id: str | None) -> Generator[None]:
+    """Name the task whose workspace evidence the reads inside this scope gather (ADR-054).
+
+    Level L2 pins a task's reads to one snapshot of the server's copy and counts, per task, where
+    each piece of evidence was read (design v2 section 8.6). The routed readers are blocking ports
+    that see only a workspace, so the caller that holds the task's runtime names the task here;
+    ``asyncio.to_thread`` copies the scope into the worker thread. ``None`` names no task: its
+    reads are pinned and counted under no task. Only the task's id crosses; nothing else.
+
+    Each scope is one evidence job (a check, a review, a verification worker) and starts with
+    its own empty bindings (``evidence_bindings``): what its reads are bound to stays fixed for
+    the job, whatever another job of the same task does meanwhile.
+    """
+
+    if task_id is not None and (type(task_id) is not str or not 1 <= len(task_id) <= 128):
+        raise TypeError("evidence_task_invalid")
+    token = _EVIDENCE_TASK.set(task_id)
+    bindings = _EVIDENCE_BINDINGS.set({})
+    try:
+        yield
+    finally:
+        _EVIDENCE_BINDINGS.reset(bindings)
+        _EVIDENCE_TASK.reset(token)
+
+
+def evidence_bindings() -> dict[object, object] | None:
+    """The current evidence job's bindings (``evidence_task_scope``), or None outside a scope.
+
+    Shared by every worker thread the job's reads run in (the scope's own mapping, copied by
+    reference); level L2 keeps there the snapshot a job's reads were first served from, so a
+    review keeps reading the snapshot it started with (design v2 section 8.6).
+    """
+
+    return _EVIDENCE_BINDINGS.get()
+
+
+def evidence_task_of(runtime: object) -> str | None:
+    """The task id a task runtime names, for ``evidence_task_scope``; None for anything else.
+
+    A stand-in or mismatched runtime (one a later identity check refuses) names no task, so the
+    scope never decides that refusal earlier or differently.
+    """
+
+    task_id = getattr(runtime, "task_id", None)
+    return task_id if type(task_id) is str and 1 <= len(task_id) <= 128 else None
+
+
+def current_evidence_task() -> str | None:
+    """The task the current evidence reads belong to (``evidence_task_scope``), or None."""
+
+    return _EVIDENCE_TASK.get()
 
 
 def encode_task_change_base(base: TaskChangeBase) -> bytes:

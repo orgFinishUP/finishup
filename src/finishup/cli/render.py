@@ -11,6 +11,9 @@ from finishup.client.attribution import (
     ServiceAttribution,
     attribution_lines,
     coverage_hook_observed,
+    evidence_provenance_section,
+    evidence_provenance_unknown_section,
+    shows_server_copy_section,
 )
 from finishup.domain.check_totals import render_check_totals
 from finishup.domain.findings import SELF_VERIFIED_GUIDANCE
@@ -1269,6 +1272,12 @@ def render_human_receipt(
     matters, and what to do for the passing cause or why that cause lasts, unless its
     text already carries it (a JSON receipt, or one whose text was withheld, has no such text);
     the connection's "read on the client machine" line is then left out.
+
+    A receipt whose ``evidence_provenance`` carries a level-L2 account (ADR-054) shows the same
+    fixed server-copy lines the service's text ends with, rendered from the member, unless its
+    text already carries them; the connection then names only the producing service. So does a
+    receipt whose ``evidence_provenance_unknown`` says that account could not be given, with the
+    evidence-unknown lines for its reason: never the connection's level-L1 line beside them.
     """
 
     if type(result) is not ReceiptSuccessModel:
@@ -1345,6 +1354,19 @@ def render_human_receipt(
         # ADR-051 decision D4: fixed words for the result's closed reason only; a text or
         # markdown receipt already ends with them.
         lines.append(workspace_provenance_unknown_block(markdown=False, reason=provenance.reason))
+    hook_observed = coverage_hook_observed(result.coverage.publication_channels)
+    unknown = result.evidence_provenance_unknown
+    server_copy = result.evidence_provenance is not None or unknown is not None
+    if server_copy and not shows_server_copy_section(shown):
+        # ADR-054: the fixed lines for the member's level-L2 account, or for why that account is
+        # unknown; a text or markdown receipt already ends with them.
+        section = (
+            evidence_provenance_section(result.evidence_provenance, hook_observed=hook_observed)
+            if unknown is None
+            else evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
+        )
+        if section is not None:
+            lines.append(section)
     if result.agent_closing_prompt is not None:
         # #1240 D5: the same closing line the MCP reply carries (fixed words and counts only).
         lines.append(result.agent_closing_prompt)
@@ -1353,7 +1375,8 @@ def render_human_receipt(
             attribution,
             shown=shown,
             provenance_unknown=provenance_unknown,
-            hook_observed=coverage_hook_observed(result.coverage.publication_channels),
+            hook_observed=hook_observed,
+            server_copy=server_copy,
         )
     )
     return "\n".join(lines)
@@ -1497,8 +1520,8 @@ def render_recovery_directive_lines(
 
 
 def render_remote_refusal(phase: str, *, head: str) -> str:
-    """A remote root refused before anything was sent (ADR-051): ``<phase>: <head>``, then the
-    directive lines of its way back, as every CLI error surface shows a directive.
+    """A connection to a server elsewhere refused or ended (ADR-051, ADR-052): ``<phase>: <head>``,
+    then the directive lines of its way back, as every CLI error surface shows a directive.
 
     ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code. Its directive
     follows what named the root (``targets.remote_root_continuation``): 'finishup server use
@@ -1514,6 +1537,28 @@ def render_remote_refusal(phase: str, *, head: str) -> str:
     if directive is not None:
         lines.extend(render_recovery_directive_lines(directive))
     return "\n".join(lines)
+
+
+def render_authorization_refusal(error: BaseException) -> str | None:
+    """A connection the shared authorization gate refused or ended (ADR-052), or None.
+
+    ``<phase>: <summary>`` and the directive of the phase's way back, for a retryable
+    ``service_unavailable`` whose phase is one of ``client.authorization.AUTHORIZATION_REFUSALS``
+    (the remote-root refusals, the repository hold, a changed authorization); any other error is
+    None, so the caller keeps its own rendering.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    if getattr(error, "reason", None) != "service_unavailable":
+        return None
+    phase = getattr(error, "phase", None)
+    if type(phase) is not str:
+        return None
+    summary = refusal_summary(phase)
+    if summary is None:
+        return None
+    return render_remote_refusal(phase, head=summary)
 
 
 def render_local_recovery_lines(reason: object) -> list[str]:

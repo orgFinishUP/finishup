@@ -19,6 +19,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from finishup import __version__
+from finishup.cli import server_code as _server_code
 from finishup.cli.agent_start import AGENT_START_HANDOFF
 from finishup.cli.ai import ai_app, register_credential_remove
 from finishup.cli.bootstrap import (
@@ -43,6 +44,7 @@ from finishup.cli.exits import (
     lifecycle_public_code,
     remediation_message,
 )
+from finishup.cli.helper import helper_app
 from finishup.cli.project import project_app
 from finishup.cli.render import (
     bounded_failure_line,
@@ -56,6 +58,7 @@ from finishup.cli.render import (
     render_human_status,
     render_local_recovery_lines,
 )
+from finishup.cli.rest_server import api_key_app, rest_app
 from finishup.cli.server import server_app
 from finishup.client.attribution import connection_attribution
 from finishup.client.workspace_ref import (
@@ -253,6 +256,8 @@ app.add_typer(service_app, name="service")
 app.add_typer(instance_app, name="instance")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
+service_app.add_typer(api_key_app, name="api-key")
+service_app.add_typer(rest_app, name="rest")
 app.add_typer(ai_app, name="ai")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
@@ -271,6 +276,9 @@ app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
 app.add_typer(project_app, name="project")
 app.add_typer(server_app, name="server")
+# Importing it registered the hidden 'server code' group on the server app (level L2, ADR-054).
+_SERVER_CODE_APP: Final = _server_code.code_app
+app.add_typer(helper_app, name="helper")
 
 
 def _recommend_operation(name: str) -> Callable[..., None]:
@@ -494,19 +502,40 @@ async def build_service_client(
 
     Ordinary CLI work is repository-bound by default. Passing ``None`` explicitly remains the
     narrow escape hatch for callers whose operation genuinely has no workspace authority.
+
+    For a server elsewhere (an SSH target, ADR-052) the connection answers the server's workspace
+    calls while it is open (its own live calls), and registers the workspace with the target's
+    helper, whose background agent answers the work the server goes on with after this command
+    returns (the registration's 15-minute lease). A local root connects exactly as before.
     """
+
+    from finishup.client.targets import active_root_may_be_remote
 
     locator = (
         resolve_cli_workspace_locator()
         if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
         else resolve_cli_workspace_locator(cast(WorkspaceLocator | None, workspace_locator))
     )
-    return await connect_service(
+    if not active_root_may_be_remote():
+        return await connect_service(
+            client_kind,
+            workspace_locator=locator,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+        )
+    client = await connect_service(
         client_kind,
         workspace_locator=locator,
         projection_render_mode=projection_render_mode,
         output_is_controlling_tty=output_is_controlling_tty,
+        serve_workspace=True,
     )
+    import asyncio
+
+    from finishup.client.helper_runtime import register_for_background
+
+    await asyncio.to_thread(register_for_background, client, "cli")
+    return client
 
 
 def _bounded_input(input_path: str | None, inline: str | None) -> JsonValue:
@@ -734,6 +763,28 @@ def _control_failure(
         stderr_writer=_stderr,
         stdout_writer=_stdout_json,
     )
+
+
+def _operation_failure(
+    error: ControlError,
+    *,
+    json_output: bool,
+    operation: str | None = None,
+    check_mode: object = None,
+) -> int:
+    """An operation command's control failure (ADR-052 recovery contract).
+
+    A refusal or end of a connection to a server elsewhere (``bootstrap.is_remote_refusal``)
+    answers a JSON caller (``--json``, or a stdout that is not a terminal, as the command's own
+    result would) with the same JSON body ``service status --json`` prints, on stdout, and the
+    same exit code and stderr lines. Every other control failure renders as on ``main``: its
+    lines on stderr only.
+    """
+
+    from finishup.cli.bootstrap import is_remote_refusal
+
+    as_json = is_remote_refusal(error) and (json_output or not sys.stdout.isatty())
+    return _control_failure(error, json_output=as_json, operation=operation, check_mode=check_mode)
 
 
 def control_failure(
@@ -971,7 +1022,9 @@ async def _call_workflow(
     except (ProtocolValueError, ValidationError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error, operation=method, check_mode=check_mode)
+        return _operation_failure(
+            error, json_output=json_output, operation=method, check_mode=check_mode
+        )
     except (WorkspaceRefNotPortable, WorkspaceRefNotServed) as refusal:
         # Refused before anything was sent; the fixed message and directive name no path. A JSON
         # caller gets the same failure body a server's refusal prints, on stdout (run u8).
@@ -2022,7 +2075,8 @@ def closure_prepare_command(
             _stderr(f"{reason}: {remediation}")
             _finish(2)
     except ControlError as error:
-        _finish(_control_failure(error))
+        # Its result is always JSON on stdout, so is a refusal by a server elsewhere.
+        _finish(_operation_failure(error, json_output=True))
 
 
 @app.command("closure-schema")
@@ -2157,7 +2211,7 @@ async def _call_support(
     except (OSError, ProtocolValueError, ValidationError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _operation_failure(error, json_output=json_output)
 
 
 _POLICY_CHANGE_METHODS: Final = frozenset({"privacy_propose_policy", "privacy_tighten_policy"})
@@ -2200,12 +2254,14 @@ def _zero_network_change_refused(request: JsonObject, json_output: bool) -> int 
     return None
 
 
-async def _after_policy_change() -> None:
-    """After this computer's policy changed: remember it (ADR-051 decision 8, 2026-11-07)."""
+async def _after_policy_change(*, sweep: bool = False) -> None:
+    """After this computer's policy changed: remember it (ADR-051 decision 8, 2026-11-07), and
+    the current folder's repository's policy; with ``sweep`` every repository last reported to
+    allow network use too."""
 
     from finishup.cli.zero_network_selection import after_policy_change_async
 
-    await after_policy_change_async()
+    await after_policy_change_async(sweep=sweep)
 
 
 def _effective_credential_heuristic_line(value: JsonValue) -> str | None:
@@ -2860,6 +2916,40 @@ def service_endpoint(json_output: _JSON = False) -> None:
         for key, value in report.items():
             typer.echo(f"{key}: {canonical_encode(value).decode('utf-8')}")
     _finish(0)
+
+
+async def _service_profile(json_output: bool) -> int:
+    from finishup.protocol.server_profile import profile_to_json
+    from finishup.service.client import connect_service_on_demand
+
+    try:
+        client = await connect_service_on_demand(ControlClientKind.CLI, workspace_locator=None)
+        try:
+            profile = await client.server_profile()
+        finally:
+            await client.close()
+    except ControlError as error:
+        return _control_failure(error, json_output=json_output)
+    document = profile_to_json(profile)
+    if json_output:
+        _stdout_json(cast(JsonValue, document))
+    else:
+        for key, value in document.items():
+            typer.echo(f"{key}: {canonical_encode(value).decode('utf-8')}")
+    return 0
+
+
+# SSH discovery runs it on the server over OpenSSH (ADR-052, design v2 section 2.1).
+@service_app.command("profile")
+def service_profile(json_output: _JSON = False) -> None:
+    """Show what this FinishUP server offers a client on another computer (its server profile).
+
+    Starts this root's service on demand, as ``finishup service start`` does, and is answered
+    while the vault is locked. The JSON is the ``server-profile`` 1.0.0 document: the levels this
+    server offers, its AI-review egress and the profile revision a client's consent is bound to.
+    """
+
+    _finish(run_async(lambda: _service_profile(json_output)))
 
 
 async def _service_restart(json_output: bool) -> int:
@@ -5975,7 +6065,10 @@ def _privacy_decision_command(kind: str) -> Callable[..., None]:
             with machine_readable_answer(json_output):
                 code = await _trusted_call(run_decision, json_output)
             if code == 0 and decided and getattr(decided[-1], "status", None) == "committed":
-                await _after_policy_change()
+                # The decided proposal's repository is not known here (the command may run in
+                # any folder), so every repository last reported to allow network use is read
+                # again too (ADR-051 decision 8, 2026-11-07, round 4).
+                await _after_policy_change(sweep=True)
             return code
 
         _finish(run_async(decide))
@@ -6380,6 +6473,17 @@ def main() -> None:
         lifecycle_exit = _lifecycle_exit_code(error)
         if lifecycle_exit is not None:
             raise SystemExit(lifecycle_exit) from None
+        _stderr(
+            "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
+        )
+        raise SystemExit(70) from None
+    except BaseException as error:
+        # An interrupt arrives as KeyboardInterrupt (above); a cancellation that still escapes a
+        # command's event loop is a defect, named as one and never printed as a traceback. Only
+        # a process that loaded asyncio can raise one, so it is never imported here.
+        loop_module = sys.modules.get("asyncio")
+        if loop_module is None or not isinstance(error, loop_module.CancelledError):
+            raise
         _stderr(
             "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
         )

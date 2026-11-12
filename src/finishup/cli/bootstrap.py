@@ -402,6 +402,24 @@ def _handshake_failure_line(error: ControlError, phase: str) -> str:
     return _with_correlation(_with_holder_pid(head), error)
 
 
+def is_remote_refusal(error: ControlError) -> bool:
+    """Whether ``control_failure`` renders ``error`` as a refusal or end of a connection to a
+    server elsewhere (a retryable ``service_unavailable`` naming one of its phases).
+
+    Every command that can answer in JSON prints that refusal's JSON body on stdout when asked to
+    (``--json``, or a stdout that is not a terminal): ``service status --json`` and the operation
+    commands alike (ADR-052). Any other control failure renders as each command always has.
+    """
+
+    if error.reason != "service_unavailable" or error.phase is None:
+        return False
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    # From layer 4 a server elsewhere can also be unreachable through its transport: every
+    # phase of ``REMOTE_CONNECTION_PHASES`` (the authorization refusals and the outages).
+    return error.phase in REMOTE_CONNECTION_PHASES
+
+
 def control_failure(
     error: ControlError,
     *,
@@ -433,41 +451,31 @@ def control_failure(
         )
     error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
-    if error.reason == "service_unavailable" and error.phase is not None:
-        from finishup.client.targets import REMOTE_ROOT_REFUSALS, remote_root_continuation
+    if is_remote_refusal(error):
+        # The shared authorization gate refused or ended a connection to a server elsewhere
+        # (ADR-051, ADR-052), or that server could not be reached through its transport: the
+        # line names the phase and its fixed summary, then the directive of its way back (for
+        # a remote root, it follows what named the root), never a local service to start.
+        from finishup.cli.render import recovery_directive_json, render_authorization_refusal
+        from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.recovery import directive_for
 
-        if error.phase in REMOTE_ROOT_REFUSALS:
-            # The root in use names a server elsewhere (ADR-051): this computer refused before
-            # anything was sent or started, so the line names the phase and the directive of its
-            # way back (which follows what named the root), never a local service to start.
-            from finishup.cli.render import recovery_directive_json, render_remote_refusal
-            from finishup.protocol.recovery import directive_for
-
-            stderr_writer(
-                _with_correlation(
-                    render_remote_refusal(
-                        error.phase,
-                        head="FinishUP refused the selected server's connection before anything "
-                        "was sent",
-                    ),
-                    error,
-                )
-            )
-            if json_output:
-                payload: dict[str, JsonValue] = {
-                    "ok": False,
-                    "public_code": code.value,
-                    "reason": "service_unavailable",
-                    "phase": error.phase,
-                    "retryable": error.retryable,
-                }
-                if error.correlation_id is not None:
-                    payload["correlation_id"] = error.correlation_id
-                remote_directive = directive_for(remote_root_continuation(error.phase))
-                if remote_directive is not None:
-                    payload["recovery"] = recovery_directive_json(remote_directive)
-                stdout_writer(payload)
-            return exit_code_for(code)
+        stderr_writer(_with_correlation(cast(str, render_authorization_refusal(error)), error))
+        if json_output:
+            payload: dict[str, JsonValue] = {
+                "ok": False,
+                "public_code": code.value,
+                "reason": "service_unavailable",
+                "phase": error.phase,
+                "retryable": error.retryable,
+            }
+            if error.correlation_id is not None:
+                payload["correlation_id"] = error.correlation_id
+            remote_directive = directive_for(remote_root_continuation(cast(str, error.phase)))
+            if remote_directive is not None:
+                payload["recovery"] = recovery_directive_json(remote_directive)
+            stdout_writer(payload)
+        return exit_code_for(code)
     if error.reason == "request_timeout" and operation is not None:
         from finishup.cli.render import render_recovery_directive_lines
         from finishup.protocol.recovery import (

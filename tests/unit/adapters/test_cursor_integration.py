@@ -180,6 +180,11 @@ def test_portable_and_native_use_distinct_skill_entries_and_shared_guidance(
     manifest = json.loads(native.members[".cursor-plugin/plugin.json"])
     hooks = json.loads(native.members["hooks/hooks.json"])
     assert manifest["hooks"] == "hooks/hooks.json"
+    # The ledger is the selected FinishUP server's, which may be on another machine (ADR-051).
+    assert manifest["description"] == (
+        "Records material work in a FinishUP ledger and checks completion claims against that "
+        "record."
+    )
     assert tuple(sorted(hooks["hooks"])) == CURSOR_HOOK_EVENTS
     assert "afterAgentThought" not in hooks["hooks"]
     resolved = str(executable.resolve())

@@ -517,17 +517,22 @@ async def test_on_demand_keeps_waiting_when_the_spawned_service_lost_the_singlet
 def _remote_record(disclosure_version: int | None = None) -> object:
     from finishup.client.targets import DISCLOSURE_VERSION, ServerTarget
 
+    # An HTTPS server: the kind these tests close in process (``_close_https``) as the gate's
+    # closed example; every remote kind is open from layer 5.
     return ServerTarget(
         "t_0a1b2c3d",
         "lab",
-        "ssh",
+        "https",
         "2026-11-05T12:00:00.000Z",
-        host="lab.example",
-        port=22,
+        base_url="https://lab.example",
         claim_salt="A" * 43 + "=",
         authorized_at="2026-11-05T12:00:00.000Z",
         disclosure_version=DISCLOSURE_VERSION if disclosure_version is None else disclosure_version,
     )
+
+
+def _close_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
 
 
 def _unreadable_record() -> object:
@@ -568,6 +573,7 @@ async def test_on_demand_names_a_remote_target_root_without_waiting(
     async def unavailable(_kind: ControlClientKind, **_kwargs: object) -> object:
         raise ControlError("service_unavailable", retryable=True)
 
+    _close_https(monkeypatch)
     monkeypatch.setattr("finishup.client.targets.active_target_record", _remote_record)
     monkeypatch.setattr(client_module, "_connect_service_attempt", unavailable)
     started = time.monotonic()
@@ -591,15 +597,16 @@ async def test_on_demand_names_a_remote_target_root_without_waiting(
 async def test_a_remote_target_root_is_refused_before_anything_is_dialled(
     monkeypatch: pytest.MonkeyPatch, on_demand: bool, refusal: str | None, phase: str
 ) -> None:
-    """This release reaches no server on another machine: a connection from a remote target's
-    root (one another build selected) is refused at once, before its endpoint is even tried or a
-    service started. The shared connection check names a zero-network or stale-disclosure
+    """A kind closed in this process (HTTPS, closed here as the gate's example): a connection from
+    such a remote target's root (one another build selected) is refused at once, before its
+    endpoint is even tried or a service started. The shared connection check names a zero-network or stale-disclosure
     refusal by its own token (ADR-051 decision 8); any other remote root, or one whose record
     cannot be read, is ``target_root_is_remote``."""
 
     import finishup.client.everyday_policy as everyday_policy
     import finishup.service.client as client_module
 
+    _close_https(monkeypatch)
     tried: list[str] = []
 
     async def dial() -> object:

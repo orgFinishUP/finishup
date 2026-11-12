@@ -19,6 +19,8 @@ from test_process_owner_fencing import (
     wait_status,
 )
 
+from credential_store_guard import NO_PLATFORM_CREDENTIAL_STORE
+
 _DAEMON_PROBE = r"""
 import asyncio, os, sys
 from datetime import UTC, datetime
@@ -170,6 +172,7 @@ def _spawn(lock_path: Path) -> subprocess.Popen[str]:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONPATH": os.fspath(Path.cwd() / "src"),
         "FINISHUP_TEST_LOCK": os.fspath(lock_path),
+        **NO_PLATFORM_CREDENTIAL_STORE,
     }
     return subprocess.Popen(  # noqa: S603 - fixed interpreter and in-repo probe
         [sys.executable, "-c", _DAEMON_PROBE],
@@ -187,6 +190,7 @@ def _control_environment(lock_path: Path, runtime_path: Path) -> dict[str, str]:
         "PYTHONPATH": os.fspath(Path.cwd() / "src"),
         "FINISHUP_TEST_LOCK": os.fspath(lock_path),
         "FINISHUP_TEST_RUNTIME": os.fspath(runtime_path),
+        **NO_PLATFORM_CREDENTIAL_STORE,
     }
 
 

@@ -160,7 +160,9 @@ def test_the_classification_is_a_view_of_the_table_with_the_same_readiness_group
     # + the #1138 semantic_review_skipped_privacy_block limit. + ADR-051's
     # check_time_change_unavailable_workspace_agent_unavailable and _workspace_agent_refused
     # beside their G7 siblings. + ADR-051 decision 5's outside_reads_not_listed disclosure.
-    assert len(GAP_EFFECT_TABLE) == 231
+    # + ADR-054's check_time_change_unavailable_content_forgotten beside its G7 siblings.
+    # + ADR-054's check_time_change_unavailable_code_copy_unavailable beside them.
+    assert len(GAP_EFFECT_TABLE) == 233
     for code, group in GAP_CLASSIFICATION.items():
         assert GAP_EFFECT_TABLE[code].readiness is group, code
     assert {row.why for row in GAP_EFFECT_TABLE.values()} <= set(GAP_EFFECT_WHY)

@@ -186,6 +186,15 @@ class FakeRuntime:
     zero_network: tuple[str, ...] = ()
     zero_network_title: str = "This computer is zero-network: the selected server is refused"
     zero_network_reads: int = 0
+    # This repository held from, or kept here for, the selected server elsewhere (ADR-051
+    # decision 8, round 4): the lines ``/server`` shows, its title, how often it was read, and
+    # what ``server repositories add`` answers when the interface hands the terminal over.
+    repository_hold: tuple[str, ...] = ()
+    repository_hold_title: str = "This repository's work is held from the selected server"
+    repository_hold_reads: int = 0
+    repository_allows: int = 0
+    repository_allow_result: tuple[str, bool] = ("t_9f8e7d6c", True)
+    repository_allow_error: BaseException | None = None
     # The remote server whose privacy policy a questionnaire changes (ADR-051 decision 8), how
     # often the interface read it, and whether the owner switches away from it during the
     # questionnaire (the zero-network choice offers that), after which it reads as ``None``.
@@ -539,6 +548,21 @@ class FakeRuntime:
 
     def zero_network_heading(self) -> str:
         return self.zero_network_title
+
+    async def refresh_repository_hold_item(self) -> tuple[str, ...]:
+        self.repository_hold_reads += 1
+        return self.repository_hold
+
+    def repository_hold_heading(self) -> str:
+        return self.repository_hold_title
+
+    async def allow_repository_here(self) -> tuple[str, bool]:
+        self.repository_allows += 1
+        if self.repository_allow_error is not None:
+            raise self.repository_allow_error
+        if self.repository_allow_result[1]:
+            self.repository_hold = ()
+        return self.repository_allow_result
 
     def selected_policy_server(self) -> PolicyServer | None:
         self.policy_server_reads += 1

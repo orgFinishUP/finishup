@@ -33,6 +33,16 @@ that while this computer's service is stopped or locked, the client remembers ea
 computer's machine-scope policy in an owner-only marker outside the vault; this release already
 keeps that marker up to date.
 
+Layer 2 ([ADR-052](../adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
+adds, still with every remote kind closed: one client-side authorization gate checked before any
+claim, dial or sync (zero-network, the disclosure, an open kind, then the repository hold) and
+watched while a connection is open; and the repository egress hold of ADR-051 decision 8. A
+repository whose own grant composes to no network egress is held from a server elsewhere until the
+owner allows it for that target on the trusted console or keeps it on this computer; unknown is not
+held, and the hold covers FinishUP's own reads and claims, not native hook content from sessions in
+other folders. The client's owner-only repository reports exist only once a remote target is
+recorded.
+
 ## Content classes
 
 Every candidate item is classified before policy evaluation as exactly one of:

@@ -25,6 +25,7 @@ from finishup.domain.values import ClaimId, JsonObject, ObligationId, ResultId
 from finishup.kernel.check_standing import check_standing
 from finishup.kernel.claims import ClaimRecord, effective_claim_items
 from finishup.kernel.correctness_advisories import correctness_advisory_index
+from finishup.kernel.forgotten_content import mask_check_payload
 from finishup.kernel.observed_failures import is_observed_run_record
 from finishup.kernel.plan_scope import current_plan_scope
 from finishup.kernel.projections import ProjectionState
@@ -342,6 +343,8 @@ def build_evidence_view(
         check = record.payload
         if not isinstance(check, CheckRecordedPayload):
             continue
+        # ADR-054 (U20): a check of content the service has since forgotten shows no quote.
+        check = mask_check_payload(state.content_forgotten, check, record.ledger.ingestion_sequence)
         for ruling in check.prior_finding_verdicts:
             rulings.setdefault(
                 str(ruling.finding_id),

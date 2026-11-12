@@ -195,8 +195,7 @@ _GUIDANCE_NAMES: Final = tuple(
 )
 _SKILL_PATH: Final = "skills/cursor/finishup/SKILL.md"
 _DESCRIPTION: Final = (
-    "Records material work in a local FinishUP ledger and checks completion claims "
-    "against that record."
+    "Records material work in a FinishUP ledger and checks completion claims against that record."
 )
 
 type Route = Literal["strict", "policy"]

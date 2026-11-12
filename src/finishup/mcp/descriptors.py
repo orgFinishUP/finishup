@@ -1961,7 +1961,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Before evidence or a completion claim, cite IDs you published; reuse only linked "
         "native captures. Put feedback and requested delivery in the effective "
         "plan via a revision. Accepted records are assertions, not repair proof. "
-        "Previews or appends asserted work to the local FinishUP ledger. It does not publish to GitHub "
+        "Previews or appends asserted work to the task's FinishUP ledger. It does not publish to GitHub "
         "or run an AI-powered evaluation. Omit request_id, expected_frontier, each draft's "
         "event_id, occurred_at and envelope lists, and a 1.1.0 claim's empty limitation_refs and "
         "supersedes_claim_refs (evidence observed_at stays required): FinishUP mints the call's "
@@ -2093,7 +2093,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "declined (reason). One answer closes it unless new material arrives. That appends a "
         "non-blocking decision record, not a finding response, and needs no recheck. "
         "This appends one "
-        "finding-response record to the local FinishUP ledger; it does not publish to GitHub or run an "
+        "finding-response record to the task's FinishUP ledger; it does not publish to GitHub or run an "
         "AI-powered evaluation. It does not resolve other findings or establish that underlying work "
         "changed. A provenance_disputed response contests the finding's authorship or provenance "
         "premise rather than its conclusion, requires a reason, and never resolves the finding. "
@@ -2261,9 +2261,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:4f0882901380efe04aa96f066a0bd56cd7511b091f0b5728d0efa02ef86a4499",
-                "publish_work": "sha256:0818149f507547dbdd4d3d0c37761e09978ad3c46b699df5a3c635093cdd6e2a",
+                "publish_work": "sha256:e330114db16ca88eb1d2a4dbb5e7c90f0a1def0c4c7ebe6fd9f51268f688d2e8",
                 "check": "sha256:48dfd8224c245f8af98e833046ae1e56f5c2e44b25b937c8ce1bf399fe230246",
-                "respond": "sha256:4f49b993015fb22de31573a2f568f7124bf1aaa2a0cdc3534a49d1c59c074594",
+                "respond": "sha256:f7ffd5181a1ded986d9e77f8aaf1773584e691cbc87649f9548397a4bbd72215",
                 "status": "sha256:b5b522c70143921055c1260c3e4a9bb35c8efd6208fc65cef55b84605519d5e4",
                 "receipt": "sha256:040e8f9c7f76f03d248e58a4447be5cc728ec3b399c76a346f3e7a63f7f6c0c4",
                 "read_guidance": "sha256:dbcb10d90771cbf18e469e9646127d7966fd54771f360cdff77759d740efeb08",
@@ -2273,9 +2273,9 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:4f0882901380efe04aa96f066a0bd56cd7511b091f0b5728d0efa02ef86a4499",
-                "publish_work": "sha256:0818149f507547dbdd4d3d0c37761e09978ad3c46b699df5a3c635093cdd6e2a",
+                "publish_work": "sha256:e330114db16ca88eb1d2a4dbb5e7c90f0a1def0c4c7ebe6fd9f51268f688d2e8",
                 "check": "sha256:50a1fbc793d1b55f8cec40ff8408795ad8523ca3fb0eda9837606c3b6ec4b2df",
-                "respond": "sha256:4f49b993015fb22de31573a2f568f7124bf1aaa2a0cdc3534a49d1c59c074594",
+                "respond": "sha256:f7ffd5181a1ded986d9e77f8aaf1773584e691cbc87649f9548397a4bbd72215",
                 "status": "sha256:b5b522c70143921055c1260c3e4a9bb35c8efd6208fc65cef55b84605519d5e4",
                 "receipt": "sha256:040e8f9c7f76f03d248e58a4447be5cc728ec3b399c76a346f3e7a63f7f6c0c4",
                 "read_guidance": "sha256:dbcb10d90771cbf18e469e9646127d7966fd54771f360cdff77759d740efeb08",
@@ -2286,8 +2286,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:fb2a3250c76b3cc02dbc28974aef6d2c64287e34f43b08130f318be1a94922cc",
-        "strict": "sha256:abc6b61032ff3e339ee3dede09bb7fb48452830dff0d88c800cddac8387381f0",
+        "policy": "sha256:80854cb4baecb7068ea6c9b7bc354ad6bd039ce52032da38fd2d5ee49b1a2fb3",
+        "strict": "sha256:a817a339b3b383ebb4cd4ed6d36c46f0319b004b7c5c36c464b48678820984d0",
     }
 )
 

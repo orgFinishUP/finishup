@@ -134,11 +134,29 @@ async def _connected(_kind: object) -> object:
     return _Client()
 
 
+async def _held(_kind: object) -> object:
+    # The connection seam refused before anything was claimed or dialled (ADR-051 decision 8).
+    from finishup.ports.control import ControlError
+
+    raise ControlError("service_unavailable", retryable=True, phase="repository_egress_held")
+
+
+async def _kept(_kind: object) -> object:
+    from finishup.ports.control import ControlError
+
+    raise ControlError("service_unavailable", retryable=True, phase="repository_egress_kept")
+
+
+_CONNECT_FAILURES = [
+    (_timeout, "drain_connect_timeout"),
+    (_refused, "drain_connect_failed"),
+    (_held, "repository_egress_held"),
+    (_kept, "repository_egress_kept"),
+]
+
+
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("connect", "expected"),
-    [(_timeout, "drain_connect_timeout"), (_refused, "drain_connect_failed")],
-)
+@pytest.mark.parametrize(("connect", "expected"), _CONNECT_FAILURES)
 async def test_leased_drain_connect_failures_are_split(
     tmp_path: Path, connect: object, expected: str
 ) -> None:
@@ -197,16 +215,15 @@ async def _stage_without_lease(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("connect", "expected"),
-    [(_timeout, "drain_connect_timeout"), (_refused, "drain_connect_failed")],
-)
+@pytest.mark.parametrize(("connect", "expected"), _CONNECT_FAILURES)
 async def test_contended_content_stage_connect_failures_are_split(
     tmp_path: Path, connect: object, expected: str
 ) -> None:
     store, workspace = _store_with_row(tmp_path)
     await _stage_without_lease(tmp_path, store, workspace, connect)
     assert _reasons(tmp_path) == [expected]
+    # The rows wait in this computer's outbox for the next owner (or an allow).
+    assert store.pending_outbox_count(workspace) == 1
     gaps = store.status(ObservationStatusQuery(workspace)).gaps
     assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in gaps
 

@@ -991,3 +991,58 @@ async def test_a_task_input_beneath_an_admitted_outside_root_reaches_the_packet(
     assert b"LEGACY_FORM_MARKER" in legacy.plaintext
     assert b"outside the workspace beneath a root the owner admitted" in legacy.plaintext
     assert _SECRET.encode() not in legacy.plaintext
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("forgotten", [True, False], ids=("forgotten_after", "not_forgotten"))
+async def test_a_change_is_stored_inside_the_content_fence_and_never_after_a_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forgotten: bool
+) -> None:
+    """ADR-054 (U20): a check whose frontier a forget of its copy content came after stores no
+    change (every view masks its excerpts); the decision and the store hold the task's fence."""
+
+    import asyncio
+
+    from finishup.application import check_change, content_fence
+
+    repository = _repository(tmp_path)
+    frozen, runtime = await _kea_case(memory_adapter(append_command()), repository)
+    _python_rewrite(repository, "String(key)", "`${typeof key}:${String(key)}`")
+    asked: list[tuple[int, bool]] = []
+    stored: list[bool] = []
+
+    def fence_held() -> bool:
+        fences = content_fence._FENCES.get(asyncio.get_running_loop(), {})  # pyright: ignore[reportPrivateUsage]
+        return runtime.task_id in fences and fences[runtime.task_id].lock.locked()
+
+    async def forgotten_after(_runtime: TaskRuntime, subject_sequence: int) -> bool:
+        asked.append((subject_sequence, fence_held()))
+        return forgotten
+
+    store = check_change._store  # pyright: ignore[reportPrivateUsage]
+
+    async def recorded_store(*arguments: object) -> ObjectRef:
+        stored.append(fence_held())
+        return await store(*arguments)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(check_change, "content_forgotten_after", forgotten_after)
+    monkeypatch.setattr(check_change, "_store", recorded_store)
+    outcome = await capture_check_time_change(
+        runtime=runtime,
+        source=CheckWorkspaceSource(os.fspath(repository), _REPOSITORY),
+        route_repository_commitment=_REPOSITORY,
+        port=GitChangeCaptureAdapter(),
+        clock=FixedClock(),
+        request_id="req_00000000-0000-4000-8000-000000000901",
+        subject_sequence=frozen.lease.frontier.sequence,
+    )
+    assert asked == [(frozen.lease.frontier.sequence, True)]
+    if forgotten:
+        assert (outcome.change, outcome.unavailable, outcome.reason) == (
+            None,
+            True,
+            "content_forgotten",
+        )
+        assert stored == []
+    else:
+        assert outcome.change is not None and stored == [True]
