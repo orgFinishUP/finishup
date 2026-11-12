@@ -471,9 +471,11 @@ server also say that the server reads evidence from its copy where it has one.
 
 **Which project was read.** A task reads only the project FinishUP was started in. A task naming
 another project is refused (`workspace_ref_not_served`), and nothing is copied for it. The tree in
-the last evidence line is the start of the git tree id of the files the copy holds. In that
-project, with every change committed and nothing excluded or held back, `git rev-parse HEAD^{tree}`
-begins with the same twelve characters, so you can check which project's files were read.
+the last evidence line is the start of the git tree id of the files the copy holds. You can check
+it in a project that uses git's default object format, with every change committed, no
+line-ending conversion, and nothing excluded or held back: there, `git rev-parse HEAD^{tree}`
+begins with the same twelve characters. Elsewhere the two can differ even though that project's
+files were read.
 
 ### See and forget
 
