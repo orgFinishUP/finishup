@@ -1,7 +1,15 @@
-"""The MCP bridge sends a claim-bound connection's handle in place of a start's workspace path."""
+"""The MCP bridge sends a claim-bound connection's handle in place of a start's workspace path.
+
+Rule R (run u8): only a path naming the worktree the bridge serves (the folder its host started it
+in, or Cursor's bound root) becomes the handle. A start naming any other folder is refused typed
+before it is sent, with a continuation an agent behind a bridge can follow (tell the user, carry
+on without FinishUP for that folder); the bridge's connection keeps serving its own folder.
+"""
 
 from __future__ import annotations
 
+import os
+import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
@@ -9,7 +17,7 @@ from typing import cast
 import pytest
 
 import finishup.mcp.server as bridge
-from finishup.ports.control import ControlError
+from finishup.ports.control import ControlError, WorkspaceLocator
 from finishup.protocol.canonical import JsonValue
 from finishup.protocol.models import StartRequest, StartResult
 
@@ -23,11 +31,38 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _start_body() -> dict[str, JsonValue]:
+def _repository(path: Path) -> Path:
+    path.mkdir(parents=True)
+    subprocess.run(  # noqa: S603 - fixed argv
+        ["git", "init", "-q", os.fspath(path)],
+        check=True,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    return path
+
+
+@pytest.fixture
+def folders(tmp_path: Path) -> dict[str, Path]:
+    """``proj`` is the folder the host started the bridge in; ``other`` is another repository."""
+
+    proj = _repository(tmp_path / "private-project")
+    (proj / "src").mkdir()
+    return {"proj": proj, "other": _repository(tmp_path / "other-project")}
+
+
+def _runtime(folders: dict[str, Path], host: bridge.McpHostProfile = "generic") -> object:
+    return bridge.build_bridge_runtime(
+        host_profile=host, workspace_locator=WorkspaceLocator(os.fspath(folders["proj"]))
+    )
+
+
+def _start_body(
+    workspace_ref: Path | str = _PATH, request_id: str = _REQUEST
+) -> dict[str, JsonValue]:
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
-        "request_id": _REQUEST,
+        "request_id": request_id,
         "actor": {"actor_id": "harness:mcp", "actor_type": "harness"},
         "client": {
             "kind": "cooperative_agent",
@@ -37,7 +72,7 @@ def _start_body() -> dict[str, JsonValue]:
         "mode": "create",
         "task_title": "Remote task",
         "requested_view": "compact",
-        "workspace_ref": _PATH,
+        "workspace_ref": os.fspath(workspace_ref),
         "external_ref": "host-session:1",
     }
 
@@ -79,30 +114,82 @@ def _wire(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: _Client) -> N
 
 @pytest.mark.anyio
 async def test_a_claim_bound_start_sends_the_handle(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, folders: dict[str, Path]
 ) -> None:
     client = _Client("client_claim", _HANDLE)
     _wire(monkeypatch, tmp_path, client)
-    await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
+    await bridge.dispatch_start(
+        _start_body(folders["proj"]), cast(bridge.BridgeRuntime, _runtime(folders))
+    )
     (sent,) = client.sent
     assert sent.workspace_ref == _HANDLE
     assert sent.request_id == _REQUEST
 
 
+def _refusal(result: object) -> dict[str, object]:
+    assert getattr(result, "isError") is True
+    structured = cast(dict[str, object], getattr(result, "structuredContent"))
+    return cast(dict[str, object], structured["error"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("host", ["generic", "codex", "claude", "cursor"])
+async def test_two_tasks_naming_different_folders_on_one_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    folders: dict[str, Path],
+    host: bridge.McpHostProfile,
+) -> None:
+    """A host started the bridge in one checkout while the agent worked in another (the Mac's
+    case): the start naming the other checkout is refused typed and nothing is sent for it; a
+    start naming the bridge's own folder, before and after, is sent as the handle."""
+
+    client = _Client("client_claim", _HANDLE)
+    _wire(monkeypatch, tmp_path, client)
+    runtime = cast(bridge.BridgeRuntime, _runtime(folders, host))
+    await bridge.dispatch_start(_start_body(folders["proj"]), runtime)
+    refused = await bridge.dispatch_start(
+        _start_body(folders["other"], "req_00000000-0000-4000-8000-000000000052"), runtime
+    )
+    await bridge.dispatch_start(
+        _start_body(folders["proj"] / "src", "req_00000000-0000-4000-8000-000000000053"), runtime
+    )
+    assert [request.request_id for request in client.sent] == [
+        _REQUEST,
+        "req_00000000-0000-4000-8000-000000000053",
+    ]
+    assert {request.workspace_ref for request in client.sent} == {_HANDLE}
+    error = _refusal(refused)
+    assert (error["code"], error["retryable"]) == ("INVALID_REQUEST", False)
+    assert error["safe_details"] == {
+        "continuation": "workspace_not_served_tell_user",
+        "field": "/workspace_ref",
+        "reason_code": "workspace_ref_not_served",
+    }
+    text = repr(refused)
+    assert "Tell the user, and carry on without FinishUP for that folder" in text
+    for path in folders.values():
+        assert os.fspath(path) not in text
+
+
 @pytest.mark.anyio
 async def test_a_local_start_is_sent_as_written(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, folders: dict[str, Path]
 ) -> None:
+    """``main``'s L0 behaviour: a local bridge sends any folder as written (issue #1349)."""
+
     client = _Client("local_path", None)
     _wire(monkeypatch, tmp_path, client)
-    await bridge.dispatch_start(_start_body(), bridge.build_bridge_runtime())
+    await bridge.dispatch_start(
+        _start_body(folders["other"]), cast(bridge.BridgeRuntime, _runtime(folders))
+    )
     (sent,) = client.sent
-    assert sent.workspace_ref == _PATH
+    assert sent.workspace_ref == os.fspath(folders["other"])
 
 
 @pytest.mark.anyio
 async def test_without_a_handle_nothing_is_sent_and_the_locked_server_is_named(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, folders: dict[str, Path]
 ) -> None:
     """A claim the server could not key at hello (its vault was locked) is ``vault_locked``.
 
@@ -124,8 +211,8 @@ async def test_without_a_handle_nothing_is_sent_and_the_locked_server_is_named(
         "connect_service_on_demand",
         cast(Callable[[object], Awaitable[object]], on_demand),
     )
-    runtime = bridge.build_bridge_runtime()
-    result = await bridge.dispatch_start(_start_body(), runtime)
+    runtime = cast(bridge.BridgeRuntime, _runtime(folders))
+    result = await bridge.dispatch_start(_start_body(folders["proj"]), runtime)
     assert clients and all(client.sent == [] for client in clients)
     assert getattr(result, "isError") is True
     structured = cast(dict[str, object], getattr(result, "structuredContent"))
@@ -145,7 +232,7 @@ async def test_without_a_handle_nothing_is_sent_and_the_locked_server_is_named(
         "connect_service_on_demand",
         cast(Callable[[object], Awaitable[object]], unlocked),
     )
-    await bridge.dispatch_start(_start_body(), runtime)
+    await bridge.dispatch_start(_start_body(folders["proj"]), runtime)
     (sent,) = clients[-1].sent
     assert sent.workspace_ref == _HANDLE
 

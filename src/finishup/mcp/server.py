@@ -3662,9 +3662,16 @@ async def dispatch_start(
         StartRequest,
         StartResult,
         # ADR-051: on a connection to a server on another machine, the workspace path becomes
-        # the connection's handle here, so every attempt (a reconnect too) sends its own.
+        # the connection's handle here, so every attempt (a reconnect too) sends its own. Rule R:
+        # only a path naming the worktree this bridge serves (the folder its host started it in,
+        # or Cursor's bound root) becomes the handle; any other is refused before it is sent.
         lambda client, request: client.start(
-            start_request_for_connection(request, client),
+            start_request_for_connection(
+                request,
+                client,
+                serving=_workspace_locator_for_runtime(runtime),
+                surface="bridge",
+            ),
             deadline_ms=_stage_deadline_ms("start"),
         ),
         runtime,
