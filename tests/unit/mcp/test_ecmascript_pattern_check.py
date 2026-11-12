@@ -54,11 +54,11 @@ _REFUSED = (
     r"\1",
     r"\k<x>",
     r"(?=a)*",
-    r"(?i:a)",
     r"\00",
     r"\x4",
     r"\u{110000}",
     r"\c1",
+    "\\c\u212a",  # the Kelvin sign, which lowercases to an ASCII k but is not a ControlLetter
     r"a**",
     r"(",
     r")",
@@ -97,3 +97,12 @@ def test_the_check_agrees_with_a_javascript_engine_where_one_is_installed() -> N
     )
     engine = dict(zip(patterns, json.loads(completed.stdout), strict=True))
     assert engine == {pattern: pattern in _ACCEPTED for pattern in patterns}
+
+
+def test_what_a_current_engine_may_accept_is_still_refused_here() -> None:
+    """Stricter than a current engine, by design (the builder's module text): ES2025 modifier
+    groups and group names outside ASCII are refused; the bridge advertises neither."""
+
+    for pattern in (r"(?i:a)", "(?<\u03c0>a)"):
+        with pytest.raises(ECMAPatternError):
+            check_unicode_pattern(pattern)
