@@ -231,9 +231,10 @@ an agent that declares it, so the server never asks them, and it never replays e
 connection. A prepare still unanswered on an older helper agent goes on, with the time it has left,
 at a newer helper agent of the same workspace that registers meanwhile (ADR-052 decision 12: a
 helper stopped, replaced or killed without its agent being unregistered at the server), which builds
-the snapshot the sync's reads then fetch from it; a read is never taken over, since its snapshot
-lives only in the agent that prepared it (macOS dogfood). The declaration is made when the agent
-opens (defect A of the 2026-11-11 dogfood), so a running helper follows the consent
+the snapshot the sync's reads then fetch from it; the reads go to the agent that answered the
+prepare while it is registered, even once a newer one is, and a read is never taken over, since its
+snapshot lives only in the agent that prepared it (macOS dogfood). The declaration is made when the
+agent opens (defect A of the 2026-11-11 dogfood), so a running helper follows the consent
 (`client.helper.Helper._follow`): it opens each background agent again under the record as it is
 now, then records which consent its agents follow (`state/helper-consent`,
 `yoetz.helper-consent/1`): after a new level, only once each old agent is closed and its relay

@@ -113,9 +113,11 @@ _HELPER_OPERATIONS: Final = frozenset(
 # The older channel is left open; its late answer is dropped as unmatched. The same reads as a
 # replay: an approved check may already have run, so it is never sent twice. A code-sync prepare
 # is taken over too (ADR-054): the snapshot is built by the agent that answers it, and the sync's
-# reads go to the newest background agent, which is that one. A read is not: its snapshot lives
-# only in the agent that prepared it.
+# reads go to that agent while it is registered (``_sync_channels``), even once a newer one is.
+# A read is not taken over: its snapshot lives only in the agent that prepared it.
 _SUPERSEDABLE_OPERATIONS: Final = _REPLAYABLE_OPERATIONS | {WorkspaceOperation.CODE_SYNC_PREPARE}
+# How many prepared syncs the hub remembers the answering channel of (their reads go there).
+_MAX_SYNC_CHANNELS: Final = 64
 _COMPONENT: Final = "service.workspace_hub"
 _WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 
@@ -447,6 +449,7 @@ class WorkspaceAgentHub:
         "_inline_wait",
         "_loop",
         "_lock",
+        "_sync_channels",
     )
 
     def __init__(
@@ -461,6 +464,9 @@ class WorkspaceAgentHub:
         self._inline_wait = inline_wait_seconds
         self._background_wait = background_wait_seconds
         self._channels: dict[str, list[WorkspaceAgentChannel]] = {}
+        # (handle, sync_id) -> the channel that answered that code-sync prepare: the snapshot its
+        # reads name lives only there. Oldest first; bounded by ``_MAX_SYNC_CHANNELS``.
+        self._sync_channels: dict[tuple[str, str], WorkspaceAgentChannel] = {}
         self._changed: asyncio.Condition | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
@@ -544,6 +550,8 @@ class WorkspaceAgentHub:
             raise TypeError("workspace_agent_channel_invalid")
         was_open = not channel.closed
         await channel.close()
+        for key in [key for key, item in self._sync_channels.items() if item is channel]:
+            del self._sync_channels[key]
         condition = self._condition()
         async with condition:
             live = self._channels.get(channel.handle)
@@ -784,8 +792,8 @@ class WorkspaceAgentHub:
         # The control call this one serves bounds it as a whole: the agent wait and the answer.
         deadline = None if scope is None else scope.deadline_now()
         try:
-            channel = await self._channel_for(
-                handle, spec.operation, _within(wait, deadline), preferred
+            channel = self._sync_channel(handle, spec.operation, arguments) or (
+                await self._channel_for(handle, spec.operation, _within(wait, deadline), preferred)
             )
             asked = [channel]
             try:
@@ -822,9 +830,39 @@ class WorkspaceAgentHub:
         except WorkspaceCodecError:
             _record("workspace_call", "reply_invalid")
             raise WorkspaceAgentUnavailable("reply_invalid") from None
+        if spec.operation is WorkspaceOperation.CODE_SYNC_PREPARE:
+            self._remember_sync(handle, getattr(decoded, "sync_id", None), asked[-1])
         # What the agent answered is the client's attestation, never a read of this machine.
         _record("workspace_evidence", CLIENT_ATTESTED)
         return decoded
+
+    def _remember_sync(self, handle: str, sync_id: object, channel: WorkspaceAgentChannel) -> None:
+        """Remember which channel answered a prepare (none for an unchanged copy)."""
+
+        if type(sync_id) is not str:
+            return
+        self._sync_channels.pop((handle, sync_id), None)
+        self._sync_channels[(handle, sync_id)] = channel
+        while len(self._sync_channels) > _MAX_SYNC_CHANNELS:
+            del self._sync_channels[next(iter(self._sync_channels))]
+
+    def _sync_channel(
+        self, handle: str, operation: WorkspaceOperation, arguments: object
+    ) -> WorkspaceAgentChannel | None:
+        """For a code-sync read, the channel that answered the prepare it names, while that
+        channel is registered and open; None otherwise (the usual choice then applies)."""
+
+        if operation is not WorkspaceOperation.CODE_SYNC_READ:
+            return None
+        sync_id = getattr(arguments, "sync_id", None)
+        if type(sync_id) is not str:
+            return None
+        channel = self._sync_channels.get((handle, sync_id))
+        if channel is None or channel.closed:
+            return None
+        if not any(item is channel for item in self._channels.get(handle, ())):
+            return None
+        return channel
 
     async def _exchange(
         self,
