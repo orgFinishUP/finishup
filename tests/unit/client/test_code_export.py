@@ -1001,23 +1001,19 @@ def _one_file_for(
 
     read = code_export._read_beneath  # pyright: ignore[reportPrivateUsage]
     digest = code_export._hash_file_beneath  # pyright: ignore[reportPrivateUsage]
-    same = code_export._same_file  # pyright: ignore[reportPrivateUsage]
 
     def disk(relative: bytes) -> bytes:
         return on_disk if relative in spellings else relative
 
     def one_file(root_fd: int, relative: bytes, limit: int) -> object:
+        # Read where the file system would: both spellings then carry that file's identity.
         return read(root_fd, disk(relative), limit)
 
     def one_hash(root_fd: int, relative: bytes) -> str | None:
         return digest(root_fd, disk(relative))
 
-    def one_identity(root_fd: int, first: bytes, second: bytes) -> bool:
-        return disk(first) == disk(second) or same(root_fd, first, second)
-
     monkeypatch.setattr(code_export, "_read_beneath", one_file)
     monkeypatch.setattr(code_export, "_hash_file_beneath", one_hash)
-    monkeypatch.setattr(code_export, "_same_file", one_identity)
 
 
 def test_held_bytes_never_leave_under_another_spelling_of_their_name(
@@ -1117,3 +1113,40 @@ def test_a_held_directory_holds_no_other_spelling_that_is_another_directory(
     assert "Vendor/a.py" in tree
     assert "vendor" in prepared.manifest.lists["nested_repository"]
     assert "Vendor/a.py" not in prepared.manifest.lists["case_collision"]
+
+
+@pytest.mark.parametrize(
+    ("readme", "held"),
+    [((1, 7), True), (None, True), ((1, 8), False)],
+    ids=["same_file", "identity_unknown", "another_file"],
+)
+def test_another_spelling_is_held_by_the_identity_seen_when_it_was_read(
+    readme: tuple[int, int] | None, held: bool
+) -> None:
+    """Codex review, third pass: the spellings are compared by the (device, inode) captured while
+    each was read, never by a later look, which a file deleted meanwhile would answer "not the
+    same"; an identity that is not known holds the other spelling."""
+
+    admission = code_export._Admission()  # pyright: ignore[reportPrivateUsage]
+    admission.entries[b"README"] = code_export._Entry(b"100644", "0" * 40, 1)  # pyright: ignore[reportPrivateUsage]
+    admission.identities[b"README"] = (1, 7)
+    admission.held[b"readme"] = "lfs_content"
+    if readme is not None:
+        admission.identities[b"readme"] = readme
+    code_export._hold_case_aliases(admission)  # pyright: ignore[reportPrivateUsage]
+    assert (admission.held.get(b"README") == "case_collision") is held
+
+
+def test_a_read_carries_the_identity_of_the_file_and_of_each_directory_above_it(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "c.txt").write_bytes(b"c\n")
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        read = code_export._read_beneath(root_fd, b"a/b/c.txt", 1024)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        os.close(root_fd)
+    expected = [os.stat(tmp_path / path) for path in ("a", "a/b", "a/b/c.txt")]
+    assert read.parents == tuple((f.st_dev, f.st_ino) for f in expected[:2])
+    assert read.identity == (expected[2].st_dev, expected[2].st_ino)

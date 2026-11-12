@@ -654,6 +654,10 @@ class _Read:
     data: bytes = field(default=b"", repr=False)
     executable: bool = False
     over: bool = False
+    # (device, inode) of what was read, and of each directory opened on the way, from the very
+    # descriptors read: another spelling's identity is compared with these, never a later stat.
+    identity: tuple[int, int] | None = None
+    parents: tuple[tuple[int, int], ...] = ()
 
 
 def _read_beneath(root_fd: int, relative: bytes, limit: int) -> _Read:
@@ -662,6 +666,7 @@ def _read_beneath(root_fd: int, relative: bytes, limit: int) -> _Read:
     parts = relative.split(b"/")
     directory = root_fd
     opened: list[int] = []
+    parents: list[tuple[int, int]] = []
     try:
         for part in parts[:-1]:
             try:
@@ -671,6 +676,11 @@ def _read_beneath(root_fd: int, relative: bytes, limit: int) -> _Read:
             except OSError:
                 return _Read("special")
             opened.append(directory)
+            try:
+                held = os.fstat(directory)
+            except OSError:
+                return _Read("special")
+            parents.append((held.st_dev, held.st_ino))
         name = parts[-1]
         try:
             facts = os.lstat(name, dir_fd=directory)
@@ -678,29 +688,37 @@ def _read_beneath(root_fd: int, relative: bytes, limit: int) -> _Read:
             return _Read("absent")
         except OSError:
             return _Read("special")
+        seen = (facts.st_dev, facts.st_ino)
         if stat.S_ISLNK(facts.st_mode):
             try:
                 target = os.readlink(name, dir_fd=directory)
             except OSError:
-                return _Read("special")
+                return _Read("special", identity=seen, parents=tuple(parents))
             return _Read(
-                "link", os.fsencode(target), over=len(os.fsencode(target)) > _MAX_LINK_BYTES
+                "link",
+                os.fsencode(target),
+                over=len(os.fsencode(target)) > _MAX_LINK_BYTES,
+                identity=seen,
+                parents=tuple(parents),
             )
         if stat.S_ISDIR(facts.st_mode):
-            return _Read("directory")
+            return _Read("directory", identity=seen, parents=tuple(parents))
         if not stat.S_ISREG(facts.st_mode):
-            return _Read("special")
+            return _Read("special", identity=seen, parents=tuple(parents))
         try:
             descriptor = os.open(name, _OPEN_FILE, dir_fd=directory)
         except OSError:
-            return _Read("special")
+            return _Read("special", identity=seen, parents=tuple(parents))
         try:
             opened_facts = os.fstat(descriptor)
+            seen = (opened_facts.st_dev, opened_facts.st_ino)
             if not stat.S_ISREG(opened_facts.st_mode) or opened_facts.st_nlink != 1:
-                return _Read("special")
+                return _Read("special", identity=seen, parents=tuple(parents))
             executable = bool(opened_facts.st_mode & stat.S_IXUSR)
             if opened_facts.st_size > limit:
-                return _Read("file", executable=executable, over=True)
+                return _Read(
+                    "file", executable=executable, over=True, identity=seen, parents=tuple(parents)
+                )
             chunks: list[bytes] = []
             remaining = limit + 1
             while remaining > 0:
@@ -710,9 +728,16 @@ def _read_beneath(root_fd: int, relative: bytes, limit: int) -> _Read:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             data = b"".join(chunks)
-            return _Read("file", data, executable, over=len(data) > limit)
+            return _Read(
+                "file",
+                data,
+                executable,
+                over=len(data) > limit,
+                identity=seen,
+                parents=tuple(parents),
+            )
         except OSError:
-            return _Read("special")
+            return _Read("special", identity=seen, parents=tuple(parents))
         finally:
             os.close(descriptor)
     finally:
@@ -770,7 +795,7 @@ class _Entry:
 class _Admission:
     """The admitted entries and the held-out paths of one tree."""
 
-    __slots__ = ("entries", "held", "objects", "pointers")
+    __slots__ = ("entries", "held", "identities", "objects", "pointers")
 
     def __init__(self) -> None:
         self.entries: dict[bytes, _Entry] = {}
@@ -778,6 +803,18 @@ class _Admission:
         self.objects: dict[str, GitObject] = {}
         # Worktree paths sent as their LFS pointer (never the bytes on disk).
         self.pointers: set[bytes] = set()
+        # Worktree path (file, link or directory, a read path's directories included) → the
+        # (device, inode) read there, as captured while it was read.
+        self.identities: dict[bytes, tuple[int, int]] = {}
+
+    def saw(self, path: bytes, read: _Read) -> None:
+        """Keep what ``read`` identified: ``path`` itself and each directory above it."""
+
+        if read.identity is not None:
+            self.identities[path] = read.identity
+        parts = path.split(b"/")
+        for depth, identity in enumerate(read.parents, start=1):
+            self.identities.setdefault(b"/".join(parts[:depth]), identity)
 
 
 class _Exporter:
@@ -1003,7 +1040,13 @@ class _Exporter:
             self._admit_worktree(admission, path, index_mode=mode, index_oid=oid)
         for path in sorted(untracked):
             if path.endswith(b"/"):
-                admission.held[path.rstrip(b"/")] = "nested_repository"
+                nested = path.rstrip(b"/")
+                admission.held[nested] = "nested_repository"
+                try:
+                    facts = os.lstat(nested, dir_fd=self.root_fd)
+                except (OSError, ValueError):
+                    continue
+                admission.identities[nested] = (facts.st_dev, facts.st_ino)
                 continue
             self._admit_worktree(admission, path, index_mode=None, index_oid=None)
         return admission
@@ -1023,6 +1066,7 @@ class _Exporter:
             admission.held[path] = refusal
             return
         read = _read_beneath(self.root_fd, path, self.policy.max_file_bytes)
+        admission.saw(path, read)
         if read.kind == "absent":
             return  # deleted: absent from the tree
         if read.kind == "directory":
@@ -1133,26 +1177,16 @@ def _folded_parts(path: bytes) -> tuple[str, ...] | None:
         return None
 
 
-def _same_file(root_fd: int, first: bytes, second: bytes) -> bool:
-    """Whether two worktree paths are one file or directory on disk, as two spellings are on a
-    case-insensitive file system (APFS). Neither is followed if it is a link."""
-
-    try:
-        one = os.stat(first, dir_fd=root_fd, follow_symlinks=False)
-        other = os.stat(second, dir_fd=root_fd, follow_symlinks=False)
-    except (OSError, ValueError):
-        return False
-    return (one.st_dev, one.st_ino) == (other.st_dev, other.st_ino)
-
-
-def _hold_case_aliases(admission: _Admission, root_fd: int) -> None:
+def _hold_case_aliases(admission: _Admission) -> None:
     """Hold each admitted worktree path that is, on disk, the same file as (or lies beneath the
     same directory as) another spelling of it that is held or sent as its LFS pointer.
 
     Only a case-insensitive file system (APFS, NTFS) makes two spellings one file; there the
     reason one is held for, or its LFS pointer, covers the bytes under every spelling, which
-    would otherwise leave under the other one. On a case-sensitive file system the spellings
-    are distinct files and nothing more is held. A held path found this way is listed as a case
+    would otherwise leave under the other one. The identities compared are the ones captured
+    while each was read (``_Read.identity``, ``_Read.parents``), never a later look; where
+    either is unknown the other spelling is held. On a case-sensitive file system the spellings
+    are distinct files and nothing more is held. A path held this way is listed as a case
     collision.
     """
 
@@ -1163,6 +1197,7 @@ def _hold_case_aliases(admission: _Admission, root_fd: int) -> None:
             sources.setdefault(folded, []).append(path)
     if not sources:
         return
+    identities = admission.identities
     for path in sorted(admission.entries):
         if path in admission.pointers or _under(path, admission.held):
             continue
@@ -1172,9 +1207,11 @@ def _hold_case_aliases(admission: _Admission, root_fd: int) -> None:
         parts = path.split(b"/")
         for depth in range(1, len(parts) + 1):
             prefix = b"/".join(parts[:depth])
+            mine = identities.get(prefix)
             if any(
-                other != prefix and _same_file(root_fd, prefix, other)
+                mine is None or identities.get(other) in {None, mine}
                 for other in sources.get(folded[:depth], ())
+                if other != prefix
             ):
                 admission.held[path] = "case_collision"
                 break
@@ -1348,11 +1385,11 @@ def export_snapshot(
         exporter.lfs_paths([*index, *untracked, *base_paths])
         base = exporter.base(listing)
         current = exporter.current(index, untracked)
-        # The worktree's names first: another spelling of a name held, or sent as its LFS
-        # pointer, that is the same file on disk (a case-insensitive file system) is held.
-        _hold_case_aliases(current, root_fd)
     finally:
         os.close(root_fd)
+    # The worktree's names first: another spelling of a name held, or sent as its LFS pointer,
+    # that was the same file when read (a case-insensitive file system) is held.
+    _hold_case_aliases(current)
     # Then the case collisions, among the names nothing else holds on either side, so a held
     # spelling never takes the file another spelling can still send down with it.
     held_paths = {*base.held, *current.held}
