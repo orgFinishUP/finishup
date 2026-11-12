@@ -103,12 +103,15 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "provider": "server_host",
         "recommend": "server_host",
         "restore": "server_host",
+        "service api-key": "server_host",
         "service auto-unlock": "server_host",
         "service diagnostics": "server_host",
         "service endpoint": "server_host",
+        "service profile": "server_host",
         "service idle-relock": "server_host",
         "service initialize-passphrase": "server_host",
         "service recovery": "server_host",
+        "service rest": "server_host",
         "service restart": "server_host",
         "service rotate-passphrase": "server_host",
         "service run": "server_host",
@@ -116,6 +119,8 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "service unlock": "server_host",
         "setup vault": "server_host",
         # This machine's host registrations and server targets.
+        # The background helper of an SSH server target: this client's own process (ADR-052).
+        "helper": "client_only",
         "integrate admission": "client_only",
         "integrate mcp": "client_only",
         "integrate plugin": "client_only",
@@ -127,6 +132,9 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         # Which held repositories a remote target's server receives anyway, or keeps here: this
         # client's own record, never sent to that server (ADR-051 decision 8).
         "server repositories": "client_only",
+        # Level L2 (ADR-054): asks the selected server elsewhere, or edits this computer's own
+        # per-repository choices for it.
+        "server code": "client_only",
         "setup disconnect": "client_only",
     }
 )
@@ -267,19 +275,28 @@ def server_host_refusal_line(error: ServerHostRequired, command: str | None = No
         ),
         "",
     )
+    from finishup.client.targets import root_named_explicitly
+
+    # An isolation variable or a pinned launcher outranks the selection: 'finishup server use
+    # local' answers ``selection_overridden`` there, so the way back is to clear that override.
+    back = (
+        "or unset FINISHUP_ISOLATED_ROOT (or YOETZ_ISOLATED_ROOT), or use an unpinned launcher, "
+        "which names that root for this process"
+        if root_named_explicitly()
+        else "or select this machine's server with 'finishup server use local'"
+    )
     if isinstance(error, ServerTargetUnreadable):
         which = "" if error.target_id is None else f" {error.target_id}"
         return (
             f"{error.reason}: this command runs only on the FinishUP server host, and the server "
             f"target record of this process's FinishUP root{which} cannot be read, so it was not "
-            "run; repair or remove that target, or select this machine's server with "
-            "'finishup server use local'"
+            f"run; repair or remove that target, {back}"
         )
+    chosen = "named" if root_named_explicitly() else "selected"
     return (
         f"{REQUIRES_SERVER_HOST}: this command runs on the FinishUP server host, and the "
-        f"selected server target {error.target_id} ({error.kind}) is not this machine; run it "
-        "on the server host, or select this machine's server with 'finishup server use local'"
-        f"{meaning}"
+        f"{chosen} server target {error.target_id} ({error.kind}) is not this machine; run it "
+        f"on the server host, {back}{meaning}"
     )
 
 

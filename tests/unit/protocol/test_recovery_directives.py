@@ -353,7 +353,7 @@ class TestCliProjection:
         model = PublicErrorModel.model_validate(
             {
                 "code": "SERVICE_UNAVAILABLE",
-                "message": "The local operation timed out and may still have committed.",
+                "message": "The operation timed out and may still have committed.",
                 "retryable": True,
                 "correlation_id": _CORRELATION_ID,
                 "safe_details": {
@@ -643,11 +643,41 @@ class TestWorkspaceBindingAndServerTargetReasons:
             "repository_egress_held",
             "repository_egress_kept",
             "server_authorization_changed",
+            "server_profile_changed",
+            "server_level_unavailable",
         }
         assert REMOTE_CONNECTION_PHASES <= PROTOCOL_REASON_CODES
         for phase in REMOTE_CONNECTION_PHASES:
             assert re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase)
             assert continuation_for_reason(phase) is not None
+
+    @pytest.mark.parametrize(
+        ("phase", "token"),
+        [
+            ("server_profile_changed", "remote_reconsent"),
+            ("server_level_unavailable", "server_level_decision_required"),
+        ],
+    )
+    def test_a_changed_profile_or_level_asks_the_owner_and_never_agrees_for_them(
+        self, phase: str, token: str
+    ) -> None:
+        """ADR-052 (O5): only the owner agrees again, on their own terminal, with 'finishup
+        server use'; the agent never does it for them. A level above the consent is refused
+        before anything is sent; a changed profile may also be the server's own refusal of what
+        it was sent, so it says only that the server did no work for it (review of layer 3:
+        B2)."""
+
+        assert continuation_for_reason(phase) == token
+        entry = directive_for(token)
+        assert entry is not None and entry.nudge is not None
+        if phase == "server_profile_changed":
+            assert "before that server did any work for it" in entry.directive
+            assert "nothing" not in entry.directive
+        else:
+            assert "before anything was sent" in entry.directive
+        assert "finishup server use" in entry.nudge
+        assert "Never agree for them" in entry.nudge
+        assert "stays there" not in entry.directive
 
     @pytest.mark.parametrize(
         "token",
@@ -678,13 +708,12 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
 
     def test_the_closed_remote_kinds_say_what_this_release_connects_to(self) -> None:
-        # The remote kinds (ssh, https, local_port) are closed in this release: the refusal says
-        # that only servers on this computer are reached, that nothing was added, selected or
-        # sent, and the owner's way back, and never tells an agent to choose a server itself.
+        # Every kind is open from layer 5: the refusal of an address this release names none of
+        # says which servers are reached, that nothing was added, selected or sent, and the
+        # owner's way back, and never tells an agent to choose a server itself.
         entry = directive_for("server_on_this_computer_required")
         assert entry is not None
-        assert "connects only to servers on this computer" in entry.directive
-        assert "SSH, HTTPS and port servers arrive later" in entry.directive
+        assert "connects to servers on this computer, over SSH and over HTTPS" in entry.directive
         assert "nothing was added, selected or sent" in entry.directive
         assert "'finishup server use local'" in entry.directive
         assert entry.nudge == "Never select or add a FinishUP server for the owner."
@@ -743,21 +772,22 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert tokens <= set(REASON_CODE_CONTINUATIONS.values())
 
     def test_a_selected_remote_root_points_to_this_computer_and_a_new_session(self) -> None:
-        # Layer 1 reaches no server elsewhere. The way back from a selection is 'finishup server
-        # use local'; an open agent session's MCP bridge keeps the root it started with, so the
-        # owner starts a new one. A stale disclosure cannot be confirmed with 'finishup server use
-        # NAME' while the remote kinds are closed (it answers remote_kind_unavailable).
+        # The way back from a selection is 'finishup server use local'; an open agent session's
+        # MCP bridge keeps the root it started with, so the owner starts a new one. A stale
+        # disclosure of an SSH server (open since layer 4) is confirmed again by the owner with
+        # 'finishup server use NAME' on their own terminal; an HTTPS or port one only later.
         for token in ("remote_target_no_local_service", "server_reauthorization_required"):
             entry = directive_for(token)
             assert entry is not None
             assert "Ask the owner to run 'finishup server use local'" in entry.directive
-            assert entry.directive.endswith("then start a new agent session.")
+            assert entry.directive.endswith("then start a new session.")
             assert "with its name" not in entry.directive
-            assert "server use NAME" not in entry.directive
+        remote = directive_for("remote_target_no_local_service")
+        assert remote is not None and "server use NAME" not in remote.directive
         stale = directive_for("server_reauthorization_required")
         assert stale is not None
         assert "older disclosure" in stale.directive
-        assert "only a later release can authorize it again" in stale.directive
+        assert "'finishup server use NAME' on their own terminal," in stale.directive
 
     def test_a_remote_root_an_override_names_points_to_the_override(self) -> None:
         # With an isolation variable or a pinned launcher naming the root, 'finishup server use

@@ -637,15 +637,17 @@ as active.
 
 ## Server targets (ADR-051)
 
-Decision for this release: **Cursor uses only this computer's FinishUP servers.** Remote server
-kinds (SSH, HTTPS and port) are closed: `finishup server add` refuses them with
-`remote_kind_unavailable` before asking anything, and `finishup server use` refuses a remote
-record, so only this computer's everyday server and named local servers (`finishup server add NAME
---local`) can be selected. With no remote target, Cursor hooks, MCP and the CLI behave exactly as
-they did before server targets existed, and the Cursor registration is unchanged. The shared
-remote seams (workspace claim, workspace agent, outside-read modes, zero-network selection rules,
-client attestation and the client-attested receipt lines) are present but dormant until a remote kind
-opens in a later release, and no remote cell is claimed for Cursor.
+Decision for this release: **Cursor uses this computer's FinishUP servers and the owner's FinishUP
+servers over SSH and over HTTPS (on the web or on a port of this computer).** Only the owner adds
+and chooses a server elsewhere, on their own terminal (`finishup server add NAME
+ssh://[user@]host[:port]`, `finishup server add NAME https://HOST[:PORT][/BASE]` or `--port PORT`,
+`finishup server use NAME`), and only the owner types or rotates an HTTPS server's API key
+(`server add`, `server login`, `server logout`). With no remote target, Cursor hooks,
+MCP and the CLI behave exactly as they did before server targets existed, and the Cursor
+registration is unchanged. The shared remote seams (workspace claim, workspace agent,
+outside-read modes, zero-network selection rules, client attestation and the client-attested
+receipt lines) act for an SSH, HTTPS or port target; no real-environment cell is claimed for Cursor
+against one (see *Evidence*).
 
 Decision: **no Cursor registration changes.** The MCP entry, the project MCP entry and the hook
 commands keep their exact launcher, arguments and isolation environment. Which FinishUP server
@@ -664,23 +666,91 @@ default service.
 
 - **Roots.** The Cursor bridge still decodes only local `file:` roots (ADR-010); a root that is
   itself remote stays refused.
-- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on
-  every host, and dormant until remote kinds open. A held or kept repository gets one
-  byte-identical SessionStart text per state (`repository_hold.hook_context`: the attach form in
-  place of the start advice, an unconsented form, a mapped form on resume and compact); MCP returns
-  the phase with its continuation; the drain sites record the phase and leave rows pending. The
-  agent's own shell cannot confirm `server repositories add` (trusted console); a real terminal
-  can. The per-prompt cue is unchanged. With no remote target recorded, Cursor's session start is
-  byte for byte as before (O3).
+- **SSH servers and the helper (layer 4, ADR-052).** Supported, same code path as every host; no
+  registration change. Cursor's hooks, its MCP bridge and Agent CLI shell calls reach an SSH server
+  through its one helper (relay, the default: they keep dialling a Unix endpoint) or each through
+  its own `ssh -W` (direct, `finishup server set NAME --style direct`). Hooks never register a
+  workspace and never fetch a profile; in the relay style a hook may start the helper within its
+  own deadline and names `remote_unreachable` when it cannot (`failClosed` gate hooks in required
+  mode deny as for an unreachable local service). The MCP bridge registers each claimed workspace
+  with the helper (source `mcp_roots`) and renews it (layer 3); Cursor's roots changing releases
+  the bridge's registrations, as in layer 3, and the helper closes their background agents. The
+  bridge starts the helper in the direct style and refuses a request id it already sent to another
+  server (`server_authorization_changed`). A workflow command from a shell answers its own live
+  workspace calls and registers once, with a 15-minute lease. Host-key questions arise only on
+  the owner's terminal: `finishup server add` and `finishup server use` let OpenSSH ask about an
+  unknown host key there and take the typed name; an agent's shell has no trusted console
+  (`trusted_console_required`), and no hook or MCP tool can confirm a host key or agree to a
+  server. The five transport outages (`remote_unreachable`, `remote_auth_failed`,
+  `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) reach the
+  SessionStart texts, MCP results and the CLI with their own continuations, never a local service
+  to start. In the direct style `remote_unreachable` carries `remote_direct_slow` instead: the
+  direct style is slow on that network and `finishup server set NAME --style relay` is the remedy
+  (layer 7, the owner's WAN-gate decision; same code path on every host, ADR-052 decision 24.5).
+- **HTTPS and port servers (layer 5, ADR-053).** Supported, same code path as every host and as SSH;
+  no registration change. Cursor's hooks, its MCP bridge and Agent CLI shell calls reach an HTTPS or
+  port server through the same helper (relay, the default: they keep dialling a Unix endpoint, and
+  only the helper reads the API key) or each over its own REST connection (direct, `finishup server
+  set NAME --style direct`, where each of those processes reads the API key itself). Hooks never run
+  HTTPS discovery or fetch a profile, and load the REST client only in the direct style; a hook
+  spends only its own deadline and names the transport phase when the server cannot be reached
+  (`failClosed` gate hooks in required mode deny as for an unreachable local service). The API key
+  is typed only on the owner's terminal (`finishup server add`, `finishup server login`; an agent's
+  shell has no trusted console, `trusted_console_required`) or read from an owner-only `--key-file`;
+  no hook, MCP tool or agent-facing text carries it. A refused or missing key is
+  `remote_auth_failed` with `remote_credential_repair` (the owner runs `finishup server login
+  NAME`); a key the owner replaces or deletes ends every connection made under the old one with
+  `server_authorization_changed`, and a new key asks for the owner's consent again
+  (`server_profile_changed`). The terminal interface adds only a server on this computer; an HTTPS
+  server is added in a terminal.
+- **Level L2, the server copy (layer 6, ADR-054).** Released, and opt-in at both ends: a server
+  offers it only when its owner's `[server.code_copy]` table enables an offer, and a copy is sent
+  only after the owner consents at L2 on the trusted console (`finishup server add|use NAME --level
+  L2 --retention …`). Decision, the same on every host and with no registration change: the sync
+  runs only in the target's helper, whose background agent alone declares the two code-sync
+  operations and checks the gate and the L2 consent again before anything is read; Cursor's hooks,
+  its MCP bridge and Agent CLI shell calls never declare them, so they never sync and the server
+  never asks them. Receipts and status show where each kind of evidence was read (the
+  `evidence_provenance` member and the fixed "Workspace evidence" lines, never the L1
+  client-attested line, for a task that read the copy), the same through the CLI, the MCP text and
+  summary and the terminal interface; the terminal interface has no L2 flows (consent, `server code`
+  and `server remove`'s question are CLI only). No Cursor session ran against a server keeping a
+  copy, and no macOS or WSL 2 run
+  (gaps with owners in the [acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
+- **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host, and
+  acting for an SSH server from layer 4 and an HTTPS or port server from layer 5: the gate's consent
+  step names `server_profile_changed` or `server_level_unavailable` in the same SessionStart texts,
+  MCP shapes and drain records as the other phases, and only the owner agrees again (`finishup
+  server use NAME` on the trusted console; the agent's own shell cannot). The MCP bridge registers
+  its claimed workspace with the target's helper, renews it from a task the connection owns (an idle
+  bridge keeps it), and releases it when it closes, and when Cursor says its roots changed. Nothing
+  changes with no server elsewhere.
+- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on every
+  host, and acting for an SSH server from layer 4 and an HTTPS or port server from layer 5. A held
+  or kept repository gets one byte-identical SessionStart text per state
+  (`repository_hold.hook_context`: the attach form in place of the start advice, an unconsented
+  form, a mapped form on resume and compact); MCP returns the phase with its continuation; the drain
+  sites record the phase and leave rows pending. The agent's own shell cannot confirm `server
+  repositories add` (trusted console); a real terminal can. The per-prompt cue is unchanged. With no
+  remote target recorded, Cursor's session start is byte for byte as before (O3).
 - **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
   connection it made to a server elsewhere ends with `server_authorization_changed` once the
   selection, record or key changes, and its next request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown);
   hooks follow a new selection at once. Restart open Cursor windows and Agent CLI sessions after `finishup server
   use`. Required-mode `failClosed` gate hooks deny for an unreachable target exactly as for an
   unreachable local service; nothing falls back to the local service.
-- **Evidence.** Coverage at the time of writing is unit and integration tests; the remote seams
-  are exercised in process only. No remote cell is claimed for Cursor or any other host: the
-  real-environment runs are recorded with the pull request that opens a remote kind.
+- **Evidence.** Coverage at the time of writing is unit and integration tests, plus capability
+  tests and an end-to-end run of the `finishup` command against a real OpenSSH server on Linux
+  (layer 4), and the REST conformance kit against both server edges over real TLS and an
+  end-to-end run of the `finishup` command against a real HTTPS server on Linux (layer 5). No Cursor
+  session was run against an SSH or HTTPS server, and no remote cell is claimed for Cursor or any
+  other host. Layer 7 ([acceptance matrix](acceptance-matrix.md#hosts-on-linux)) recorded the Linux
+  rows: Cursor agent 2026.10.22: in a scratch home, `~/.cursor/mcp.json` by a test instance's absolute
+  launcher, and `cursor-agent mcp list-tools` started the bridge and listed its eight tools; `hooks
+  cursor-observe` with the recorded payload shapes exited 0. The bridge and hooks against servers elsewhere ran by scripts driving `finishup
+  mcp serve` over stdio as a host does, not from a Cursor session: a model session needs the
+  account's host credentials and was not run. Gaps with owners (macOS, WSL 2, Cursor sessions
+  against a server elsewhere) are in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
 - **Receipt provenance** (ADR-051, decision D4). This part holds for every task, local ones
   included: when the service cannot read the task's opening record, the receipt is still made and
   ends with the fixed provenance-unknown section (on a claim-bound task, in place of the
@@ -688,8 +758,8 @@ default service.
   member, and the agent gets them in the MCP receipt text and its summary and at the head of a
   paged receipt's first page.
 
-The decisions below are dormant in this release: they take effect only for a remote target, and
-none can be added or selected yet.
+The decisions below take effect only for a remote target, which in this release is an SSH, HTTPS
+or port server.
 
 - **Workspace and outside reads** (ADR-051 decision 5). The bridge sends a workspace claim
   derived from the local `file:` root instead of the path, rewrites an absolute `workspace_ref` to
@@ -1441,8 +1511,9 @@ ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 `storage_corrupt`, or, for a selected remote server this computer refuses before any dial,
-`zero_network_remote_selected`, `target_reauthorization_required` or `target_root_is_remote` (any
-other remote root, which this release does not reach), which the `sessionStart` context names with
+`zero_network_remote_selected`, `target_reauthorization_required` or `target_root_is_remote` (a
+remote record this computer cannot read; before layer 5 also an HTTPS or port root), which the
+`sessionStart` context names with
 the owner's fix) in the same diagnostics file, and the session keeps an
 observation-only binding
 until a retry or an explicit `start` maps it. An explicit `mode=create` collision remains

@@ -131,11 +131,25 @@ def _remote_refusal_phase(error: ControlError) -> str | None:
     run one.
     """
 
-    from finishup.client.authorization import AUTHORIZATION_REFUSALS
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-    if error.reason == "service_unavailable" and error.phase in AUTHORIZATION_REFUSALS:
+    if error.reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
         return error.phase
     return None
+
+
+def _refusal_head(phase: str) -> str:
+    """What stopped, in the shared phase-specific words (``authorization.refusal_summary``).
+
+    Only a phase that refuses before a connection sends anything says so; a changed
+    authorization says FinishUP stopped sending over a connection that had sent, a changed
+    profile that the server did no work for the request, and an unreachable server what
+    happened to the way there.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    return refusal_summary(phase) or "the selected FinishUP server could not be reached"
 
 
 def _control_guidance(error: ControlError) -> str:
@@ -143,10 +157,7 @@ def _control_guidance(error: ControlError) -> str:
     if phase is not None:
         from finishup.cli.render import render_remote_refusal
 
-        return "service_unavailable: " + render_remote_refusal(
-            phase,
-            head="this computer refused the selected FinishUP server before anything was sent",
-        )
+        return "service_unavailable: " + render_remote_refusal(phase, head=_refusal_head(phase))
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (
@@ -309,7 +320,7 @@ async def _service_summary() -> str:
 
         directive = directive_for(remote_root_continuation(phase))
         assert directive is not None
-        return f"refused before anything was sent ({phase}) — {directive.directive}"
+        return f"{_refusal_head(phase)} ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
 
@@ -745,8 +756,84 @@ def _service_menu() -> None:
         _run_ceremony(unlock.initialize_passphrase_vault)
     elif choice == "4":
         _run(lambda: _service_simple("lock"))
-    elif typer.confirm("Stop the local service now?", default=False):
-        _run(lambda: _service_simple("stop"))
+    else:
+        question = _stop_question()
+        if question is not None and typer.confirm(question, default=False):
+            _run(lambda: _service_simple("stop"))
+
+
+def _stop_question() -> str | None:
+    """The question before stopping the service this process uses; ``None`` when it is refused.
+
+    A server elsewhere the shared gate refuses now, or that the current repository is held from
+    or kept away from, is named, with its way back, before any question (L1's known edge: the
+    menu asked first and only then found the connection refused); one it admits is named by its
+    generated id, since stopping it stops that server for every client that uses it.
+    """
+
+    from finishup.client.targets import (
+        TargetError,
+        TargetRecordUnreadable,
+        active_target_record,
+    )
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        record = None
+        remote = True
+    except TargetError:
+        record, remote = None, False
+    else:
+        remote = record is not None and record.is_remote
+    if not remote:
+        return "Stop the local service now?"
+    from finishup.client.authorization import preflight_refusal
+
+    phase = preflight_refusal() or _repository_hold()
+    if phase is not None or record is None:
+        typer.echo(
+            _control_guidance(
+                ControlError(
+                    "service_unavailable", retryable=True, phase=phase or "target_root_is_remote"
+                )
+            ),
+            err=True,
+        )
+        return None
+    return (
+        f"Stop the FinishUP service of the selected server {record.target_id} ({record.kind}) "
+        "now? It stops that server for every client that uses it"
+    )
+
+
+def _repository_hold() -> str | None:
+    """The hold the stop's own connection would be refused with, for this process's workspace.
+
+    The stop connects as every CLI command does (``build_service_client``: the current
+    repository claimed, its hold decided before the claim), so a repository held from the selected
+    server elsewhere, or kept on this computer, refuses it; that is named before the question,
+    not after the owner answered it. File and Git reads only, never a dial.
+    """
+
+    import asyncio
+
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.cli.bootstrap import resolve_cli_workspace_locator
+    from finishup.client.remote_binding import binding_for_active_root
+    from finishup.client.targets import TargetError
+
+    locator = resolve_cli_workspace_locator()
+    if locator is None:
+        return None
+    try:
+        asyncio.run(binding_for_active_root(locator, serve_workspace=False))
+    except RepositoryIdentityError:
+        # Not a repository FinishUP can name: the connection claims no workspace.
+        return None
+    except TargetError as error:
+        return error.reason
+    return None
 
 
 def run_menu() -> int:

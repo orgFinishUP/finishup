@@ -8,14 +8,16 @@ import os
 import re
 import stat
 import sys
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 from urllib.parse import unquote_to_bytes, urlsplit
 
 import anyio
@@ -47,6 +49,9 @@ from finishup.client.attribution import (
     attribution_lines,
     connection_attribution,
     coverage_hook_observed,
+    evidence_provenance_section,
+    evidence_provenance_unknown_section,
+    shows_server_copy_section,
 )
 from finishup.client.workspace_ref import start_request_for_connection
 from finishup.config.env import EnvNameConflictError, read_env
@@ -180,6 +185,7 @@ from finishup.service.client import (
     connect_service_on_demand,
     handshake_failure,
     holder_version_order,
+    newer_helper_build_holds_selection,
     path_refusal_reason,
     service_holder_identity,
     start_timed_out,
@@ -370,7 +376,8 @@ _INHERITED_AVAILABILITY_SUFFIX: Final = (
 # message says to stop replaying and read status instead (tb4n3 RC-2). The remedy is the one the
 # text channel renders (`REASON_REMEDIES`), so the two cannot disagree.
 _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
-    "The operation completed on the local service. " + REASON_REMEDIES["response_projection_failed"]
+    "The operation completed on the FinishUP service. "
+    + REASON_REMEDIES["response_projection_failed"]
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
 # A text section that failed to render is recorded, but one runaway renderer must not write an
@@ -388,7 +395,7 @@ _CONSENT_AUTHORIZE_COMMAND: Final = "finishup consent authorize"
 # A read never appended, so there is no stored result and no operation record to replay against.
 # Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
 _READ_PROJECTION_FAILED_MESSAGE: Final = (
-    "The read completed on the local service, but its response could not be shaped. No durable "
+    "The read completed on the FinishUP service, but its response could not be shaped. No durable "
     "state changed. Repeat the request with a new request_id, or read status view=versions for "
     "the authoritative frontier."
 )
@@ -472,7 +479,7 @@ def _internal_stage_error(
 # #65, #239). The remedy is always safe: the service is the authority on request identity and will
 # replay or reject the id itself.
 _PUBLISH_RECOVERY_UNCHECKED_CAVEAT: Final = (
-    " A prior operation under this request_id could not be checked; the local service was "
+    " A prior operation under this request_id could not be checked; the FinishUP service was "
     "unreachable. Correct the named fields and resubmit; the service will replay or reject the "
     "request_id itself if it already names a committed operation."
 )
@@ -978,10 +985,281 @@ def _cursor_workspace_identity(path: str) -> tuple[int, int] | None:
 
 
 async def _close_client(client: ServiceClient) -> None:
+    _release_for_helper(client)
     try:
         await client.close()
     except Exception:
         pass
+
+
+# This bridge's registrations with the helper of a server elsewhere (ADR-052, design v2 section
+# 8.5): each claim-bound connection with an agent registers its workspace under a registrant of its
+# own (so one connection's release never removes another's lease for the same workspace) and owns
+# a renewal task that renews it at half its lease for as long as the connection lives, idle or
+# waiting on a long request alike; closing the connection, and Cursor's roots-changed retirement,
+# cancel that task and release the registration (review of layer 3: C3).
+if TYPE_CHECKING:
+    from finishup.client.authorization import ConnectionAuthorization
+    from finishup.client.helper_registrations import Registration
+
+
+@dataclass(slots=True, eq=False)
+class _HelperLease:
+    """One connection's registration and the task that renews it.
+
+    ``released`` is set before the registration is released, from the event loop; a registration
+    or renewal written meanwhile in a worker thread asks it under the registry lock before it
+    writes, and again after, so a released one is never written back.
+    """
+
+    target_id: str
+    registrant: str
+    registration: Registration | None = None
+    released: threading.Event = field(default_factory=threading.Event)
+    task: asyncio.Task[None] | None = None
+
+    def wanted(self) -> bool:
+        return not self.released.is_set()
+
+    def forget(self) -> None:
+        """This lease's record is gone (released, refused or never written): no sweep needs it."""
+
+        _HELPER_REGISTRANTS.discard((self.target_id, self.registrant))
+
+
+_HELPER_REGISTRATIONS: dict[int, _HelperLease] = {}
+# Every (target, registrant) this bridge process registered under: Cursor's retirement removes
+# whatever of them is left, a record whose release did not happen included.
+_HELPER_REGISTRANTS: set[tuple[str, str]] = set()
+
+
+async def _lease_wait(seconds: float) -> None:
+    """Wait until a lease is due for renewal; a test injects an event-driven tick."""
+
+    await asyncio.sleep(seconds)
+
+
+# How often a lease looks at its target's consent while it waits to renew (defect A of the
+# 2026-11-11 dogfood): one ``lstat``, and a read of ``target.json`` only when its stamp moved.
+_LEASE_WATCH_SECONDS: Final = 2.0
+
+
+class _ConsentWatch:
+    """Whether a target's consent is no longer the one a registration was made under.
+
+    The owner agreed again under the same profile revision (``server use NAME --level L2``, say):
+    the connection's authorization still admits it, but the helper no longer serves a
+    registration made under the earlier consent (``helper_registrations.served_workspaces``:
+    ``consent_changed``), so the bridge renews it now, under its connection's authorization as
+    it stands (a renewal it refuses ends the lease), instead of at half its lease. A record that
+    cannot be read, or is gone, also asks for the renewal, whose own checks then decide.
+    """
+
+    __slots__ = ("_digest", "_path", "_stamp")
+
+    def __init__(self, target_id: str) -> None:
+        from finishup.client.targets import target_root
+        from finishup.config.paths import SERVER_TARGET_FILE_NAME
+
+        self._path = target_root(target_id) / SERVER_TARGET_FILE_NAME
+        self._stamp: object = None
+        self._digest: str | None = None
+
+    def moved(self, registration: Registration) -> bool:
+        from finishup.client.authorization import consent_digest
+        from finishup.client.targets import TargetError, read_target
+
+        try:
+            facts = os.lstat(self._path)
+        except OSError:
+            return True
+        stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+        if stamp != self._stamp:
+            self._stamp = stamp
+            try:
+                record = read_target(self._path.parent)
+            except (TargetError, OSError):
+                return True
+            self._digest = None if record is None else consent_digest(record)
+        return self._digest is None or self._digest != registration.consent_digest
+
+
+def _connection_authorization(client: ServiceClient) -> ConnectionAuthorization | None:
+    from finishup.client.authorization import ConnectionAuthorization
+
+    authorization = getattr(client, "authorization", None)
+    return authorization if type(authorization) is ConnectionAuthorization else None
+
+
+def _register_in_worker(
+    lease: _HelperLease, write: Callable[[], Registration | str | None]
+) -> Registration | str | None:
+    """Run one registration or renewal (it takes the registry lock) off the event loop.
+
+    A registration released while this one was written is removed again here, in the same
+    worker, so a release never loses to a write that was already under way.
+    """
+
+    from finishup.client.helper_registrations import Registration, release
+
+    result = write()
+    if isinstance(result, Registration) and not lease.wanted():
+        release(result.target_id, result.claim, result.registrant)
+        return None
+    return result
+
+
+async def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) -> None:
+    """Register ``client``'s claimed workspace with its target's helper and start its renewal.
+
+    Best effort: only a claim-bound connection to a server elsewhere that serves its workspace
+    registers, and the connection works the same either way (its own agent answers its live
+    calls). The write takes the registry lock, in a worker thread.
+    """
+
+    # A stand-in client (a test's) need not carry either.
+    workspace = getattr(client, "remote_workspace", None)
+    authorization = _connection_authorization(client)
+    if workspace is None or authorization is None:
+        return
+    from finishup.client.helper_registrations import (
+        Registration,
+        RegistrationError,
+        new_registrant,
+        register,
+    )
+
+    source = "mcp_roots" if runtime.host_profile == "cursor" else "mcp_bridge"
+    registrant = new_registrant()
+    lease = _HelperLease(authorization.grant.target_id, registrant)
+    _HELPER_REGISTRANTS.add((lease.target_id, registrant))
+
+    def write() -> Registration | None:
+        return register(
+            authorization,
+            workspace[0],
+            workspace[1],
+            registrant=registrant,
+            source=source,
+            wanted=lease.wanted,
+        )
+
+    try:
+        registration = await asyncio.to_thread(_register_in_worker, lease, write)
+    except (RegistrationError, OSError, ValueError):
+        lease.forget()
+        return
+    except BaseException:
+        # Cancelled: the worker may still write; it finds the lease released and removes it.
+        lease.released.set()
+        raise
+    if not isinstance(registration, Registration):
+        lease.forget()
+        return
+    lease.registration = registration
+    _HELPER_REGISTRATIONS[id(client)] = lease
+    lease.task = asyncio.create_task(_renew_helper_lease(client, authorization, lease))
+    # The helper serves the registration in the background; in the direct style no connection
+    # of this bridge passes it, so it is started here when none runs (ADR-052).
+    with contextlib.suppress(Exception):
+        from finishup.client.helper_runtime import ensure_helper_for_direct_style
+
+        await asyncio.to_thread(ensure_helper_for_direct_style, registration.target_id)
+
+
+async def _renew_helper_lease(
+    client: ServiceClient, authorization: ConnectionAuthorization, lease: _HelperLease
+) -> None:
+    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3), and at once
+    when the target's consent moved under the same authorization (``_ConsentWatch``, defect A).
+
+    Ends when the connection has ended (its registration released), when a renewal is refused
+    (``renew`` released it: the selection, record, key, consent or hold changed), or when
+    cancelled by the connection's close or Cursor's retirement.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from finishup.client.helper_registrations import LEASE_SECONDS, Registration, release, renew
+    from finishup.config.installation import parse_rfc3339_ms
+
+    watch: _ConsentWatch | None = None
+    with contextlib.suppress(Exception):
+        watch = _ConsentWatch(lease.target_id)
+    while True:
+        current: Registration | None = lease.registration
+        if current is None:
+            return
+        due = parse_rfc3339_ms(current.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
+        left = max(0.0, (due - datetime.now(UTC)).total_seconds())
+        # At most a few seconds at a time: the consent is looked at again (defect A).
+        await _lease_wait(left if watch is None else min(left, _LEASE_WATCH_SECONDS))
+        if not lease.wanted():
+            return
+        if (
+            not getattr(client, "closed", False)
+            and (due - datetime.now(UTC)).total_seconds() > 0
+            and (watch is None or not watch.moved(current))
+        ):
+            continue
+        if getattr(client, "closed", False):
+            # The connection ended without the bridge closing it yet: its lease ends with it.
+            _drop_lease(client, lease)
+            lease.released.set()
+            release(current.target_id, current.claim, current.registrant)
+            lease.forget()
+            return
+
+        def write(registration: Registration = current) -> Registration | str | None:
+            return renew(registration, authorization, wanted=lease.wanted)
+
+        try:
+            renewed = await asyncio.to_thread(_register_in_worker, lease, write)
+        except Exception:  # noqa: BLE001 - best effort: the lease ends, the connection does not
+            renewed = None
+            lease.released.set()
+            release(current.target_id, current.claim, current.registrant)
+        if isinstance(renewed, Registration):
+            lease.registration = renewed
+            continue
+        # Refused (``renew`` released it) or released meanwhile: this lease is over.
+        _drop_lease(client, lease)
+        lease.forget()
+        return
+
+
+def _drop_lease(client: ServiceClient, lease: _HelperLease) -> None:
+    if _HELPER_REGISTRATIONS.get(id(client)) is lease:
+        del _HELPER_REGISTRATIONS[id(client)]
+
+
+def _end_lease(lease: _HelperLease) -> None:
+    """Stop renewing ``lease``: the flag first, so a renewal under way never writes it back."""
+
+    lease.released.set()
+    task = lease.task
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+        task.add_done_callback(_consume_lease_task)
+
+
+def _consume_lease_task(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+def _release_for_helper(client: ServiceClient) -> None:
+    lease = _HELPER_REGISTRATIONS.pop(id(client), None)
+    if lease is None:
+        return
+    _end_lease(lease)
+    registration = lease.registration
+    if registration is None:
+        return
+    from finishup.client.helper_registrations import release
+
+    release(registration.target_id, registration.claim, registration.registrant)
+    lease.forget()
 
 
 async def _discard_client(runtime: BridgeRuntime, client: ServiceClient) -> None:
@@ -1150,6 +1428,7 @@ async def _ensure_service_client(
                     )
                 )
                 await connected_attempt.connect()
+                await _register_for_helper(runtime, connected_attempt)
             except BaseException as exc:
                 if connected_attempt is not None:
                     await _close_client(connected_attempt)
@@ -1385,23 +1664,41 @@ def _attributed_text(
     receipt_page: bool = False,
     provenance_unknown: bool = False,
     hook_observed: bool = False,
+    server_copy: object = None,
+    evidence_unknown: object = None,
 ) -> str:
     """``text`` followed by a claim-bound connection's provenance lines (ADR-051), unchanged for
     any other connection. A line the text already carries is not repeated, and a page of a paged
     receipt, or a receipt whose ``workspace_provenance`` says it is unknown, names only the
     producing service (``attribution_lines``). A receipt with hook-observed evidence also gets
-    the fixed client-attested observation line (decision 12)."""
+    the fixed client-attested observation line (decision 12).
 
+    ``server_copy`` is a receipt's ``evidence_provenance`` member (ADR-054): unless ``text``
+    already carries the service's server-copy section, the same fixed lines rendered from the
+    member follow it, whatever the connection, and the connection then names only the producing
+    service. ``evidence_unknown`` is its ``evidence_provenance_unknown`` member: the
+    evidence-unknown lines for its reason follow on the same terms, never the level-L1 line."""
+
+    extra: tuple[str, ...] = ()
+    if server_copy is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_section(server_copy, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
+    if evidence_unknown is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_unknown_section(evidence_unknown, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
     lines = attribution_lines(
         attribution,
         shown=text,
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy is not None or evidence_unknown is not None,
     )
-    if not lines:
+    if not lines and not extra:
         return text
-    return "\n".join((text, *lines) if text else lines)
+    return "\n".join((text, *extra, *lines) if text else (*extra, *lines))
 
 
 def result_from_public_model(
@@ -1421,7 +1718,9 @@ def result_from_public_model(
     "Workspace evidence" section is on at most one page. So does a receipt whose
     ``workspace_provenance`` member says the provenance is unknown (decision D4); that member is
     in the canonical text and, paged, on the first page. The structured result never carries
-    the connection's lines.
+    the connection's lines. A receipt whose ``evidence_provenance`` member carries a level-L2
+    account (ADR-054) gets the fixed server-copy lines rendered from it when its text does not
+    already hold them (a JSON receipt), and names only the producing service.
     """
 
     wire = public_model_to_wire(result)
@@ -1430,6 +1729,10 @@ def result_from_public_model(
     )
     # ADR-051 decision D4: every receipt format, JSON included, says when its provenance is unknown.
     provenance_unknown = "receipt_id" in wire and "workspace_provenance" in wire
+    # ADR-054: and, for a level-L2 task, where each kind of evidence was read.
+    server_copy = wire.get("evidence_provenance") if "receipt_id" in wire else None
+    # ADR-054: or, when that account could not be given, why (never the level-L1 line).
+    evidence_unknown = wire.get("evidence_provenance_unknown") if "receipt_id" in wire else None
     coverage = wire.get("coverage") if "receipt_id" in wire else None
     hook_observed = isinstance(coverage, Mapping) and coverage_hook_observed(
         cast(Mapping[str, object], coverage).get("publication_channels")
@@ -1440,6 +1743,8 @@ def result_from_public_model(
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy,
+        evidence_unknown=evidence_unknown,
     )
     # The service budgets canonical text plus structured content. A small result's prose can
     # repeat several fields more often: fall back to that complete canonical text if needed.
@@ -1453,6 +1758,8 @@ def result_from_public_model(
             receipt_page=receipt_page,
             provenance_unknown=provenance_unknown,
             hook_observed=hook_observed,
+            server_copy=server_copy,
+            evidence_unknown=evidence_unknown,
         )
         if mcp_delivery_bytes(wire, text=canonical) < rendered_bytes:
             rendered = canonical
@@ -1859,6 +2166,9 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
     if runtime.host_profile != "cursor":
         return
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    # The helper stops serving the old roots: every registration this bridge made goes with them
+    # (ADR-052; the closing client releases its own as well).
+    _release_bridge_registrations()
     async with slot.workspace_binding_lock:
         slot.workspace_locator = None
         slot.workspace_root_identity = None
@@ -1867,6 +2177,24 @@ async def _invalidate_cursor_workspace_binding(runtime: BridgeRuntime) -> None:
         slot.workspace_binding_state = "failed"
         slot.workspace_binding_correlation_id = None
     await close_bridge_runtime(runtime)
+
+
+def _release_bridge_registrations() -> None:
+    """Release every registration this bridge process made, for every target, and cancel every
+    renewal task (a renewal already under way finds its lease released and writes nothing)."""
+
+    leases = tuple(_HELPER_REGISTRATIONS.values())
+    _HELPER_REGISTRATIONS.clear()
+    for lease in leases:
+        _end_lease(lease)
+    if not _HELPER_REGISTRANTS:
+        return
+    from finishup.client.helper_registrations import release_registrant
+
+    registrants = tuple(_HELPER_REGISTRANTS)
+    _HELPER_REGISTRANTS.clear()
+    for target_id, registrant in registrants:
+        release_registrant(target_id, registrant)
 
 
 def _workspace_locator_for_runtime(runtime: BridgeRuntime) -> WorkspaceLocator | None:
@@ -1953,7 +2281,7 @@ def _vault_initialization_required_message(include_authorize: bool) -> str:
         else "Direct"
     )
     return (
-        "The local service vault is uninitialized: first-run initialization must complete before "
+        "The FinishUP service vault is uninitialized: first-run initialization must complete before "
         "any FinishUP task can start. This is a bounded initialization-required continuation "
         "(safe_details.continuation), not an ordinary terminal error. Run "
         "`finishup consent prepare vault_initialize`, show the returned danger text to the user, "
@@ -2002,7 +2330,7 @@ def _control_error_result(
             )
         if error.retryable:
             message = (
-                "The local service vault is soft-locked or a transient unlock attempt just "
+                "The FinishUP service vault is soft-locked or a transient unlock attempt just "
                 "failed; it re-opens automatically. Retry this operation shortly. If the "
                 "error persists, on a local terminal run `finishup service unlock` or "
                 "`finishup service auto-unlock repair`. If those no longer work, run "
@@ -2011,7 +2339,7 @@ def _control_error_result(
             )
         else:
             message = (
-                "The local service vault is locked or uninitialized. After trusted setup with "
+                "The FinishUP service vault is locked or uninitialized. After trusted setup with "
                 "platform auto-unlock, soft locks (idle/session) re-open automatically; this "
                 "error means a hard lock or missing setup. On a local terminal run "
                 "`finishup service unlock` (uses the platform credential store when provisioned) "
@@ -2100,7 +2428,7 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
-                "Receipt projection is temporarily unavailable; retry after the local service is ready."
+                "Receipt projection is temporarily unavailable; retry after the FinishUP service is ready."
             ),
             retryable=True,
             host_profile=host_profile,
@@ -2115,21 +2443,20 @@ def _control_error_result(
             # generic write recovery names cannot be queried. The shipped guidance excepts this
             # case explicitly: replay the exact start once under the same request_id.
             message = (
-                "The local start timed out and may still have committed. Replay the exact same "
+                "The start timed out and may still have committed. Replay the exact same "
                 "start body once with the same request_id; the idempotent start path returns the "
                 "stored result or a typed boundary. Do not fabricate session or writer ids for a "
                 "status query."
             )
         elif operation_kind == "write":
             message = (
-                "The local operation timed out and may still have committed. Retry with the same "
+                "The operation timed out and may still have committed. Retry with the same "
                 "request_id to recover the stored outcome; for an existing FinishUP session, status "
                 "view=operation can inspect that request_id."
             )
         else:
             message = (
-                "The local read timed out and requested no write. Repeat the read with a new "
-                "request_id."
+                "The read timed out and requested no write. Repeat the read with a new request_id."
             )
         # The read-versus-write distinction above was previously legible only in the free-form
         # message, which the native text channel drops by design; a typed continuation carries it
@@ -2191,20 +2518,21 @@ def _control_error_result(
             request_id,
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
-            message="The local service is draining; retry after it is ready.",
+            message="The FinishUP service is draining; retry after it is ready.",
             retryable=True,
             host_profile=host_profile,
             safe_details={"reason_code": "service_draining"},
         )
     if error.reason == "service_unavailable":
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summary
+        from finishup.client.authorization import refusal_summary
         from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-        if error.phase in AUTHORIZATION_REFUSALS:
+        if error.phase in REMOTE_CONNECTION_PHASES:
             # The shared authorization gate refused or ended a connection to a server elsewhere
-            # (ADR-051, ADR-052): nothing more was sent and nothing started. Name the phase and
-            # the continuation of its way back (for a remote root, it follows what named this
-            # bridge's root), never a local service to run.
+            # (ADR-051, ADR-052), or that server could not be reached through its transport: name
+            # the phase and the continuation of its way back (for a remote root, it follows what
+            # named this bridge's root), never a local service to run.
             remote_details: dict[str, object] = {
                 "reason_code": "service_unavailable",
                 "phase": error.phase,
@@ -2357,7 +2685,7 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
-                "The local service instance changed after reconnect. Retry this operation with "
+                "The FinishUP service instance changed after reconnect. Retry this operation with "
                 "the same request_id."
             ),
             retryable=True,
@@ -2498,7 +2826,11 @@ def _holder_is_newer_than_bridge() -> bool:
         holder = service_holder_identity()
     except Exception:
         return False
-    return holder is not None and holder_version_order(holder.service_version) == "newer"
+    if holder is not None and holder_version_order(holder.service_version) == "newer":
+        return True
+    # A server elsewhere: its helper of another build of this release, and this bridge is not the
+    # build installed now (it predates an in-place upgrade).
+    return newer_helper_build_holds_selection()
 
 
 def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:
@@ -2994,6 +3326,46 @@ async def _timeout_operation_state(
         return (_TimeoutOperationState.UNKNOWN, session_id, writer_id)
 
 
+# Where each request id this bridge sent went: a server elsewhere's target id, or ``None`` for this
+# computer's own server (ADR-052, review of layer 2: A1). Bounded; the oldest are forgotten first.
+_SENT_REQUEST_TARGETS: OrderedDict[str, str | None] = OrderedDict()
+_SENT_REQUEST_LIMIT: Final = 4_096
+
+
+def _connection_target(client: ServiceClient) -> str | None:
+    """The server elsewhere ``client`` is connected to (its target id); ``None`` when local."""
+
+    grant = getattr(getattr(client, "authorization", None), "grant", None)
+    target_id = getattr(grant, "target_id", None)
+    return target_id if type(target_id) is str else None
+
+
+def _admit_request_target(request_id: str | None, client: ServiceClient) -> None:
+    """Refuse a request id already sent to another server than ``client``'s; record this one.
+
+    An agent may repeat a request with the same ``request_id`` (after ``request_timeout``, say)
+    once the selection moved to another server: that request may already be recorded where it
+    was first sent, so it is never sent to another server (no replay across targets). It ends
+    as ``server_authorization_changed``: its outcome there is unknown. Requests between servers
+    on this computer are never compared (local-to-local switches stay as before, O1).
+    """
+
+    if request_id is None:
+        return
+    target = _connection_target(client)
+    if request_id in _SENT_REQUEST_TARGETS:
+        first = _SENT_REQUEST_TARGETS[request_id]
+        if first != target and (first is not None or target is not None):
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            )
+        _SENT_REQUEST_TARGETS.move_to_end(request_id)
+        return
+    _SENT_REQUEST_TARGETS[request_id] = target
+    while len(_SENT_REQUEST_TARGETS) > _SENT_REQUEST_LIMIT:
+        _SENT_REQUEST_TARGETS.popitem(last=False)
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
@@ -3007,6 +3379,7 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
         request_id=request_id,
         retain_availability_failure_for_latch=retain_availability_failure_for_latch,
     )
+    _admit_request_target(request_id, client)
     try:
         return await invoke(client, request)
     except ControlError as error:
@@ -3026,6 +3399,7 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
             request_id=request_id,
             retain_availability_failure_for_latch=retain_availability_failure_for_latch,
         )
+        _admit_request_target(request_id, replacement)
         return await invoke(replacement, request)
 
 

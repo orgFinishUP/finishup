@@ -11,6 +11,7 @@ from finishup.protocol.canonical import JsonValue
 from finishup.protocol.consent_envelope import (
     ConsentEnvelope,
     EnvelopeError,
+    Retention,
     canonical_bytes,
     compare,
     consentable,
@@ -18,6 +19,8 @@ from finishup.protocol.consent_envelope import (
     envelope_from_json,
     envelope_to_json,
     precedes,
+    retention_from_token,
+    retention_to_json,
 )
 
 _IDENTITY = "sha256:" + "ab" * 32
@@ -39,7 +42,11 @@ def _document(**changes: Any) -> dict[str, JsonValue]:
         "code_sync": {"methods": ["git_export"], "max_repo_bytes": 1000, "max_file_bytes": 100},
         "retention": {"kind": "days", "days": 30},
         "exclusions": [".env", "*.pem"],
-        "review": {"ai_review": "server_policy", "provider_disclosure": "provider-a"},
+        "review": {
+            "ai_review": "server_policy",
+            "provider_disclosure": "provider-a",
+            "fallback_disclosure": None,
+        },
         "disclosure_version": 2,
     }
     for key, value in changes.items():
@@ -67,7 +74,8 @@ def test_the_canonical_bytes_and_digest_are_fixed() -> None:
         b'"exclusions":["*.pem",".env"],"key_scope":["agent","tasks"],"level":"L2",'
         b'"principal":{"key_id":"key-1","principal":"owner"},"required_min":"L1",'
         b'"retention":{"days":30,"kind":"days"},'
-        b'"review":{"ai_review":"server_policy","provider_disclosure":"provider-a"},'
+        b'"review":{"ai_review":"server_policy","fallback_disclosure":null,'
+        b'"provider_disclosure":"provider-a"},'
         b'"schema":"yoetz.consent-envelope/1"}'
     )
     assert canonical_bytes(envelope) == expected
@@ -122,8 +130,40 @@ def test_an_unknown_member_or_value_is_kept_named_and_never_consentable() -> Non
         (_document(**{"endpoint.identity_type": "tls_system_ca"}), "envelope_field_invalid"),
         (_document(**{"endpoint.origin": "https://a b"}), "envelope_field_invalid"),
         (
-            _document(review={"ai_review": "none", "provider_disclosure": "x"}),
+            _document(
+                review={
+                    "ai_review": "none",
+                    "provider_disclosure": "x",
+                    "fallback_disclosure": None,
+                }
+            ),
             "envelope_field_invalid",
+        ),
+        # A fallback is the provider used when the first one fails: never one alone, and never
+        # beside no review at all (ADR-052, review of layer 3: A1).
+        (
+            _document(
+                review={
+                    "ai_review": "server_policy",
+                    "provider_disclosure": None,
+                    "fallback_disclosure": "provider-b",
+                }
+            ),
+            "envelope_field_invalid",
+        ),
+        (
+            _document(
+                review={
+                    "ai_review": "none",
+                    "provider_disclosure": None,
+                    "fallback_disclosure": "x",
+                }
+            ),
+            "envelope_field_invalid",
+        ),
+        (
+            _document(review={"ai_review": "server_policy", "provider_disclosure": "provider-a"}),
+            "envelope_field_missing",
         ),
         (_document(disclosure_version=0), "envelope_field_invalid"),
         (
@@ -167,7 +207,16 @@ def test_identical_envelopes_are_the_same() -> None:
         ({"retention": {"kind": "days", "days": 7}}, set[str]()),
         ({"retention": None}, set[str]()),
         ({"exclusions": [".env", "*.pem", "secrets/"]}, {"exclusions"}),
-        ({"review": {"ai_review": "none", "provider_disclosure": None}}, {"review"}),
+        (
+            {
+                "review": {
+                    "ai_review": "none",
+                    "provider_disclosure": None,
+                    "fallback_disclosure": None,
+                }
+            },
+            {"review"},
+        ),
         ({"required_min": None}, set[str]()),
     ],
 )
@@ -199,6 +248,19 @@ def test_a_current_envelope_that_sends_or_keeps_less_is_narrower(
         ({"principal": {"key_id": "key-2", "principal": "owner"}}, set[str](), {"principal"}),
         ({"disclosure_version": 3}, set[str](), {"disclosure_version"}),
         ({"review.provider_disclosure": "provider-b"}, set[str](), {"review"}),
+        # Every provider is named: a fallback added, or the two swapped, is asked about again.
+        ({"review.fallback_disclosure": "provider-b"}, set[str](), {"review"}),
+        (
+            {
+                "review": {
+                    "ai_review": "server_policy",
+                    "provider_disclosure": "provider-b",
+                    "fallback_disclosure": "provider-a",
+                }
+            },
+            set[str](),
+            {"review"},
+        ),
         (
             {"code_sync": {"methods": ["other"], "max_repo_bytes": 1, "max_file_bytes": 1}},
             set[str](),
@@ -256,3 +318,54 @@ def test_anything_unknown_asks_again_even_when_unchanged() -> None:
     assert precedes(unknown, unknown)
     assert not precedes(unknown, _envelope())
     assert not precedes(_envelope(), unknown)
+
+
+# --- the written retention token (``--retention`` and ``[server.code_copy]``) -----------------
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("task_close", Retention("task_close", None)),
+        ("until_forgotten", Retention("until_forgotten", None)),
+        ("days:1", Retention("days", 1)),
+        ("days:30", Retention("days", 30)),
+        ("days:36500", Retention("days", 36_500)),
+    ],
+)
+def test_a_retention_token_names_a_retention_an_envelope_admits(
+    token: str, expected: Retention
+) -> None:
+    retention = retention_from_token(token)
+    assert retention == expected
+    parsed = envelope_from_json(_document(retention=retention_to_json(retention)))
+    assert parsed.retention == expected
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "days",
+        "days:",
+        "days:0",
+        "days:07",
+        "days:36501",
+        "days:-1",
+        "days:+1",
+        "days: 1",
+        "days:1 ",
+        "days:1\n",
+        "days:\u0661",
+        "Days:1",
+        "TASK_CLOSE",
+        "task_close ",
+        "forever",
+        30,
+        None,
+    ],
+)
+def test_any_other_retention_token_is_refused_by_a_closed_reason(token: object) -> None:
+    with pytest.raises(EnvelopeError) as refused:
+        retention_from_token(token)
+    assert refused.value.reason == "retention_token_invalid"

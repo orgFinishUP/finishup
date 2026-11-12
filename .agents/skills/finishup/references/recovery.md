@@ -49,7 +49,16 @@ repositories keep` and do not ask again. `repository_kept_on_this_computer`: con
 FinishUP for this repository. `server_connection_renew`: FinishUP stopped sending over a
 connection whose authorization changed, and what that server received stays there; a request
 already sent may be recorded there and FinishUP never resends it, so tell the user a write's
-outcome is unknown; later requests use the current selection. Never switch servers or change a privacy policy for the user.
+outcome is unknown; later requests use the current selection. `remote_profile_checking`: that
+server changed what it offers and FinishUP is checking what changed; repeat the same request in a
+few seconds, and if the next refusal names `remote_reconsent`, follow that one instead.
+`remote_reconsent`: what that server offers or needs changed since the user agreed to use it, so
+the request was refused before that server did any work for it. `server_level_decision_required`: it requires more than they
+agreed to, so nothing was sent. For both, only the user agrees again, with `finishup server use`
+in their own terminal. `remote_direct_slow`: the server could not be reached in time in the
+direct style, which is slow on a slow network; tell the user that `finishup server set NAME
+--style relay` is the remedy. Never switch servers or styles, agree for the user
+or change a privacy policy for the user.
 
 Typed continuation pointers resolve to these small topics: startup and identity to
 [`startup.md`](startup.md), publication field ownership to [`publication.md`](publication.md),

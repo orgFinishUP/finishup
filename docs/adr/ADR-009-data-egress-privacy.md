@@ -1911,6 +1911,13 @@ accepted, this record changes as follows. **In layer 1 the hop is defined but ne
 refused before any dial, and no channel or endpoint is added to what this record permits. Of the
 rules below only the owner-only record of what this computer's everyday service last reported is
 kept up to date in layer 1; the rest is the contract the layers that open a remote kind implement.
+**Layer 4 takes the hop for SSH servers** (ADR-052): over OpenSSH only, through the target's helper
+(relay) or a direct `ssh -W` stream, after the shared gate, the consent to the server's profile and
+the repository hold; no other channel or endpoint is added, and HTTPS and port servers stay closed.
+**Layer 5 takes it for HTTPS and port servers** ([ADR-053](ADR-053-rest-v1-public-contract.md)):
+over REST v1 only, through the same helper (relay) or each process's own REST connection
+(direct), after the same gate, consent and hold; the one request made before authentication is
+the bounded discovery of `server add`, which carries no credential and no task content.
 
 - **A distinct hop, outside the five channels.** Traffic between a FinishUP client and the
   owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one
@@ -1976,3 +1983,27 @@ The hold covers FinishUP's own reads and claims for the repository, not what an 
 folder reads and its hooks capture (the maintainer's addendum of 2026-11-07). No remote kind is
 open in layer 2, so the hold is built but reached only in process; its reads and records stay
 dormant until a server elsewhere is recorded.
+
+## Amendment proposed by ADR-054 (layer 6): a copy of the code on the server (level L2)
+
+[ADR-054](ADR-054-level-l2-the-server-copy.md) adds one kind of content to the FinishUP server hop
+above, at level L2 only: a sanitized copy of a repository's git-visible files (never its history),
+sent by the target's helper when the server pulls it. It travels the server hop under the same
+gate; it is not a new channel, and enabling it enables none of the five channels.
+
+- **Offer and consent.** A copy goes only to a server whose owner's `[server.code_copy]` table
+  offers level L2, and only after this computer's owner consents at L2 on the trusted console,
+  with a retention that server offers (ADR-054 decisions 9 and 16).
+- **Zero network and the hold refuse before any export.** Every sync runs the gate again (zero
+  network, the disclosure, the kind, the consent verdict, the repository's hold) before any file
+  is read or any object written, and a refused sync never falls back to a copy already kept
+  (ADR-054 decisions 2, 4 and 12).
+- **What is held out.** The always-excluded credential names (ADR-031's and more), the server's
+  exclusions and the owner's own list, files over the size cap, and files whose contents match a
+  known secret format until the owner allows those exact bytes; the names of what is held out are
+  sent, never their contents. Names and scans are not a secret guarantee.
+- **Only forget removes what was sent.** Holding a repository, zero network, narrowing to L1,
+  choosing another server or removing it stop future sends only. Forget (`finishup server code
+  forget`, its `--all`, or `server remove`'s question) deletes the copy, its snapshots and the
+  excerpts tasks derived from it, which keep a "content forgotten" marker; backups of the server's
+  folder are not managed (ADR-054 decisions 7 and 15).

@@ -191,15 +191,39 @@ def remote_refusal_context(phase: str) -> str:
     directive = directive_for(token)
     assert token is not None and directive is not None
     nudge = "" if directive.nudge is None else f" {directive.nudge}"
-    return (
-        f"{_REFUSAL_HEADS.get(phase, _REFUSAL_HEAD)} ({phase}). "
-        f"{directive.directive}{nudge} Continuation: {token}. "
-    )
+    return f"{_refusal_head(phase)} ({phase}). {directive.directive}{nudge} Continuation: {token}. "
+
+
+def _refusal_head(phase: str) -> str:
+    head = _REFUSAL_HEADS.get(phase)
+    if head is not None:
+        return head
+    if phase in _REFUSED_AFTER_SENDING:
+        # Also the server's own refusal of a hello or request it was sent: the shared summary
+        # says only that it did no work for it, never that nothing was sent.
+        from finishup.client.authorization import refusal_summary
+
+        summary = refusal_summary(phase) or ""
+        return summary[:1].upper() + summary[1:]
+    return _REFUSAL_HEAD
 
 
 _REFUSAL_HEAD: Final = "FinishUP refused the selected server's connection before anything was sent"
-# A connection whose authorization changed (ADR-052) had sent things before it ended.
+# A phase that may come after something was sent, whose head is the shared summary.
+_REFUSED_AFTER_SENDING: Final = frozenset({"server_profile_changed"})
+_UNREACHED_HEAD: Final = "FinishUP could not reach the selected server elsewhere"
+# A connection whose authorization changed (ADR-052) had sent things before it ended; a server
+# that could not be reached through its transport refused nothing itself.
 _REFUSAL_HEADS: Final[dict[str, str]] = {
+    "remote_unreachable": _UNREACHED_HEAD,
+    "remote_auth_failed": "The selected server elsewhere refused this computer's credentials",
+    "remote_identity_changed": (
+        "FinishUP did not connect: the selected server elsewhere could not be verified"
+    ),
+    "remote_service_not_running": (
+        "The selected server elsewhere is reachable, but its FinishUP service is not running"
+    ),
+    "remote_incompatible": "The selected server elsewhere runs another FinishUP release",
     "server_authorization_changed": (
         "FinishUP ended the selected server's connection before sending more"
     ),
@@ -221,9 +245,12 @@ def unavailable_context(phase: str | None) -> str:
         from finishup.client.repository_hold import hook_context
 
         return hook_context(phase, "mapped")
-    from finishup.client.targets import REMOTE_ROOT_REFUSALS
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-    if phase in REMOTE_ROOT_REFUSALS or phase == "server_authorization_changed":
+    if phase in REMOTE_CONNECTION_PHASES:
+        # Every other refusal of the shared gate (ADR-052): zero-network, an older disclosure,
+        # a remote root, a changed profile or level, or a changed authorization; or a server
+        # elsewhere that could not be reached (its own repair).
         return remote_refusal_context(phase).rstrip()
     return _UNAVAILABLE_CONTEXT
 
@@ -412,6 +439,9 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "request_timeout": "retry",
         "service_draining": "retry",
         "service_generation_changed": "retry",
+        # A request on a connection bound to an older server-profile revision (ADR-052): the client
+        # ends the connection with phase ``server_profile_changed``; the hook reports it unavailable.
+        "server_profile_changed": "unavailable",
         "read_projection_failed": "retry",
         "response_projection_failed": "retry",
         "privacy_projection_unavailable": "retry",
@@ -1657,11 +1687,11 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
         return StatusOutcome(
             _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
-            phase=error.phase if error.phase in AUTHORIZATION_REFUSALS else None,
+            phase=error.phase if error.phase in REMOTE_CONNECTION_PHASES else None,
         )
     except Exception:
         return StatusOutcome("unavailable")

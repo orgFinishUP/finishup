@@ -44,6 +44,13 @@ from finishup.domain.coordination import (
     WorkState,
 )
 from finishup.domain.correctness_advisories import ADVISORY_ID_PATTERN
+from finishup.domain.evidence_provenance import (
+    EVIDENCE_COUNT_MAX,
+    EVIDENCE_PROVENANCE_TOKENS,
+    EvidenceProvenanceUnknownReason,
+    evidence_provenance_from_json,
+    evidence_provenance_unknown_notice,
+)
 from finishup.domain.receipt_closing import CLOSING_PROMPT_PATTERN
 from finishup.domain.review_guidance import ReviewGuidance
 from finishup.domain.workspace_provenance import (
@@ -7987,15 +7994,104 @@ class ReceiptWorkspaceProvenanceModel(_ClosedModel):
         return self
 
 
+_EvidenceCount = Annotated[int, Field(strict=True, ge=0, le=EVIDENCE_COUNT_MAX)]
+
+
+class ReceiptEvidenceReadsModel(_ClosedModel):
+    """How many evidence reads of the task each source answered, one closed token each."""
+
+    server_copy_read: _EvidenceCount
+    client_attested_read: _EvidenceCount
+    client_check: _EvidenceCount
+    client_observation: _EvidenceCount
+    outside_read: _EvidenceCount
+    stale_copy_read: _EvidenceCount
+
+
+class ReceiptEvidenceSnapshotModel(_ClosedModel):
+    """The copy snapshot the task's evidence was last read from: sync time and synthetic tree."""
+
+    synced_at: str
+    tree: str
+
+
+class ReceiptContentForgottenModel(_ClosedModel):
+    """The marker of a forgotten copy: when, and the closed reason (U20)."""
+
+    at: str
+    reason: Literal["owner", "expired"]
+
+
+class ReceiptEvidenceProvenanceModel(_ClosedModel):
+    """ADR-054, design v2 section 8.6: a claim-bound task's level-L2 evidence account.
+
+    Exactly ``domain.evidence_provenance.EvidenceProvenance.to_json()`` of an account that is
+    level L2's (a read from the server's copy, fresh or stale, or that copy's content-forgotten
+    marker): ``schema`` ``yoetz.evidence-provenance/1``, every token's count, the outside reads a
+    held repository fenced (ADR-052 O7), the snapshot last read and the marker. Closed tokens,
+    counts, synthetic ids and service-stamped times only. Anything else, and an account that is
+    not level L2's, is refused.
+    """
+
+    schema_: Literal["yoetz.evidence-provenance/1"] = Field(alias="schema")
+    reads: ReceiptEvidenceReadsModel
+    fenced_reads: _EvidenceCount
+    snapshot: ReceiptEvidenceSnapshotModel | None
+    content_forgotten: ReceiptContentForgottenModel | None
+
+    @model_validator(mode="after")
+    def _validate_level_l2_account(self) -> ReceiptEvidenceProvenanceModel:
+        try:
+            account = evidence_provenance_from_json(self.model_dump(mode="json", by_alias=True))
+        except ValueError:
+            raise ValueError("evidence_provenance_invalid") from None
+        if not account.level_l2:
+            raise ValueError("evidence_provenance_not_level_l2")
+        return self
+
+
+class ReceiptEvidenceProvenanceUnknownModel(_ClosedModel):
+    """ADR-054, design v2 section 8.6: a claim-bound task's evidence account could not be given.
+
+    Present on every receipt format, JSON included, exactly when this service keeps copies of
+    repositories and could not say where the task's evidence was read, so a client rendering the
+    receipt never adds the connection's level-L1 line ("the server did not read the repository
+    itself") beside it. ``reason`` is a closed token: ``evidence_provenance_unreadable`` (the
+    account could not be read; a retry can help) or ``evidence_provenance_counts_incomplete``
+    (the copy served evidence whose counts were lost; it lasts). ``notice`` is exactly that
+    reason's fixed text; a notice of another reason is refused.
+    """
+
+    status: Literal["unknown"]
+    reason: EvidenceProvenanceUnknownReason
+    notice: str
+
+    @model_validator(mode="after")
+    def _validate_fixed_notice(self) -> ReceiptEvidenceProvenanceUnknownModel:
+        if self.notice != evidence_provenance_unknown_notice(self.reason):
+            raise ValueError("evidence_provenance_notice_invalid")
+        return self
+
+
 class ReceiptSuccessModel(_ClosedModel):
     optional_non_null_fields = frozenset(
-        {"agent_closing_prompt", "correctness_advisory_counts", "workspace_provenance"}
+        {
+            "agent_closing_prompt",
+            "correctness_advisory_counts",
+            "evidence_provenance",
+            "evidence_provenance_unknown",
+            "workspace_provenance",
+        }
     )
     correctness_advisory_counts: CorrectnessAdvisoryCountsModel | None = None
     # #1240 D5: asks the agent to tell the user the conclusion and the open or declined notes.
     agent_closing_prompt: AgentClosingPromptWire | None = None
     # ADR-051 decision D4: the receipt's workspace provenance is unknown (receipt-result 1.5.0).
     workspace_provenance: ReceiptWorkspaceProvenanceModel | None = None
+    # ADR-054: a claim-bound task's level-L2 evidence account (receipt-result 1.5.0, in place).
+    evidence_provenance: ReceiptEvidenceProvenanceModel | None = None
+    # ADR-054: that account could not be given (receipt-result 1.5.0, in place).
+    evidence_provenance_unknown: ReceiptEvidenceProvenanceUnknownModel | None = None
 
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
@@ -8039,6 +8135,9 @@ class ReceiptSuccessModel(_ClosedModel):
             f"Tell the user in your final message: receipt conclusion {self.conclusion}"
         ):
             raise ValueError("receipt_closing_prompt_mismatch")
+        if self.evidence_provenance is not None and self.evidence_provenance_unknown is not None:
+            # A receipt either carries the task's level-L2 account or says it is unknown.
+            raise ValueError("evidence_provenance_conflict")
         _validate_model_against_schema(self, "receipt-result")
         return self
 
@@ -9833,6 +9932,21 @@ _ADVISORY_RECEIPT_STRUCTURAL_POINTERS: Final = (
     "/workspace_provenance/status",
     "/workspace_provenance/reason",
     "/workspace_provenance/notice",
+    # ADR-054: closed tokens, counts, synthetic ids and service-stamped times only
+    # (``domain.evidence_provenance``).
+    "/evidence_provenance/schema",
+    *(f"/evidence_provenance/reads/{token}" for token in EVIDENCE_PROVENANCE_TOKENS),
+    "/evidence_provenance/fenced_reads",
+    "/evidence_provenance/snapshot",
+    "/evidence_provenance/snapshot/synced_at",
+    "/evidence_provenance/snapshot/tree",
+    "/evidence_provenance/content_forgotten",
+    "/evidence_provenance/content_forgotten/at",
+    "/evidence_provenance/content_forgotten/reason",
+    # ADR-054: fixed words and closed tokens only (``domain.evidence_provenance``).
+    "/evidence_provenance_unknown/status",
+    "/evidence_provenance_unknown/reason",
+    "/evidence_provenance_unknown/notice",
     "/correctness_advisory_counts/total",
     "/correctness_advisory_counts/no_recorded_response",
     "/correctness_advisory_counts/withheld_may_answer",
@@ -10043,7 +10157,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         ):
             raise RuntimeError("invalid_result_leaf_classification")
     if (
-        len(result) != 2105
+        len(result) != 2122
     ):  # ... #1239 +7 status task_lifecycle (with quiet_until); #1017 +3, #1027 +5, tb4n3 LO +9, W2-A +46, LF +34 (fact_lineage), W2-B +2,
         # tb4n4 #1044 +7 (closure_readiness.undeclared_references), #1048 +38 (inspection),
         # #1047 +2 (follow_up_round), tb4n5 +3 (publish action_notices),
@@ -10071,6 +10185,9 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         # #1244 +6 check (the brief reply's detail marker and its closure_state subset).
         # #1240 D5 +1 receipt (agent_closing_prompt).
         # ADR-051 decision D4 +3 receipt (workspace_provenance status, reason and notice).
+        # ADR-054 +14 receipt (evidence_provenance: schema, six reads, fenced_reads, and the
+        # snapshot and content_forgotten objects with their two leaves each), +3 receipt
+        # (evidence_provenance_unknown status, reason and notice).
         # ADR-051 decision 5 +2 receipt (an outside_reads_not_listed gap's kept_back counts),
         # +1 check_recorded 1.7.0 event selector.
         raise RuntimeError("incomplete_result_leaf_registry")

@@ -27,7 +27,7 @@ from finishup.client import server_folders, targets
 from finishup.client.server_folders import (
     FOLDERS_SCHEMA,
     MAX_FOLDERS,
-    OFFICIAL_ENDPOINT_HOSTS,
+    OFFICIAL_ENDPOINT_ORIGINS,
     FolderError,
     FolderRecord,
     OutsideReadMode,
@@ -439,18 +439,22 @@ def test_an_unreadable_record_fails_closed_to_listed_where_the_owner_chose_local
 def test_no_official_endpoint_is_named_yet() -> None:
     """The reviewed constant is empty until an official hosted FinishUP endpoint exists."""
 
-    assert OFFICIAL_ENDPOINT_HOSTS == frozenset()
+    assert OFFICIAL_ENDPOINT_ORIGINS == ()
 
 
-def test_an_official_endpoint_is_local_by_exact_host_and_system_trust(
+def test_an_official_endpoint_is_local_by_its_whole_origin_and_system_trust(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del home
-    monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
+    monkeypatch.setattr(
+        server_folders, "OFFICIAL_ENDPOINT_ORIGINS", (server_folders.OfficialOrigin("fu.example"),)
+    )
     pin = "sha256:" + "a" * 64
     cases: tuple[tuple[str, dict[str, str], OutsideReadMode], ...] = (
         ("official", {"base_url": "https://fu.example"}, "local"),
-        ("official-port", {"base_url": "https://fu.example:8443/api"}, "local"),
+        ("official-path", {"base_url": "https://fu.example/api"}, "local"),
+        # Layer 5 (design v2 section 8.8): an origin is scheme, host, port and path prefix.
+        ("other-port", {"base_url": "https://fu.example:8443/api"}, "listed"),
         ("sub", {"base_url": "https://api.fu.example"}, "listed"),
         ("suffix", {"base_url": "https://fu.example.evil"}, "listed"),
         ("prefix", {"base_url": "https://notfu.example"}, "listed"),
@@ -478,3 +482,35 @@ def test_an_official_endpoint_is_local_by_exact_host_and_system_trust(
     assert official_endpoint(ssh) is False
     for kind in ("ssh", "local_port", "local"):
         assert official_address(kind, "https://fu.example", ca_file=None, tls_pin=None) is False
+
+
+def test_an_official_origin_pins_its_scheme_host_port_and_path_prefix() -> None:
+    origin = server_folders.OfficialOrigin("fu.example", 443, "/api")
+    assert origin.url() == "https://fu.example/api"
+    assert origin.matches("https://fu.example/api")
+    assert origin.matches("https://FU.example:443/api/v")
+    for other in (
+        "https://fu.example",
+        "https://fu.example/apix",
+        "https://fu.example:8443/api",
+        "https://api.fu.example/api",
+    ):
+        assert not origin.matches(other), other
+    assert server_folders.official_preset_url() is None
+
+
+def test_an_official_prefix_is_never_matched_through_a_dot_segment() -> None:
+    """C4: ``/api/../tenant`` is sent as ``/tenant`` by the client library, outside the prefix;
+    it is neither official nor even a recordable base URL."""
+
+    origin = server_folders.OfficialOrigin("fu.example", 443, "/api")
+    for escaping in (
+        "https://fu.example/api/../tenant",
+        "https://fu.example/api/..",
+        "https://fu.example/api/./v",
+        "https://fu.example/api/v/../../tenant",
+    ):
+        assert not origin.matches(escaping), escaping
+        with pytest.raises(targets.TargetError):
+            targets.normalize_https_url(escaping)
+    assert origin.matches("https://fu.example/api/v.1/..x")

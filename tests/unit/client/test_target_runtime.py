@@ -20,8 +20,30 @@ def test_the_local_kind_has_the_built_in_runtime() -> None:
     assert isinstance(runtime_for("local"), LocalTargetRuntime)
 
 
-@pytest.mark.parametrize("kind", ["local_port", "ssh", "https"])
-def test_an_unregistered_remote_kind_is_a_closed_refusal(kind: str) -> None:
+def test_an_ssh_target_has_its_helper_runtime() -> None:
+    from finishup.client.helper_runtime import SshTargetRuntime
+
+    assert isinstance(runtime_for("ssh"), SshTargetRuntime)
+
+
+@pytest.mark.parametrize("kind", ["local_port", "https"])
+def test_https_and_port_servers_run_through_the_helper_runtime(kind: str) -> None:
+    """Layer 5 (ADR-053): HTTPS and port servers are reached through the same helper."""
+
+    from finishup.client.helper_runtime import SshTargetRuntime
+
+    assert isinstance(runtime_for(kind), SshTargetRuntime)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", ["local_port", "https"])
+def test_an_unregistered_remote_kind_is_a_closed_refusal(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client import target_runtime
+
+    loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+    del loaders[kind]
+    monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
     with pytest.raises(TargetRuntimeError) as raised:
         runtime_for(kind)  # type: ignore[arg-type]
     assert (raised.value.reason, raised.value.phase) == (
@@ -41,6 +63,10 @@ def test_an_approach_registers_its_runtime(monkeypatch: pytest.MonkeyPatch) -> N
         def probe(self, root: Path | None) -> ProbeResult:
             del root
             return ProbeResult("ready", samples=1, round_trip_p95_ms=3)
+
+        def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+            del root
+            return (3,) * count
 
     monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", dict(target_runtime._RUNTIME_LOADERS))  # pyright: ignore[reportPrivateUsage]
     register_target_runtime("ssh", _Runtime)

@@ -42,8 +42,9 @@ from finishup.kernel.finding_todo import (
     duplicate_link_target,
     finding_todo_state,
 )
+from finishup.kernel.forgotten_content import mask_check_payload, with_forgotten_content
 from finishup.kernel.lineage import evaluate_recorded_lineage
-from finishup.kernel.projections import ProjectionState
+from finishup.kernel.projections import ContentForgottenMarker, ProjectionState
 from finishup.kernel.receipt_builder import (
     CheckSuffixClass,
     ReceiptBuildContext,
@@ -52,6 +53,7 @@ from finishup.kernel.receipt_builder import (
 )
 from finishup.kernel.receipt_capacity import current_receipt_findings
 from finishup.kernel.receipt_prediction import ClosureBasis
+from finishup.ports.ledger import ProjectionView
 from finishup.ports.runtime import TaskRuntime
 from finishup.protocol.coverage import LedgerFreshness, weakest
 
@@ -94,7 +96,7 @@ class LoadedClosureBasis:
 # adapter replaces that object on any append, redaction or recovery), so it can never be stale.
 # It holds derived values for at most ``_MEMO_LIMIT`` frontiers and is not a source of truth.
 _MEMO_LIMIT: Final = 8
-_MEMO: OrderedDict[tuple[str, int, str], LoadedClosureBasis] = OrderedDict()
+_MEMO: OrderedDict[tuple[str, int, str, str | None], LoadedClosureBasis] = OrderedDict()
 
 
 def clear_closure_basis_memo() -> None:
@@ -111,7 +113,15 @@ async def load_closure_basis(runtime: TaskRuntime, frontier: Frontier) -> Loaded
     case. Memoized per ``(session, frontier)`` while the adapter's projection object is unchanged.
     """
 
-    key = (runtime.session_id, frontier.sequence, frontier.head_digest)
+    # ADR-054 (U20): a receipt built after a recorded forget quotes none of the forgotten content,
+    # also one pinned to a frontier before it, so the memo is per marker too.
+    forgotten = await _head_content_forgotten(runtime)
+    key = (
+        runtime.session_id,
+        frontier.sequence,
+        frontier.head_digest,
+        None if forgotten is None else forgotten.source_event_id,
+    )
     trusted = await trusted_projection_at(runtime.ledger, runtime.session_id, frontier)
     if trusted is not None:
         hit = _MEMO.get(key)
@@ -147,7 +157,9 @@ async def load_closure_basis(runtime: TaskRuntime, frontier: Frontier) -> Loaded
             availability,
             _projection_validated=True,
         )
-        context = receipt_context(projection, frontier, case, records)
+        context = receipt_context(
+            with_forgotten_content(projection, forgotten), frontier, case, records
+        )
         basis = closure_basis_from_context(context)
     except ValueError as exc:
         raise ClosureBasisUnavailable("closure_basis_invalid") from exc
@@ -157,6 +169,20 @@ async def load_closure_basis(runtime: TaskRuntime, frontier: Frontier) -> Loaded
         while len(_MEMO) > _MEMO_LIMIT:
             _MEMO.popitem(last=False)
     return loaded
+
+
+async def _head_content_forgotten(runtime: TaskRuntime) -> ContentForgottenMarker | None:
+    """The task's latest ``content_forgotten`` marker, read from the live head projection."""
+
+    loader = getattr(runtime.ledger, "load_projection", None)
+    if not callable(loader):
+        return None
+    stored = await runtime.ledger.load_projection(
+        runtime.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    if stored is None or type(stored.state) is not ProjectionState:
+        return None
+    return stored.state.content_forgotten
 
 
 def finding_states(
@@ -258,7 +284,12 @@ def receipt_context(
             )
         )
     elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
-        applicable = check_record.payload
+        # ADR-054 (U20): a receipt built after the content was forgotten quotes none of it.
+        applicable = mask_check_payload(
+            projection.content_forgotten,
+            check_record.payload,
+            check_record.ledger.ingestion_sequence,
+        )
         # Only the records FinishUP cannot prove harmless keep the disclosure (tb4n3 RC-6): the
         # agent's own status polls, host stream bookkeeping and read-only runs no longer make
         # every receipt "current as of an earlier frontier".

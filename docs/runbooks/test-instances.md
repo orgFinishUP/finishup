@@ -160,13 +160,130 @@ for everyday work cannot redirect a test run, and `finishup server use` run thro
 launcher or under an exported root refuses with `selection_overridden`. `finishup server status`
 names the source that decided the root.
 
-Remote server kinds (SSH, HTTPS and port) arrive in a later release; until then `finishup server
-add` refuses them with `remote_kind_unavailable`, so testing server targets covers only the
-everyday and named local servers. A named local server is itself an isolated root, so a process
-tree can also be pointed at it explicitly with `FINISHUP_ISOLATED_ROOT`, which always wins over
-the selection. Never point an instance at the everyday install's directories, and stop only the
-processes you started (`finishup server disconnect`, `finishup instance dispose`), never by
-pattern.
+SSH servers are open (layer 4) and HTTPS and port servers too (layer 5); see the next two sections.
+A named local
+server is itself an isolated root, so a process tree can also be pointed at it explicitly with
+`FINISHUP_ISOLATED_ROOT`, which always wins over the selection. Never point an instance at the
+everyday install's directories, and stop only the processes you started (`finishup server
+disconnect`, `finishup instance dispose`), never by pattern.
+
+### Testing an SSH server against a private `sshd` (ADR-052, layer 4)
+
+An SSH test needs three isolated parts, none of which may touch the account's own `~/.ssh`, the
+everyday install, or a system `sshd`. `tests/capability/test_openssh_helper.py` (and the
+layer-4 end-to-end run) does exactly this on Linux; follow the same shape by hand. It is not run by
+PR CI, and skips where `ssh`, `sshd` or `ssh-keygen` is missing or `sshd` cannot start.
+
+1. **A private, unprivileged `sshd`.** In a fresh owner-only (0700) folder beneath the real home,
+   not `/tmp` (for example `~/.yz-ssh-<tag>`), generate a throwaway host key and client key with
+   `ssh-keygen -t ed25519 -N ""`, write the client's public key to an `authorized_keys` there, and
+   a config with a free loopback port: `Port <port>`, `ListenAddress 127.0.0.1`, `HostKey`,
+   `AuthorizedKeysFile` and `PidFile` in that folder, `PubkeyAuthentication yes`,
+   `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`, `StrictModes no`,
+   `AllowStreamLocalForwarding yes`, `StreamLocalBindUnlink yes`. Run it in the foreground (`sshd
+   -D -e -f <config>`) and stop it by the PID you started, never by pattern.
+2. **An `ssh` that stays off `~/.ssh`.** OpenSSH reads `~/.ssh` from the password database, not
+   from `$HOME`, so a changed `HOME` does not isolate it. Write a private `ssh_config`
+   (`IdentityFile` the client key, `IdentitiesOnly yes`, `UserKnownHostsFile` in the private
+   folder, `GlobalKnownHostsFile /dev/null`) and a two-line wrapper named `ssh` that runs the real
+   `ssh` with `-F <that config>`; put its folder first on `PATH` for the client processes only.
+   FinishUP runs the first `ssh` on `PATH`, and never writes `known_hosts` itself: the
+   host-key question is answered on a terminal (the capability test drives OpenSSH's own question
+   through a pseudo-terminal), or the test writes the private `known_hosts` beforehand.
+3. **A server root and a client home.** The server is a FinishUP root of its own: a provisioned
+   test instance, or `FINISHUP_ISOLATED_ROOT` naming a fresh root, with its service started and
+   stopped through that root's own commands. Add it with `--remote-root <that root>` and
+   `--remote-launcher <that instance's absolute launcher>`, so discovery never falls back to the
+   usual install paths, which on a developer machine could find the everyday install. The client
+   must be an *ambient* installation, since `server add` and `server use` refuse while an isolation
+   variable or pin decides the root (`selection_overridden`): on Linux, point
+   `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR` at
+   private 0700 folders, unset both isolation variables, and run an unpinned launcher (the
+   checkout's `uv run finishup`), never a provisioned instance's pinned one. The helper inherits
+   the XDG variables, so it resolves the same client registry. macOS ignores the XDG variables for
+   these folders and is untested here (gap, owner: the maintainer's macOS dogfood run; see the
+   [acceptance matrix](acceptance-matrix.md#gaps-and-owners), which also runs every cell of this
+   kind for real on Linux).
+
+Never register a host (Codex, Claude Code, Cursor) against such a client with a bare `finishup`
+resolved through `PATH`: register it with the absolute launcher you tested (issue #604). Stop what
+you started with `finishup server disconnect NAME` (the helper through its stop epoch, which signals
+no process; the master with `ssh -O exit`) and `finishup server remove NAME`, then the `sshd` by its PID; remove the
+private folders last.
+
+### Testing an HTTPS server (ADR-053, layer 5)
+
+Start with the REST conformance kit, which provisions everything itself: without
+`FINISHUP_REST_URL`, `tests/conformance/rest/` makes, in a fresh 0700 folder beneath the real home,
+a throwaway CA, an isolated server root of this checkout with a passphrase vault, an `operator`
+and an `agent` key, and runs `finishup service rest run` with `--edge gateway` and then `--edge
+native` on free loopback ports, so every case runs against both edges over real TLS. It stops
+every process it started by its own PID (the root's service with `finishup service stop`) and
+removes the folder. It spawns real services, so run it from a short checkout path with both root
+variables unset:
+
+```text
+env -u FINISHUP_ISOLATED_ROOT -u YOETZ_ISOLATED_ROOT uv run pytest tests/conformance/rest
+```
+
+PR CI does not run it (a follow-up). Pointed at another server it reads `FINISHUP_REST_URL`,
+`FINISHUP_REST_KEY` (an `operator` key), optionally `FINISHUP_REST_AGENT_KEY`, and
+`FINISHUP_REST_CA_FILE` or `FINISHUP_REST_TLS_PIN`; give it a throwaway key on a test server, never
+one of the owner's.
+
+By hand, an HTTPS test needs the same separation as the SSH one, without `sshd`:
+
+1. **A throwaway CA and server certificate** in a fresh owner-only (0700) folder beneath the real
+   home, not `/tmp` (for example `~/.yz-rest-<tag>`): a certificate for `localhost` and
+   `127.0.0.1` signed by that CA, its key at 0600. Never reuse a real certificate or key.
+2. **A server root with its own keys.** A provisioned test instance, or `FINISHUP_ISOLATED_ROOT`
+   naming a fresh root, set up through that root's own commands. Its API keys live beneath that
+   root's state (`rest/api-keys.json`): make one with `finishup service api-key create --label test
+   --scope operator --output-file <folder>/test.key` under that root. Run `finishup service rest
+   run --listen 127.0.0.1:<free port> --tls-cert <folder>/server.pem --tls-key <folder>/server.key`
+   from that instance's absolute launcher, in the foreground, and stop it by the PID you started.
+   For `--edge native`, stop that root's service first, and unlock a passphrase vault on a
+   pseudo-terminal once it runs.
+3. **A client home** exactly as in step 3 of the SSH test: an ambient installation with private
+   XDG folders, both isolation variables unset and an unpinned launcher. Export
+   `PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring` for the client processes, so the key
+   lands in the owner-only file beneath the private client state and never in the account's own
+   credential store. Add the server with `finishup server add NAME https://localhost:<port>
+   --ca-file <folder>/ca.pem --key-file <folder>/test.key` (an `https` target) or `finishup server
+   add NAME --port <port> --tls-pin sha256:<hex>` (a `local_port` target); the key file must be
+   0600, and the add asks for the typed name on a terminal (drive it through a pseudo-terminal).
+
+Stop what you started with `finishup server disconnect NAME` and `finishup server remove NAME` on
+the client, then the edge by its PID and the server root's service with its own `finishup service
+stop`; remove the private folders last. macOS (its system store, the XDG variables it ignores)
+and WSL 2 are untested here (gaps with owners in the
+[acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
+
+### Trying level L2, the server copy (ADR-054, layer 6)
+
+A server offers level L2 only when its own `config.toml` enables `[server.code_copy]` (config
+1.4.0), so an SSH or HTTPS test server set up as above needs that table before a client can
+consent at L2. For an isolated root the file is `<root>/config/config.toml`; never edit the
+everyday install's. Add the table there (every key but `enabled` has a default), then restart that
+root's service through its own launcher (`finishup service restart`), since the table is read only
+at service start:
+
+```toml
+[server.code_copy]
+enabled = true
+retention = ["task_close", "days:7", "until_forgotten"]
+retention_default = "days:7"
+```
+
+On the client home of the SSH or HTTPS test, consent with `finishup server add NAME … --level L2
+--retention days:7` (or `server use NAME --level L2`) on a pseudo-terminal, as for any consent.
+The copy, its checkouts and its pending erasures live beneath the server root's state
+(`code-copies/`); the client's export records beneath the client's target root
+(`state/code-export/`). Clean up in this order: `finishup server code forget --all` on the client
+(or `finishup server remove NAME --forget-copies`, which forgets first and removes nothing if one
+copy is not forgotten), then the server root's service and the private folders as above. A test
+that removes the target without forgetting leaves the copies in the server root until it is
+deleted.
 
 ## Concurrency
 

@@ -13,6 +13,14 @@ A *target* is one root beneath ``<ambient state dir>/servers/t_<8 hex>/`` holdin
 Non-local kinds also record a per-target ``claim_salt`` (32 random bytes) and the owner's
 authorization (``authorized_at``, ``disclosure_version``). A remote root holds client state only.
 
+A remote record the owner consented to under a server profile (ADR-052, layer 3) is
+``yoetz.server-target/2``: the same fields plus an exact ``consent`` object (``ServerConsent``:
+the level, the profile digest and the issuer and number of its revision, the retention chosen,
+the digest of the consented envelope kept beside it in ``config/consent-envelope.json``, and
+whether a narrowed profile adjusted it since). A local record is always ``/1``, byte for byte as
+before; a remote ``/1`` record (written before profiles) still reads, and is refused
+``target_reauthorization_required`` (its disclosure is older than this release's).
+
 The owner-only selection file ``<ambient config dir>/server-selection.json``
 (``yoetz.server-selection/1``) names one target; absent, the everyday server is used exactly as
 before. ``config.paths.active_root()`` reads it. Names match ``[a-z0-9][a-z0-9-]{0,15}``, ``local``
@@ -68,7 +76,9 @@ __all__ = [
     "CLAIM_SALT_BYTES",
     "DISCLOSURE_VERSION",
     "PRE_DIAL_REFUSALS",
+    "PROFILE_CHECKING_CONTINUATION",
     "REMOTE_KINDS",
+    "DIRECT_STYLE_SLOW_CONTINUATION",
     "REMOTE_ROOT_OVERRIDE_CONTINUATION",
     "REMOTE_ROOT_REFUSALS",
     "RESERVED_NAMES",
@@ -94,8 +104,10 @@ __all__ = [
     "read_selected_target_id",
     "read_target",
     "reauthorized",
+    "profile_change_continuation",
     "registry_lock",
     "remote_root_continuation",
+    "root_named_explicitly",
     "reconcile_remote_presence",
     "remote_target_recorded",
     "remove_leftover_root",
@@ -111,13 +123,17 @@ __all__ = [
 ]
 
 TARGET_SCHEMA: Final = "yoetz.server-target/1"
+# A remote record with the owner's consent to a server profile (ADR-052).
+CONSENTED_TARGET_SCHEMA: Final = "yoetz.server-target/2"
 TARGET_KINDS: Final = ("local", "local_port", "ssh", "https")
 REMOTE_KINDS: Final = frozenset({"local_port", "ssh", "https"})
 RESERVED_NAMES: Final = frozenset({"local"})
 # The versioned disclosure the owner confirmed for a remote target (design section 6). A new
 # version forces the owner to confirm again before the target is used. Version 2 names the hook
 # observations sent to the server, the captured content among them (ADR-051 decision 12).
-DISCLOSURE_VERSION: Final = 2
+# Version 3 names the level of use and the server's AI-review egress from its profile, and binds
+# the consent to that profile's revision (ADR-052).
+DISCLOSURE_VERSION: Final = 3
 CLAIM_SALT_BYTES: Final = 32
 
 type TargetKind = Literal["local", "local_port", "ssh", "https"]
@@ -154,6 +170,14 @@ _REGISTRY_LOCK_NAME: Final = ".registry.lock"
 _REMOTE_PRESENCE_NAME: Final = "remote-target-recorded"
 _COMMON_FIELDS: Final = frozenset({"schema", "target_id", "name", "kind", "created_at"})
 _REMOTE_FIELDS: Final = frozenset({"claim_salt", "authorized_at", "disclosure_version"})
+_CONSENT_FIELDS: Final = frozenset(
+    {"level", "profile_digest", "profile_revision", "retention", "envelope_digest", "adjusted"}
+)
+_LEVELS: Final = ("L1", "L2")
+_RETENTION_KINDS: Final = frozenset({"task_close", "days", "until_forgotten"})
+_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
+_ISSUER: Final = re.compile(r"^[0-9a-f]{32}$", re.ASCII)
+_COVERAGE: Final = frozenset({"level", "code_sync", "exclusions", "review"})
 _HTTPS_FIELDS: Final = frozenset({"base_url", "ca_file", "tls_pin", "credential"})
 _SSH_FIELDS: Final = frozenset(
     {"user", "host", "port", "remote_root", "remote_endpoint", "remote_launcher"}
@@ -190,6 +214,10 @@ _REASONS: Final = frozenset(
         # may reach in this release, and a connection whose selection, record or key changed.
         "target_root_is_remote",
         "server_authorization_changed",
+        # The consent step (``client.server_profile``, ADR-052): what the server offers or needs
+        # changed since the owner consented, or it requires a level they did not agree to.
+        "server_profile_changed",
+        "server_level_unavailable",
     }
 )
 # The refusals ``require_current_authorization`` makes before anything is sent to a remote target.
@@ -207,6 +235,17 @@ assert REMOTE_ROOT_REFUSALS == REMOTE_ROOT_REFUSAL_PHASES
 # the root (``remote_root_continuation``): 'finishup server use local' answers
 # ``selection_overridden`` there, so the way back is to clear that override instead.
 REMOTE_ROOT_OVERRIDE_CONTINUATION: Final = "remote_root_override_clear"
+# The continuation of ``remote_unreachable`` while the root this process uses is a server
+# elsewhere reached in the direct style (``remote_root_continuation``): that style opens a
+# connection per program, so on a slow network the remedy is ``finishup server set NAME --style
+# relay`` (the owner's WAN-gate decision, 2026-11-11).
+DIRECT_STYLE_SLOW_CONTINUATION: Final = "remote_direct_slow"
+# The continuation of ``server_profile_changed`` while this computer's copy of that server's
+# profile still agrees with the owner's consent (``profile_change_continuation``): the server
+# refused a revision this computer has not fetched, so what changed is not known yet and the
+# request may be repeated; ``remote_reconsent`` stays for a consent known to need the owner.
+PROFILE_CHECKING_CONTINUATION: Final = "remote_profile_checking"
+_PROFILE_CHANGED_PHASE: Final = "server_profile_changed"
 
 
 class TargetError(Exception):
@@ -284,7 +323,8 @@ def validate_name(name: str) -> str:
 
 
 def normalize_https_url(raw: str, *, loopback_only: bool = False) -> str:
-    """Normalize ``https://host[:port][/base]``; refuse plain HTTP, userinfo, query, fragment.
+    """Normalize ``https://host[:port][/base]``; refuse plain HTTP, userinfo, query, fragment
+    and a ``.`` or ``..`` path segment.
 
     ``loopback_only`` additionally requires ``127.0.0.1`` or ``[::1]`` with an explicit port
     (the ``local_port`` kind).
@@ -306,6 +346,9 @@ def normalize_https_url(raw: str, *, loopback_only: bool = False) -> str:
         or "@" in parts.netloc
         or parts.hostname is None
         or not _URL_PATH.match(parts.path)
+        # A dot segment is resolved away by the client library before a request is sent, so
+        # the recorded path (official matching, the consented origin) would name another one.
+        or any(segment in {".", ".."} for segment in parts.path.split("/"))
     ):
         raise TargetError("target_url_invalid")
     host = parts.hostname.lower()
@@ -360,8 +403,143 @@ def parse_ssh_url(raw: str) -> tuple[str | None, str, int]:
 
 
 @dataclass(frozen=True, slots=True)
+class ServerConsent:
+    """What the owner consented to for a remote target, under which server profile (ADR-052).
+
+    ``level`` (``L1``; ``L2`` arrives with the server copy), the ``profile_digest`` and the
+    ``issuer`` and ``revision`` of the server's profile revision the consent was given or last
+    adjusted under, the ``retention`` chosen (``None`` at L1: nothing is kept), the digest of the
+    consented envelope (``config/consent-envelope.json``), and, when a narrowed profile adjusted
+    the consent since the owner last confirmed it, when (``adjusted_at``) and which coverage it
+    reduced (``coverage_reduced``). The disclosure version is the record's own.
+    """
+
+    level: str
+    profile_digest: str
+    issuer: str
+    revision: int
+    retention_kind: str | None
+    retention_days: int | None
+    envelope_digest: str
+    adjusted_at: str | None = None
+    coverage_reduced: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.level not in _LEVELS:
+            raise TargetError("target_record_invalid")
+        for digest in (self.profile_digest, self.envelope_digest):
+            if type(digest) is not str or not _DIGEST.match(digest):
+                raise TargetError("target_record_invalid")
+        if type(self.issuer) is not str or not _ISSUER.match(self.issuer):
+            raise TargetError("target_record_invalid")
+        if type(self.revision) is not int or not 1 <= self.revision <= 2**53 - 1:
+            raise TargetError("target_record_invalid")
+        if self.retention_kind is None:
+            if self.retention_days is not None:
+                raise TargetError("target_record_invalid")
+        elif self.retention_kind not in _RETENTION_KINDS or (
+            (self.retention_kind == "days")
+            != (type(self.retention_days) is int and 1 <= self.retention_days <= 36_500)
+        ):
+            raise TargetError("target_record_invalid")
+        if (self.level == "L1") != (self.retention_kind is None):
+            # Level L1 keeps no copy, so nothing is retained; L2 always names a retention.
+            raise TargetError("target_record_invalid")
+        if self.adjusted_at is None:
+            if self.coverage_reduced:
+                raise TargetError("target_record_invalid")
+        else:
+            try:
+                parse_rfc3339_ms(self.adjusted_at)
+            except (TypeError, ValueError):
+                raise TargetError("target_record_invalid") from None
+            if (
+                type(self.coverage_reduced) is not tuple
+                or list(self.coverage_reduced) != sorted(set(self.coverage_reduced))
+                or not set(self.coverage_reduced) <= _COVERAGE
+            ):
+                raise TargetError("target_record_invalid")
+
+    def body(self) -> dict[str, JsonValue]:
+        """The exact ``consent`` object of a ``/2`` record."""
+
+        return {
+            "level": self.level,
+            "profile_digest": self.profile_digest,
+            "profile_revision": {"issuer": self.issuer, "revision": self.revision},
+            "retention": None
+            if self.retention_kind is None
+            else {"kind": self.retention_kind, "days": self.retention_days},
+            "envelope_digest": self.envelope_digest,
+            "adjusted": None
+            if self.adjusted_at is None
+            else {"at": self.adjusted_at, "coverage_reduced": list(self.coverage_reduced)},
+        }
+
+
+def _consent_from(value: JsonValue) -> ServerConsent:
+    if type(value) is not dict:
+        raise ValueError("consent")
+    source = cast(dict[str, JsonValue], value)
+    if frozenset(source) != _CONSENT_FIELDS:
+        raise ValueError("consent")
+    revision = source["profile_revision"]
+    if type(revision) is not dict or set(cast(dict[str, JsonValue], revision)) != {
+        "issuer",
+        "revision",
+    }:
+        raise ValueError("consent")
+    revision_source = cast(dict[str, JsonValue], revision)
+    retention = source["retention"]
+    kind: object = None
+    days: object = None
+    if retention is not None:
+        if type(retention) is not dict or set(cast(dict[str, JsonValue], retention)) != {
+            "kind",
+            "days",
+        }:
+            raise ValueError("consent")
+        kind = cast(dict[str, JsonValue], retention)["kind"]
+        days = cast(dict[str, JsonValue], retention)["days"]
+        if type(kind) is not str or (days is not None and type(days) is not int):
+            raise ValueError("consent")
+    adjusted = source["adjusted"]
+    adjusted_at: object = None
+    reduced: tuple[str, ...] = ()
+    if adjusted is not None:
+        if type(adjusted) is not dict or set(cast(dict[str, JsonValue], adjusted)) != {
+            "at",
+            "coverage_reduced",
+        }:
+            raise ValueError("consent")
+        adjusted_at = cast(dict[str, JsonValue], adjusted)["at"]
+        fields = cast(dict[str, JsonValue], adjusted)["coverage_reduced"]
+        if type(fields) is not list or any(type(item) is not str for item in fields):
+            raise ValueError("consent")
+        reduced = tuple(cast(list[str], fields))
+    for name in ("level", "profile_digest", "envelope_digest"):
+        if type(source[name]) is not str:
+            raise ValueError(name)
+    if type(revision_source["issuer"]) is not str or type(revision_source["revision"]) is not int:
+        raise ValueError("consent")
+    if adjusted_at is not None and type(adjusted_at) is not str:
+        raise ValueError("consent")
+    return ServerConsent(
+        cast(str, source["level"]),
+        cast(str, source["profile_digest"]),
+        revision_source["issuer"],
+        revision_source["revision"],
+        kind,
+        days,
+        cast(str, source["envelope_digest"]),
+        adjusted_at,
+        reduced,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ServerTarget:
-    """One validated ``yoetz.server-target/1`` record."""
+    """One validated ``yoetz.server-target/1`` (or, with a consent, ``/2``) record."""
 
     target_id: str
     name: str
@@ -380,6 +558,8 @@ class ServerTarget:
     claim_salt: str | None = None
     authorized_at: str | None = None
     disclosure_version: int | None = None
+    # The owner's consent to a server profile (ADR-052): remote kinds only, ``/2`` records only.
+    consent: ServerConsent | None = None
 
     def __post_init__(self) -> None:
         if type(self.target_id) is not str or not _TARGET_ID.match(self.target_id):
@@ -401,10 +581,17 @@ class ServerTarget:
         if self.kind == "local":
             if any(
                 value is not None
-                for value in (self.claim_salt, self.authorized_at, self.disclosure_version)
+                for value in (
+                    self.claim_salt,
+                    self.authorized_at,
+                    self.disclosure_version,
+                    self.consent,
+                )
             ):
                 raise TargetError("target_record_invalid")
             return
+        if self.consent is not None and type(self.consent) is not ServerConsent:
+            raise TargetError("target_record_invalid")
         self._validate_authorization()
         if self.kind == "ssh":
             if self.host is None or self.port is None:
@@ -462,11 +649,17 @@ class ServerTarget:
 
         return self.is_remote and self.disclosure_version != DISCLOSURE_VERSION
 
+    @property
+    def schema(self) -> str:
+        """``/2`` for a record with a consent to a server profile, else ``/1``."""
+
+        return TARGET_SCHEMA if self.consent is None else CONSENTED_TARGET_SCHEMA
+
     def body(self) -> dict[str, JsonValue]:
         """The exact ``target.json`` object for this kind."""
 
         values: dict[str, JsonValue] = {
-            "schema": TARGET_SCHEMA,
+            "schema": self.schema,
             "target_id": self.target_id,
             "name": self.name,
             "kind": self.kind,
@@ -486,7 +679,10 @@ class ServerTarget:
             "disclosure_version": self.disclosure_version,
         }
         fields = _FIELDS_BY_KIND[self.kind]
-        return {key: value for key, value in values.items() if key in fields}
+        body = {key: value for key, value in values.items() if key in fields}
+        if self.consent is not None:
+            body["consent"] = self.consent.body()
+        return body
 
     def encode(self) -> bytes:
         return canonical_encode(cast(JsonValue, self.body())) + b"\n"
@@ -503,7 +699,14 @@ def _decode_target(encoded: bytes) -> ServerTarget:
         kind = source.get("kind")
         if type(kind) is not str or kind not in _FIELDS_BY_KIND:
             raise ValueError("kind")
-        if frozenset(source) != _FIELDS_BY_KIND[kind] or source["schema"] != TARGET_SCHEMA:
+        consented = source.get("schema") == CONSENTED_TARGET_SCHEMA and kind in REMOTE_KINDS
+        expected: frozenset[str] = _FIELDS_BY_KIND[kind] | (
+            frozenset({"consent"}) if consented else frozenset[str]()
+        )
+        if frozenset(source) != expected or source["schema"] not in {
+            TARGET_SCHEMA,
+            CONSENTED_TARGET_SCHEMA,
+        }:
             raise ValueError("fields")
         if canonical_encode(cast(JsonValue, source)) != encoded[:-1]:
             raise ValueError("canonical")
@@ -541,6 +744,7 @@ def _decode_target(encoded: bytes) -> ServerTarget:
             claim_salt=text("claim_salt"),
             authorized_at=text("authorized_at"),
             disclosure_version=version,
+            consent=_consent_from(source["consent"]) if consented else None,
         )
     except TargetError:
         raise TargetError("target_record_invalid") from None
@@ -912,12 +1116,16 @@ def new_remote_target(
     port: int | None = None,
     remote_root: str | None = None,
     remote_launcher: str | None = None,
+    remote_endpoint: str | None = None,
     now: str | None = None,
 ) -> tuple[ServerTarget, Path]:
     """Create a remote target root (client state only) with a fresh claim salt.
 
     The caller has already obtained the owner's typed confirmation of the current disclosure on
     the trusted console; ``authorized_at`` records when. Callers hold ``registry_lock()``.
+    ``remote_endpoint`` is the SSH server's control endpoint its own launcher reported (SSH
+    discovery, ADR-052); without one it is ``<remote_root>/run/control.sock`` when a remote root
+    is given.
     """
 
     if kind not in REMOTE_KINDS:
@@ -926,7 +1134,8 @@ def new_remote_target(
     if any(record.name == name for record in list_targets()):
         raise TargetError("target_name_taken")
     stamp = now or _now()
-    remote_endpoint = None if remote_root is None else f"{remote_root.rstrip('/')}/run/control.sock"
+    if remote_endpoint is None and remote_root is not None:
+        remote_endpoint = f"{remote_root.rstrip('/')}/run/control.sock"
     directory = servers_dir()
     target_id = _new_target_id(directory)
     root = directory / target_id
@@ -1143,16 +1352,75 @@ def remote_root_continuation(phase: str) -> str | None:
     selection is not in force ('finishup server use local' answers ``selection_overridden``), so
     it is ``REMOTE_ROOT_OVERRIDE_CONTINUATION``: unset that variable or use an unpinned launcher.
     A variable or pin that cannot be read still names the root (it fails closed on its own path).
-    Any other phase resolves as ``continuation_for_reason`` does. Every surface that names a
-    remote-root refusal (the CLI, setup, the menu, the terminal interface, hooks and MCP) reads its
-    continuation here. Hook-safe: environment and pin reads only.
+    ``remote_unreachable`` while that root is a server elsewhere reached in the direct style is
+    ``DIRECT_STYLE_SLOW_CONTINUATION``: the direct style is slow on this network, and 'finishup
+    server set NAME --style relay' is the remedy (the owner's decision, 2026-11-11).
+    ``server_profile_changed`` resolves by the active target's consent
+    (``profile_change_continuation``). Any other phase resolves as ``continuation_for_reason``
+    does. Every surface that names a remote-root refusal, an outage or a remote connection phase
+    (the CLI, setup, the menu, the terminal interface, hooks and MCP) reads its continuation here.
+    Hook-safe: environment, pin and target-file reads only.
     """
 
     from finishup.protocol.recovery import continuation_for_reason
 
     if phase in REMOTE_ROOT_REFUSALS and _root_named_explicitly():
         return REMOTE_ROOT_OVERRIDE_CONTINUATION
+    if phase == "remote_unreachable" and _active_direct_style():
+        return DIRECT_STYLE_SLOW_CONTINUATION
+    if phase == _PROFILE_CHANGED_PHASE:
+        try:
+            record = active_target_record()
+        except Exception:  # noqa: BLE001 - an unreadable record is no known consent
+            record = None
+        return profile_change_continuation(record)
     return continuation_for_reason(phase)
+
+
+def _active_direct_style() -> bool:
+    """Whether the root this process uses is a server elsewhere reached in the direct style.
+
+    File reads only (the selection or pin, ``target.json``, ``config/connection-style.json``);
+    a record that cannot be read is not the direct style (the phase's own continuation stands).
+    """
+
+    try:
+        record = active_target_record()
+    except (TargetError, PathSafetyError, OSError):
+        return False
+    if record is None or not record.is_remote:
+        return False
+    from finishup.client.helper_status import read_connection_style
+
+    try:
+        return read_connection_style(target_root(record.target_id)) == "direct"
+    except (TargetError, PathSafetyError, OSError):
+        return False
+
+
+def profile_change_continuation(record: ServerTarget | None) -> str:
+    """The continuation of a ``server_profile_changed`` refusal for the server ``record`` names.
+
+    ``remote_reconsent`` when the consent step already refuses ``record`` on what this computer
+    holds (``server_profile.consent_verdict``: a wider or changed profile, a level above the
+    consent, another issuer, or a consent that is missing or cannot be read): only the owner
+    agrees again. ``PROFILE_CHECKING_CONTINUATION`` when it admits it: the refusal came from
+    the server, naming a revision this computer has not fetched yet, so what changed is not
+    known, and the refresh such a refusal asks for may show only a narrowing this computer adjusts
+    to by itself; the agent repeats the same request instead of asking the owner. A ``record``
+    that is ``None`` or not remote has no consent to read: ``remote_reconsent``. Hook-safe: file
+    reads only; never raises.
+    """
+
+    if record is None or not record.is_remote:
+        return "remote_reconsent"
+    from finishup.client.server_profile import consent_verdict
+
+    try:
+        verdict = consent_verdict(record)
+    except Exception:  # noqa: BLE001 - a verdict that cannot be read is no known consent
+        return "remote_reconsent"
+    return "remote_reconsent" if verdict.phase is not None else PROFILE_CHECKING_CONTINUATION
 
 
 def _root_named_explicitly() -> bool:
@@ -1164,6 +1432,16 @@ def _root_named_explicitly() -> bool:
         return isolated_root_variable() is not None or read_runtime_pin() is not None
     except PathSafetyError:
         return True
+
+
+def root_named_explicitly() -> bool:
+    """Whether an isolation variable or a runtime pin, not the selection, names this root.
+
+    Then 'finishup server use local' answers ``selection_overridden``: the way back to this
+    computer's own server is to unset that variable or use an unpinned launcher.
+    """
+
+    return _root_named_explicitly()
 
 
 def active_root_may_be_remote() -> bool:

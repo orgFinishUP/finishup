@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from builders.server_profiles import consent_to
 from builders.server_targets import ambient_home, open_remote_kinds
 from finishup.client import authorization, targets
 from finishup.client.authorization import (
@@ -41,7 +42,12 @@ _KEY = "sha256:" + "a" * 64
 
 @pytest.fixture
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    from finishup.client import authorization
+
     with ambient_home(monkeypatch) as root:
+        # Every remote kind is open from layer 5: these tests keep HTTPS closed in process as the
+        # gate's closed example (its kind step), and open it where they admit a connection.
+        monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 
@@ -107,12 +113,15 @@ def test_the_gate_refuses_in_one_order(home: Path, monkeypatch: pytest.MonkeyPat
             return error.reason
         return None
 
-    # Zero-network first, then the disclosure, then the closed kind, then the hold.
+    # Zero-network first, then the disclosure, then the closed kind, then the consent to the
+    # server's profile (ADR-052), then the hold.
     assert reason(old) == "zero_network_remote_selected"
     remove_marker()
     assert reason(old) == "target_reauthorization_required"
     assert reason(record) == "target_root_is_remote"
-    open_remote_kinds(monkeypatch, "https")
+    open_remote_kinds(monkeypatch, "https", consent=False)
+    assert reason(record) == "server_profile_changed"
+    record = consent_to(record)
     assert reason(record) == "repository_egress_held"
     assert reason(record, key=None) is None
     with targets.registry_lock():
@@ -242,7 +251,9 @@ def test_a_rewrite_with_the_same_content_keeps_the_connection(
     _rewrite(root / "target.json")
     record_reported_policy(zero_network=False)
     with targets.registry_lock():
-        targets.write_target(root, targets.reauthorized(record))
+        stored = targets.read_target(root)
+        assert stored is not None and stored.consent is not None
+        targets.write_target(root, targets.reauthorized(stored))
     assert admitted.refusal() is None
     assert admitted.refusal() is None
 
@@ -353,9 +364,14 @@ def test_an_admission_binds_the_selection_on_disk_not_this_process_memory(
     second = _remote("second", select=False)
     first = _remote("first")
     open_remote_kinds(monkeypatch, "https")
-    assert targets.active_target_record() == first  # this process now remembers it
+
+    def remembered() -> str | None:
+        record = targets.active_target_record()
+        return None if record is None else record.target_id
+
+    assert remembered() == first.target_id  # this process now remembers it
     _select_elsewhere(second, monkeypatch)
-    assert targets.active_target_record() == first  # still remembered
+    assert remembered() == first.target_id  # still remembered
     with pytest.raises(TargetError) as refused:
         authorize_active_root()
     assert refused.value.reason == CHANGED

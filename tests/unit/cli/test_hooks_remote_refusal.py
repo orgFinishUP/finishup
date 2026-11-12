@@ -9,11 +9,12 @@ mapped session's status read names it the same way. (This release adds and selec
 server; the record here is one another build left selected.)
 
 A remote target authorized under the current disclosure, with no zero-network policy, is refused
-the same way as ``target_root_is_remote``: this release reaches no server elsewhere. Its context
+the same way as ``target_root_is_remote`` when its kind is closed (an HTTPS server here: this
+release reaches SSH servers only). Its context
 names that phase, its registry directive and ``finishup server use local``, never a service still
 to start or ``finishup service run``. A target authorized under an older disclosure
-(``target_reauthorization_required``) points to this computer's server as well, since this release
-cannot confirm it again. When an isolation variable names the root instead, ``finishup server use
+(``target_reauthorization_required``) points to this computer's server as well, or, for an SSH
+server, to the owner's own 'finishup server use NAME'. When an isolation variable names the root instead, ``finishup server use
 local`` cannot change it (``selection_overridden``), so the directive says to unset it or use an
 unpinned launcher (``remote_root_override_clear``). The terminal menu's home line and its service
 actions name every refusal the same way.
@@ -57,6 +58,9 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             "_location",
             everyday_policy._ambient_marker_path,  # pyright: ignore[reportPrivateUsage]
         )
+        # Every remote kind is open from layer 5: HTTPS stays closed in this process as the
+        # example of a remote root this client does not reach (the gate's kind step).
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 
@@ -80,9 +84,9 @@ def refused(
     does not reach), or under an older disclosure; or an isolation variable naming its root."""
 
     with targets.registry_lock():
-        record, root = targets.new_remote_target(
-            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
-        )
+        # An HTTPS server: a kind this release does not reach (SSH opens in layer 4, where a
+        # target the owner never consented to a profile for is refused at the consent step).
+        record, root = targets.new_remote_target("lab", "https", base_url="https://lab.example")
         if request.param != "isolation":
             targets.write_selection(record)
     if request.param == "isolation":
@@ -170,7 +174,10 @@ def _names_the_refusal(context: str, refused: _Refused) -> None:
     assert directive is not None
     assert directive.directive in context
     assert refused.way_back in context
-    assert "server use NAME" not in context and "with its name" not in context
+    if refused.phase != "target_reauthorization_required":
+        # An older disclosure of an SSH server is confirmed again by the owner, by its name, on
+        # their own terminal (layer 4); every other refusal points elsewhere.
+        assert "server use NAME" not in context and "with its name" not in context
     assert "nothing was sent" in context
     assert f"Continuation: {refused.continuation}." in context
     assert "could not be reached" not in context
@@ -274,11 +281,12 @@ def test_the_menu_names_the_refusal_and_never_a_service_to_start(
     assert directive is not None
     service = [line for line in captured.out.splitlines() if line.startswith("  Service ")]
     assert service == [
-        f"  Service    refused before anything was sent ({refused.phase}) — {directive.directive}"
+        f"  Service    FinishUP refused the selected server's connection before anything was "
+        f"sent ({refused.phase}) — {directive.directive}"
     ]
     assert captured.err.startswith(
-        f"service_unavailable: {refused.phase}: this computer refused the selected FinishUP "
-        "server before anything was sent\n"
+        f"service_unavailable: {refused.phase}: FinishUP refused the selected server's "
+        "connection before anything was sent\n"
         f"Continuation: {refused.continuation}\n"
         f"Next: {directive.directive}\n"
     )
@@ -301,3 +309,33 @@ def test_the_menu_keeps_its_service_hint_without_a_remote_root() -> None:
     assert guidance == (
         "service_unavailable: run 'finishup service run' under your selected user supervisor"
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "said"),
+    [
+        ("server_authorization_changed", "stopped sending over it"),
+        ("server_profile_changed", "refused before that server did any work for it"),
+    ],
+)
+def test_a_refusal_after_sending_never_says_nothing_was_sent(phase: str, said: str) -> None:
+    """C2: a connection whose selection changed may already have sent a request (its outcome is
+    unknown); a profile change may be the server's own answer to one. The menu and the hooks say
+    what the shared summary says, never 'before anything was sent'."""
+
+    from finishup.cli import menu
+    from finishup.cli.hooks import remote_refusal_context
+    from finishup.ports.control import ControlError
+
+    guidance = menu._control_guidance(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase)
+    )
+    assert guidance.startswith(f"service_unavailable: {phase}: ")
+    assert said in guidance and "before anything was sent" not in guidance
+    context = remote_refusal_context(phase)
+    assert "before anything was sent" not in context
+    if phase == "server_profile_changed":
+        assert context.startswith("What the selected FinishUP server offers or needs changed")
+        assert said in context
+    else:
+        assert context.startswith("FinishUP ended the selected server's connection")

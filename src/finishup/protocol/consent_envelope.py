@@ -60,12 +60,18 @@ __all__ = [
     "ReviewEgress",
     "Verdict",
     "canonical_bytes",
+    "code_sync_to_json",
     "compare",
     "consentable",
     "envelope_digest",
     "envelope_from_json",
     "envelope_to_json",
+    "exclusions_to_json",
+    "parse_shared_member",
     "precedes",
+    "retention_from_token",
+    "retention_to_json",
+    "review_to_json",
 ]
 
 ENVELOPE_SCHEMA: Final = "yoetz.consent-envelope/1"
@@ -87,6 +93,7 @@ _SET_LIMIT: Final = 256
 _ORIGIN_LIMIT: Final = 512
 _MAX_ENVELOPE_BYTES: Final = 65_536
 _MAX_DAYS: Final = 36_500
+_DAYS_TOKEN: Final = re.compile(r"days:([1-9][0-9]{0,4})", re.ASCII)
 
 _TOP_FIELDS: Final = (
     "schema",
@@ -105,7 +112,7 @@ _ENDPOINT_FIELDS: Final = ("kind", "origin", "identity_type", "identity")
 _PRINCIPAL_FIELDS: Final = ("key_id", "principal")
 _CODE_SYNC_FIELDS: Final = ("methods", "max_repo_bytes", "max_file_bytes")
 _RETENTION_FIELDS: Final = ("kind", "days")
-_REVIEW_FIELDS: Final = ("ai_review", "provider_disclosure")
+_REVIEW_FIELDS: Final = ("ai_review", "provider_disclosure", "fallback_disclosure")
 
 type Verdict = Literal["same", "narrower", "ask_again", "level_unavailable"]
 type FieldOrder = Literal["equal", "narrower", "wider", "incomparable"]
@@ -159,10 +166,17 @@ class Retention:
 
 @dataclass(frozen=True, slots=True)
 class ReviewEgress:
-    """Whether the server may send what it holds to an AI provider for review, and which."""
+    """Whether the server may send what it holds to an AI provider for review, and to which.
+
+    ``provider_disclosure`` names the provider its review sends to first; ``fallback_disclosure``
+    the one it may send to when that provider fails (a server whose review pairs two providers),
+    or ``None``. Every provider a server's review may send to is named, so adding, removing or
+    swapping one changes the envelope (ADR-052).
+    """
 
     ai_review: str
     provider_disclosure: str | None
+    fallback_disclosure: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,12 +384,40 @@ def _review(value: JsonValue, unknown: list[tuple[str, str, str]], paths: set[st
     unknown.extend(_unknown(source, _REVIEW_FIELDS, "review"))
     ai_review = _required_token(_member(source, "ai_review"))
     disclosure = _token(_member(source, "provider_disclosure"), nullable=True)
+    fallback = _token(_member(source, "fallback_disclosure"), nullable=True)
+    if fallback is not None and disclosure is None:
+        # A fallback is the provider used when the first one fails: there is a first one.
+        raise EnvelopeError("envelope_field_invalid")
     if ai_review not in AI_REVIEW_VALUES:
         paths.add("review.ai_review")
     elif ai_review == "none" and disclosure is not None:
         # No review egress names no provider; one canonical form for "nothing is sent".
         raise EnvelopeError("envelope_field_invalid")
-    return ReviewEgress(ai_review, disclosure)
+    return ReviewEgress(ai_review, disclosure, fallback)
+
+
+def parse_shared_member(name: str, value: JsonValue) -> CodeSync | Retention | ReviewEgress | None:
+    """Parse one member the server profile shares with the envelope, strictly.
+
+    ``name`` is ``code_sync``, ``retention`` or ``review``. Anything this release does not know
+    (an unknown member or enumerated value) raises ``EnvelopeError("envelope_value_unknown")``:
+    unlike an envelope, a profile with anything unknown in a shared member is refused outright.
+    """
+
+    unknown: list[tuple[str, str, str]] = []
+    paths: set[str] = set()
+    parsed: CodeSync | Retention | ReviewEgress | None
+    if name == "code_sync":
+        parsed = _code_sync(value, unknown)
+    elif name == "retention":
+        parsed = _retention(value, unknown, paths)
+    elif name == "review":
+        parsed = _review(value, unknown, paths)
+    else:
+        raise EnvelopeError("envelope_member_invalid")
+    if unknown or paths:
+        raise EnvelopeError("envelope_value_unknown")
+    return parsed
 
 
 def envelope_from_json(value: JsonValue | bytes) -> ConsentEnvelope:
@@ -427,6 +469,60 @@ def _sorted(values: frozenset[str]) -> list[JsonValue]:
     return list(sorted(values, key=str.encode))
 
 
+def code_sync_to_json(code_sync: CodeSync | None) -> JsonValue:
+    """``code_sync`` in the envelope's canonical shape (shared with the server profile)."""
+
+    if code_sync is None:
+        return None
+    return {
+        "methods": _sorted(code_sync.methods),
+        "max_repo_bytes": code_sync.max_repo_bytes,
+        "max_file_bytes": code_sync.max_file_bytes,
+    }
+
+
+def retention_to_json(retention: Retention | None) -> JsonValue:
+    """``retention`` in the envelope's canonical shape (shared with the server profile)."""
+
+    if retention is None:
+        return None
+    return {"kind": retention.kind, "days": retention.days}
+
+
+def retention_from_token(token: object) -> Retention:
+    """The retention a written token names: ``task_close``, ``until_forgotten`` or ``days:N``.
+
+    ``N`` is a whole number of days from 1 to 36,500 written without a sign or leading zeros, the
+    bounds the envelope itself admits, so a token this accepts is always a retention a profile
+    and a consent can carry. The one parser behind ``--retention`` and ``[server.code_copy]``.
+    Raises ``EnvelopeError("retention_token_invalid")``.
+    """
+
+    if type(token) is str:
+        if token in {"task_close", "until_forgotten"}:
+            return Retention(token, None)
+        found = _DAYS_TOKEN.fullmatch(token)
+        if found is not None and int(found.group(1)) <= _MAX_DAYS:
+            return Retention("days", int(found.group(1)))
+    raise EnvelopeError("retention_token_invalid")
+
+
+def review_to_json(review: ReviewEgress) -> dict[str, JsonValue]:
+    """``review`` in the envelope's canonical shape (shared with the server profile)."""
+
+    return {
+        "ai_review": review.ai_review,
+        "provider_disclosure": review.provider_disclosure,
+        "fallback_disclosure": review.fallback_disclosure,
+    }
+
+
+def exclusions_to_json(exclusions: frozenset[str]) -> list[JsonValue]:
+    """Exclusion patterns in the envelope's canonical shape: byte-sorted, exact strings."""
+
+    return _sorted(exclusions)
+
+
 def envelope_to_json(envelope: ConsentEnvelope) -> dict[str, JsonValue]:
     """The envelope as a JSON object: sets as byte-sorted arrays, explicit nulls, unknown members
     restored where they were found."""
@@ -447,21 +543,10 @@ def envelope_to_json(envelope: ConsentEnvelope) -> dict[str, JsonValue]:
         "key_scope": _sorted(envelope.key_scope),
         "level": envelope.level,
         "required_min": envelope.required_min,
-        "code_sync": None
-        if envelope.code_sync is None
-        else {
-            "methods": _sorted(envelope.code_sync.methods),
-            "max_repo_bytes": envelope.code_sync.max_repo_bytes,
-            "max_file_bytes": envelope.code_sync.max_file_bytes,
-        },
-        "retention": None
-        if envelope.retention is None
-        else {"kind": envelope.retention.kind, "days": envelope.retention.days},
-        "exclusions": _sorted(envelope.exclusions),
-        "review": {
-            "ai_review": envelope.review.ai_review,
-            "provider_disclosure": envelope.review.provider_disclosure,
-        },
+        "code_sync": code_sync_to_json(envelope.code_sync),
+        "retention": retention_to_json(envelope.retention),
+        "exclusions": exclusions_to_json(envelope.exclusions),
+        "review": review_to_json(envelope.review),
         "disclosure_version": envelope.disclosure_version,
     }
     for parent, name, text in envelope.unknown_members:
@@ -593,6 +678,7 @@ def _review_order(current: ConsentEnvelope, consented: ConsentEnvelope) -> Field
         return "narrower"
     if now.ai_review == "server_policy" and then.ai_review == "none":
         return "wider"
+    # Another provider, a fallback added, removed or swapped with the first: asked again.
     return "incomparable"
 
 

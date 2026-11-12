@@ -242,6 +242,9 @@ async def test_a_claim_bound_connection_reaches_the_scripted_service_in_process(
     claim = await workspace_claim(locator, bytes(range(32)))
     handler = WorkspaceAgentHandler(locator, protected=(os.fspath(tmp_path / "state"),))
     daemon = ScriptedDaemon()
+    # No admission names a profile revision here (a prebuilt binding from a local root), so the
+    # scripted service issues none and admits the claim as layer 1 did (ADR-052).
+    daemon.profile_revision = None
     client_end, server_end = memory_pair()
 
     async def connect() -> AuthenticatedUnixStream:

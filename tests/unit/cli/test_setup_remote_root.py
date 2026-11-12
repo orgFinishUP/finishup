@@ -164,7 +164,10 @@ def test_setup_run_refuses_a_remote_root_before_it_looks_asks_or_writes(
     assert result.stdout == ""
     assert result.stderr.startswith(_refusal(refused))
     assert refused.way_back in result.stderr
-    assert "server use NAME" not in result.stderr and "with its name" not in result.stderr
+    if "reauthorization" not in refused.phase:
+        # An older disclosure of an SSH server is confirmed again by the owner, by its name, on
+        # their own terminal (layer 4); every other refusal points to this computer's server.
+        assert "server use NAME" not in result.stderr and "with its name" not in result.stderr
     assert "service run" not in result.stderr
     assert "lab.example" not in result.stderr
     assert _tree(home) == before

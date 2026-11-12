@@ -172,6 +172,10 @@ _REASONS: Final = frozenset(
         # ADR-052: a connection to a server elsewhere ended because the selection, the server
         # record or the key it was made under changed.
         "server_authorization_changed",
+        # ADR-052: what the selected server offers or needs changed since the owner consented,
+        # or it requires a level they did not agree to; refused before that server did any work.
+        "server_profile_changed",
+        "server_level_unavailable",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",

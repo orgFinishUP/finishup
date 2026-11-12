@@ -799,15 +799,16 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
     ),
-    # A root that names a server elsewhere, chosen by the saved selection: 'finishup server use
-    # local' switches new processes, and an open agent session (its MCP bridge) keeps the root it
-    # started with until a new one starts.
+    # A root that names a server elsewhere, chosen by the saved selection, refused here: a kind
+    # this release does not reach, a record that cannot be read, or any server elsewhere for this
+    # computer's own setup, menu and first run. 'finishup server use local'
+    # switches new processes; an open agent session keeps the root it started with.
     RecoveryDirective(
         token="remote_target_no_local_service",
         directive=(
-            "The selected FinishUP server is elsewhere (another machine, the web or a port), which "
-            "this release does not reach, so nothing was sent or started. Ask the owner to run "
-            "'finishup server use local', then start a new agent session."
+            "The selected FinishUP server is elsewhere, and setup here never acts on one (nor on "
+            "one whose record cannot be read), so nothing was sent or started. Ask the owner to "
+            "run 'finishup server use local', then start a new session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select a FinishUP server for the owner, or start a service for this.",
@@ -817,9 +818,9 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="remote_root_override_clear",
         directive=(
-            "FINISHUP_ISOLATED_ROOT or a pinned launcher names a FinishUP server elsewhere, which "
-            "this release does not reach, so nothing was sent or started. Ask the owner to unset "
-            "it or use an unpinned launcher, then start a new agent session."
+            "FINISHUP_ISOLATED_ROOT or a pinned launcher names a FinishUP server elsewhere that "
+            "this computer refused, so nothing was sent or started. Ask the owner to unset it or "
+            "use an unpinned launcher, then start a new agent session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge=(
@@ -827,15 +828,14 @@ _DIRECTIVES: Final = (
             "Never change them for the owner."
         ),
     ),
-    # The remote kinds are closed in this release, so 'finishup server use NAME' cannot confirm
-    # the current disclosure (it answers ``remote_kind_unavailable``): the way on is a server on
-    # this computer, and a later release can authorize that server again.
+    # A server elsewhere (SSH, HTTPS or a port, layer 5) is confirmed again with 'finishup server
+    # use NAME' on the owner's own terminal; the other way on is local.
     RecoveryDirective(
         token="server_reauthorization_required",
         directive=(
             "The selected FinishUP server was authorized under an older disclosure, so nothing "
-            "was sent to it; only a later release can authorize it again. Ask the owner to run "
-            "'finishup server use local', then start a new agent session."
+            "was sent to it. Ask the owner to run 'finishup server use local', or 'finishup server "
+            "use NAME' on their own terminal, then start a new session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select or authorize a FinishUP server for the owner.",
@@ -896,11 +896,59 @@ _DIRECTIVES: Final = (
             "unknown. Never change servers or keys."
         ),
     ),
+    # What the selected server elsewhere offers or needs (its profile) changed since the owner
+    # consented (ADR-052, design v2 section 2.3): refused before that server did any work for the
+    # request, by this client before anything was sent or by the server itself; only the owner
+    # agrees again, on their own terminal. A request already sent over a connection the server
+    # refused this way ends as ``server_connection_renew`` instead (review of layer 3: B2).
+    RecoveryDirective(
+        token="remote_reconsent",
+        directive=(
+            "What the selected FinishUP server elsewhere offers or needs changed since the owner "
+            "agreed to use it, so this request was refused before that server did any work for "
+            "it. Only the owner can agree again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with that server's name in their own "
+            "terminal. Never agree for them."
+        ),
+    ),
+    # The same phase while this computer's copy of that server's profile still agrees with the
+    # consent: the server names a revision this computer has not fetched, so whether the owner
+    # must agree again is not known yet. Attached by ``targets.remote_root_continuation``, never
+    # through a reason code (ADR-052 decision 10).
+    RecoveryDirective(
+        token="remote_profile_checking",
+        directive=(
+            "The selected FinishUP server elsewhere changed what it offers, so this request was "
+            "refused before that server did any work for it. FinishUP is checking what changed; "
+            "repeat the same request in a few seconds."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "If the next refusal says remote_reconsent, only the owner agrees again; if this one "
+            "repeats, tell them. Never agree for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="server_level_decision_required",
+        directive=(
+            "The selected FinishUP server elsewhere requires more of this computer than the owner "
+            "agreed to for this repository, so FinishUP refused this request before anything was "
+            "sent. Only the owner decides."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with its name, or 'finishup server use local'. "
+            "Never agree for them."
+        ),
+    ),
     RecoveryDirective(
         token="server_on_this_computer_required",
         directive=(
-            "This FinishUP release connects only to servers on this computer; SSH, HTTPS and "
-            "port servers arrive later, so nothing was added, selected or sent. Ask the owner to "
+            "This FinishUP release connects to servers on this computer, over SSH and over HTTPS; "
+            "that one is none of them, so nothing was added, selected or sent. Ask the owner to "
             "run 'finishup server use local', then repeat this request."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
@@ -924,6 +972,19 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never fall back to another server or a local service for this request.",
+    ),
+    RecoveryDirective(
+        token="remote_direct_slow",
+        directive=(
+            "The selected server could not be reached in time in the direct style, where each "
+            "program opens its own connection: slow on a slow network. Ask the owner to run "
+            "'finishup server set NAME --style relay', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Never change the style or switch servers for the owner; 'finishup server test' shows "
+            "whether it is up and how slow."
+        ),
     ),
     RecoveryDirective(
         token="remote_credential_repair",
@@ -1385,7 +1446,7 @@ REASON_REMEDIES: Final[Mapping[str, str]] = MappingProxyType(
             "nothing was recorded. Send the same call once more, then report the correlation_id."
         ),
         "bridge_invoke_failed": (
-            "The bridge failed while calling the local service. A write (start, publish_work, "
+            "The bridge failed while calling the FinishUP service. A write (start, publish_work, "
             "check other than an inspection, respond, receipt) may or may not be recorded: replay the same request_id "
             "(never a new one); replay is idempotent and returns the stored result when the "
             "write committed. A read changed nothing: repeat it. Report the correlation_id."

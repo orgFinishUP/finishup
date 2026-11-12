@@ -3783,8 +3783,9 @@ async def test_reviewer_steps_upgrade_preserves_reservations_and_admits_bounded_
     await steps.capture("repair", 1, b"format_error")
     before = db.execute("SELECT * FROM semantic_review_steps ORDER BY kind,ordinal").fetchall()
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)
-    # 0019 (#1239) then rebuilds events only; the step rows below are untouched by it.
-    assert report.applied_versions == ("0018", "0019") and report.to_version == 19
+    # 0019 (#1239) and 0020 (ADR-054) then rebuild events only; the step rows below are
+    # untouched by them.
+    assert report.applied_versions == ("0018", "0019", "0020") and report.to_version == 20
     assert (
         db.execute("SELECT * FROM semantic_review_steps ORDER BY kind,ordinal").fetchall() == before
     )

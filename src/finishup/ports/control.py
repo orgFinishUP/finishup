@@ -197,16 +197,23 @@ class WorkspaceAgentDeclaration:
     """A connection's offer to answer workspace calls for its claimed workspace (ADR-051).
 
     ``operations`` are the catalog operations it answers, byte-sorted and distinct;
-    ``max_reply_bytes`` is the largest reply frame it will send.
+    ``max_reply_bytes`` is the largest reply frame it will send. ``role`` says which calls it is
+    for (ADR-052, design v2 section 8.5): ``connection``, the agent of the connection in front of
+    the workspace, answers the live calls of its own connection; ``background``, the helper's
+    agent, answers background work (the service's ``WorkspaceAgentHub`` routes each call to one
+    of them, so they never compete).
     """
 
     operations: tuple[str, ...]
     max_reply_bytes: int
     schema_version: Literal["1.0.0"] = "1.0.0"
+    role: Literal["connection", "background"] = "connection"
 
     def __post_init__(self) -> None:
         if self.schema_version != WORKSPACE_AGENT_SCHEMA_VERSION:
             raise ValueError("workspace_agent_schema_version_invalid")
+        if self.role not in {"connection", "background"}:
+            raise ValueError("workspace_agent_role_invalid")
         if (
             type(self.operations) is not tuple
             or not self.operations
@@ -319,6 +326,9 @@ class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base
     OBSERVATION_PAUSE = "observation_pause"
     OBSERVATION_RESUME = "observation_resume"
     OBSERVATION_REVOKE = "observation_revoke"
+    SERVER_PROFILE = "server_profile"
+    # Level L2 (ADR-054): the server's copy of the claimed repository (status, forget).
+    CODE_COPY = "code_copy"
     SERVICE_STATUS = "service_status"
     SERVICE_LOCK = "service_lock"
     SERVICE_STOP = "service_stop"

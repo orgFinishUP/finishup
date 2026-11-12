@@ -43,9 +43,22 @@ def _envelopes() -> SearchStrategy[ConsentEnvelope]:
     )
     review = st.sampled_from(
         (
-            {"ai_review": "none", "provider_disclosure": None},
-            {"ai_review": "server_policy", "provider_disclosure": "p1"},
-            {"ai_review": "server_policy", "provider_disclosure": "p2"},
+            {"ai_review": "none", "provider_disclosure": None, "fallback_disclosure": None},
+            {
+                "ai_review": "server_policy",
+                "provider_disclosure": "p1",
+                "fallback_disclosure": None,
+            },
+            {
+                "ai_review": "server_policy",
+                "provider_disclosure": "p2",
+                "fallback_disclosure": None,
+            },
+            {
+                "ai_review": "server_policy",
+                "provider_disclosure": "p1",
+                "fallback_disclosure": "p2",
+            },
         )
     )
     document: SearchStrategy[dict[str, Any]] = st.fixed_dictionaries(

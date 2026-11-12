@@ -382,7 +382,10 @@ async def test_while_no_kind_is_open_nothing_is_shown_and_send_refuses_before_th
     home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The owner's answer O4: with every remote kind closed the item is never shown, and the
-    shared core behind "repo-send" refuses before the confirmation and records nothing."""
+    shared core behind "repo-send" refuses before the confirmation and records nothing. (Every
+    kind is open from layer 5: they are closed in this process.)"""
+
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset[str]())
 
     from finishup.cli import server as server_cli
     from finishup.tui.runtime import FinishUpRuntime

@@ -282,3 +282,50 @@ def test_the_connection_path_takes_the_folder_it_serves_and_the_bridge_says_so(
     # and carry on without FinishUP for that folder, not to run anything from there.
     assert raised.value.safe_details["continuation"] == "workspace_not_served_tell_user"
     assert "host started" in raised.value.message
+
+
+def test_the_connection_reports_the_worktree_its_claim_was_made_for(
+    layout: dict[str, Path],
+) -> None:
+    """From layer 3 a remote connection names the worktree its claim was made for: that worktree
+    is the one served, whatever folder the caller passes."""
+
+    bound = SimpleNamespace(
+        workspace_binding="client_claim",
+        workspace_handle=_HANDLE,
+        remote_workspace=(object(), os.fspath(layout["served"])),
+        authorization=object(),
+    )
+    for serving in (os.fspath(layout["other"]), None):
+        sent = start_request_for_connection(
+            _start(os.fspath(layout["subfolder"])), bound, serving=serving
+        )
+        assert sent.workspace_ref == _HANDLE
+        with pytest.raises(WorkspaceRefNotServed):
+            start_request_for_connection(_start(os.fspath(layout["other"])), bound, serving=serving)
+
+
+def test_a_remote_connection_without_a_claim_sends_no_path(layout: dict[str, Path]) -> None:
+    """A connection to a server elsewhere made from a folder in no repository has no claim, so it
+    serves no worktree: a path sent as written would name a folder of this computer to that
+    server. A start naming no workspace, or a non-path value, is unchanged."""
+
+    unclaimed = SimpleNamespace(
+        workspace_binding="none", workspace_handle=None, authorization=object()
+    )
+    for named in ("served", "plain", "missing"):
+        with pytest.raises(WorkspaceRefNotServed) as raised:
+            start_request_for_connection(
+                _start(os.fspath(layout[named])),
+                unclaimed,
+                serving=os.fspath(layout["plain"]),
+                surface="bridge",
+            )
+        assert raised.value.safe_details["continuation"] == "workspace_not_served_tell_user"
+    for value in (None, "label"):
+        request = _start(value)
+        assert start_request_for_connection(request, unclaimed, serving=None) is request
+    # A local connection (no authorization) still sends the path as written, as on main.
+    local = SimpleNamespace(workspace_binding="none", workspace_handle=None, authorization=None)
+    request = _start(os.fspath(layout["other"]))
+    assert start_request_for_connection(request, local, serving=None) is request

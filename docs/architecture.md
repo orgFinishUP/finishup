@@ -10,8 +10,9 @@ signatures — live in [`docs/INTERFACES.md`](INTERFACES.md).
 A persistent local service owns the keys, the decrypted state, the writers, the privacy authority,
 and all outbound access; the CLI, the MCP bridge, and any future UI are clients that ask it to do
 things. That service runs on your own machine: the everyday one by default, or a named local
-server the owner added, each with its own vault and ledger. FinishUP servers on another machine
-are designed but not yet open (see [Client and server](#client-and-server)).
+server the owner added, each with its own vault and ledger. A client can also use the owner's own
+FinishUP server on another machine over SSH, or over HTTPS (on the web, or on a port of this
+computer) through its REST v1 edge (see [Client and server](#client-and-server)).
 
 ## Trust topology
 
@@ -49,10 +50,14 @@ privacy authority.
 Secret material never travels over an ordinary CLI argument, environment variable, config file,
 log, trace, transcript, or LLM context. Credentials are provisioned through a confidential terminal
 ceremony ([ADR-015](adr/ADR-015-elevated-bootstrap-consent.md),
-[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). When FinishUP servers on another
-machine open, their API key will be entered at a masked prompt (or read once from an owner-only
-key file) and kept in the OS credential store or, where none is usable, an owner-only credential
-file ([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md)); this release stores none.
+[ADR-016](adr/ADR-016-human-review-non-default-actions.md)). An SSH server needs no FinishUP
+credential: OpenSSH authenticates with the owner's own keys and agent, and FinishUP never reads or
+stores an SSH key. An HTTPS server's API key is typed at a masked prompt on the owner's terminal
+(or read once from an owner-only key file), checked with the server, and kept in the OS
+credential store or, where none is usable, an owner-only credential file
+([ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) decision 7); only the target's
+helper reads it, or, in the direct style the owner may choose, each dialing process
+([ADR-053](adr/ADR-053-rest-v1-public-contract.md)).
 
 The terminal interface sits on the human-CLI leg and is bound by the same rule. It has no
 credential path of its own: when a secret is needed it suspends itself and hands the controlling
@@ -108,11 +113,11 @@ service's observation store still shares.
 
 | Side | Modules |
 |---|---|
-| **SHARED** (imports SHARED only) | `protocol`, `ports`, `domain`, `config`, `observability`, `resources`, `legacy_names`, `version`; `service.control_protocol` and `service.confidential_protocol` (wire codecs); `adapters.control`; the credential-store primitives `adapters.keys.os_keyring` and `adapters.keys.owner_file_store`; the pure renderers `kernel.fact_lineage` and `kernel.claim_verification`. |
+| **SHARED** (imports SHARED only) | `protocol`, `ports`, `domain`, `config`, `observability`, `resources`, `legacy_names`, `version`; `rest` (the REST v1 contract, key store, routes and listeners, hosted by either server edge; a client imports only `rest.contract`); `service.control_protocol` and `service.confidential_protocol` (wire codecs); `adapters.control`; the credential-store primitives `adapters.keys.os_keyring` and `adapters.keys.owner_file_store`; the pure renderers `kernel.fact_lineage` and `kernel.claim_verification`. |
 | **WORKSPACE** (imports WORKSPACE and SHARED only; CLIENT and SERVER may import it) | The workspace readers, which run wherever the workspace is: in the local service for a local root, and in the client's workspace agent for a remote one. `adapters.git_change_capture`, `task_input_read`, `approved_checks`, `check_sandbox`, `workspace_inspect`, `home_project_reads`, `input_summary`, `git_subject_state`, `git_rev_parse`, `git_version`; `adapters.workspace_root` (the one rule for "which directory is this workspace"); and `application.observation_check_policy` (the repository's own `checks.toml`). None of them reaches storage, the vault, providers, the service or a client surface. |
 | **CLIENT** | `cli`, `mcp`, `tui`, the new `client` package, `service.client`, `service.confidential_client`, the host integration adapters under `adapters.integrations` (except the observation store), `adapters.workspace_binding`, `workspace_fingerprint`, `mcp_stdio`, `process_lifetime`, `release_runtime`, `package_upgrade`, and the client-side application modules `harness_mcp`, `host_connection`, `codex_plugin`, `applied_mcp_route`, `upgrade`, `package_update`, `observation_drain`. |
 | **SERVER** | The rest of `service`, `application`, `kernel` and `adapters`: storage, the vault, providers, privacy and the runtime. |
-| **GATEWAY** (server host; reserved) | `gateway`: the gateway server edge, a same-user control client of the service that a later layer adds. It may import SHARED modules and `service.client`, never a workspace reader, and never touches the vault or storage. No module carries this side in layer 1. |
+| **GATEWAY** (server host) | `gateway`: the gateway server edge (layer 5), a same-user control client of the service that serves REST v1 and re-enters the service over its control socket. It may import SHARED modules and `service.client`, never a workspace reader, and never touches the vault or storage. No module carried this side before layer 5. |
 
 Commands carry a scope too. Each CLI and terminal-interface command is `any`, `server_host` (vault
 setup and unlock, provider and privacy configuration, backup, restore, migrate, the service
@@ -129,37 +134,174 @@ with `finishup server add NAME --local` and picks one with `finishup server use`
 owner-only selection file. That file is the lowest-precedence root source: the isolation variable
 and a runtime pin always win, a selection that names a missing root fails closed instead of
 falling back, and no host registration records it. The target record also knows the remote kinds
-(`local_port`, `ssh`, `https`: a FinishUP service the same owner runs elsewhere), but layer 1
-keeps them closed: `server add` and `server use` refuse them with `remote_kind_unavailable`, and a
-connection to a remote root is refused before any dial (`target_root_is_remote`).
+(`local_port`, `ssh`, `https`: a FinishUP service the same owner runs elsewhere). Layer 1 kept
+them closed; layer 4 opens `ssh` (`finishup server add NAME ssh://[user@]host[:port]`), and layer 5
+opens `https` and `local_port` (`finishup server add NAME https://HOST[:PORT][/BASE]` or `--port
+PORT`); `remote_kind_unavailable` now refuses only an address that names none of them.
 
 **The workspace agent.** The service reads the agent's working tree for the task base, the
 check-time change, requested-output facts, task inputs, declared tests, reviewer file reads,
 observation verification and approved checks. A server on another machine cannot. For a remote
 target the client sends a keyed workspace *claim* instead of a path, and a client-side workspace
 agent (`client/workspace_agent.py`, eighteen bounded operations cataloged in
-`ports/workspace_agent.py`) answers the server's `workspace_call`s with the same adapters and
-fences the local service uses. On the server, `service/workspace_hub.py` keeps the live agent
-channels keyed by workspace handle and correlates each call with its reply, and
+`ports/workspace_agent.py`, twenty with level L2's two sync operations from layer 6) answers the
+server's `workspace_call`s with the same adapters and fences the local service uses. On the
+server, `service/workspace_hub.py` keeps the live agent channels keyed by workspace handle and
+correlates each call with its reply, and
 `service/workspace_routing.py` wraps every workspace port the service composes: an absolute path
 goes to the local adapter unchanged, a `client:` handle goes to the hub, and no local adapter is
 ever handed a handle. Evidence obtained that way is labelled `client_attested`, and every
 non-local receipt rendering says so in one fixed line. When no agent can be reached the receipt
 carries a typed gap; nothing passes silently. Layer 1 ships all of this and tests it in process;
-no network reaches it until a remote kind opens.
+from layer 4 an SSH server reaches it over the network, and from layer 5 an HTTPS server.
 
 **Shared authorization (layer 2,
 [ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)).**
 `client/authorization.py` (hook-safe) is the one gate every connection from a remote root passes
 before any claim, dial or spawn — zero-network, the disclosure, an open kind
-(`OPEN_REMOTE_KINDS`, empty in layer 2), then the repository hold — and the authorization
+(`OPEN_REMOTE_KINDS`, empty in layers 2 and 3, `{ssh}` in layer 4, `{ssh, https, local_port}` from
+layer 5), the consent (layer 3), a key for an HTTPS target (layer 5, checked where the REST client
+reads it), then the repository hold — and the authorization
 generation an admitted connection watches. `service/client.py` runs the gate in both connect paths
 (`_admit_remote`) and keeps the admission in `ServiceClient`, checked before every frame, on reuse
 and by a one-second watch; a local connection carries none. `client/repository_hold.py` decides
 the hold of a repository whose own grant forbids network egress from the reports
 `client/everyday_repository.py` records (dormant until a remote target exists), and the workspace
 agent fences held worktrees. `protocol/consent_envelope.py` (SHARED, pure) holds the consent
-envelope types, their canonical form and their partial order for layer 3's profiles.
+envelope types, their canonical form and their partial order.
+
+**Server profiles and consent (layer 3, ADR-052 decisions 9 to 12).** `protocol/server_profile.py`
+(SHARED, pure, hook-safe) parses and verifies `server-profile` 1.0.0 and builds the envelope of
+using a profile at a level; `protocol/server_profile_contract.py` is its schema contract.
+`service/server_profile.py` (SERVER) decides what this service offers (levels pinned by the
+release, review egress from its own config) and keeps the profile revision it issues at start;
+the daemon answers the structural `server_profile` method and admits a remote hello, and every
+request that does work, only under that revision (`service/control_protocol.py`,
+`service/daemon.py`). `client/server_profile.py` (CLIENT, hook-safe readers) keeps the consented
+envelope and the last profile fetched beside a `/2` `target.json` and decides the gate's consent
+step (after the kind step); `cli/server.py` asks for the consent on the trusted console once a
+kind opens, and `server status` shows it. `client/helper_registrations.py` is the API through
+which client processes register the workspaces a target's helper serves (layer 4 runs the
+helper); the MCP bridge registers its claimed workspace, and `service/workspace_hub.py` routes a
+live call to its own connection's agent and background work to a `background` agent first. In
+layer 3 no profile source is registered and no kind is open.
+
+**SSH servers and the helper (layer 4, ADR-052 decisions 13 to 19).** Layer 4 opens `ssh`. Every
+part of it is CLIENT and never runs or loads on a hook's path unless an SSH target is in use.
+
+- `client/ssh_discovery.py` runs at `server add` and `server use` (and in the helper's refresh):
+  over OpenSSH it finds the server's own `finishup` launcher at fixed install paths, asks it for
+  its control endpoint (`service endpoint --json`) and its profile (`service profile --json`), and
+  takes the host key OpenSSH verified in that connection as the endpoint identity the consent is
+  bound to. An unknown host key is asked about only by OpenSSH on the owner's terminal; a changed
+  one is refused (`remote_identity_changed`).
+- `client/ssh_transport.py` holds the fixed OpenSSH argv: the relay's master with its stream-local
+  forward, the direct style's verified master and its `ssh -W` streams, and the closed
+  classification of OpenSSH failures. Every new connection is used only once it verified the host
+  key the owner's consent names (OpenSSH's own `DEBUG1` line; a rotated key with `known_hosts`
+  updated is refused until the owner agrees again), every command's output is bounded while it is
+  read, and a socket path is handed over as written (spaces included) or refused.
+- `client/helper.py` (`finishup helper run --target <id>`, hidden, `client_only`) is the one
+  background helper per SSH target, started on demand by a client and never by `service run`,
+  stopped by `server disconnect|remove|use <other>|set --style` through its owner-only stop epoch
+  (never a signal; a pending start is fenced), idle
+  15 minutes after its last client. In the relay style (the default) it serves
+  `<target root>/run/control.sock`, so hooks, the MCP bridge, the CLI and the terminal interface
+  keep dialling a Unix endpoint, and checks every client frame against its own admission before
+  forwarding it. In every style it runs one background workspace agent per registered workspace
+  (`role: background`), drains captured observations every 30 seconds, and re-fetches the
+  server's profile. It admits itself through the shared gate (`authorization.authorize_target`);
+  a lapse ends every relayed connection and agent, and zero-network stops it at once.
+  `client/helper_status.py` (hook-safe) is what a client needs of it: the lock, the status record
+  and its phases, start (with the stop epoch its client read before dialling), stop (the epoch,
+  then the lock seen free) and the fenced replacement of exactly one holder. `client/helper_runtime.py` is the SSH
+  `TargetRuntime` and the CLI's one-time registration.
+- `service/client.py` dispatches an admitted SSH root on its connection style (the helper's
+  endpoint, or `ssh -W`), within one deadline for a hook (design v2 section 8.9), and names a
+  transport outage by its closed phase on every surface; never a local service to start.
+
+**HTTPS servers and REST v1 (layer 5, [ADR-053](adr/ADR-053-rest-v1-public-contract.md)).**
+Layer 5 opens `https` and `local_port` over REST v1, the one public network contract.
+
+- **The contract** (`rest/contract.py`, SHARED): routes, headers, scopes, the API key shape, the
+  claim header and its per-principal namespace, the profile-revision header, the closed
+  `rest-error` reasons, the seven `rest-*` documents and the REST API manifest that decides
+  compatibility (the core server serves exactly its own release's).
+- **The edges** (server host). `rest/app.py` serves the routes over a backend interface
+  (`rest/backend.py`) and owns everything both edges share: API keys (`rest/api_keys.py`, hashed
+  at rest, with scopes and principals), the unauthenticated budget, the revision and manifest
+  checks, operations and agents; `rest/listener.py` is the TLS listener with its bounds and
+  `rest/audit.py` the bounded audit. Two backends: `gateway/` (GATEWAY, the default), a separate
+  process of the service's user with no vault that re-enters the service over its owner-only
+  control socket as ordinary control connections; and `service/rest_native.py` (SERVER), the
+  listener inside the service, an owner opt-in that puts the process holding the vault on the
+  network. `cli/rest_server.py` runs either (`finishup service rest run`) and manages keys
+  (`finishup service api-key`).
+- **The client.** `client/rest_client.py` is the one REST client library (TLS by the owner's CA
+  file, pin or the system store; no proxies or redirects; bounded answers; the key read off the
+  event loop); `client/rest_stream.py` maps control frames to REST requests, so the same mapping
+  serves the direct style (under a `ServiceClient`) and the relay style (inside the helper);
+  `client/rest_discovery.py` makes the unauthenticated discovery, fetches the profile with the key
+  (`GET /v1/server`) and checks a key for `server login`. The first two load on a hook's path only
+  for an HTTPS target in the direct style; discovery never does.
+- **HTTPS through the helper.** The helper serves every remote kind: for an HTTPS or port target its
+  upstream is a REST stream over one warm TLS connection (`RestUpstream` in `client/helper.py`),
+  and only it reads the API key in the relay style. `server login` and `server logout` stop it so
+  nothing goes on under the old key.
+
+**Level L2, the server copy (layer 6, [ADR-054](adr/ADR-054-level-l2-the-server-copy.md)).**
+Built and **released**, and still opt-in at both ends: a server offers L2 only when its owner's
+`[server.code_copy]` table (config 1.4.0) enables an offer, and a client sends a copy only after
+its owner consents at L2 on the trusted console; otherwise every surface behaves as at L1. The
+server pulls; only the target's helper answers.
+
+Reads from the copy, provenance and erasure: `service/workspace_routing.py` serves a claim-bound
+task's git and in-root reads (task base, capture, change counts, reviewer reads beneath the root,
+task inputs inside it, an observation workspace's changed paths and inspection) from the snapshot
+the task is pinned to, through an owner-only checkout the service materializes from verified copy
+objects, while outside reads and approved checks stay with the client's workspace agent; an
+offline client's reads use the copy as last synced (`stale_copy_read`), and its approved checks
+fail `workspace_agent_unavailable`. A task keeps one source for its git reads, and an approved
+check whose subject state differs from the pinned snapshot is never a pass
+(`code_snapshot_mismatch`). Every routed read is counted per task by where it was answered
+(`domain/evidence_provenance.py`), and the receipt of a task that read the copy carries that
+account (`evidence_provenance`) and fixed "Workspace evidence" lines in every rendering instead of
+level L1's client-attested line. Forgetting a copy (by its owner or on expiry) records a
+service-written `content_forgotten` event in each pinned task's ledger, erases the task's
+captured-change and review objects, and masks the quoted excerpts in every later projection,
+leaving findings and checks and a "content forgotten" marker on the receipt.
+
+- `protocol/server_copy.py` (SHARED, pure): the `git-bundle-1` wire format, its one verifier for the
+  client's audit and the server's admission, the snapshot manifest, the provenance tokens and the
+  release switch.
+- `domain/code_exclusions.py` (SHARED): the names always left out of a copy and how a pattern
+  matches.
+- `client/code_secrets.py` (CLIENT): the content scan for known secret formats before a file enters
+  a copy.
+- `client/code_copy_settings.py` (CLIENT): the owner's per-repository choices
+  (`config/code-copy.json`: level L1, exclusions, allowed contents).
+- `client/code_export.py` (CLIENT, helper only): the sanitized exporter and its FinishUP-owned
+  export object database.
+- `client/code_sync.py` (CLIENT, helper only): answers the server's two code-sync operations after
+  the gate and the consent are checked again.
+- `client/code_sync_fence.py` (CLIENT): the lease-bound fence `server remove` raises so no code is
+  synced to a target while its copies are forgotten.
+- `service/code_store.py` (SERVER): the encrypted copy store (keys under the vault's authority,
+  admission, quotas, forget with its tombstone, expiry).
+- `service/code_copy.py` (SERVER): the puller that syncs before the task-base and check reads,
+  the pins, the evidence tally, the expiry (`days:N`, `task_close`) and the vault-derived copy
+  keys.
+- `service/code_checkout.py` (SERVER): the owner-only checkout of a copy's snapshot that routed
+  reads are served from.
+- `domain/evidence_provenance.py` (SHARED): one task's per-evidence account,
+  `yoetz.evidence-provenance/1`.
+- `application/content_forgetting.py` and `kernel/forgotten_content.py` (SERVER): the
+  `content_forgotten` event, the erasure of a task's derived content objects and the masks every
+  projection applies after it.
+- `application/content_fence.py` (SERVER): the per-task fence a forget and every content publisher
+  hold, and the refusal of content for work a forget came after.
+- `cli/server_code.py` (CLIENT): `finishup server code` (`list`, `forget [--all]`, `exclude`,
+  `allow add|list|remove`, `level`).
 
 ### Topology by target
 
@@ -171,12 +313,15 @@ NAMED LOCAL (each an ADR-028 persistent instance root)
   selected "work" ──► <state>/servers/t_1a2b3c4d/run/control.sock ──► service #2 (own vault, ledger)
   selected "lab"  ──► <state>/servers/t_9f8e7d6c/run/control.sock ──► service #3
 
-REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1, none of it built
+REMOTE (local_port, ssh, https; the owner's own server) — ssh built in layer 4; https and
+local_port in layer 5
   client host                                             server host (same owner)
 
   ssh: control frames over the forwarded owner-only socket (sshd stream-local forwarding)
-  hook / MCP / CLI / TUI ─► relay helper ──┐
-  hook / MCP / CLI / TUI ─► direct (ssh -W) ┴═ control frames ═► control.sock ─► service
+  relay:  hook / MCP / CLI / TUI ─► <troot>/run/control.sock ─► helper ─► ssh -M -L ═══╗
+  direct: hook / MCP / CLI / TUI ─► ssh -W (shared ControlMaster) ═════════════════════╣
+  server: service ◄─ control.sock ◄─ sshd (stream-local forward) ◄═════════════════════╝
+  helper: background workspace agent per registration, observation drain, profile re-check
   workspace agent ◄══════ workspace_call / workspace_reply frames ══════ workspace hub
 
   https, local_port: REST v1 to the edge the server owner runs
@@ -189,8 +334,10 @@ REMOTE (local_port, ssh, https; the owner's own server) — closed in layer 1, n
   human-control and secret channels: never leave the server host
 ```
 
-None of the remote path exists in layer 1: no helper, SSH transport, REST protocol, gateway or
-native edge is built, and a remote root is refused before any dial. The remote path follows
+None of the remote path existed in layer 1. Layer 4 builds the SSH part (the helper, both
+connection styles and the SSH edge); layer 5 builds the REST part (REST v1, the gateway and native
+edges, the one REST client and its mapping, the helper's REST upstream); layer 6 builds level L2's
+server copy and releases it. The remote path follows
 ADR-051's unified model, delivered in later layers: a *level* says where
 the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
 review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of

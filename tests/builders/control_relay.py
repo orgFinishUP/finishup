@@ -27,18 +27,28 @@ from typing import Final, cast
 
 import pytest
 
+from builders.server_profiles import TEST_REVISION
+from finishup.client.helper_status import (
+    RELAY_BINDING_BYTES,
+    read_relay_binding,
+    relay_binding,
+    starts_relay_binding,
+)
 from finishup.domain.values import JsonObject
 from finishup.ports.control import (
     ControlCallRequest,
     ControlError,
     ControlMethod,
     ControlResult,
+    RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
     WorkspaceCall,
+    WorkspaceClaim,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.schemas import load_schema_catalog
+from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.control_protocol import (
     ControlProtocolError,
     ControlStream,
@@ -50,6 +60,8 @@ from finishup.service.control_protocol import (
 )
 
 __all__ = [
+    "RELAY_KEY",
+    "hello_frame",
     "AGENT_METHODS",
     "call_request",
     "split_frames",
@@ -60,6 +72,7 @@ __all__ = [
     "MemoryStream",
     "ScriptedDaemon",
     "memory_pair",
+    "relay_binding_frame",
     "rpc_id",
     "run_scripted_session",
     "scripted_service",
@@ -132,6 +145,13 @@ class MemoryStream:
         if payload:
             self.other._chunks.put_nowait(payload)
 
+    async def shutdown_write(self) -> None:
+        """End the peer's reads (a half-close); this end still reads what the peer sends."""
+
+        if self.closed or self.other is None:
+            return
+        self.other._chunks.put_nowait(b"")
+
     async def aclose(self) -> None:
         if self.closed:
             return
@@ -157,18 +177,23 @@ def _payload(frame: object) -> bytes:
 
 
 class _Tap:
-    """A stream that records every byte read from it."""
+    """A stream that records every byte read from it (``pending``: bytes already read, read
+    again first)."""
 
-    def __init__(self, inner: ControlStream, sink: bytearray) -> None:
+    def __init__(self, inner: ControlStream, sink: bytearray, pending: bytes = b"") -> None:
         self._inner = inner
         self._sink = sink
+        self._pending = pending
 
     @property
     def peer_identity(self) -> object:
         return self._inner.peer_identity
 
     async def receive(self, max_bytes: int) -> bytes:
-        data = await self._inner.receive(max_bytes)
+        if self._pending:
+            data, self._pending = self._pending[:max_bytes], self._pending[max_bytes:]
+        else:
+            data = await self._inner.receive(max_bytes)
         self._sink.extend(data)
         return data
 
@@ -209,6 +234,26 @@ class ScriptedDaemon:
         # once one arrives, so a test acts while a request is in flight without waiting on time.
         self.hold_calls = False
         self.held = asyncio.Event()
+        # The server-profile revision this service issues (ADR-052): a remote hello is admitted
+        # only under it. The default is the revision of the test profile a consented target
+        # names (``builders.server_profiles``).
+        self.profile_revision: ServerProfileRevision | None = TEST_REVISION
+        # When set, a claim is keyed to this handle (as a ready service keys it) and recorded in
+        # ``claims``; otherwise a claim-bound session has no handle, as with a locked vault.
+        self.claim_handle: str | None = None
+        self.claims: list[WorkspaceClaim] = []
+        # The repository keys clients named in a relay binding (``serve(relay=True)``).
+        self.relay_keys: list[str] = []
+        # Cancels that named a call already answered (they crossed its answer): no-ops.
+        self.late_cancels = 0
+
+    async def _key_claim(self, claim: WorkspaceClaim) -> RepositoryPrivacyContext | None:
+        self.claims.append(claim)
+        return RepositoryPrivacyContext(
+            commitment="hmac-sha256:" + "c" * 64,
+            identity_kind="client_claim",
+            workspace_handle=self.claim_handle,
+        )
 
     def received(self, connection: int = -1) -> list[bytes]:
         """Every frame payload one connection sent the daemon, its hello first."""
@@ -220,19 +265,49 @@ class ScriptedDaemon:
         self.sent.append(encoded[4:])
         await stream.send_all(encoded)
 
-    async def serve(self, stream: ControlStream) -> None:
-        """Serve one connection until its peer ends it."""
+    async def serve(self, stream: ControlStream, *, relay: bool = False) -> None:
+        """Serve one connection until its peer ends it.
+
+        With ``relay`` (standing in for the target's helper and the server behind it, as
+        ``scripted_service`` does) a relay binding the client wrote before its hello is read as
+        the helper reads it and recorded in ``relay_keys``, never served.
+        """
 
         self.connections += 1
         sink = bytearray()
         self.inbound.append(sink)
-        stream = _Tap(stream, sink)
+        pending = b""
+        if relay:
+            pending = await stream.receive(1)
+            if starts_relay_binding(pending):
+                rest = b""
+                while len(rest) < RELAY_BINDING_BYTES - 1:
+                    chunk = await stream.receive(RELAY_BINDING_BYTES - 1 - len(rest))
+                    if not chunk:
+                        return
+                    rest += chunk
+                key = read_relay_binding(pending + rest)
+                if key is None:
+                    return
+                self.relay_keys.append(key)
+                pending = b""
+        stream = _Tap(stream, sink, pending)
         write_lock = asyncio.Lock()
         slow: dict[str, asyncio.Event] = {}
         tasks: set[asyncio.Task[None]] = set()
+        answered: set[str] = set()
         workspace_called = False
         try:
-            session = await server_handshake(stream, stream.peer_identity, service_status())
+            session = await server_handshake(
+                stream,
+                stream.peer_identity,
+                service_status(),
+                # A service that issues no revision admits a claim as layer 1 did.
+                profile_revision=None
+                if self.profile_revision is None
+                else (lambda: self.profile_revision),
+                claim_context_resolver=None if self.claim_handle is None else self._key_claim,
+            )
             while True:
                 try:
                     frame = await read_control_frame(stream)
@@ -244,10 +319,14 @@ class ScriptedDaemon:
                     continue
                 request = parse_control_request(frame)
                 if not isinstance(request, ControlCallRequest):
-                    # As the service admits a cancel (``ControlSession.admit``): one that names
-                    # no running call ends the connection, and every call on it with it.
+                    # As the service admits a cancel (``ControlSession.admit``): one that names a
+                    # call already answered crossed its answer and is a no-op; one that names no
+                    # call of this connection ends it, and every call on it with it.
                     running = slow.get(request.target_rpc_id)
                     if running is None:
+                        if request.target_rpc_id in answered:
+                            self.late_cancels += 1
+                            continue
                         return
                     running.set()
                     continue
@@ -260,6 +339,7 @@ class ScriptedDaemon:
                         await done.wait()
                         async with write_lock:
                             slow.pop(call.rpc_id, None)
+                            answered.add(call.rpc_id)
                             await self._send(
                                 stream, _result(call, ControlError("request_cancelled"))
                             )
@@ -271,6 +351,7 @@ class ScriptedDaemon:
                     self.held.set()
                     continue
                 async with write_lock:
+                    answered.add(request.rpc_id)
                     await self._send(stream, _answer(request))
                     if session.workspace_agent is not None and not workspace_called:
                         workspace_called = True
@@ -317,7 +398,9 @@ def _answer(request: ControlCallRequest) -> ControlResult:
     return _result(request, ControlError("vault_locked"))
 
 
-def _hello(*, agent: bool) -> dict[str, JsonValue]:
+def _hello(
+    *, agent: bool, server_profile: ServerProfileRevision | None = None
+) -> dict[str, JsonValue]:
     hello: dict[str, JsonValue] = {
         "protocol_version": "1.0",
         "client_kind": "cli",
@@ -341,6 +424,10 @@ def _hello(*, agent: bool) -> dict[str, JsonValue]:
             "operations": ["read_task_base"],
             "max_reply_bytes": 1_048_576,
         }
+    if server_profile is not None:
+        from finishup.protocol.server_profile import revision_to_json
+
+        hello["server_profile"] = revision_to_json(server_profile)
     return hello
 
 
@@ -462,15 +549,26 @@ async def _read_payload(stream: ControlStream) -> bytes:
     return _payload(await read_control_frame(stream, eof_reason="handshake_rejected"))
 
 
-async def run_scripted_session(stream: ControlStream, *, agent: bool = True) -> list[bytes]:
+async def run_scripted_session(
+    stream: ControlStream,
+    *,
+    agent: bool = True,
+    server_profile: ServerProfileRevision | None = None,
+    relay: bool = False,
+) -> list[bytes]:
     """Drive the fixed session over ``stream``; return every payload the client received.
 
     Bodies are empty objects: the scripted daemon answers by method alone, so no workflow body
-    shape is involved and only framing, routing and correlation are under test.
+    shape is involved and only framing, routing and correlation are under test. A hello for a
+    server elsewhere names the consented ``server_profile`` revision (ADR-052). With ``relay``
+    (a session through the target's helper) a hello that claims a workspace is preceded by the
+    relay binding, as a client writes it.
     """
 
     received: list[bytes] = []
-    await stream.send_all(encode_control_frame(_hello(agent=agent)))
+    if relay and agent:
+        await stream.send_all(relay_binding_frame())
+    await stream.send_all(encode_control_frame(_hello(agent=agent, server_profile=server_profile)))
     received.append(await _read_payload(stream))
     for index, method in enumerate(AGENT_METHODS):
         await stream.send_all(encode_control_frame(call_request(0x5100 + index, method)))
@@ -537,8 +635,26 @@ def scripted_service(monkeypatch: pytest.MonkeyPatch) -> ScriptedDaemon:
 
     async def dial() -> MemoryStream:
         client_end, server_end = memory_pair()
-        daemon.serving.append(asyncio.create_task(daemon.serve(server_end)))
+        daemon.serving.append(asyncio.create_task(daemon.serve(server_end, relay=True)))
         return client_end
 
     monkeypatch.setattr(client_module, "connect_control", dial)
     return daemon
+
+
+def hello_frame(
+    *, agent: bool = False, server_profile: ServerProfileRevision | None = None
+) -> bytes:
+    """One encoded scripted hello (a claim and an agent with ``agent``)."""
+
+    return encode_control_frame(_hello(agent=agent, server_profile=server_profile))
+
+
+# The repository key a scripted relayed client names (``relay_binding_frame``).
+RELAY_KEY: Final = "sha256:" + "b3" * 32
+
+
+def relay_binding_frame(key: str = RELAY_KEY) -> bytes:
+    """What a client writes on a relayed connection before a hello that claims a workspace."""
+
+    return relay_binding(key)

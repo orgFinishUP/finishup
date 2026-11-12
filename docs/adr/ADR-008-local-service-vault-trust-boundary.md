@@ -589,3 +589,115 @@ when the owner's own command acts on the target's key (`server logout`, `server 
 admitted under the previous generation ends with `server_authorization_changed` and must
 authenticate again under the key now current. A key changed in the platform credential store
 outside FinishUP is not seen. The vault, its states and the local ceremonies are unchanged.
+
+## Amendment proposed by ADR-052 (layer 3): the server's profile revision and the consent records
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) decisions 9 to 11
+add owner-only records outside the vault, none holding a secret or granting anything by itself:
+the service's `<state dir>/server-profile-revision.json` (a random issuer, a number and the digest
+of what it offers), and, beneath a remote target's client root, the consented envelope
+(`config/consent-envelope.json`), the last profile fetched (`state/server-profile.json`) and the
+helper's workspace registrations (`state/registrations/`). The service answers its profile and
+admits a remote client's hello only to a peer-authenticated session, as before; the profile is
+answered while the vault is locked and needs no vault handle. The vault, its states and the local
+ceremonies are unchanged. The narrow unauthenticated discovery exception of design v2 section 8.8
+belongs to layer 5 and is not made here (it is made below, layer 5).
+
+## Amendment proposed by ADR-052 (layer 4): the SSH edge and who reads an SSH key
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) decisions 13 to
+19 open FinishUP servers on another machine over SSH, the first network edge
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) delivers. This amends invariant 6 with
+that edge, as the ADR-051 amendment above foresaw; the vault, its states, the confidential
+channels and the local ceremonies are unchanged on the server host.
+
+- **Invariant 6 with the SSH edge.** The service still opens no TCP or network listener. On the
+  server, the owner's `sshd` carries a stream-local channel into the service's owner-only control
+  socket (`-L` for the relay's OpenSSH master, `-W` in the direct style) and connects to it as the
+  login user, so the socket's peer-UID check passes unchanged. **SSH is owner-equivalent:** the SSH
+  login is the service owner, and anyone who can log in as that user over SSH could already reach
+  that socket on the server host. Only the control endpoint the server's own launcher reported
+  (`service endpoint --json`) is forwarded; the human-control (YZH1) and secret-ingress (YZS1)
+  endpoints never are, and unlock, consent and the owner receipt view run only on the server host.
+- **Who reads the key.** FinishUP never reads, stores or asks for an SSH key or password. OpenSSH
+  reads the owner's keys, agent (`SSH_AUTH_SOCK`) and `known_hosts`: in the target's helper (its
+  master, relay style), in each dialing process's `ssh -W` child (direct style, through the
+  owner-only master socket `<target root>/run/m`), and in the probes of `server add`, `server use`
+  and the helper's profile refresh. Every `ssh` runs with `BatchMode=yes` and
+  `StrictHostKeyChecking=yes`, except the one probe of `server add` or `server use` on the trusted
+  console that lets OpenSSH ask about an unknown host key (password and keyboard-interactive login
+  off). FinishUP never writes `known_hosts`; the owner's answer to OpenSSH is the pin, and the
+  fingerprint OpenSSH verified is recorded only as the consent's endpoint identity. Choosing the
+  relay or the direct style therefore changes who runs OpenSSH, not who reads a FinishUP
+  credential, and moves no generation.
+- **The helper holds no vault.** `finishup helper run` is a `client_only` process of the client:
+  no vault, key, credential, provider or policy authority. It runs with a fixed, scrubbed
+  environment (no FinishUP variable), binds its relay endpoint `<target root>/run/control.sock`
+  with the service's owner-only fences and peer-UID check, so only the owner's processes on the
+  client reach it, and keeps only owner-only records of closed tokens, generated ids, integers and
+  times. FinishUP's own variables are removed from every `ssh` child, so no root rides a `SendEnv`
+  line to the server.
+- **Not changed.** HTTPS and port servers stay closed; the gateway and native edges, and which
+  processes read an API key in the direct style, remain layer 5's amendment (the native edge with
+  the maintainer's security review; made below, layer 5).
+
+## Amendment proposed by ADR-053 (layer 5): the REST edges, discovery and who reads an API key
+
+[ADR-053](ADR-053-rest-v1-public-contract.md) opens FinishUP servers over HTTPS and on a port of
+this computer, the second network edge [ADR-051](ADR-051-client-server-cut-and-server-targets.md)
+delivers. This amends invariant 6 with the two HTTP edges and the narrow discovery exception the
+ADR-051 amendment above foresaw. The vault, its states, the confidential channels and the local
+ceremonies are unchanged on the server host: the human-control (YZH1) and secret-ingress (YZS1)
+endpoints are never served over HTTP, and unlock, consent and the owner receipt view still run only
+there.
+
+- **Invariant 6 with the gateway edge.** The control transport stays an owner-only Unix endpoint.
+  The gateway (`finishup service rest run`, the default edge) is a separate process of the
+  service's own user, run in the foreground by the owner's supervisor: it holds no vault, no
+  installation MAC and no storage or policy authority, and re-enters the service over its
+  owner-only control socket as ordinary, peer-authenticated control connections, so the process
+  that holds the vault opens no network listener.
+- **Invariant 6 changed at its root: the native edge.** `finishup service rest run --edge native`
+  runs the service itself with the TLS listener inside it, so the process that holds the vault is
+  on the network. It is the server owner's explicit opt-in, and its security review is the owner's
+  (design v2 U13); nothing starts it on its own, and the gateway stays the default. A claim is
+  keyed with the installation MAC exactly as for a claim-bound hello.
+- **Both edges.** TLS 1.2 or later (plain HTTP only behind a TLS-terminating proxy on a loopback
+  address); every `/v1` request needs an API key, refused before any work when it is absent,
+  unknown, revoked or expired; its scope bounds the methods it reaches and grants no vault, unlock
+  or policy authority (ADR-051 decision 9); a request carrying an `Origin` header is refused;
+  connections and unauthenticated requests are bounded; the audit holds closed tokens only. The
+  server keeps its keys hashed at rest (`<state dir>/rest/api-keys.json`, owner-only, a salted
+  `sha256` compared in constant time); a key is shown once, on the trusted console or written to a
+  new owner-only file, and is never stored.
+- **The discovery exception** (design v2 section 8.8). One bounded unauthenticated `GET
+  /.well-known/finishup`, over TLS the owner's own trust already verified (a CA file, a pin or the
+  system store), with no credential, made by `server add` before the key is asked for. Its answer
+  names no release, instance or key. Nothing else is sent before authentication.
+- **Who reads an API key.** The API key is the target credential of the ADR-051 amendment above,
+  now stored: in the OS credential store under `yoetz.server-credential.v1`, or in the owner-only
+  file `<target root>/config/credential`. In the relay style (the default) only the target's
+  helper reads it; in the direct style every dialing process (hooks, the MCP bridge and CLI
+  commands) reads it itself, which `finishup server set NAME --style direct` says. It never
+  appears in argv, the environment, `target.json`, a registration, a log, hook output, an MCP
+  frame or JSON output. `server login` and `server logout` move the credential generation and stop
+  the helper, so nothing goes on under the old key (ADR-052 decision 23).
+
+## Amendment proposed by ADR-054 (layer 6): the keys of a server's copies of code
+
+[ADR-054](ADR-054-level-l2-the-server-copy.md) lets a server keep a copy of a client's code (level
+L2), encrypted under the vault's authority. The vault, its states, the confidential channels and
+the local ceremonies are unchanged.
+
+- **Each copy's key-encryption key comes from the installation MAC.** A copy's random data key is
+  stored only wrapped (AES key wrap, `yoetz.code-copy-wrap/1`) under a key-encryption key that the
+  vault's installation MAC derives for that copy under its own versioned domain
+  (`yoetz/code-copy-kek/v1`); the derived key is never stored. It exists only while the vault is
+  unlocked: a locked vault reads and admits no copy, and relocking makes every copy unreadable
+  (ADR-054 decision 6 and owner ruling 4).
+- **What relocking does not do.** It does not erase plaintext a server owner already copied out of
+  a running service, nor a copy's checkout, the plaintext working directory the server's reads
+  need while the copy is in use, which stays until the service starts again, the copy is forgotten
+  or it expires (ADR-054 decision 12).
+- **No new authority.** The helper that sends a copy holds no vault (layer 4 amendment above), and
+  the copy store opens only in a service whose owner's `[server.code_copy]` table offers level L2.
