@@ -469,7 +469,8 @@ exit 2 (`helper_target_invalid`) for an id that is not such a target in this com
 registry, or while an isolation variable or pin names another root;
 exit 20 (`helper_failed`) when its endpoint cannot be bound safely. It runs in its own session
 with a fixed, scrubbed environment (no FinishUP variable; `SSH_AUTH_SOCK` kept so OpenSSH can use
-the owner's agent), its stderr in `log/helper.stderr`, and resolves every path under
+the owner's agent, and from layer 5 `PYTHON_KEYRING_BACKEND`, so it reads an API key from the
+store its client used), its stderr in `log/helper.stderr`, and resolves every path under
 `selection_override(<target root>)`.
 
 - **One per target.** The flock `state/helper.lock`, stamped with the holder's pid, package

@@ -169,6 +169,8 @@ _ENVIRONMENT_NAMES: Final = (
     "LC_CTYPE",
     "LOGNAME",
     "PATH",
+    # The keyring backend the client is pinned to: the helper reads the key from the same store.
+    "PYTHON_KEYRING_BACKEND",
     "SSH_AUTH_SOCK",
     "TMPDIR",
     "USER",
