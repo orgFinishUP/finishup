@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import errno
 import os
 import socket
 import stat
@@ -190,11 +191,20 @@ class AuthenticatedUnixStream:
             raise LocalControlTransportError("connection_failed") from exc
 
     async def shutdown_write(self) -> None:
+        """Half-close: no more bytes from this side. A no-op once the peer has closed.
+
+        Linux returns success from ``shutdown(SHUT_WR)`` after the peer closed; macOS reports
+        ``ENOTCONN``. The write side is closed either way, so both read as success, and the next
+        ``receive`` reports the peer's end (macOS run, 2026-11-12).
+        """
+
         if self._closed:
             return
         try:
             self._socket.shutdown(socket.SHUT_WR)
         except OSError as exc:
+            if exc.errno == errno.ENOTCONN:
+                return
             raise LocalControlTransportError("connection_failed") from exc
 
     async def aclose(self) -> None:
