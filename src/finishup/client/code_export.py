@@ -23,8 +23,9 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    ``max_file_bytes`` (``too_large``); a known secret format in its bytes unless the owner
    allowed that exact content (``held_for_content``); a Git LFS file whose bytes are not its
    pointer (``lfs_content``); case-fold collisions, chosen among the names nothing else holds,
-   and every other spelling of a worktree name held for its bytes, since on a case-insensitive
-   file system (APFS) it is the same file (``case_collision``); nested repositories that are not submodules; special files, links to
+   and any other spelling of a worktree name held or sent as its LFS pointer that is the same
+   file on disk, as on a case-insensitive file system such as APFS (``case_collision``); nested
+   repositories that are not submodules; special files, links to
    directories through a path and multiply-linked files (``special``). Symlinks are sent as
    their target text, submodules as gitlinks (commit id only), LFS files as their pointers.
 4. Every admitted object is re-created from the bytes read, by this module, into the target's
@@ -50,7 +51,7 @@ import shutil
 import stat
 import subprocess
 import zlib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -769,12 +770,14 @@ class _Entry:
 class _Admission:
     """The admitted entries and the held-out paths of one tree."""
 
-    __slots__ = ("entries", "held", "objects")
+    __slots__ = ("entries", "held", "objects", "pointers")
 
     def __init__(self) -> None:
         self.entries: dict[bytes, _Entry] = {}
         self.held: dict[bytes, str] = {}
         self.objects: dict[str, GitObject] = {}
+        # Worktree paths sent as their LFS pointer (never the bytes on disk).
+        self.pointers: set[bytes] = set()
 
 
 class _Exporter:
@@ -1056,6 +1059,7 @@ class _Exporter:
         if not read.over and _lfs_pointer(read.data) is not None:
             self.counts["lfs_pointers"] += 1
             self.admit(admission, path, mode, read.data)
+            admission.pointers.add(path)
             return
         if index_oid is not None:
             pointer = self.pointers.get(index_oid, b"")
@@ -1063,6 +1067,7 @@ class _Exporter:
             if named is not None and _hash_file_beneath(self.root_fd, path) == named.decode():
                 self.counts["lfs_pointers"] += 1
                 self.admit(admission, path, mode, pointer)
+                admission.pointers.add(path)
                 return
         admission.held[path] = "lfs_content"
 
@@ -1111,8 +1116,11 @@ def _case_collisions(entries: Mapping[bytes, _Entry]) -> set[bytes]:
     return colliding
 
 
-def _under(path: bytes, held: Iterable[bytes]) -> bool:
-    return any(path == item or path.startswith(item + b"/") for item in held)
+def _under(path: bytes, held: Container[bytes]) -> bool:
+    """Whether ``path`` is held or lies beneath a held path: one lookup per component."""
+
+    parts = path.split(b"/")
+    return any(b"/".join(parts[:depth]) in held for depth in range(1, len(parts) + 1))
 
 
 def _folded_parts(path: bytes) -> tuple[str, ...] | None:
@@ -1125,25 +1133,51 @@ def _folded_parts(path: bytes) -> tuple[str, ...] | None:
         return None
 
 
-def _hold_case_aliases(admission: _Admission) -> None:
-    """Hold each admitted worktree path that is another spelling of a held one (or lies beneath).
+def _same_file(root_fd: int, first: bytes, second: bytes) -> bool:
+    """Whether two worktree paths are one file or directory on disk, as two spellings are on a
+    case-insensitive file system (APFS). Neither is followed if it is a link."""
 
-    On a case-insensitive file system (APFS, NTFS) names that differ only by case are one file
-    on disk, so the reason one spelling is held for (its bytes are LFS content, a known secret,
-    too large) holds the bytes under every spelling. Applied on every system, so a copy never
-    depends on the file system it was made on: on a case-sensitive one it holds a distinct file
-    whose name differs from a held one only by case, listed as a case collision.
+    try:
+        one = os.stat(first, dir_fd=root_fd, follow_symlinks=False)
+        other = os.stat(second, dir_fd=root_fd, follow_symlinks=False)
+    except (OSError, ValueError):
+        return False
+    return (one.st_dev, one.st_ino) == (other.st_dev, other.st_ino)
+
+
+def _hold_case_aliases(admission: _Admission, root_fd: int) -> None:
+    """Hold each admitted worktree path that is, on disk, the same file as (or lies beneath the
+    same directory as) another spelling of it that is held or sent as its LFS pointer.
+
+    Only a case-insensitive file system (APFS, NTFS) makes two spellings one file; there the
+    reason one is held for, or its LFS pointer, covers the bytes under every spelling, which
+    would otherwise leave under the other one. On a case-sensitive file system the spellings
+    are distinct files and nothing more is held. A held path found this way is listed as a case
+    collision.
     """
 
-    held = {folded for path in admission.held if (folded := _folded_parts(path)) is not None}
-    if not held:
+    sources: dict[tuple[str, ...], list[bytes]] = {}
+    for path in (*admission.held, *admission.pointers):
+        folded = _folded_parts(path)
+        if folded is not None:
+            sources.setdefault(folded, []).append(path)
+    if not sources:
         return
-    for path in tuple(admission.entries):
-        if _under(path, admission.held):
+    for path in sorted(admission.entries):
+        if path in admission.pointers or _under(path, admission.held):
             continue
         folded = _folded_parts(path)
-        if folded is not None and any(folded[:n] in held for n in range(1, len(folded) + 1)):
-            admission.held[path] = "case_collision"
+        if folded is None:
+            continue
+        parts = path.split(b"/")
+        for depth in range(1, len(parts) + 1):
+            prefix = b"/".join(parts[:depth])
+            if any(
+                other != prefix and _same_file(root_fd, prefix, other)
+                for other in sources.get(folded[:depth], ())
+            ):
+                admission.held[path] = "case_collision"
+                break
 
 
 def _build_tree(
@@ -1314,11 +1348,11 @@ def export_snapshot(
         exporter.lfs_paths([*index, *untracked, *base_paths])
         base = exporter.base(listing)
         current = exporter.current(index, untracked)
+        # The worktree's names first: another spelling of a name held, or sent as its LFS
+        # pointer, that is the same file on disk (a case-insensitive file system) is held.
+        _hold_case_aliases(current, root_fd)
     finally:
         os.close(root_fd)
-    # The worktree's names first: a name held for its bytes holds every other spelling of it,
-    # which is the same file on a case-insensitive file system (APFS).
-    _hold_case_aliases(current)
     # Then the case collisions, among the names nothing else holds on either side, so a held
     # spelling never takes the file another spelling can still send down with it.
     held_paths = {*base.held, *current.held}

@@ -1000,11 +1000,24 @@ def _one_file_for(
     file system does (APFS), on every system."""
 
     read = code_export._read_beneath  # pyright: ignore[reportPrivateUsage]
+    digest = code_export._hash_file_beneath  # pyright: ignore[reportPrivateUsage]
+    same = code_export._same_file  # pyright: ignore[reportPrivateUsage]
+
+    def disk(relative: bytes) -> bytes:
+        return on_disk if relative in spellings else relative
 
     def one_file(root_fd: int, relative: bytes, limit: int) -> object:
-        return read(root_fd, on_disk if relative in spellings else relative, limit)
+        return read(root_fd, disk(relative), limit)
+
+    def one_hash(root_fd: int, relative: bytes) -> str | None:
+        return digest(root_fd, disk(relative))
+
+    def one_identity(root_fd: int, first: bytes, second: bytes) -> bool:
+        return disk(first) == disk(second) or same(root_fd, first, second)
 
     monkeypatch.setattr(code_export, "_read_beneath", one_file)
+    monkeypatch.setattr(code_export, "_hash_file_beneath", one_hash)
+    monkeypatch.setattr(code_export, "_same_file", one_identity)
 
 
 def test_held_bytes_never_leave_under_another_spelling_of_their_name(
@@ -1056,3 +1069,51 @@ def test_a_held_spelling_never_drops_the_file_another_spelling_can_send(
     assert "README" not in tree
     assert _content(tmp_path, "readme") == b"benign\n"
     assert "README" in prepared.manifest.lists["held_for_content"]
+
+
+def test_an_lfs_payload_never_leaves_under_a_spelling_that_is_not_lfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review, second pass: git's index holds an ordinary ``README`` and ``readme`` whose
+    blob is an LFS pointer (no attributes); the one file on disk is the payload that pointer
+    names. ``readme`` is sent as its pointer, and ``README``, which would read the payload itself,
+    is held (``case_collision``)."""
+
+    payload = b"large binary payload\n" * 4
+    pointer = (
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:"
+        + hashlib.sha256(payload).hexdigest().encode()
+        + b"\nsize "
+        + str(len(payload)).encode()
+        + b"\n"
+    )
+    root = _repository(tmp_path, {"README": b"a\n", "z.txt": b"z\n"})
+    _in_git_only(root, "readme", pointer)
+    git(root, "commit", "-q", "-m", "lfs alias")
+    (root / "README").write_bytes(payload)  # the smudged payload, as git-lfs leaves it
+    _one_file_for(monkeypatch, frozenset({b"README", b"readme"}), b"README")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "README" not in tree
+    assert _content(tmp_path, "readme") == pointer
+    assert "README" in prepared.manifest.lists["case_collision"]
+
+
+def test_a_held_directory_holds_no_other_spelling_that_is_another_directory(
+    tmp_path: Path,
+) -> None:
+    """Codex review, second pass: a nested repository ``vendor`` is held; ``Vendor/a.py`` is
+    another directory on a case-sensitive file system, so it is still sent. (Where the file
+    system folds case they are one directory, and the other spelling is held.)"""
+
+    root = _repository(tmp_path, {"Vendor/a.py": b"print('a')\n", "z.txt": b"z\n"})
+    if _folds_case(root):
+        pytest.skip("this file system folds case: Vendor and vendor are one directory here")
+    (root / "vendor").mkdir()
+    git(root / "vendor", "init", "-q")
+    (root / "vendor" / "inner.py").write_bytes(b"inner\n")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "Vendor/a.py" in tree
+    assert "vendor" in prepared.manifest.lists["nested_repository"]
+    assert "Vendor/a.py" not in prepared.manifest.lists["case_collision"]
