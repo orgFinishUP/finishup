@@ -279,9 +279,10 @@ and `server login` for every kind. `server logout` refuses an SSH target
 
 **Not yet built:** HTTPS and port servers, `server login`, the REST client, both HTTP server
 edges, discovery with the official origin preset and API-key direct disclosure (layer 5); the
-server copy, code sync in the helper and level L2 (layer 6); the WAN timing gate, an upgrade over
-running helpers and bridges, and the host × surface × operating system acceptance rows,
-including every macOS and WSL 2 run (layer 7). The terminal interface's `/server` still adds only
+server copy, code sync in the helper and level L2 (layer 6). Layer 7 ran the compatibility matrix,
+an upgrade over running helpers and bridges, the WAN timing gate and the Linux host rows
+([acceptance matrix](../runbooks/acceptance-matrix.md)); every macOS and WSL 2 run is still
+missing (owner: the maintainer). The terminal interface's `/server` still adds only
 a server on this computer (an SSH server is added with `finishup server add NAME ssh://…` in a
 terminal, because OpenSSH's host-key question needs the raw terminal), its `use` of an SSH target
 never lets OpenSSH ask, and it does not register its workspace with the helper (its own
@@ -356,8 +357,8 @@ first. Both parts ran over real networks on Linux (gateway and native REST edges
 and a private `sshd`; ADR-054 honest limit 14 names what ran and what is covered in process only).
 
 **Not yet built:** the terminal interface's L2 flows (CLI only), any macOS or WSL 2 run, and a
-Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*); then
-layer 7's lifecycle validation.
+Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*).
+Layer 7's lifecycle validation ran on Linux ([acceptance matrix](../runbooks/acceptance-matrix.md)).
 
 ## Decisions
 
@@ -1829,8 +1830,9 @@ its next tick, then a wait until its lock is seen free; no process is ever signa
 pattern; a helper spawned before the stop exits without serving; one that does not stop is
 `target_still_connected`). `server logout` does not apply to SSH. The spawner reaps its own child
 on a daemon thread; a spawner that exits first leaves it to the system, so reaping never depends
-on the short-lived starter. A helper stamped by an older release of this client is replaced
-through the stop epoch, a newer one never. A client dialling while
+on the short-lived starter. A helper stamped by an older release of this client (or by another
+build of this release, by a client of the build installed now) is replaced through the stop
+epoch, a newer one never (ADR-052). A client dialling while
 the helper ends its idle exit starts its successor; any other stop has no successor in that
 client's wait.
 

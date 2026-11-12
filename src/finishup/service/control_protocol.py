@@ -656,7 +656,9 @@ def _decode_control_payload(payload: bytes) -> ControlFrame:
     """Decode one frame body whose length prefix the caller has already checked."""
 
     try:
-        parsed = strict_json_parse(payload)
+        # ``canonical_encode`` makes the parse's profile walk itself (the same checks in the
+        # same order), and every refusal is ``frame_invalid`` either way: one walk, not two.
+        parsed = strict_json_parse(payload, validate=False)
         if canonical_encode(parsed) != payload or not isinstance(parsed, Mapping):
             _fail("frame_invalid")
         schema_name = _schema_name_for_frame(parsed)
@@ -1258,16 +1260,18 @@ async def client_handshake(
     }
     try:
         # Every frame of the session is validated against one of these envelopes. A process
-        # without the full catalog parses their schemas here, before the hello, where the hello
-        # used to build the whole catalog, so no schema work lands in a caller's later delivery
-        # budget (#1083).
+        # without the full catalog parses their schemas here, inside the handshake, where the
+        # hello used to build the whole catalog, so no schema work lands in a caller's later
+        # delivery budget (#1083): the hello's own envelope before it is encoded, the others
+        # while it is in flight (the service, or a server elsewhere one or more round trips
+        # away, answers meanwhile), before its answer is read (design v2 section 8.9).
+        prepare_schemas(("control-hello", _CONTROL_SCHEMA_VERSION))
+        await write_control_frame(stream, hello)
         prepare_schemas(
-            ("control-hello", _CONTROL_SCHEMA_VERSION),
             ("control-hello-result", _CONTROL_SCHEMA_VERSION),
             ("control-request", _CONTROL_REQUEST_SCHEMA_VERSION),
             ("control-result", _CONTROL_RESULT_SCHEMA_VERSION),
         )
-        await write_control_frame(stream, hello)
         # A service that rejects this hello (schema-manifest or protocol mismatch, or a hello
         # shape its decoder does not know) closes without answering. Name that outcome so the
         # client can treat the listening peer as incompatible instead of merely malformed.

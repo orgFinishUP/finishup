@@ -81,6 +81,12 @@ __all__ = [
 # The largest control frame plus room for its envelope (the REST answer is the frame's body).
 MAX_RESPONSE_BYTES: Final = 6_291_456 + 65_536
 CONNECT_SECONDS: Final = 5.0
+# How long an idle connection is kept for the next request: under the edge's own keep-alive
+# (``rest.listener.KEEP_ALIVE_SECONDS``), so a reused connection is never one the server already
+# closed, and long enough that a warm helper's connection outlives the gaps between a session's
+# hooks. httpx's 5 s made every hook after a pause open a new TCP and TLS connection first: two
+# more round trips on the startup gate's path (design v2 section 8.9).
+KEEPALIVE_SECONDS: Final = 25.0
 # A long-poll answers within ``MAX_WAIT_MS``; the read bound leaves room for the network.
 _POLL_READ_SECONDS: Final = MAX_WAIT_MS / 1000 + 10.0
 _REQUEST_READ_SECONDS: Final = 30.0
@@ -215,7 +221,7 @@ class _PinnedTransport(httpx.AsyncHTTPTransport):
             ssl_context=context,
             max_connections=100,
             max_keepalive_connections=20,
-            keepalive_expiry=5.0,
+            keepalive_expiry=KEEPALIVE_SECONDS,
             network_backend=_PinnedBackend(pin),
         )
 
@@ -330,7 +336,13 @@ def load_trust(record: ServerTarget) -> TlsTrust:
 def _transport(trust: TlsTrust) -> httpx.AsyncBaseTransport:
     if trust.pin is not None:
         return _PinnedTransport(trust.pin)
-    return httpx.AsyncHTTPTransport(verify=cast(ssl.SSLContext, trust.context), trust_env=False)
+    return httpx.AsyncHTTPTransport(
+        verify=cast(ssl.SSLContext, trust.context),
+        trust_env=False,
+        limits=httpx.Limits(
+            max_connections=100, max_keepalive_connections=20, keepalive_expiry=KEEPALIVE_SECONDS
+        ),
+    )
 
 
 def _is_identity_failure(error: BaseException) -> bool:

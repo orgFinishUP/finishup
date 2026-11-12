@@ -306,6 +306,24 @@ def test_bridge_from_before_an_update_asks_to_reopen_instead_of_restarting(
     assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
 
 
+def test_bridge_from_before_an_update_of_a_remote_helper_asks_to_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server elsewhere: a newer build of this release now runs its helper (same version, so
+    the version cannot tell): this older bridge asks to reopen, never ``service restart``."""
+
+    monkeypatch.setattr(bridge, "service_holder_identity", lambda: None)
+    monkeypatch.setattr(bridge, "newer_helper_build_holds_selection", lambda: True)
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_incompatible", retryable=True, correlation_id=_CORRELATION),
+        request_id=_REQUEST,
+        operation="status",
+    )
+    message = cast(str, _error_of(result)["message"])
+    assert "reopen this session" in message
+    assert "finishup service restart" not in message
+
+
 def test_absent_service_maps_to_supervisor_copy_and_control_class_reason(
     diagnostic_root: Path,
 ) -> None:

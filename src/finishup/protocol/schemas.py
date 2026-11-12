@@ -374,7 +374,10 @@ def _collect_files(root: Traversable) -> frozenset[str]:
 
 def _parse_manifest(data: bytes) -> tuple[_ManifestMember, ...]:
     try:
-        parsed = strict_json_parse(data)
+        # ``canonical_encode`` makes the profile walk the parse would make (the same checks, in
+        # the same order, raising the same reason), so the parse skips its own (see
+        # ``_plain_schema``).
+        parsed = strict_json_parse(data, validate=False)
         if canonical_encode(parsed) != data:
             _protocol_error("schema_manifest_invalid")
         manifest = _as_plain_object(parsed, "schema_manifest_invalid")
@@ -705,7 +708,13 @@ def _validate_document_references(
 
 def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
     try:
-        parsed = strict_json_parse(data)
+        # One profile walk, not two: ``canonical_encode`` runs exactly the walk
+        # ``strict_json_parse`` would run to validate (``ensure_canonical_value``: the same checks
+        # in the same order, so the same reason for any value it refuses), and every refusal
+        # here is ``schema_bytes_invalid`` either way. The parse keeps every lexical check. That
+        # second walk was about 40% of the schema work a hook does before its hello is answered
+        # (design v2 section 8.9).
+        parsed = strict_json_parse(data, validate=False)
         if canonical_encode(parsed) != data:
             _protocol_error("schema_bytes_invalid")
         schema = _as_plain_object(parsed, "schema_bytes_invalid")

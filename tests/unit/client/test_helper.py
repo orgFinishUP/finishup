@@ -13,7 +13,7 @@ import asyncio
 import shutil
 import socket
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -962,6 +962,51 @@ def test_a_helper_spawned_before_a_stop_serves_nothing_once_it_starts(
     status = read_helper_status(root)
     assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
     assert stop_helper(root, timeout_seconds=0.2) is True
+
+
+def test_a_helper_takes_the_lock_and_reads_the_epoch_under_the_epoch_fence(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3: a client replacing the helper it saw (``supersede_helper``) checks the holder and
+    moves the epoch under the same fence, so it either sees this helper holding the target (and
+    decides again) or moved the epoch first (this start is fenced); it never stops a helper that
+    took the target after its decision."""
+
+    import contextlib
+
+    from finishup.client import helper as helper_module
+    from finishup.client.helper import run_helper_process
+    from finishup.client.helper_status import helper_holder, read_helper_epoch
+    from finishup.config.paths import selection_override
+
+    record, root = ssh_target
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fence(path: Path) -> Generator[None]:
+        assert path == root
+        events.append("enter")
+        yield
+        events.append("lock held" if helper_holder(root) is not None else "lock free")
+        events.append("exit")
+
+    def epoch_read(path: Path) -> str:
+        events.append("epoch")
+        return read_helper_epoch(path)
+
+    monkeypatch.setattr(helper_module, "helper_start_fence", fence)
+    monkeypatch.setattr(helper_module, "read_helper_epoch", epoch_read)
+
+    async def run() -> int:
+        # Spawned with an epoch a stop has moved since: it is fenced and serves nothing.
+        return await asyncio.wait_for(
+            run_helper_process(root, record, idle_seconds=900.0, epoch="0" * 32), 10
+        )
+
+    with selection_override(root):
+        assert asyncio.run(run()) == 0
+    assert events[:4] == ["enter", "epoch", "lock held", "exit"]
+    assert helper_holder(root) is None
 
 
 def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_free(

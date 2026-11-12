@@ -280,6 +280,64 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   [FinishUP servers](docs/usage/servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2) and
   [ADR-054](docs/adr/ADR-054-level-l2-the-server-copy.md).
 
+### Servers elsewhere across upgrades and slow networks (#1308)
+
+- **An upgrade no longer makes helpers flap.** When FinishUP is upgraded in place while an agent
+  session is open, that session's MCP bridge keeps running its earlier build. Between two builds
+  of one version, the bridge and the newer commands used to replace each other's background
+  helper on every use. Now only the build that is installed replaces a helper of another build,
+  and exactly that helper; the older session is told to reopen instead of being told to run
+  `finishup service restart`.
+- **A deselected server stays stopped.** A command or hook that was connecting to a server when
+  you switched away from it (`finishup server use`), disconnected or removed it no longer starts
+  that server's background helper again afterwards.
+- **A server that was not upgraded says so.** When this computer runs a newer release than its SSH
+  server, the error is now `remote_incompatible` ("install the same release on both"), not "the
+  running local service … run `finishup service restart`", which repaired nothing.
+- **The direct style notices a changed server.** In the direct style, a request refused because the
+  server's profile changed now starts the background helper to read the new profile, so `finishup
+  server status` shows the change (and a profile that only asks for less is adjusted) instead of
+  calling the consent current while every request is refused. Through a shared SSH connection
+  that refusal used to reach `finishup service status` as a Python traceback (exit 1), and the
+  helper was never started; it is now the usual refusal, with `finishup server use NAME` as the
+  way back, on every surface.
+- **A server that does not answer in time is named.** In the direct style, a hook or command whose
+  server elsewhere did not answer within its time now names `remote_unreachable`, as the relay
+  style does, instead of reading as this computer's own service being down.
+- **A slow direct connection says so, and names the fix.** The direct style opens a new
+  connection in every program, which a slow network makes slow. When a server reached that way
+  cannot be reached in time, every surface (commands, `--json`, agents' tools, hooks, the terminal
+  interface, `finishup server connect` and `server status`, whose JSON carries the continuation)
+  now says so, that the direct style is slow on a slow network, and that `finishup server set NAME
+  --style relay` is the remedy (continuation `remote_direct_slow`); `finishup server test` says
+  this network is slow when it measures it. Relay stays the default; nothing changes for it.
+- **Level L2 chosen later takes effect at once.** `finishup server use NAME --level L2` on a server
+  already in use at L1 now makes the running background helper serve the copy at once (it opens
+  its connection again under your new choice); before, nothing was copied until the helper
+  restarted, and tasks started meanwhile never read from the copy. Back to L1 works the same way.
+- **A changed HTTPS server is named at once.** When an HTTPS server's profile changed while the
+  background helper was connected, every request waited about 30 seconds and read
+  `remote_unreachable`, and `finishup server status` kept calling your agreement current. Now the
+  request is refused at once with `server_profile_changed` and `finishup server use NAME` as the
+  way back, and the status says the agreement changed.
+- **Faster status reads and warm HTTPS connections.** A server's status read no longer looks up
+  every mount point of the computer again for each file it opens (about half its time), and the
+  background helper keeps its HTTPS connection to a server for 25 seconds between requests instead
+  of 5, so a hook after a pause no longer waits for a new TLS connection first.
+- **`finishup server test` measures what the startup gate measures.** It now times a new
+  connection and one status in five fresh FinishUP processes and compares the slowest with the
+  required startup gate's 0.65 s. It used to compare one status round trip on an open connection
+  with 200 ms, and so said "within the hook budgets" on a 100 ms network where the gate itself
+  needed 0.67 s.
+- **Tested for real on Linux.** Every combination of server kind, edge, connection style and level
+  passed end to end, as did an upgrade over a running helper, bridge and service; Claude Code and
+  the Cursor agent started FinishUP's MCP server and Codex listed it. On a network with a 100 ms
+  round trip, the required startup gate's 0.65 s is met through the background helper over SSH
+  and over HTTPS (the default), and not by direct HTTPS, where every new process makes its own
+  TLS connection: that is reported, not required, for the direct styles, and FinishUP tells you
+  when it happens (above). macOS and Windows through WSL 2 are not tested yet. See the
+  [acceptance matrix](docs/runbooks/acceptance-matrix.md).
+
 ### Added
 
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy

@@ -682,7 +682,9 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
   are CLI only (the terminal interface renders a receipt's evidence lines).
 - Any macOS or WSL 2 run of level L2.
 - A Codex, Claude Code or Cursor session against a server keeping a copy.
-- The WAN timing gate and an upgrade over running helpers and services (layer 7).
+- An upgrade over a running helper of a server keeping a copy (layer 7's upgrade run starts from a
+  build before L2; older helpers refusing the copy's operations is covered in process only). Every
+  L2 cell of the layer-7 [acceptance matrix](../runbooks/acceptance-matrix.md) passed on Linux.
 
 ## Honest limits
 

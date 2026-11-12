@@ -85,6 +85,7 @@ from finishup.client.helper_status import (
     HelperLockBusy,
     HelperPhase,
     HelperStatus,
+    helper_start_fence,
     new_status,
     now_stamp,
     read_connection_style,
@@ -1836,16 +1837,22 @@ async def run_helper_process(
     from finishup.protocol.schemas import schema_manifest_digest
 
     lock = HelperLock(root)
+    digest = schema_manifest_digest()
     try:
-        lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+        # Under the epoch fence: a client replacing the helper it saw (``supersede_helper``)
+        # either sees this one holding the target and decides again, or moved the epoch first,
+        # which fences this start below.
+        with helper_start_fence(root):
+            lock.acquire(version=__version__, schema_manifest_digest=digest)
+            # Read once, right after the lock: a stop before this read fences this start, one
+            # after it is seen on the first tick.
+            current = read_helper_epoch(root)
     except HelperLockBusy:
         return 0
     except OSError:
+        lock.release()
         return 20
     try:
-        # Read once, right after the lock: a stop before this read fences this start, one after
-        # it is seen on the first tick.
-        current = read_helper_epoch(root)
         if epoch is not None and current != epoch:
             with contextlib.suppress(OSError):
                 write_helper_status(

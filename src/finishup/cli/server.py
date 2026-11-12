@@ -55,9 +55,12 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, NoReturn, cast
 import typer
 
 from finishup import __version__
+from finishup.cli.startup_gate_probe import STARTUP_GATE_SECONDS
 from finishup.client.authorization import bump_credential_generation
 from finishup.client.target_runtime import (
+    NEW_CONNECTION_SAMPLES,
     ProbeResult,
+    TargetRuntime,
     TargetRuntimeError,
     runtime_for,
 )
@@ -125,9 +128,6 @@ server_app = typer.Typer(
 
 _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _EXPLICIT_SOURCES: Final = frozenset({"environment", "runtime_pin", "environment_and_pin"})
-# p95 status round trip above which a required-mode startup gate (0.65 s for connect + status)
-# would likely deny on a cold hook (design section 8).
-_STARTUP_GATE_RISK_MS: Final = 200
 _USAGE: Final = 2
 _UNSAFE: Final = 20
 _UNAVAILABLE: Final = 20
@@ -2227,9 +2227,13 @@ def _resolve(name: str | None) -> tuple[ServerTarget | None, Path | None, bool]:
     return record, target_root(record.target_id), False
 
 
-def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+def _runtime(record: ServerTarget | None) -> TargetRuntime:
     kind: TargetKind = "local" if record is None else record.kind
-    return runtime_for(kind).probe(root)
+    return runtime_for(kind)
+
+
+def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+    return _runtime(record).probe(root)
 
 
 def build_status_document(
@@ -2321,7 +2325,11 @@ def build_status_document(
         "client_version": __version__,
         "target": target,
         # Nothing is sent to probe it while this computer is zero-network (ADR-051 decision 8).
-        "probe": (_probe_document(result, failure) if refused is None else _not_probed(refused)),
+        "probe": _with_continuation(
+            _probe_document(result, failure) if refused is None else _not_probed(refused),
+            target,
+            record,
+        ),
         "zero_network_selection": zero_network_item,
         "observed_at": format_rfc3339_ms(stamp),
     }
@@ -2329,6 +2337,35 @@ def build_status_document(
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _with_continuation(
+    probe: JsonValue, target: Mapping[str, JsonValue], record: ServerTarget | None
+) -> JsonValue:
+    """``probe`` with the registered continuation of its failure, for a server elsewhere.
+
+    The target's own style and consent decide it, never the selected one's: a probe of a target
+    reached in the direct style that did not answer in time is ``remote_direct_slow`` (the
+    owner's WAN-gate decision); ``server_profile_changed`` is ``remote_profile_checking`` while
+    the consent here still admits the cached profile and ``remote_reconsent`` otherwise
+    (``targets.profile_change_continuation``); any other remote phase is its own continuation;
+    anything else has none.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+    from finishup.protocol.recovery import continuation_for_reason
+
+    document = cast(dict[str, JsonValue], probe)
+    phase = document.get("phase")
+    continuation: str | None = None
+    if document.get("outcome") in {"not_running", "unavailable"} and type(phase) is str:
+        if _direct_style(target) and phase in _DIRECT_TIMEOUT_PHASES:
+            continuation = "remote_direct_slow"
+        elif phase == "server_profile_changed":
+            continuation = profile_change_continuation(record)
+        elif phase in REMOTE_CONNECTION_PHASES:
+            continuation = continuation_for_reason(phase)
+    return {**document, "continuation": continuation}
 
 
 def _connection_document(record: ServerTarget | None, root: Path | None) -> JsonValue:
@@ -2567,6 +2604,46 @@ def _key_refused_line(kind: str, name: str) -> str:
     return f"The server answered and refused this client's key; {fix}."
 
 
+# What a direct-style connection that did not answer in time looks like in a probe: the
+# connection's own deadline (``remote_unreachable``) or the probe's bound (``timeout``).
+_DIRECT_TIMEOUT_PHASES: Final = frozenset({"remote_unreachable", "timeout"})
+
+
+def _reached_directly(record: ServerTarget | None, root: Path | None) -> bool:
+    """Whether ``record`` is a server elsewhere this computer reaches in the direct style."""
+
+    if record is None or root is None or record.kind not in _STYLE_KINDS:
+        return False
+    from finishup.client.helper_status import read_connection_style
+
+    return read_connection_style(root) == "direct"
+
+
+def _direct_style(target: Mapping[str, JsonValue]) -> bool:
+    connection = target.get("connection")
+    return isinstance(connection, Mapping) and connection.get("style") == "direct"
+
+
+def direct_style_slow_line(name: str, *, answered: bool) -> str:
+    """The plain line of a slow direct-style connection and its remedy (the owner's decision,
+    2026-11-11): the direct style opens a connection per program, which a slow network makes
+    slow; ``finishup server set NAME --style relay`` keeps one for every program instead.
+    ``answered``: measured slow (``server test``); otherwise it could not be reached in time,
+    which a server that is down also does, so that line says only what the style costs."""
+
+    head = (
+        "The direct style is slow on this network: each program here opens its own connection "
+        "to that server"
+        if answered
+        else f"{name} could not be reached in time in the direct style, where each program here "
+        "opens its own connection to that server, which is slow on a slow network"
+    )
+    return (
+        f"{head}. Run 'finishup server set {name} --style relay' (the default) so this "
+        "computer's FinishUP helper keeps one connection for every program."
+    )
+
+
 def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
     """The owner display of a status document, a remote target's outside reads included.
 
@@ -2615,6 +2692,8 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
         )
     lines.extend(consent_lines(target))
     lines.extend(connection_lines(target))
+    if _direct_style(target) and probe["phase"] in _DIRECT_TIMEOUT_PHASES:
+        lines.append(direct_style_slow_line(str(target["name"] or "NAME"), answered=False))
     lines.extend(outside_read_lines(target))
     lines.extend(repository_lines(target))
     if document["selection_overridden"]:
@@ -2826,7 +2905,7 @@ def server_test(
 ) -> None:
     """Probe a target and compare its round trip with the hook and startup-gate budgets."""
 
-    record, _root, _everyday = _resolve(name)
+    record, root, _everyday = _resolve(name)
     # These lines never show the zero-network item (``status`` and ``list`` do), so this
     # computer's service is not asked for its policy, nor for this folder's repository.
     document = build_status_document(name, zero_network=lambda: None, repository_here=False)
@@ -2851,14 +2930,41 @@ def server_test(
             err=True,
         )
         raise typer.Exit(_UNAVAILABLE)
-    p95 = probe["round_trip_p95_ms"]
-    if isinstance(p95, int) and p95 > _STARTUP_GATE_RISK_MS:
+    target = cast(dict[str, JsonValue], document["target"])
+    direct = _direct_style(target)
+    target_name = str(target["name"] or "NAME")
+    # What the required startup gate times (design v2 section 8.9): a new process's connection
+    # and a status, after its imports. The round trip above is one warm status only; a new
+    # connection adds its handshake's round trips (and, relayed, the server's new channel) and
+    # the process's own schema work, so only this is compared with the gate's bound.
+    try:
+        times = _runtime(record).time_new_connections(root, NEW_CONNECTION_SAMPLES)
+    except TargetRuntimeError as error:
+        phase = "" if error.phase is None else f", phase {error.phase}"
         typer.echo(
-            f"Warning: {p95} ms p95 is above {_STARTUP_GATE_RISK_MS} ms; with the required "
-            "startup gate (0.65 s for connect and status) agent tools would likely be denied."
+            f"A new connection did not answer a status call ({error.reason}{phase}).", err=True
         )
+        if direct and error.phase in _DIRECT_TIMEOUT_PHASES:
+            typer.echo(direct_style_slow_line(target_name, answered=False), err=True)
+        raise typer.Exit(_UNAVAILABLE) from None
+    bound = round(STARTUP_GATE_SECONDS * 1000)
+    slowest = max(times)
+    typer.echo(
+        f"New connection and status: {slowest} ms at the slowest of {len(times)} new processes "
+        f"(the required startup gate allows {bound} ms)."
+    )
+    if slowest > bound:
+        typer.echo(
+            f"Warning: {slowest} ms is above the {bound} ms the required startup gate allows for "
+            "a connection and a status; agent tools would likely be denied."
+        )
+        if direct:
+            typer.echo(direct_style_slow_line(target_name, answered=True))
     else:
-        typer.echo("Within the hook budgets (0.65 s startup gate, 1.0 s hook connect).")
+        typer.echo(
+            f"Within the startup gate's {bound} ms for a new connection and status; a task's "
+            "status asks the server for more than this one."
+        )
 
 
 @server_app.command("remove")
@@ -3517,6 +3623,17 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
                     else _PROFILE_CHECKING_AT_CONNECT
                 ),
                 continuation=continuation,
+            ) from None
+        if (
+            error.reason == "service_unavailable"
+            and error.phase in _DIRECT_TIMEOUT_PHASES
+            and _reached_directly(record, root)
+        ):
+            # This target, reached in the direct style, could not be reached in time: the
+            # direct style is slow on a slow network, and the relay style is the remedy (the
+            # owner's WAN-gate decision; the named target's own style, never the selected one's).
+            raise ServerCommandRefused(
+                "remote_unreachable", continuation="remote_direct_slow"
             ) from None
         _runtime_failure(error)
     if record is not None:

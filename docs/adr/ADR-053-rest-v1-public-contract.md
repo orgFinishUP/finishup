@@ -302,8 +302,9 @@ free one (`rest_listen_invalid`); an address that cannot be bound is `rest_liste
 another `--edge` is `rest_edge_invalid`. Open connections are capped at 256 in all and 64 per peer
 address, shrunk to a quarter of the process's descriptor budget, and a connection over a cap is
 closed before TLS; a connection completes TLS and a request head within 10 seconds and a body
-within 120 seconds (a long-poll being answered has no such bound). No access log, no `Server` or
-`Date` header, no trust in forwarded-for headers.
+within 120 seconds (a long-poll being answered has no such bound); an idle keep-alive connection
+is held 30 seconds for the client's next request. No access log, no `Server` or `Date` header, no
+trust in forwarded-for headers.
 
 **The audit.** `<log dir>/rest-audit.jsonl`: owner-only canonical JSON lines of closed tokens (the
 time, the edge, the event, the route, the status or refusal reason, the key id once a key
@@ -355,6 +356,10 @@ fetches.
   (`remote_incompatible`), so the hop goes only where the record says and no credential is carried
   elsewhere.
 - **Bounded answers.** A body past the largest control frame plus 64 KiB is refused unread.
+- **Warm connections.** An idle connection is kept 25 seconds for the next request, under the
+  edge's own 30 (a reused connection is never one the server already closed), so the helper's
+  relay answers a hook after a pause without a new TCP and TLS connection first (layer 7's WAN
+  gate: httpx's 5 seconds added two round trips to every hook after a pause).
 - **The key** is read off the event loop, one read at a time (A-KEYRING-LOOP), on a daemon thread
   of its own (never the loop's default executor, so a blocked read holds neither the loop's
   shutdown nor the process's exit), from where the record says it lives now (A-CRED-STALE); a store
@@ -552,17 +557,22 @@ advertises.
 6. The REST edge and HTTPS targets ran for real on Linux only (the conformance kit, 18 cases, nine
    per edge over real TLS from a throwaway CA, and an end-to-end run of add, use, relay and direct,
    a changed profile, login with a rotated key, logout, the native edge with `--port` and a pin,
-   disconnect and remove). macOS and WSL 2 have no recorded run (owner: layer 7). The system store
+   disconnect and remove), and every REST cell of the layer-7
+   [acceptance matrix](../runbooks/acceptance-matrix.md) (both edges, both styles, L1 and L2).
+   macOS and WSL 2 have no recorded run (owner: the maintainer). The system store
    is Python's default verify paths: on macOS a python.org Python may need its certificates
    installed; untested.
-7. PR CI does not run `tests/conformance/rest/` (it starts real services); a job for it is a
-   follow-up.
+7. PR CI does not run `tests/conformance/rest/` (it starts real services); the real-network
+   workflow (`real-network.yml`, layer 7) will, on pull requests to any branch, once the
+   maintainer adds it (it ships as a patch; adding a workflow needs the `workflow` token scope).
 8. A receipt's frozen version slice holds 64 entries: the next layer that adds operation schemas
    needs a receipt-document version bump.
 9. The server copy and its code sync over REST are built and released in layer 6 (ADR-054),
-   offered only by a server whose owner enables it. Not built: the WAN timing gate and an upgrade
-   over running gateways and helpers (layer 7); adding an HTTPS server from the terminal
-   interface; OAuth credential sources; an official service (another repository).
+   offered only by a server whose owner enables it. Layer 7 measured the WAN timing gate (not met
+   for direct HTTPS at a 100 ms round trip; the owner accepted it as a reported result for the
+   direct styles, with the relay remedy shown to the user: ADR-052 decision 24) and ran an upgrade over running
+   helpers. Not built: adding an HTTPS server from the terminal interface; OAuth credential
+   sources; an official service (another repository).
 10. The macOS keychain check before a key is stored (a default keychain that exists and is
     unlocked, read through Security.framework without user interaction; ADR-051 decision 7) ran
     only against stand-ins on Linux. On a Mac it is unverified: that no keychain dialog appears

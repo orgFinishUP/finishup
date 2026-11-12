@@ -201,7 +201,9 @@ PR CI, and skips where `ssh`, `sshd` or `ssh-keygen` is missing or `sshd` cannot
    private 0700 folders, unset both isolation variables, and run an unpinned launcher (the
    checkout's `uv run finishup`), never a provisioned instance's pinned one. The helper inherits
    the XDG variables, so it resolves the same client registry. macOS ignores the XDG variables for
-   these folders and is untested here (gap, owner: layer 7).
+   these folders and is untested here (gap, owner: the maintainer's macOS dogfood run; see the
+   [acceptance matrix](acceptance-matrix.md#gaps-and-owners), which also runs every cell of this
+   kind for real on Linux).
 
 Never register a host (Codex, Claude Code, Cursor) against such a client with a bare `finishup`
 resolved through `PATH`: register it with the absolute launcher you tested (issue #604). Stop what
@@ -254,7 +256,8 @@ By hand, an HTTPS test needs the same separation as the SSH one, without `sshd`:
 Stop what you started with `finishup server disconnect NAME` and `finishup server remove NAME` on
 the client, then the edge by its PID and the server root's service with its own `finishup service
 stop`; remove the private folders last. macOS (its system store, the XDG variables it ignores)
-and WSL 2 are untested here (gap, owner: layer 7).
+and WSL 2 are untested here (gaps with owners in the
+[acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
 
 ### Trying level L2, the server copy (ADR-054, layer 6)
 

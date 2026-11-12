@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     import uvicorn
 
 __all__ = [
+    "KEEP_ALIVE_SECONDS",
     "MAX_TCP_CONNECTIONS",
     "MAX_TCP_CONNECTIONS_PER_PEER",
     "REQUEST_BODY_SECONDS",
@@ -56,6 +57,8 @@ MAX_TCP_CONNECTIONS: Final = 256
 MAX_TCP_CONNECTIONS_PER_PEER: Final = 64
 REQUEST_HEAD_SECONDS: Final = 10.0
 REQUEST_BODY_SECONDS: Final = 120.0
+# How long an idle keep-alive connection is held for a client's next request.
+KEEP_ALIVE_SECONDS: Final = 30
 _DESCRIPTOR_TARGET: Final = 4_096
 _DESCRIPTOR_SHARE: Final = 4
 _LISTEN_BACKLOG: Final = 128
@@ -510,7 +513,7 @@ class RestListener:
             forwarded_allow_ips="",
             server_header=False,
             date_header=False,
-            timeout_keep_alive=30,
+            timeout_keep_alive=KEEP_ALIVE_SECONDS,
             timeout_graceful_shutdown=2,
         )
         config.load()

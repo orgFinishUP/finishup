@@ -684,7 +684,9 @@ default service.
   server. The five transport outages (`remote_unreachable`, `remote_auth_failed`,
   `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) reach the
   SessionStart texts, MCP results and the CLI with their own continuations, never a local service
-  to start.
+  to start. In the direct style `remote_unreachable` carries `remote_direct_slow` instead: the
+  direct style is slow on that network and `finishup server set NAME --style relay` is the remedy
+  (layer 7, the owner's WAN-gate decision; same code path on every host, ADR-052 decision 24.5).
 - **HTTPS and port servers (layer 5, ADR-053).** Supported, same code path as every host and as SSH;
   no registration change. Cursor's hooks, its MCP bridge and Agent CLI shell calls reach an HTTPS or
   port server through the same helper (relay, the default: they keep dialling a Unix endpoint, and
@@ -713,7 +715,8 @@ default service.
   client-attested line, for a task that read the copy), the same through the CLI, the MCP text and
   summary and the terminal interface; the terminal interface has no L2 flows (consent, `server code`
   and `server remove`'s question are CLI only). No Cursor session ran against a server keeping a
-  copy, and no macOS or WSL 2 run (layer 7).
+  copy, and no macOS or WSL 2 run
+  (gaps with owners in the [acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
 - **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host, and
   acting for an SSH server from layer 4 and an HTTPS or port server from layer 5: the gate's consent
   step names `server_profile_changed` or `server_level_unavailable` in the same SessionStart texts,
@@ -741,8 +744,13 @@ default service.
   (layer 4), and the REST conformance kit against both server edges over real TLS and an
   end-to-end run of the `finishup` command against a real HTTPS server on Linux (layer 5). No Cursor
   session was run against an SSH or HTTPS server, and no remote cell is claimed for Cursor or any
-  other host. Gaps, owner layer 7: the host × surface × operating system rows, and every macOS and
-  WSL 2 run of the helper, of SSH and of HTTPS.
+  other host. Layer 7 ([acceptance matrix](acceptance-matrix.md#hosts-on-linux)) recorded the Linux
+  rows: Cursor agent 2026.10.22: in a scratch home, `~/.cursor/mcp.json` by a test instance's absolute
+  launcher, and `cursor-agent mcp list-tools` started the bridge and listed its eight tools; `hooks
+  cursor-observe` with the recorded payload shapes exited 0. The bridge and hooks against servers elsewhere ran by scripts driving `finishup
+  mcp serve` over stdio as a host does, not from a Cursor session: a model session needs the
+  account's host credentials and was not run. Gaps with owners (macOS, WSL 2, Cursor sessions
+  against a server elsewhere) are in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
 - **Receipt provenance** (ADR-051, decision D4). This part holds for every task, local ones
   included: when the service cannot read the task's opening record, the receipt is still made and
   ends with the fixed provenance-unknown section (on a claim-bound task, in place of the

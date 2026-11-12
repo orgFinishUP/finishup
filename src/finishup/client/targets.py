@@ -78,6 +78,7 @@ __all__ = [
     "PRE_DIAL_REFUSALS",
     "PROFILE_CHECKING_CONTINUATION",
     "REMOTE_KINDS",
+    "DIRECT_STYLE_SLOW_CONTINUATION",
     "REMOTE_ROOT_OVERRIDE_CONTINUATION",
     "REMOTE_ROOT_REFUSALS",
     "RESERVED_NAMES",
@@ -234,6 +235,11 @@ assert REMOTE_ROOT_REFUSALS == REMOTE_ROOT_REFUSAL_PHASES
 # the root (``remote_root_continuation``): 'finishup server use local' answers
 # ``selection_overridden`` there, so the way back is to clear that override instead.
 REMOTE_ROOT_OVERRIDE_CONTINUATION: Final = "remote_root_override_clear"
+# The continuation of ``remote_unreachable`` while the root this process uses is a server
+# elsewhere reached in the direct style (``remote_root_continuation``): that style opens a
+# connection per program, so on a slow network the remedy is ``finishup server set NAME --style
+# relay`` (the owner's WAN-gate decision, 2026-11-11).
+DIRECT_STYLE_SLOW_CONTINUATION: Final = "remote_direct_slow"
 # The continuation of ``server_profile_changed`` while this computer's copy of that server's
 # profile still agrees with the owner's consent (``profile_change_continuation``): the server
 # refused a revision this computer has not fetched, so what changed is not known yet and the
@@ -1346,10 +1352,13 @@ def remote_root_continuation(phase: str) -> str | None:
     selection is not in force ('finishup server use local' answers ``selection_overridden``), so
     it is ``REMOTE_ROOT_OVERRIDE_CONTINUATION``: unset that variable or use an unpinned launcher.
     A variable or pin that cannot be read still names the root (it fails closed on its own path).
+    ``remote_unreachable`` while that root is a server elsewhere reached in the direct style is
+    ``DIRECT_STYLE_SLOW_CONTINUATION``: the direct style is slow on this network, and 'finishup
+    server set NAME --style relay' is the remedy (the owner's decision, 2026-11-11).
     ``server_profile_changed`` resolves by the active target's consent
     (``profile_change_continuation``). Any other phase resolves as ``continuation_for_reason``
-    does. Every surface that names a remote-root refusal or a remote connection phase (the CLI,
-    setup, the menu, the terminal interface, hooks and MCP) reads its continuation here.
+    does. Every surface that names a remote-root refusal, an outage or a remote connection phase
+    (the CLI, setup, the menu, the terminal interface, hooks and MCP) reads its continuation here.
     Hook-safe: environment, pin and target-file reads only.
     """
 
@@ -1357,6 +1366,8 @@ def remote_root_continuation(phase: str) -> str | None:
 
     if phase in REMOTE_ROOT_REFUSALS and _root_named_explicitly():
         return REMOTE_ROOT_OVERRIDE_CONTINUATION
+    if phase == "remote_unreachable" and _active_direct_style():
+        return DIRECT_STYLE_SLOW_CONTINUATION
     if phase == _PROFILE_CHANGED_PHASE:
         try:
             record = active_target_record()
@@ -1364,6 +1375,27 @@ def remote_root_continuation(phase: str) -> str | None:
             record = None
         return profile_change_continuation(record)
     return continuation_for_reason(phase)
+
+
+def _active_direct_style() -> bool:
+    """Whether the root this process uses is a server elsewhere reached in the direct style.
+
+    File reads only (the selection or pin, ``target.json``, ``config/connection-style.json``);
+    a record that cannot be read is not the direct style (the phase's own continuation stands).
+    """
+
+    try:
+        record = active_target_record()
+    except (TargetError, PathSafetyError, OSError):
+        return False
+    if record is None or not record.is_remote:
+        return False
+    from finishup.client.helper_status import read_connection_style
+
+    try:
+        return read_connection_style(target_root(record.target_id)) == "direct"
+    except (TargetError, PathSafetyError, OSError):
+        return False
 
 
 def profile_change_continuation(record: ServerTarget | None) -> str:

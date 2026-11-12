@@ -186,8 +186,11 @@ finishup server test lab
 
 `list` shows every server and which one is in use. `status` shows which setting chose the server
 in use, its kind, its state (for example ready, locked or not running), its FinishUP release and
-its vault mode. `test` connects, measures the round trip and warns when it is slow enough that a startup
-check required by your agent setup would likely time out.
+its vault mode. `test` connects, measures the round trip of a status call, then times a new
+connection and one status in five fresh FinishUP processes, the way the startup check required by
+some agent setups makes them, and warns when the slowest of those exceeds that check's 0.65 s.
+A task's own status asks the server for a little more than this test's, so a result close to
+0.65 s may still be too slow.
 
 For an SSH or HTTPS server, `status` also shows how this computer reaches it and what FinishUP's
 helper last did, for example:
@@ -223,6 +226,18 @@ finishup server set lab --style relay
 
 You can choose only a way the server offers. Changing it stops the helper (and, for SSH, the SSH
 connection) first; restart open agent sessions afterwards.
+
+The direct way is slower over a long distance: every program pays for its own new connection.
+When FinishUP sees that, it tells you and names the fix:
+
+- `finishup server test lab` measures a new connection the way an agent's tools need it; past
+  650 ms in the direct way it says the direct way is slow on this network;
+- `finishup server status lab`, `finishup server connect lab`, and the message an agent or a
+  command shows when the server could not be reached in time in the direct way, say that the direct
+  way is slow on a slow network (a server that is down looks the same; `server test` tells them
+  apart);
+- the fix is `finishup server set lab --style relay`, which makes the helper keep one connection
+  for every program again.
 
 ## Log in and out of an HTTPS server
 
