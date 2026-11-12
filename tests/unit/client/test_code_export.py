@@ -1204,3 +1204,28 @@ def test_a_case_collision_in_the_base_never_drops_the_only_spelling_left_on_disk
     tree = _tree_of(prepared, tmp_path)
     assert "readme" in tree and "README" not in tree
     assert _content(tmp_path, "readme") == b"lower\n"
+
+
+def test_a_spelling_held_for_its_bytes_is_out_of_both_trees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review, sixth pass: the base holds README (an ordinary blob P) and readme (an LFS
+    pointer); on disk one file under both names holds P, which readme's pointer does not name, so
+    readme is held (``lfs_content``) and README is held as its spelling. That hold is about the
+    bytes, not the tree's names, so README is out of the base tree too."""
+
+    payload = b"the payload on disk\n"
+    pointer = (
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:"
+        + hashlib.sha256(b"another payload\n").hexdigest().encode()
+        + b"\nsize 16\n"
+    )
+    root = _repository(tmp_path, {"README": payload, "z.txt": b"z\n"})
+    _in_git_only(root, "readme", pointer)
+    git(root, "commit", "-q", "-m", "lfs alias")
+    _one_file_for(monkeypatch, frozenset({b"README", b"readme"}), b"README")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "README" not in tree and "readme" not in tree
+    base = git(tmp_path / "receiver", "ls-tree", "--name-only", "refs/heads/s^")
+    assert "README" not in base.split()

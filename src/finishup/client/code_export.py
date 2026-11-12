@@ -796,7 +796,7 @@ class _Entry:
 class _Admission:
     """The admitted entries and the held-out paths of one tree."""
 
-    __slots__ = ("digests", "entries", "held", "identities", "objects", "pointers")
+    __slots__ = ("aliases", "digests", "entries", "held", "identities", "objects", "pointers")
 
     def __init__(self) -> None:
         self.entries: dict[bytes, _Entry] = {}
@@ -810,6 +810,9 @@ class _Admission:
         self.identities: dict[bytes, tuple[int, int] | None] = {}
         # Worktree file path → the SHA-256 of the bytes read there (a file read whole).
         self.digests: dict[bytes, bytes] = {}
+        # Paths held as another spelling of a held or LFS name (``_hold_case_aliases``): listed
+        # as case collisions, but held for their bytes, so out of both trees.
+        self.aliases: set[bytes] = set()
 
     def saw(self, path: bytes, read: _Read) -> None:
         """Keep what ``read`` identified: ``path`` itself and each directory above it."""
@@ -1181,10 +1184,18 @@ def _under(path: bytes, held: Container[bytes]) -> bool:
 
 def _held_in(tree: _Admission, base: _Admission, current: _Admission) -> set[bytes]:
     """The paths left out of ``tree``: its own holds, and the other tree's holds but for its
-    case collisions (which only that tree cannot represent)."""
+    representational case collisions (which only that tree cannot represent); another spelling
+    held for its bytes (``_Admission.aliases``) is out of both."""
 
     other = current if tree is base else base
-    return {*tree.held, *(p for p, reason in other.held.items() if reason != "case_collision")}
+    return {
+        *tree.held,
+        *(
+            path
+            for path, reason in other.held.items()
+            if reason != "case_collision" or path in other.aliases
+        ),
+    }
 
 
 def _folded_parts(path: bytes) -> tuple[str, ...] | None:
@@ -1238,6 +1249,7 @@ def _hold_case_aliases(admission: _Admission) -> None:
                 if other != prefix
             ):
                 admission.held[path] = "case_collision"
+                admission.aliases.add(path)
                 break
 
 
