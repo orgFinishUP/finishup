@@ -3,8 +3,9 @@
 ``CredentialSource`` is the pluggable interface; an OAuth source can implement it later.
 ``KeyringOrFileCredential`` keeps one target's key in the platform credential store under the
 fixed service ``yoetz.server-credential.v1`` with the target id as the account, or — where no
-platform store is usable (WSL 2, headless Linux) — in an owner-only file beneath
-``<target root>/config/credential/``. ``target.json`` records only which of the two holds it.
+platform store can take it (WSL 2, headless Linux, a macOS keychain that is missing or locked, a
+store that refuses the write) — in an owner-only file beneath ``<target root>/config/credential/``.
+``target.json`` records only which of the two holds it, and reading follows that record.
 
 The key never appears in argv, the environment, ``target.json``, logs, or JSON output, and no
 error carries it: every failure is a closed ``CredentialError`` reason. Same-user software can
@@ -17,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 from typing import Final, Protocol, cast
 
@@ -44,6 +46,11 @@ _PLATFORM_BACKENDS: Final = frozenset(
         "keyring.backends.macOS.Keyring",
     }
 )
+_MACOS_KEYCHAIN: Final = "keyring.backends.macOS.Keyring"
+# Loaded by absolute path, never searched for, and only on macOS.
+_SECURITY_FRAMEWORK: Final = "/System/Library/Frameworks/Security.framework/Security"
+_CORE_FOUNDATION: Final = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+_KEYCHAIN_UNLOCKED: Final = 1  # kSecUnlockStateStatus, a SecKeychainStatus bit
 _FILE_DIRECTORY: Final = Path("config") / "credential"
 _ACCOUNT: Final = re.compile(r"^t_[0-9a-f]{8}$", re.ASCII)
 # Printable ASCII without whitespace, bounded: covers ``fuk_<id>_<secret>`` keys and bearer
@@ -138,6 +145,10 @@ def read_key_file(path: Path) -> str:
     return validate_secret(text)
 
 
+def _backend_id(backend: object) -> str:
+    return f"{type(backend).__module__}.{type(backend).__qualname__}"
+
+
 def _platform_backend() -> _Backend | None:
     """The first allowlisted platform credential store, or ``None`` when none is usable."""
 
@@ -152,10 +163,56 @@ def _platform_backend() -> _Backend | None:
         tuple(loaded.backends) if isinstance(loaded, ChainerBackend) else (loaded,)
     )
     for candidate in candidates:
-        backend_id = f"{type(candidate).__module__}.{type(candidate).__qualname__}"
-        if backend_id in _PLATFORM_BACKENDS:
+        if _backend_id(candidate) in _PLATFORM_BACKENDS:
             return cast(_Backend, candidate)
     return None
+
+
+def _macos_keychain_ready() -> bool:
+    """Whether macOS has a default keychain and it is unlocked, asked without user interaction.
+
+    Adding an item where no default keychain can be found makes macOS show a dialog ("A keychain
+    cannot be found to store ...") and wait for it; adding one to a locked keychain asks to unlock
+    it. Neither may hold ``server add`` or ``server login``, which may run where nobody can answer
+    (an SSH session) or under another ``HOME``. ``SecKeychainCopyDefault`` and
+    ``SecKeychainGetStatus`` only read state and never ask. A failure at any step reads as not
+    ready, so the key goes to the owner-only file instead.
+    """
+
+    if sys.platform != "darwin":
+        return False
+    try:
+        import ctypes
+
+        security = ctypes.CDLL(_SECURITY_FRAMEWORK)
+        core_foundation = ctypes.CDLL(_CORE_FOUNDATION)
+        copy_default = security.SecKeychainCopyDefault
+        copy_default.argtypes = (ctypes.POINTER(ctypes.c_void_p),)
+        copy_default.restype = ctypes.c_int32
+        get_status = security.SecKeychainGetStatus
+        get_status.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+        get_status.restype = ctypes.c_int32
+        release = core_foundation.CFRelease
+        release.argtypes = (ctypes.c_void_p,)
+        release.restype = None
+        keychain = ctypes.c_void_p()
+        if copy_default(ctypes.byref(keychain)) != 0 or not keychain.value:
+            return False  # no default keychain (errSecNoDefaultKeychain), or no reference
+        try:
+            status = ctypes.c_uint32(0)
+            if get_status(keychain, ctypes.byref(status)) != 0:
+                return False  # the default names a keychain that is not there, say
+            return bool(status.value & _KEYCHAIN_UNLOCKED)
+        finally:
+            release(keychain)
+    except Exception:
+        return False
+
+
+def _takes_a_key_without_asking(backend: _Backend) -> bool:
+    """False only for the macOS keychain when it is missing or locked (``_macos_keychain_ready``)."""
+
+    return _backend_id(backend) != _MACOS_KEYCHAIN or _macos_keychain_ready()
 
 
 class KeyringOrFileCredential:
@@ -232,19 +289,37 @@ class KeyringOrFileCredential:
         return validate_secret(value)
 
     def store(self, secret: str) -> CredentialLocation:
+        """Store (or replace) the key; return where it went, for the caller to record.
+
+        The platform store takes it when there is one and it accepts the write. Otherwise the
+        owner-only file does: no platform store, a macOS keychain that is missing or locked
+        (checked first and without asking the user, so no keychain dialog holds the command), or
+        a store that refuses the write (locked, denied). Only a key the file cannot keep either
+        is ``credential_store_unavailable``. Reading follows the location recorded.
+
+        A key moved into the platform store leaves the file. A key the platform store held
+        before stays there when the file takes the new one: that store was not usable, so it is
+        not asked again. The next key it takes replaces it, and ``delete()`` tidies it when it
+        can be used.
+        """
+
         validate_secret(secret)
-        location: CredentialLocation = "keyring" if self._platform_store() is not None else "file"
-        try:
-            self._store_for(location).set_password(
-                SERVER_CREDENTIAL_SERVICE, self._target_id, secret
-            )
-        except CredentialError:
-            raise
-        except Exception:
-            raise CredentialError("credential_store_unavailable") from None
-        other: CredentialLocation = "file" if location == "keyring" else "keyring"
-        if self._recorded == other:
-            self._delete_from(other)
+        location: CredentialLocation = "file"
+        platform = self._platform_store()
+        if platform is not None and _takes_a_key_without_asking(platform):
+            try:
+                platform.set_password(SERVER_CREDENTIAL_SERVICE, self._target_id, secret)
+            except Exception:
+                location = "file"
+            else:
+                location = "keyring"
+        if location == "file":
+            try:
+                self._file_store().set_password(SERVER_CREDENTIAL_SERVICE, self._target_id, secret)
+            except Exception:
+                raise CredentialError("credential_store_unavailable") from None
+        elif self._recorded == "file":
+            self._delete_from("file")
         self._recorded = location
         return location
 

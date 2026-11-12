@@ -311,9 +311,11 @@ def test_use_asks_again_over_ssh_and_says_what_is_held_for_it(
     assert targets.read_selected_target_id() == record.target_id
 
 
-def test_an_https_server_is_still_refused_before_anything(
+def test_a_closed_kind_is_still_refused_before_anything(
     server: FakeServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Every remote kind is open from layer 5: HTTPS is closed in this process as the example.
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
     console = _console(monkeypatch, b"listed", b"lab")
 
     result = _invoke("add", "lab", "https://lab.example")

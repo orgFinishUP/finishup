@@ -132,6 +132,8 @@ _REASONS: Final = frozenset(
         "remote_incompatible",
         "remote_service_not_running",
         "remote_unreachable",
+        # A REST upstream's server refused the consented revision (ADR-053): the helper names it.
+        "server_profile_changed",
         "zero_network_remote_selected",
     }
 )
@@ -1113,7 +1115,7 @@ class SshMaster:
         require_host_key(stderr, expected)
         return 255 if code is None else code
 
-    async def _stop_process(self) -> None:
+    async def _stop_process(self, seconds: float = 2.0) -> None:
         process = self._process
         self._process = None
         self._verified = None
@@ -1121,7 +1123,7 @@ class SshMaster:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
             try:
-                async with asyncio.timeout(2.0):
+                async with asyncio.timeout(seconds):
                     await process.wait()
             except TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
@@ -1132,17 +1134,22 @@ class SshMaster:
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
 
-    async def close(self) -> None:
-        """Ask the master to exit through its control socket, reap it, remove its forward."""
+    async def close(self, seconds: float | None = None) -> None:
+        """Ask the master to exit through its control socket, reap it, remove its forward.
 
+        Within about ``seconds`` when given (a stopping helper's share of its deadline): half
+        for the exit request, the rest for the master to end before it is killed and reaped.
+        Without it, two seconds each."""
+
+        asking, ending = (2.0, 2.0) if seconds is None else (max(seconds, 0.2) / 2,) * 2
         if self.alive:
             with contextlib.suppress(Exception):
                 await run_ssh(
                     control_argv(self.executable(), self._root, self._record, "exit"),
-                    seconds=2.0,
+                    seconds=asking,
                 )
         async with self._lock:
-            await self._stop_process()
+            await self._stop_process(ending)
             remove_owned_socket(self.upstream_path)
             remove_owned_socket(self._root / "run" / MASTER_NAME)
 
@@ -1295,9 +1302,11 @@ class SshControlStream:
         returncode = self._process.returncode
         if returncode is None:
             returncode = await self._wait_exit(_EXIT_WAIT_SECONDS)
-        with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(_TERMINATE_WAIT_SECONDS):
-                await asyncio.shield(self._stderr_task)
+        # Waited on, never awaited: a close may already have cancelled the stderr reader (an
+        # OpenSSH master holds a multiplexed ``ssh -W`` client's stderr past that client's exit,
+        # so the reader is still open when the close ends it), and that reader's cancellation is
+        # not this caller's: it must not leave here as one. What it read so far still counts.
+        await asyncio.wait((self._stderr_task,), timeout=_TERMINATE_WAIT_SECONDS)
         if returncode is None or returncode <= 0:
             return None
         return classify_ssh_failure(returncode, bytes(self._stderr))

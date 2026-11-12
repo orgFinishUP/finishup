@@ -712,6 +712,11 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         # root's source (``targets.remote_root_continuation``), never through a reason code.
         "remote_root_override_clear",
         "remote_server_test",
+        # ``remote_unreachable`` while the target is reached in the direct style: that style opens
+        # a connection per program, so on a slow network the remedy is the relay style (the
+        # owner's WAN-gate decision, 2026-11-11). Attached by the client that knows the target's
+        # style (``targets.remote_root_continuation``), never through a reason code.
+        "remote_direct_slow",
         "remote_service_start_required",
         "remote_target_no_local_service",
         "server_host_command_required",

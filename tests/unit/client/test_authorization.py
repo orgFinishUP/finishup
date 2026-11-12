@@ -42,7 +42,12 @@ _KEY = "sha256:" + "a" * 64
 
 @pytest.fixture
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    from finishup.client import authorization
+
     with ambient_home(monkeypatch) as root:
+        # Every remote kind is open from layer 5: these tests keep HTTPS closed in process as the
+        # gate's closed example (its kind step), and open it where they admit a connection.
+        monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 

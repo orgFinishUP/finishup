@@ -131,6 +131,17 @@ def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> _Source:
         )
 
     monkeypatch.setattr(server_cli, "_discover_ssh", discover)
+
+    def discover_rest(record: ServerTarget, key_file: Path | None) -> tuple[FetchedProfile, str]:
+        # HTTPS discovery and the key at 'server add' (layer 5, ``client.rest_discovery``,
+        # tested on its own and against the real routes): the stand-in profile and a key.
+        del key_file
+        return stand_in.fetch(record), "fuk_0123456789ab_" + "A" * 43
+
+    monkeypatch.setattr(server_cli, "_discover_rest", discover_rest)
+    # No platform credential store: the key goes to the owner-only file (injected, since
+    # keyring's process-wide cache may hold whatever an earlier test loaded).
+    monkeypatch.setattr("finishup.client.credentials._platform_backend", lambda: None)
     return stand_in
 
 
@@ -220,21 +231,6 @@ def test_a_profile_this_release_cannot_agree_to_is_refused_before_the_console(
     assert console.opened == 0
     assert targets.list_targets() == ()
     assert list(targets.servers_dir().glob("t_*")) == []
-
-
-def test_an_open_kind_with_no_transport_is_still_unavailable(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    del home
-    # HTTPS has no transport in this release (layer 5); opened in process, it is unavailable.
-    open_remote_kinds(monkeypatch, "https", consent=False)
-    monkeypatch.setattr(server_cli, "_zero_network_in_force", lambda: False)
-    console = _console(monkeypatch, b"listed", b"lab")
-
-    result = _invoke("add", "lab", "https://lab.example")
-
-    assert result.stderr.startswith("remote_kind_unavailable:")
-    assert console.opened == 0 and targets.list_targets() == ()
 
 
 @pytest.mark.parametrize("selected", [True, False])
@@ -384,8 +380,12 @@ def test_a_target_removed_during_the_confirmation_stays_removed(
     assert targets.read_selected_target_id() is None
 
 
-def test_use_of_a_closed_kind_is_refused_before_anything(home: Path) -> None:
+def test_use_of_a_closed_kind_is_refused_before_anything(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     del home
+    # Every remote kind is open from layer 5: HTTPS is closed in this process as the example.
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
     with targets.registry_lock():
         targets.new_remote_target("lab", "https", base_url="https://lab.example")
 

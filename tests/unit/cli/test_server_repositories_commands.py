@@ -60,6 +60,9 @@ _STAMP = "2026-11-07T09:30:00.000Z"
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
         monkeypatch.setattr(zero_network, "_selection_on_disk", zero_network.read_selection_on_disk)
+        # Every remote kind is open from layer 5: HTTPS stays closed in this process as the
+        # closed kind's example; the 'opened' cases open it again.
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 
@@ -79,9 +82,10 @@ def _remote(kind: str = "https", *, select: bool = True, name: str = "lab") -> t
 
 
 @pytest.fixture
-def opened(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every remote kind open, in process: what ``add`` does once a later release opens one."""
+def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every remote kind open, in process (after ``home`` closed HTTPS as the closed example)."""
 
+    del home
     open_remote_kinds(monkeypatch, "ssh", "https", "local_port")
 
 

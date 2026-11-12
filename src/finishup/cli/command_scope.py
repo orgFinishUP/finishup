@@ -103,6 +103,7 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "provider": "server_host",
         "recommend": "server_host",
         "restore": "server_host",
+        "service api-key": "server_host",
         "service auto-unlock": "server_host",
         "service diagnostics": "server_host",
         "service endpoint": "server_host",
@@ -110,6 +111,7 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         "service idle-relock": "server_host",
         "service initialize-passphrase": "server_host",
         "service recovery": "server_host",
+        "service rest": "server_host",
         "service restart": "server_host",
         "service rotate-passphrase": "server_host",
         "service run": "server_host",
@@ -130,6 +132,9 @@ COMMAND_SCOPES: Final[Mapping[str, CommandScope]] = MappingProxyType(
         # Which held repositories a remote target's server receives anyway, or keeps here: this
         # client's own record, never sent to that server (ADR-051 decision 8).
         "server repositories": "client_only",
+        # Level L2 (ADR-054): asks the selected server elsewhere, or edits this computer's own
+        # per-repository choices for it.
+        "server code": "client_only",
         "setup disconnect": "client_only",
     }
 )

@@ -708,13 +708,12 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
 
     def test_the_closed_remote_kinds_say_what_this_release_connects_to(self) -> None:
-        # HTTPS and port servers are closed in this release (SSH opens in layer 4): the refusal
+        # Every kind is open from layer 5: the refusal of an address this release names none of
         # says which servers are reached, that nothing was added, selected or sent, and the
         # owner's way back, and never tells an agent to choose a server itself.
         entry = directive_for("server_on_this_computer_required")
         assert entry is not None
-        assert "connects to servers on this computer and over SSH" in entry.directive
-        assert "HTTPS and port servers arrive later" in entry.directive
+        assert "connects to servers on this computer, over SSH and over HTTPS" in entry.directive
         assert "nothing was added, selected or sent" in entry.directive
         assert "'finishup server use local'" in entry.directive
         assert entry.nudge == "Never select or add a FinishUP server for the owner."
@@ -788,7 +787,7 @@ class TestWorkspaceBindingAndServerTargetReasons:
         stale = directive_for("server_reauthorization_required")
         assert stale is not None
         assert "older disclosure" in stale.directive
-        assert "'finishup server use NAME' on their own terminal (SSH)" in stale.directive
+        assert "'finishup server use NAME' on their own terminal," in stale.directive
 
     def test_a_remote_root_an_override_names_points_to_the_override(self) -> None:
         # With an isolation variable or a pinned launcher naming the root, 'finishup server use

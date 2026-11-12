@@ -800,15 +800,15 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
     ),
     # A root that names a server elsewhere, chosen by the saved selection, refused here: a kind
-    # this release does not reach (HTTPS, a port), a record that cannot be read, or any server
-    # elsewhere for this computer's own setup, menu and first run. 'finishup server use local'
+    # this release does not reach, a record that cannot be read, or any server elsewhere for this
+    # computer's own setup, menu and first run. 'finishup server use local'
     # switches new processes; an open agent session keeps the root it started with.
     RecoveryDirective(
         token="remote_target_no_local_service",
         directive=(
-            "The selected FinishUP server is elsewhere: this release reaches none over HTTPS or a "
-            "port, and setup here never acts on one, so nothing was sent or started. Ask the owner "
-            "to run 'finishup server use local', then start a new session."
+            "The selected FinishUP server is elsewhere, and setup here never acts on one (nor on "
+            "one whose record cannot be read), so nothing was sent or started. Ask the owner to "
+            "run 'finishup server use local', then start a new session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select a FinishUP server for the owner, or start a service for this.",
@@ -828,14 +828,14 @@ _DIRECTIVES: Final = (
             "Never change them for the owner."
         ),
     ),
-    # An SSH server is confirmed again with 'finishup server use NAME' on the owner's own
-    # terminal; an HTTPS or port server only in a later release, so the other way on is local.
+    # A server elsewhere (SSH, HTTPS or a port, layer 5) is confirmed again with 'finishup server
+    # use NAME' on the owner's own terminal; the other way on is local.
     RecoveryDirective(
         token="server_reauthorization_required",
         directive=(
             "The selected FinishUP server was authorized under an older disclosure, so nothing "
             "was sent to it. Ask the owner to run 'finishup server use local', or 'finishup server "
-            "use NAME' on their own terminal (SSH), then start a new session."
+            "use NAME' on their own terminal, then start a new session."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never select or authorize a FinishUP server for the owner.",
@@ -947,8 +947,8 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="server_on_this_computer_required",
         directive=(
-            "This FinishUP release connects to servers on this computer and over SSH; HTTPS and "
-            "port servers arrive later, so nothing was added, selected or sent. Ask the owner to "
+            "This FinishUP release connects to servers on this computer, over SSH and over HTTPS; "
+            "that one is none of them, so nothing was added, selected or sent. Ask the owner to "
             "run 'finishup server use local', then repeat this request."
         ),
         guidance_uri=_WORKFLOW_ERRORS,
@@ -972,6 +972,19 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never fall back to another server or a local service for this request.",
+    ),
+    RecoveryDirective(
+        token="remote_direct_slow",
+        directive=(
+            "The selected server could not be reached in time in the direct style, where each "
+            "program opens its own connection: slow on a slow network. Ask the owner to run "
+            "'finishup server set NAME --style relay', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Never change the style or switch servers for the owner; 'finishup server test' shows "
+            "whether it is up and how slow."
+        ),
     ),
     RecoveryDirective(
         token="remote_credential_repair",

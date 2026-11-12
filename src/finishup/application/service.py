@@ -678,7 +678,11 @@ from finishup.application.publish_work import (  # noqa: E402
     PublishWorkInternalResult,
     execute_publish_work,
 )
-from finishup.application.receipt import ReceiptInternalResult, execute_receipt  # noqa: E402
+from finishup.application.receipt import (  # noqa: E402
+    EvidenceProvenanceSource,
+    ReceiptInternalResult,
+    execute_receipt,
+)
 from finishup.application.respond import RespondInternalResult, execute_respond  # noqa: E402
 from finishup.application.start import (  # noqa: E402
     StartInternalResult,
@@ -1132,6 +1136,13 @@ class Application:
     lineage_parent_refresh: Callable[[str], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    # ADR-054 (design v2 section 8.6): a claim-bound task's per-evidence provenance account, from
+    # a service that keeps copies of repositories (``application.receipt``'s
+    # ``EvidenceProvenanceSource``), asked once per receipt, new or replayed. ``None`` in every
+    # composition that keeps no copies: receipts are then exactly as before.
+    evidence_provenance: EvidenceProvenanceSource | None = field(
+        default=None, repr=False, compare=False
+    )
     # #1244 (D12): delivered page sets, in this process's memory only (never disk or ledger).
     delivery_pages: DeliveryPageStore = field(
         default_factory=DeliveryPageStore, repr=False, compare=False
@@ -1182,6 +1193,8 @@ class Application:
             raise TypeError("reconcile_observation_capture_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
+        if self.evidence_provenance is not None and not callable(self.evidence_provenance):
+            raise TypeError("evidence_provenance_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -2964,7 +2977,12 @@ class Application:
                             "writer_id": request.writer_id,
                         }
                     )
-                    internal = await read_recorded_receipt(runtime, receipt_request, operation)
+                    internal = await read_recorded_receipt(
+                        runtime,
+                        receipt_request,
+                        operation,
+                        evidence_provenance=self.evidence_provenance,
+                    )
         finally:
             await self.runtime.release(runtime)
         if method == "status":
@@ -3066,7 +3084,11 @@ class Application:
     ) -> ReceiptInternalResult:
         await self._require_repository_route(request, repository_privacy_context)
         await self._renew_activity_session(request.session_id, request)
-        return await execute_receipt(self, request)  # pyright: ignore[reportArgumentType]
+        return await execute_receipt(
+            self,  # pyright: ignore[reportArgumentType]
+            request,
+            evidence_provenance=self.evidence_provenance,
+        )
 
     async def import_codex_jsonl(
         self,
@@ -4092,6 +4114,11 @@ class ServiceReadyContext:
     lineage_parent_refresh: Callable[[str], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    # ADR-054: a claim-bound task's evidence account, from a service that keeps copies of
+    # repositories (``Application.evidence_provenance``); ``None`` when it keeps none.
+    evidence_provenance: EvidenceProvenanceSource | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -4131,6 +4158,8 @@ class ServiceReadyContext:
             self.reconcile_observation_capture
         ):
             raise TypeError("reconcile_observation_capture_invalid")
+        if self.evidence_provenance is not None and not callable(self.evidence_provenance):
+            raise TypeError("evidence_provenance_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -4205,6 +4234,7 @@ class ReadyApplicationFactory:
                 input_snapshot_scope=context.input_snapshot_scope,
                 conversation_review_reader=context.conversation_review_context,
                 lineage_parent_refresh=context.lineage_parent_refresh,
+                evidence_provenance=context.evidence_provenance,
             )
             if context.reconcile_started_egress_attempts is not None:
                 # Before any supervisor can admit a new physical attempt, so a live in-flight

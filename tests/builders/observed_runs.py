@@ -170,8 +170,12 @@ def command_identity_for(command: str) -> str:
 
 
 def _logical_key(payload: EventPayload, identifier: EventId) -> str | None:
-    if type(payload).__name__ in {"SessionOpenedPayload", "RedactionRecordedPayload"}:
-        # A session or redaction event projects no record of its own.
+    if type(payload).__name__ in {
+        "SessionOpenedPayload",
+        "RedactionRecordedPayload",
+        "ContentForgottenPayload",
+    }:
+        # A session, redaction or content-forgotten event projects no record of its own.
         return None
     if isinstance(payload, Finding | ResponseRecordedPayload):
         return str(payload.finding_id)

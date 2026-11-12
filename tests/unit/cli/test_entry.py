@@ -249,6 +249,57 @@ def test_service_status_fast_path_bounds_rendering_failure_without_retry(
     assert capsys.readouterr().err == "internal_error: the command could not be completed\n"
 
 
+def test_service_status_fast_path_names_an_escaped_cancellation_as_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A cancellation that escapes the run (no interrupt: that arrives as KeyboardInterrupt) is
+    a defect, named as one, exit 70; never printed as a traceback."""
+
+    import asyncio
+
+    async def connect(*_args: object, **_kwargs: object) -> object:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(client_module, "connect_service", connect)
+
+    assert (
+        entry._service_status_fast_path(["--json"])  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        == 70
+    )
+    assert capsys.readouterr().err == "internal_error: the command could not be completed\n"
+
+
+def test_the_full_cli_names_an_escaped_cancellation_as_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same for every command of the full CLI; any other BaseException keeps its course."""
+
+    import asyncio
+
+    import finishup.cli.app as cli_app
+
+    def cancelled(**_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(cli_app, "app", cancelled)
+    with pytest.raises(SystemExit) as raised:
+        cli_app.main()
+    assert raised.value.code == 70
+    err = capsys.readouterr().err
+    assert err.startswith("internal_error: the command could not be completed")
+    assert "Traceback" not in err
+
+    class _Other(BaseException):
+        pass
+
+    def other(**_kwargs: object) -> None:
+        raise _Other
+
+    monkeypatch.setattr(cli_app, "app", other)
+    with pytest.raises(_Other):
+        cli_app.main()
+
+
 def test_claude_observe_fast_path_forwards_profile_and_entry_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

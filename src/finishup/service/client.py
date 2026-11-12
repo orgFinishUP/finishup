@@ -23,7 +23,12 @@ from finishup.adapters.control.unix_socket import (
     LocalControlTransportError,
     connect_control,
 )
-from finishup.client.attribution import CONNECTION_TRANSPORTS, ConnectionTransport
+from finishup.client.attribution import (
+    CONNECTION_LEVELS,
+    CONNECTION_TRANSPORTS,
+    ConnectionLevel,
+    ConnectionTransport,
+)
 from finishup.config.env import canonical_env_name
 from finishup.config.paths import (
     ISOLATED_ROOT_ENV_NAMES,
@@ -89,7 +94,11 @@ from finishup.ports.privacy import (
     PrivacyReceiptView,
 )
 from finishup.ports.workspace_agent import outcome_for_reason
-from finishup.protocol.canonical import canonical_encode, parse_canonical_integer_string
+from finishup.protocol.canonical import (
+    canonical_encode,
+    parse_canonical_integer_string,
+    strict_json_parse,
+)
 from finishup.protocol.errors import (
     AUTHORIZATION_REFUSAL_PHASES,
     REMOTE_CONNECTION_PHASES,
@@ -136,6 +145,7 @@ from finishup.service.control_protocol import (
 )
 
 if TYPE_CHECKING:
+    from finishup.client.helper_status import HelperStamp
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
     from finishup.service.lifecycle import SingletonHolder
 
@@ -157,6 +167,7 @@ __all__ = [
     "connect_service_on_demand",
     "connect_service_via",
     "holder_version_order",
+    "newer_helper_build_holds_selection",
     "path_refusal_reason",
     "prepare_project_request",
     "service_holder_identity",
@@ -202,6 +213,8 @@ _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
 _CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
+# The packaged schema manifest's bound when the build installed now is read from its files.
+_INSTALLED_MANIFEST_MAX_BYTES: Final = 8_388_608
 # A listening service shown to be a different FinishUP installation (or generation) sharing the one
 # per-user endpoint: it answered with another manifest or protocol, or closed on this client's
 # hello while its singleton stamp names another identity (``_unanswered_hello``). Both reasons
@@ -473,6 +486,10 @@ class ClientWorkspaceBinding:
     # The worktree top level the claim was made for, on this computer only (never sent): what a
     # registration with the target's helper names (ADR-052, ``client.helper_registrations``).
     worktree: str | None = field(default=None, repr=False)
+    # The repository key the binding's hold is decided by (``client.repository_hold``), on this
+    # computer only: the target's helper binds a relayed connection to it (``helper_status``'s
+    # relay binding), never sent anywhere else.
+    repository_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
@@ -1200,6 +1217,7 @@ class ServiceClient(ControlClientPort):
         "_authorization",
         "_client_kind",
         "_closed",
+        "_consent_level",
         "_failure",
         "_last_project_request",
         "_pending",
@@ -1243,6 +1261,9 @@ class ServiceClient(ControlClientPort):
         self._stream = stream
         self._session = session
         self._transport: ConnectionTransport = transport
+        # The level the owner consented to for a server elsewhere (ADR-054); None when local or
+        # when the target records no consent. Set once the connection is admitted and made.
+        self._consent_level: ConnectionLevel | None = None
         self._client_kind = client_kind
         self._pid = os.getpid()
         self._closed = False
@@ -1399,6 +1420,16 @@ class ServiceClient(ControlClientPort):
         """
 
         return self._transport
+
+    @property
+    def consent_level(self) -> ConnectionLevel | None:
+        """The level this connection's server target was consented at (``L1`` or ``L2``,
+        ADR-054), read from the target record the connection was admitted under; None for a
+        local connection or a target that records no consent. Human renderings of a claim-bound
+        connection say, for ``L2``, that the server reads from its copy where it has one
+        (``finishup.client.attribution``)."""
+
+        return self._consent_level
 
     @property
     def last_project_request(self) -> PreparedProjectRequest | None:
@@ -2070,6 +2101,21 @@ class ServiceClient(ControlClientPort):
         except ProfileError:
             raise ControlError("frame_invalid") from None
 
+    async def code_copy(self, action: Literal["status", "forget"]) -> dict[str, object]:
+        """The server's copy of this connection's claimed repository (level L2, ADR-054):
+        ``status`` (what it holds, or null) or ``forget`` (exactly what was deleted)."""
+
+        if action not in {"status", "forget"}:
+            raise ValueError("code_copy_action_invalid")
+        body = await self._invoke(ControlMethod.CODE_COPY, JsonObject({"action": action}))
+        plain = strict_json_parse(canonical_encode(cast(JsonValue, body)))
+        if type(plain) is not dict:
+            raise ControlError("frame_invalid")
+        answer = cast(dict[str, object], plain)
+        if answer.get("action") != action:
+            raise ControlError("frame_invalid")
+        return answer
+
     async def lock(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_LOCK, JsonObject({})))
 
@@ -2301,6 +2347,19 @@ async def _connect_service_attempt(
     try:
         async with asyncio.timeout(timeout_seconds):
             stream = await (connect_control() if dial is None else _remote_dial(dial))
+            if (
+                transport == "connector"
+                and workspace_binding is not None
+                and workspace_binding.repository_key is not None
+            ):
+                # Through the target's helper: the repository this connection's own admission is
+                # bound to, on this local connection only (the helper binds its relay to it and
+                # never forwards it; ``client.helper_status``).
+                from finishup.client.helper_status import relay_binding
+
+                await stream.send_all(relay_binding(workspace_binding.repository_key))
+        if authorization is not None:
+            _bind_stream(stream, authorization)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
@@ -2374,11 +2433,29 @@ async def _connect_service_attempt(
             raise ControlError("service_unavailable", retryable=True) from exc
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
+        if transport != "unix" and exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
+            raise _remote_release_mismatch() from exc
         raise _protocol_error(exc) from exc
     except BaseException:
         if stream is not None:
             await _best_effort_close_stream(stream)
         raise
+
+
+def _bind_stream(stream: ControlStream, authorization: AuthorizationCheck) -> None:
+    """Bind a stream that sends on its own (a REST stream's retries, polls and registration) to
+    the connection's own authorization, its repository's hold included: once it refuses, the
+    stream sends nothing more, not only when the client next writes a frame. An open connection
+    ends ``server_authorization_changed`` whatever the refusal names."""
+
+    bind = getattr(stream, "bind", None)
+    if not callable(bind):
+        return
+
+    def refusal() -> str | None:
+        return None if authorization.refusal() is None else "server_authorization_changed"
+
+    bind(refusal)
 
 
 async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlStream:
@@ -2417,6 +2494,14 @@ async def _remote_end_phase(stream: ControlStream | None, deadline: float) -> st
         async with asyncio.timeout(remaining):
             phase = await failure_phase()
     except TimeoutError:
+        return None
+    except asyncio.CancelledError:
+        # A cancellation the stream's own task raised (a close ended its reader) is not this
+        # caller's: it names nothing, so the answer the connection already has (a refusal the
+        # hello named) stays the answer. Only a cancellation of this task leaves as one.
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
         return None
     except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
         return None
@@ -2482,6 +2567,8 @@ class _RemoteAdmission:
     workspace_binding: ClientWorkspaceBinding | None
     target_id: str = ""
     kind: str = ""
+    # The level the target record's consent names (ADR-054), or None when it records none.
+    level: ConnectionLevel | None = None
 
 
 async def _admit_remote(
@@ -2519,6 +2606,10 @@ async def _admit_remote(
         return None
     if record is None or not record.is_remote:
         return None
+    consent = record.consent
+    level: ConnectionLevel | None = (
+        consent.level if consent is not None and consent.level in CONNECTION_LEVELS else None
+    )
     from finishup.client.authorization import authorize_active_root
 
     try:
@@ -2536,9 +2627,9 @@ async def _admit_remote(
             check = bind_prebuilt_check(authorization, workspace_binding.authorization)
         except TargetError as error:
             raise _remote_target_refusal(error) from None
-        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind)
+        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind, level)
     if workspace_locator is None:
-        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
     from finishup.adapters.workspace_binding import canonical_workspace_locator
     from finishup.adapters.workspace_root import RepositoryIdentityError
     from finishup.client.remote_binding import binding_for_active_root
@@ -2553,15 +2644,37 @@ async def _admit_remote(
             workspace_locator, serve_workspace=serve_workspace, authorization=authorization
         )
     except RepositoryIdentityError:
-        return _RemoteAdmission(authorization, None, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
     except TargetError as error:
         raise _remote_target_refusal(error) from None
     if binding is None or binding.authorization is None:
-        return _RemoteAdmission(authorization, binding, record.target_id, record.kind)
-    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind)
+        return _RemoteAdmission(authorization, binding, record.target_id, record.kind, level)
+    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind, level)
 
 
 async def _connect_remote(
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """Reach an admitted server elsewhere (``_reach_remote``), the connection carrying the level
+    its target was consented at (``ServiceClient.consent_level``, ADR-054)."""
+
+    client = await _reach_remote(
+        admission,
+        client_kind,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        deadline=deadline,
+    )
+    client._consent_level = admission.level  # pyright: ignore[reportPrivateUsage]
+    return client
+
+
+async def _reach_remote(
     admission: _RemoteAdmission,
     client_kind: ControlClientKind,
     *,
@@ -2578,9 +2691,9 @@ async def _connect_remote(
     leaves the marker that asks the helper to fetch the profile again; never a fetch here.
     """
 
-    if admission.kind != "ssh":
-        # No transport exists for this kind in this release (the gate refuses it first); a test
-        # that opens one in process dials the target root's own endpoint, as layer 3 did.
+    if admission.kind != "ssh" and admission.kind not in _REST_KINDS:
+        # No transport exists for this kind (the gate refuses it first); a test that opens one in
+        # process without a server dials the target root's own endpoint, as layer 3 did.
         return await _connect_service_attempt(
             client_kind,
             workspace_locator=None,
@@ -2590,12 +2703,29 @@ async def _connect_remote(
             workspace_binding=admission.workspace_binding,
             authorization=admission.authorization,
         )
-    from finishup.client.helper_status import read_connection_style, request_profile_refresh
+    from finishup.client.helper_status import (
+        read_connection_style,
+        read_helper_epoch,
+        request_profile_refresh,
+    )
     from finishup.client.targets import target_root
 
     root = target_root(admission.target_id)
     style = read_connection_style(root)
+    # The target's stop epoch before any dial: every helper this attempt starts carries it, so a
+    # stop made meanwhile (``server use``, ``disconnect``, ``remove``, a zero-network policy)
+    # fences it before it serves anything or reaches the server (``helper_status.start_fenced``).
+    epoch = read_helper_epoch(root)
     try:
+        if style == "direct" and admission.kind in _REST_KINDS:
+            return await _connect_direct_rest(
+                root,
+                admission,
+                client_kind,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+                deadline=deadline,
+            )
         if style == "direct":
             return await _connect_direct(
                 root,
@@ -2612,11 +2742,131 @@ async def _connect_remote(
             projection_render_mode=projection_render_mode,
             output_is_controlling_tty=output_is_controlling_tty,
             deadline=deadline,
+            epoch=epoch,
         )
     except ControlError as error:
         if error.phase == "server_profile_changed":
             request_profile_refresh(root, _server_profile_of(admission.authorization))
+            if style == "direct":
+                _start_helper_to_refresh(root, admission, epoch)
+        if error.reason == "service_unavailable" and error.phase is None:
+            # A server elsewhere's outage always names its phase (design v2 section 8.9: hooks
+            # fail open with the reason): a direct stream that did not answer within the
+            # deadline is ``remote_unreachable``, as through the helper, never the local
+            # service's hint.
+            raise ControlError(
+                "service_unavailable",
+                retryable=True,
+                phase="remote_unreachable",
+                correlation_id=error.correlation_id,
+            ) from error
         raise
+
+
+def _remote_release_mismatch() -> ControlError:
+    """A server elsewhere answered with another schema manifest or protocol.
+
+    Self-hosted servers keep release lockstep with their clients (U18): the server's owner
+    upgrades it (``remote_incompatible``); no service of this computer is involved, so the
+    local ``service restart`` remedy is never named. Unless this process is the stale one: a
+    newer build of this release now runs the target's helper (this process predates an
+    in-place upgrade), which ``service_incompatible`` names (the bridge asks to reopen).
+    """
+
+    if newer_helper_build_holds_selection():
+        return ControlError("service_incompatible", retryable=True)
+    return ControlError("service_unavailable", retryable=True, phase="remote_incompatible")
+
+
+def _installed_manifest_digest() -> str | None:
+    """The schema-manifest digest of the build installed now, read from the installation's files.
+
+    Never this process's own (cached) digest: a process that runs a retained copy of its runtime
+    (an MCP bridge or a hook after an in-place upgrade, ``adapters.release_runtime``) reads the
+    installation it was copied from, and any other process reads its package's files again. The
+    package manager's files are the durable order of two builds of one version: the one
+    installed now is the newer, whatever process started when. ``None`` when it cannot be read.
+    """
+
+    import hashlib
+
+    import finishup
+    from finishup.adapters.release_runtime import installation_prefix
+
+    try:
+        manifest = Path(finishup.__file__).resolve().parent / "resources" / "schemas"
+        manifest /= "manifest.json"
+        here = Path(sys.prefix).resolve()
+        origin = installation_prefix()
+        if origin.resolve() != here:
+            # A retained runtime: the same package path beneath the installation it copies.
+            manifest = origin / manifest.relative_to(here)
+        with manifest.open("rb") as handle:
+            data = handle.read(_INSTALLED_MANIFEST_MAX_BYTES + 1)
+    except (OSError, ValueError):  # a ``ReleaseRuntimeError`` too: no order can be read
+        return None
+    if len(data) > _INSTALLED_MANIFEST_MAX_BYTES:
+        return None
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _stale_against_helper(holder: HelperStamp) -> bool:
+    """Whether this process must never replace ``holder``, a live helper of this release but
+    another build: this process is not the build installed now (it predates an in-place upgrade,
+    a retained runtime), or which build is installed cannot be read. Reads only.
+
+    The order is the installation's (``_installed_manifest_digest``), never a process start
+    time: a retained older bridge that starts its own helper after a newer process started (at a
+    helper's idle exit) is still the older build, and the newer one replaces that helper.
+    """
+
+    if holder.version != __version__:
+        return False
+    own = _manifest_digest_for_client()
+    return holder.schema_manifest_digest != own and _installed_manifest_digest() != own
+
+
+def newer_helper_build_holds_selection() -> bool:
+    """Whether the selected server elsewhere's helper is of this release but another build, and
+    this process is not the build installed now (``_stale_against_helper``): this process is the
+    stale one (it predates an in-place upgrade). For the MCP bridge's remedy text."""
+
+    from finishup.client.helper_status import helper_holder
+
+    root = _remote_target_root()
+    if root is None:
+        return False
+    try:
+        holder = helper_holder(root)
+        return holder is not None and _stale_against_helper(holder)
+    except Exception:  # noqa: BLE001 - a helper that cannot be read is not newer
+        return False
+
+
+def _start_helper_to_refresh(root: Path, admission: _RemoteAdmission, epoch: str) -> None:
+    """Start the target's helper so it fetches the server's profile again (never on this path).
+
+    The relay style's refusal came through the running helper, which takes the marker. The
+    direct style has no helper on its path, and none may run (no registration started one): the
+    marker alone would wait, ``server status`` would go on calling the consent current, and a
+    narrowed profile would never be adjusted. The helper is client-owned and vault-less and does
+    the fetch itself, detached (design v2 section 8.9: no profile refresh on a hook's path).
+
+    Only while the admission this request was made under still holds (a ``server use`` of
+    another server, a ``logout`` or a ``remove`` meanwhile starts nothing), and with the stop
+    epoch read before the dial (``epoch``): a stop since then fences the helper before it
+    reaches the server. Never raises.
+    """
+
+    from finishup.client.helper_status import helper_holder, spawn_helper
+
+    try:
+        if admission.authorization.refusal() is not None:
+            return
+        if helper_holder(root) is None:
+            spawn_helper(root, admission.target_id, epoch=epoch)
+    except OSError:
+        return
 
 
 def _remaining(deadline: float) -> float:
@@ -2711,6 +2961,74 @@ async def _connect_direct(
     return await attempt()
 
 
+# The kinds reached over REST v1 (ADR-053): through the target's helper (the relay style, the
+# default) or this process's own REST stream (the direct style). A unit test that opens one of
+# them in process without a server empties this (``builders.server_targets.open_remote_kinds``),
+# so its connection dials the target root's own endpoint as before.
+_REST_KINDS: frozenset[str] = frozenset({"https", "local_port"})
+
+
+async def _connect_direct_rest(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The direct style over HTTPS: this process's own REST stream (ADR-053).
+
+    This process reads the target's API key itself (off its event loop, within the deadline;
+    the disclosure says each dialing process does) and maps its control frames to REST v1
+    (``client.rest_stream``). The admission was checked before this dial and is checked before
+    every frame and on its watch, as for any connection; the stream sends nothing more once it
+    refuses.
+    """
+
+    from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
+    from finishup.client.rest_stream import RestControlStream
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        record = None
+    if record is None or record.target_id != admission.target_id:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="server_authorization_changed"
+        )
+    try:
+        key = await load_key(record.target_id, seconds=min(10.0, _remaining(deadline)))
+    except RestUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+    authorization = admission.authorization
+
+    def may_send() -> bool:
+        return authorization.refusal() is None
+
+    async def dial() -> ControlStream:
+        try:
+            # Bound to the consented identity: a CA file replaced since is refused before the
+            # key is sent (``remote_identity_changed``).
+            transport = RestTransport.for_target(record, key=key, consented=True)
+        except RestUnavailable as error:
+            raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+        return RestControlStream(transport, may_send=may_send, owns_transport=True)
+
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=None,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+        workspace_binding=admission.workspace_binding,
+        authorization=authorization,
+        dial=dial,
+        transport="https",
+    )
+
+
 def _helper_failure(root: Path, before: object) -> ControlError | None:
     """The phase the helper recorded for this attempt's failure, if it recorded one meanwhile."""
 
@@ -2742,24 +3060,37 @@ async def _connect_through_helper(
     projection_render_mode: ProjectionRenderMode,
     output_is_controlling_tty: bool,
     deadline: float,
+    epoch: str | None = None,
 ) -> ServiceClient:
     """The relay style: the target's helper serves ``<root>/run/control.sock``.
 
     The helper is client-owned and vault-less, so starting one is always safe: when nothing
-    answers, one is started (never a service), and a helper left by an older release of this
-    client is replaced through the target's stop epoch (never a newer one). A helper ending at its
-    idle exit is followed by a successor; any other stop (a ``server use``, ``disconnect``,
-    ``remove``, a zero-network policy) stays a stop (A-HANDOFF). A failure the helper names (a remote phase)
-    ends the wait at once; every ``service_unavailable`` raised here names a remote phase.
+    answers, one is started (never a service), and a helper left by an older release or build of
+    this client is replaced through the target's stop epoch (never a newer one, and only by the
+    build installed now: ``_stale_against_helper``). The replacement is fenced to the helper it
+    decided about (``helper_status.supersede_helper``): one that took the target meanwhile is
+    decided about again, never stopped blind. A helper that holds the lock but has not stamped
+    it yet is unknown: it is waited for within the deadline, never stopped and never doubled. A
+    helper ending at its idle exit is followed by a successor; any other stop (a ``server use``,
+    ``disconnect``, ``remove``, a zero-network policy) stays a stop (A-HANDOFF): every helper
+    started here carries ``epoch`` (the stop epoch read before the first dial, or the one this
+    client's own replacement wrote), and only while the admission still holds. A failure the
+    helper names (a remote phase) ends the wait at once; every ``service_unavailable`` raised
+    here names a remote phase.
     """
 
     from finishup.client.helper_status import (
+        HelperHolderChanged,
         helper_holder,
+        helper_lock_held,
+        read_helper_epoch,
         read_helper_status,
         spawn_helper,
-        stop_helper,
+        supersede_helper,
     )
 
+    if epoch is None:
+        epoch = read_helper_epoch(root)
     before = read_helper_status(root)
 
     def idle_exit_finished() -> bool:
@@ -2793,6 +3124,67 @@ async def _connect_through_helper(
             correlation_id=error.correlation_id,
         )
 
+    def spawn() -> None:
+        # The admission this attempt was made under, again: a ``server use`` of another server,
+        # a ``logout`` or a ``remove`` since starts nothing (the helper's own admission is not
+        # bound to the selection).
+        phase = admission.authorization.refusal()
+        if phase is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=phase)
+        try:
+            spawn_helper(root, admission.target_id, epoch=epoch)
+        except FileNotFoundError:
+            # The target's folder is gone (``server remove``): nothing is made again.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            ) from None
+        except OSError:
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="remote_unreachable"
+            ) from None
+
+    spawned = False
+    awaiting_stamp = False
+
+    async def settle() -> None:
+        """Replace a helper of an older release or build, start one when none holds the target,
+        or note that the holder has not stamped the lock yet (``awaiting_stamp``)."""
+
+        nonlocal awaiting_stamp, epoch, spawned
+        holder = helper_holder(root)
+        while (
+            holder is not None
+            and (
+                holder.version != __version__
+                or holder.schema_manifest_digest != _manifest_digest_for_client()
+            )
+            and holder_version_order(holder.version) != "newer"
+        ):
+            if _stale_against_helper(holder):
+                # Another build of this same release, and this process is not the build
+                # installed now: it predates an in-place upgrade (a retained runtime). It never
+                # replaces that helper; its owner reopens the session (the bridge names that).
+                raise ControlError("service_incompatible", retryable=True)
+            # A helper left by an older release or build of this client (an in-place upgrade)
+            # is client-owned: stop exactly that one (its stop epoch moves; no pid is
+            # signalled), then start this build's. One a newer release started is never
+            # replaced from here.
+            try:
+                written = await asyncio.to_thread(
+                    supersede_helper, root, holder, timeout_seconds=_remaining(deadline)
+                )
+            except HelperHolderChanged:
+                holder = helper_holder(root)
+                continue
+            if written is None:
+                raise named(ControlError("service_unavailable", retryable=True))
+            epoch = written
+            holder = helper_holder(root)
+        awaiting_stamp = holder is None and helper_lock_held(root) is True
+        if holder is None and not awaiting_stamp:
+            spawn()
+            spawned = True
+
     try:
         return await attempt()
     except _AcceptedServiceUnresponsive as error:
@@ -2804,45 +3196,17 @@ async def _connect_through_helper(
         if recorded is not None and recorded.phase != "remote_unreachable":
             # The running helper read this hello and named why it could not carry it.
             raise recorded from error
-    holder = helper_holder(root)
-    if (
-        holder is not None
-        and (
-            holder.version != __version__
-            or holder.schema_manifest_digest != _manifest_digest_for_client()
-        )
-        and holder_version_order(holder.version) != "newer"
-    ):
-        # A helper left by an older release of this client (an in-place upgrade) is client-owned:
-        # stop it (its stop epoch moves; no pid is signalled), then start this release's. One a
-        # newer release started is never replaced from here.
-        if not await asyncio.to_thread(stop_helper, root, timeout_seconds=_remaining(deadline)):
-            raise named(ControlError("service_unavailable", retryable=True))
-        holder = None
-    spawned = False
-    if holder is None:
-        try:
-            spawn_helper(root, admission.target_id)
-        except FileNotFoundError:
-            # The target's folder is gone (``server remove``): nothing is made again.
-            raise ControlError(
-                "service_unavailable", retryable=True, phase="server_authorization_changed"
-            ) from None
-        except OSError:
-            raise ControlError(
-                "service_unavailable", retryable=True, phase="remote_unreachable"
-            ) from None
-        spawned = True
+    await settle()
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        if not spawned and idle_exit_finished():
+        if awaiting_stamp:
+            # A helper took the lock without a stamp yet: decide once its identity is known.
+            await settle()
+        elif not spawned and idle_exit_finished():
             # The helper that held the target was ending at its idle exit: start its successor
             # now instead of waiting on an endpoint nothing will serve again.
-            try:
-                spawn_helper(root, admission.target_id)
-            except OSError:
-                break
+            spawn()
             spawned = True
         recorded = _helper_failure(root, before)
         if recorded is not None and recorded.phase not in {None, "remote_unreachable"}:

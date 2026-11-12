@@ -211,11 +211,14 @@ A remote server target adds a network edge in front of the ordinary control chan
 is only as strong as its credential. An SSH target (open since layer 4, ADR-052) is
 owner-equivalent: anyone who can log in to the server as the service owner can already reach these
 endpoints, and OpenSSH, not FinishUP, holds and reads the key (in the target's helper for the relay
-style, in each dialing process for the direct style); FinishUP never stores an SSH key. An HTTPS key
-(layer 5) will be a bearer credential limited to its scope's methods; anyone holding it can use
-those methods until it is revoked. On the client, software running as the same account can read a
-stored server key, as it can read any owner-only file. This release stores no server key:
-`finishup server login` is refused while HTTPS and port servers are closed.
+style, in each dialing process for the direct style); FinishUP never stores an SSH key. An HTTPS
+API key (open since layer 5, ADR-053) is a bearer credential limited to its scope's methods;
+anyone holding it can use those methods until it is revoked or expires. On the server, keys are
+kept only as salted hashes; the default gateway edge holds no vault and reaches these endpoints
+as an ordinary same-user control client, while the native edge puts the vault-holding service on
+the network at its owner's choice. On the client, software running as the same account can read a
+stored server key, as it can read any owner-only file; in the relay style only the target's helper
+reads it, in the direct style every dialing process does.
 
 ## Headless and native-vault status
 

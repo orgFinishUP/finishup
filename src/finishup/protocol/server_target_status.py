@@ -285,7 +285,10 @@ class ServerTargetProbe(BaseModel):
     server) or ``zero_network_in_force`` (any other server elsewhere), and ``last_reported_at``
     is when this computer reported that policy, as ``server login``, ``connect`` and ``test``
     say. ``last_reported_at`` is set exactly for ``not_probed`` (amended in place, 2026-11-07,
-    as 1.0.0 is unreleased).
+    as 1.0.0 is unreleased). ``continuation`` (amended in place, 2026-11-11) is the registered
+    way back of a probe that a server elsewhere did not answer: its phase's own continuation, or
+    ``remote_direct_slow`` for a target reached in the direct style that did not answer in time
+    (the owner's WAN-gate decision); ``null`` otherwise.
     """
 
     model_config = ConfigDict(
@@ -318,6 +321,8 @@ class ServerTargetProbe(BaseModel):
     samples: int = Field(ge=0)
     # Set exactly when ``outcome`` is ``not_probed``.
     last_reported_at: Timestamp | None
+    # The registered continuation of a failed probe of a server elsewhere (see the class text).
+    continuation: Token | None
 
     @model_validator(mode="after")
     def _reported_time_matches_the_outcome(self) -> "ServerTargetProbe":

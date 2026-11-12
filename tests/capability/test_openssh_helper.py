@@ -357,7 +357,9 @@ def test_the_helper_relays_a_session_through_the_real_forward(
             relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
             try:
                 async with asyncio.timeout(60):
-                    received = await run_scripted_session(client, server_profile=TEST_REVISION)
+                    received = await run_scripted_session(
+                        client, server_profile=TEST_REVISION, relay=True
+                    )
                     await client.shutdown_write()
                     await relay
                 mode = (root / "run" / "upstream.sock").stat().st_mode & 0o777
@@ -411,7 +413,9 @@ def test_a_target_root_and_an_endpoint_with_spaces_work_as_on_macos(
                 relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
                 try:
                     async with asyncio.timeout(60):
-                        relayed = await run_scripted_session(client, server_profile=TEST_REVISION)
+                        relayed = await run_scripted_session(
+                            client, server_profile=TEST_REVISION, relay=True
+                        )
                         await client.shutdown_write()
                         await asyncio.wait((relay,), timeout=60)
                 finally:
@@ -524,7 +528,7 @@ def test_a_rotated_host_key_is_refused_before_any_hello_until_the_owner_agrees_a
                 async with asyncio.timeout(60):
                     try:
                         received: list[bytes] | bytes = await run_scripted_session(
-                            client, server_profile=TEST_REVISION
+                            client, server_profile=TEST_REVISION, relay=True
                         )
                     except Exception:  # noqa: BLE001 - the relay closed the hello unanswered
                         received = b""

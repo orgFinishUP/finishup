@@ -46,6 +46,7 @@ from finishup.ports.subject_state import (
     SubjectStateStatus,
 )
 from finishup.ports.workspace_agent import (
+    MAX_CODE_SYNC_CHUNK_BYTES,
     MAX_WORKSPACE_FRAME_BYTES,
     MAX_WORKSPACE_PAYLOAD_BYTES,
     WORKSPACE_FAILURE_REASONS,
@@ -60,6 +61,9 @@ from finishup.ports.workspace_agent import (
     CaptureMetadataArguments,
     CheckPolicyRead,
     ClassifyUndeclaredReferencesArguments,
+    CodeSyncPrepareArguments,
+    CodeSyncPrepared,
+    CodeSyncReadArguments,
     CountChangeLinesArguments,
     InspectArguments,
     ListBeneathArguments,
@@ -94,6 +98,11 @@ from finishup.ports.workspace_inspect import (
     WorkspaceInspectStatus,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from finishup.protocol.server_copy import (
+    COMPLETENESS_COUNTS,
+    COMPLETENESS_LISTS,
+    SnapshotManifest,
+)
 
 _HANDLE = "client:0123456789abcdef"
 _REMOTE = "rws_" + "a" * 32
@@ -152,6 +161,31 @@ def _check_result(output: bytes | None) -> ApprovedCheckResult:
             status, outcome, exit_status, digest, size, _SHA_A, commitment, 1234
         ),
         duration_ms=1234,
+    )
+
+
+def _snapshot_manifest() -> SnapshotManifest:
+    return SnapshotManifest(
+        snapshot="1" * 40,
+        base="2" * 40,
+        tree="3" * 40,
+        base_tree="4" * 40,
+        original_base_format="sha1",
+        original_base="5" * 40,
+        export_id="6" * 32,
+        worktree=_SHA_A,
+        policy=_SHA_B,
+        lists={name: () for name in COMPLETENESS_LISTS} | {"held_for_content": ("cfg/a.ini",)},
+        more=dict.fromkeys(COMPLETENESS_LISTS, 0),
+        counts=dict.fromkeys(COMPLETENESS_COUNTS, 0),
+        subject_state=None,
+        issuer="e" * 32,
+        revision=3,
+        profile_digest=_SHA_A,
+        purpose="check",
+        synced_at="2026-11-10T08:00:00.000Z",
+        files=2,
+        bytes=10,
     )
 
 
@@ -220,9 +254,23 @@ _ARGUMENTS: dict[WorkspaceOperation, tuple[object, ...]] = {
         RunApprovedCheckArguments(_REMOTE, _approval(), _SHA_A, None),
         RunApprovedCheckArguments(_REMOTE, _approval(2.5555), _SHA_A, _SHA_B),
     ),
+    WorkspaceOperation.CODE_SYNC_PREPARE: (
+        CodeSyncPrepareArguments(_HANDLE, "base", (), None, "e" * 32, 3, _SHA_A),
+        CodeSyncPrepareArguments(
+            _HANDLE, "check", ("1" * 40, "2" * 40), "d" * 64, "e" * 32, 3, _SHA_A
+        ),
+    ),
+    WorkspaceOperation.CODE_SYNC_READ: (
+        CodeSyncReadArguments(_HANDLE, "f" * 32, 0, MAX_CODE_SYNC_CHUNK_BYTES),
+    ),
 }
 
 _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
+    WorkspaceOperation.CODE_SYNC_PREPARE: (
+        CodeSyncPrepared(False, "f" * 32, _snapshot_manifest(), 1_234, _SHA_A, "days", 7),
+        CodeSyncPrepared(True, None, _snapshot_manifest(), 0, None, "until_forgotten", None),
+    ),
+    WorkspaceOperation.CODE_SYNC_READ: (b"# v2 git bundle\n", bytes(range(256))),
     WorkspaceOperation.READ_TASK_BASE: (_base(), TaskChangeBase("sha256", "d" * 64)),
     WorkspaceOperation.CAPTURE: (
         CheckChangeCapture(
@@ -307,6 +355,8 @@ _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
         ),
         OutsideInputsRead((), (0, 2)),
         OutsideInputsRead(()),
+        # ADR-052 O7: values a held repository's fence kept unread, counted.
+        OutsideInputsRead((), (1,), (), 3),
     ),
     WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS: (
         OutsideSnapshotsRead(
@@ -320,6 +370,7 @@ _RESULTS: dict[WorkspaceOperation, tuple[object, ...]] = {
             (1,),
         ),
         OutsideSnapshotsRead(()),
+        OutsideSnapshotsRead((), (), (0,), 4_096),
     ),
     WorkspaceOperation.READ_DECLARED_TEST: (b"def test_x():\n    assert True\n", None),
     WorkspaceOperation.READ_TEXT_BENEATH: ((b"abc\x00\xff", 5), (b"", 2_000_000), None),
@@ -383,8 +434,8 @@ def _through_wire(value: JsonValue) -> JsonValue:
 # --- the catalog's shape ------------------------------------------------------------------
 
 
-def test_the_catalog_holds_exactly_the_eighteen_operations_in_three_families() -> None:
-    assert len(WorkspaceOperation) == 18
+def test_the_catalog_holds_exactly_the_twenty_operations_in_four_families() -> None:
+    assert len(WorkspaceOperation) == 20
     assert set(WORKSPACE_OPERATION_CATALOG) == set(WorkspaceOperation)
     assert WORKSPACE_OPERATION_NAMES == tuple(
         sorted((operation.value for operation in WorkspaceOperation), key=str.encode)
@@ -417,6 +468,8 @@ def test_the_catalog_holds_exactly_the_eighteen_operations_in_three_families() -
             "inspect",
             "run_approved_check",
         },
+        # Level L2's sync (ADR-054), answered only by the helper's background agent.
+        "copy": {"code_sync_prepare", "code_sync_read"},
     }
     for spec in WORKSPACE_OPERATION_CATALOG.values():
         assert 1 <= spec.max_argument_bytes <= MAX_WORKSPACE_PAYLOAD_BYTES
@@ -539,6 +592,45 @@ def test_a_wrong_typed_task_input_field_is_a_refused_result(name: str, value: ob
     with pytest.raises(WorkspaceCodecError) as refused:
         spec.decode_result(encoded)
     assert refused.value.reason == "result_invalid"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [WorkspaceOperation.READ_OUTSIDE_INPUTS, WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS],
+)
+@pytest.mark.parametrize("fenced", [-1, 4_097, True, "1", 1.0, None, "missing"])
+def test_an_outside_read_needs_its_fenced_count_within_bounds(
+    operation: WorkspaceOperation, fenced: object
+) -> None:
+    """ADR-052 O7: ``fenced`` is required on the wire (control 2.10.0 is unreleased and changes
+    in lockstep, so no older agent's answer is admitted without it) and bounded by the call's
+    value bound; anything else is an untrusted reply refused as ``result_invalid``."""
+
+    spec = WORKSPACE_OPERATION_CATALOG[operation]
+    value = (
+        OutsideInputsRead((), (), (), 2)
+        if operation is WorkspaceOperation.READ_OUTSIDE_INPUTS
+        else OutsideSnapshotsRead((), (), (), 2)
+    )
+    encoded = cast(dict[str, Any], strict_json_parse(canonical_encode(spec.encode_result(value))))
+    assert encoded["fenced"] == 2
+    assert spec.decode_result(encoded) == value
+    if fenced == "missing":
+        del encoded["fenced"]
+    else:
+        encoded["fenced"] = fenced
+    with pytest.raises(WorkspaceCodecError) as refused:
+        spec.decode_result(encoded)
+    assert refused.value.reason == "result_invalid"
+    # The service side never sends one either.
+    if type(fenced) is int:
+        bad = (
+            OutsideInputsRead((), (), (), fenced)
+            if operation is WorkspaceOperation.READ_OUTSIDE_INPUTS
+            else OutsideSnapshotsRead((), (), (), fenced)
+        )
+        with pytest.raises(WorkspaceCodecError):
+            spec.encode_result(bad)
 
 
 def test_the_approved_check_timeout_is_the_exact_float() -> None:

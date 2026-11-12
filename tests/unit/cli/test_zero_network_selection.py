@@ -594,11 +594,13 @@ def test_remote_add_and_use_are_closed_before_this_computers_policy_is_asked(
     command: str,
     state: str,
 ) -> None:
-    """HTTPS and port servers are closed in this release: ``server add`` and ``server use``
-    refuse one with ``remote_kind_unavailable`` before the zero-network check, so this computer's
-    policy is never asked and no console opens, whether it is zero-network (live or last
-    reported), cannot be read, or permits network use. (SSH is open: its zero-network refusal is
-    ``tests/unit/cli/test_server_ssh_add.py``.)"""
+    """A closed kind (HTTPS, closed in this process: every kind is open from layer 5): ``server
+    add`` and ``server use`` refuse it with ``remote_kind_unavailable`` before the zero-network
+    check, so this computer's policy is never asked and no console opens, whether it is
+    zero-network (live or last reported), cannot be read, or permits network use. (The open kinds'
+    zero-network refusals are in ``test_server_ssh_add.py`` and ``test_server_https_add.py``.)"""
+
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
 
     if command == "use":
         _remote("https", select=False)

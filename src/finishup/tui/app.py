@@ -3232,9 +3232,10 @@ class FinishUpTui(App[int]):
                 name="server-add",
                 title="Add a server",
                 body=(
-                    "Add an SSH server with 'finishup server add NAME ssh://USER@HOST' in a "
-                    "terminal (OpenSSH may ask about its host key there); HTTPS and port servers "
-                    "arrive in a later release.",
+                    "Add an SSH server with 'finishup server add NAME ssh://USER@HOST' or an "
+                    "HTTPS server with 'finishup server add NAME https://HOST' in a terminal "
+                    "(OpenSSH may ask about its host key there; an HTTPS server asks for its API "
+                    "key there).",
                 ),
                 options=(
                     Option(

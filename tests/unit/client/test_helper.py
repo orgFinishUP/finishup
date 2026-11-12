@@ -13,17 +13,21 @@ import asyncio
 import shutil
 import socket
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from builders.control_relay import (
+    RELAY_KEY,
     MemoryStream,
     ScriptedDaemon,
     call_request,
     hello_frame,
     memory_pair,
+    relay_binding_frame,
     run_scripted_session,
 )
 from builders.server_profiles import TEST_REVISION
@@ -51,6 +55,7 @@ class FakeUpstream:
         self.started = 0
         self.not_running = False
         self.closed = False
+        self.close_seconds: float | None = None
         self.zero = False
 
     async def ensure(self) -> None:
@@ -71,8 +76,9 @@ class FakeUpstream:
         self.not_running = False
         return True
 
-    async def close(self) -> None:
+    async def close(self, seconds: float | None = None) -> None:
         self.closed = True
+        self.close_seconds = seconds
 
     async def zero_network(self) -> None:
         self.zero = True
@@ -127,6 +133,42 @@ def _helper(record: ServerTarget, root: Path, upstream: FakeUpstream, **options:
     return Helper(root, record, **arguments)  # type: ignore[arg-type]
 
 
+def test_a_relayed_frame_is_never_forwarded_once_the_relays_repository_is_held(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """B3: every frame a relay forwards is checked against the repository its client named, by
+    that repository's key: once it is held (whatever worktrees the record lists) the relay ends
+    before the frame leaves; the helper's admission is untouched."""
+
+    from finishup.client.everyday_policy import record_repository_report
+
+    record, root = ssh_target
+
+    async def relayed() -> tuple[ScriptedDaemon, bytes, bool]:
+        daemon = ScriptedDaemon()
+        upstream = FakeUpstream(daemon)
+        helper = _helper(record, root, upstream)
+        client, local = _pair()
+        relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
+        try:
+            async with asyncio.timeout(10):
+                await client.send_all(relay_binding_frame())
+                await client.send_all(hello_frame(agent=True, server_profile=TEST_REVISION))
+                assert await client.receive(65_536)  # the hello-result
+                assert record_repository_report(RELAY_KEY, "/work/elsewhere", no_network=True)
+                await client.send_all(encode_control_frame(call_request(1, ControlMethod.START)))
+                await relay
+                ended = await client.receive(65_536)
+            return daemon, ended, helper._admitted() is not None  # pyright: ignore[reportPrivateUsage]
+        finally:
+            await client.aclose()
+
+    daemon, ended, admitted = asyncio.run(relayed())
+    assert ended == b""
+    assert len(daemon.received(0)) == 1  # the hello only: the call never left
+    assert admitted
+
+
 def test_a_relayed_session_reaches_the_server_byte_for_byte(
     ssh_target: tuple[ServerTarget, Path],
 ) -> None:
@@ -148,7 +190,7 @@ def test_a_relayed_session_reaches_the_server_byte_for_byte(
         client, local = _pair()
         relay = asyncio.create_task(helper._serve_local(local))  # pyright: ignore[reportPrivateUsage]
         async with asyncio.timeout(10):
-            received = await run_scripted_session(client, server_profile=TEST_REVISION)
+            received = await run_scripted_session(client, server_profile=TEST_REVISION, relay=True)
             await client.shutdown_write()
             await relay
         await client.aclose()
@@ -922,6 +964,51 @@ def test_a_helper_spawned_before_a_stop_serves_nothing_once_it_starts(
     assert stop_helper(root, timeout_seconds=0.2) is True
 
 
+def test_a_helper_takes_the_lock_and_reads_the_epoch_under_the_epoch_fence(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3: a client replacing the helper it saw (``supersede_helper``) checks the holder and
+    moves the epoch under the same fence, so it either sees this helper holding the target (and
+    decides again) or moved the epoch first (this start is fenced); it never stops a helper that
+    took the target after its decision."""
+
+    import contextlib
+
+    from finishup.client import helper as helper_module
+    from finishup.client.helper import run_helper_process
+    from finishup.client.helper_status import helper_holder, read_helper_epoch
+    from finishup.config.paths import selection_override
+
+    record, root = ssh_target
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fence(path: Path) -> Generator[None]:
+        assert path == root
+        events.append("enter")
+        yield
+        events.append("lock held" if helper_holder(root) is not None else "lock free")
+        events.append("exit")
+
+    def epoch_read(path: Path) -> str:
+        events.append("epoch")
+        return read_helper_epoch(path)
+
+    monkeypatch.setattr(helper_module, "helper_start_fence", fence)
+    monkeypatch.setattr(helper_module, "read_helper_epoch", epoch_read)
+
+    async def run() -> int:
+        # Spawned with an epoch a stop has moved since: it is fenced and serves nothing.
+        return await asyncio.wait_for(
+            run_helper_process(root, record, idle_seconds=900.0, epoch="0" * 32), 10
+        )
+
+    with selection_override(root):
+        assert asyncio.run(run()) == 0
+    assert events[:4] == ["enter", "epoch", "lock held", "exit"]
+    assert helper_holder(root) is None
+
+
 def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_free(
     ssh_target: tuple[ServerTarget, Path],
 ) -> None:
@@ -950,6 +1037,70 @@ def test_a_running_helper_stops_when_the_epoch_moves_and_the_stop_sees_its_lock_
     assert (code, stopped) == (0, True)
     status = read_helper_status(root)
     assert status is not None and (status.phase, status.reason) == ("stopped", "stop_requested")
+
+
+def test_one_background_agent_serves_a_workspace_however_many_processes_registered_it(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every command registers the worktree it ran in under its own registrant, so a busy
+    worktree has many registrations; the helper opens one agent per workspace (a REST key may
+    hold sixteen agents, and the client's own connections need room too), served under the
+    registration that holds it longest."""
+
+    from finishup.client import helper_registrations
+
+    record, root = ssh_target
+
+    def item(claim: str, worktree: str, registrant: str, expires: str) -> object:
+        return SimpleNamespace(
+            registration=SimpleNamespace(
+                claim=claim, worktree=worktree, registrant=registrant, expires_at=expires
+            )
+        )
+
+    rows = [
+        item("claim-a", "/w/one", f"r{index}", f"2026-11-10T14:{index:02d}:00.000Z")
+        for index in range(20)
+    ] + [item("claim-a", "/w/two", "r99", "2026-11-10T14:30:00.000Z")]
+    served_now: list[list[object]] = [rows]
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return tuple(served_now[0])
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+    opened: list[SimpleNamespace] = []
+    closed: list[SimpleNamespace] = []
+
+    class Agent:
+        alive = True
+
+        def __init__(self, registration: SimpleNamespace) -> None:
+            self.registration = registration
+
+        async def aclose(self) -> None:
+            closed.append(self.registration)
+
+    async def opener(*arguments: object) -> Agent:
+        registration = cast(SimpleNamespace, arguments[2])
+        opened.append(registration)
+        return Agent(registration)
+
+    async def run() -> None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
+        assert [(row.worktree, row.registrant) for row in opened] == [
+            ("/w/one", "r19"),
+            ("/w/two", "r99"),
+        ]
+        # More registrations of the same worktree open nothing more; a worktree no longer
+        # served loses its agent.
+        served_now[0] = rows[1:20]
+        await helper._sync_agents()  # pyright: ignore[reportPrivateUsage]
+        assert len(opened) == 2
+        assert [row.worktree for row in closed] == ["/w/two"]
+
+    asyncio.run(run())
 
 
 class _DownUpstream(FakeUpstream):
@@ -1036,6 +1187,191 @@ def test_a_clients_relay_refused_by_the_helpers_own_standing_refusal_is_named_at
     assert named is not None and named.phase == before.reason
 
 
+def _one_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    from finishup.client import helper_registrations
+
+    row = SimpleNamespace(
+        registration=SimpleNamespace(
+            claim="claim-a",
+            worktree="/w/one",
+            registrant="r1",
+            expires_at="2026-11-11T09:00:00.000Z",
+        )
+    )
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return (row,)
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+
+
+class _StandInAgent:
+    """A background agent stand-in: its connection is up once ``client`` is set."""
+
+    alive = True
+
+    def __init__(self, label: str, closed: list[str]) -> None:
+        self.label = label
+        self.client: object = None
+        self._closed = closed
+
+    async def drain(self, *, may_send: object) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        self._closed.append(self.label)
+
+
+async def _settle(helper: Helper) -> None:
+    """Let the closes the helper spawned run."""
+
+    tasks = tuple(helper._tasks)  # pyright: ignore[reportPrivateUsage]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("change", ["level_l2", "same_level"])
+def test_a_consent_changed_under_a_running_helper_opens_its_agents_again_under_it(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """Defect A (dogfood, 2026-11-11): ``server use NAME --level L2`` on a server in use at L1
+    changes the consent under the same profile revision, which ends no connection; the helper's
+    background agent, opened under the L1 record, declared no code-sync operation, so every
+    sync was refused (``operation_not_declared``) until the helper restarted. The helper follows
+    the consent and opens each agent again under the record as it is now. Choosing L2 closes the
+    old agent at once (the server would ask it and refuse the sync; with none, it waits for the
+    new one); any other change keeps the old one until its replacement is connected, so work in
+    flight on it finishes (make before break)."""
+
+    from dataclasses import replace
+
+    record, root = ssh_target
+    assert record.consent is not None and record.consent.level == "L1"
+    _one_workspace(monkeypatch)
+    opened: list[_StandInAgent] = []
+    closed: list[str] = []
+
+    async def opener(*arguments: object) -> _StandInAgent:
+        opened_under = cast(ServerTarget, arguments[1])
+        assert opened_under.consent is not None
+        agent = _StandInAgent(f"{opened_under.consent.level}/{opened_under.authorized_at}", closed)
+        opened.append(agent)
+        return agent
+
+    async def run() -> None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        assert len(opened) == 1
+        current = targets.read_target(root)
+        assert current is not None and current.consent is not None
+        consent = (
+            replace(current.consent, level="L2", retention_kind="days", retention_days=7)
+            if change == "level_l2"
+            else current.consent
+        )
+        with targets.registry_lock():
+            targets.write_target(
+                root, replace(current, authorized_at="2026-11-11T09:00:00.000Z", consent=consent)
+            )
+        await helper.step()
+        await _settle(helper)
+        assert [agent.label for agent in opened] == [
+            opened[0].label,
+            f"{consent.level}/2026-11-11T09:00:00.000Z",
+        ]
+        from finishup.client.authorization import consent_digest
+        from finishup.client.helper_status import read_followed_consent
+
+        moved = targets.read_target(root)
+        assert moved is not None
+        # It says it follows the new consent (``server use`` waits for that), and by then an
+        # agent that declared less is closed.
+        assert read_followed_consent(root) == consent_digest(moved)
+        if change == "level_l2":
+            assert closed == [opened[0].label]  # closed at once
+        else:
+            assert closed == []  # the old one serves until its replacement is up
+            await helper.step()
+            assert closed == []
+            opened[1].client = object()
+            await helper.step()
+            assert closed == [opened[0].label]
+        # Nothing changed since: nothing is opened or closed again.
+        await helper.step()
+        await _settle(helper)
+        assert len(opened) == 2 and closed == [opened[0].label]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert closed == [agent.label for agent in opened]
+
+    asyncio.run(run())
+
+
+def test_an_agent_replaced_for_a_changed_consent_closes_within_its_bound_if_never_replaced(
+    ssh_target: tuple[ServerTarget, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement that never connects (the server unreachable meanwhile) never keeps the
+    agent opened under the old consent past its bound, and closing the helper closes both."""
+
+    from dataclasses import replace
+
+    from finishup.client import helper_registrations
+
+    record, root = ssh_target
+    row = SimpleNamespace(
+        registration=SimpleNamespace(
+            claim="claim-a",
+            worktree="/w/one",
+            registrant="r1",
+            expires_at="2026-11-11T09:00:00.000Z",
+        )
+    )
+
+    async def served(_record: ServerTarget) -> tuple[object, ...]:
+        return (row,)
+
+    monkeypatch.setattr(helper_registrations, "served_workspaces", served)
+    closed: list[str] = []
+
+    class Agent:
+        alive = True
+        client: object = None
+
+        def __init__(self, stamp: str) -> None:
+            self.stamp = stamp
+
+        async def drain(self, *, may_send: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(self.stamp)
+
+    async def opener(*arguments: object) -> Agent:
+        return Agent(cast(ServerTarget, arguments[1]).authorized_at or "")
+
+    clock = Clock()
+
+    async def run() -> None:
+        helper = _helper(
+            record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener, clock=clock
+        )
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        current = targets.read_target(root)
+        assert current is not None
+        with targets.registry_lock():
+            targets.write_target(root, replace(current, authorized_at="2026-11-11T09:00:00.000Z"))
+        await helper.step()
+        assert closed == []
+        clock.now += 60.0
+        await helper.step()
+        assert closed == [record.authorized_at]
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert closed == [record.authorized_at, "2026-11-11T09:00:00.000Z"]
+
+    asyncio.run(run())
+
+
 class _UnreachableUpstream(FakeUpstream):
     """The server cannot be reached at all: the upstream names ``remote_unreachable`` at once."""
 
@@ -1108,6 +1444,81 @@ def test_a_refusal_is_named_to_every_client_and_only_unreachable_is_coalesced(
     else:
         assert len(recorded) == 6
         assert all(each)
+
+
+@pytest.mark.parametrize("ending_in", ["_own_relays", "_agent_closes"])
+@pytest.mark.parametrize("relay", ["ends", "hangs"])
+def test_a_new_level_is_acknowledged_only_once_the_old_agents_relays_ended(
+    ssh_target: tuple[ServerTarget, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    relay: str,
+    ending_in: str,
+) -> None:
+    """Re-review (Codex, R3-1): closing an agent closes its end of the helper's own relay; a REST
+    stream unregisters the agent at the server only as that relay ends, so the helper says it
+    follows a new level only once the old agents' relays ended, and not at all when they do not
+    end within its bound (``server use`` then stops the helper). macOS dogfood: in the direct style the
+    agent's own stream close, which runs on past its connection's 50 ms bound, is waited for
+    the same way."""
+
+    from dataclasses import replace
+
+    from finishup.client import helper as helper_module
+    from finishup.client.helper_status import read_followed_consent
+
+    record, root = ssh_target
+    _one_workspace(monkeypatch)
+    closed: list[str] = []
+
+    async def opener(*arguments: object) -> _StandInAgent:
+        return _StandInAgent(str(cast(ServerTarget, arguments[1]).authorized_at), closed)
+
+    monkeypatch.setattr(helper_module, "_CLOSE_SECONDS", 0.2)
+
+    async def run() -> str | None:
+        helper = _helper(record, root, FakeUpstream(ScriptedDaemon()), agent_opener=opener)
+        monkeypatch.setattr(helper, "_admitted", lambda: object())
+        await helper.step()
+        before = read_followed_consent(root)
+        gate = asyncio.Event()
+
+        async def ending() -> None:
+            await gate.wait()
+
+        own = asyncio.create_task(ending())  # the L1 agent's relay or close, still sending its end
+        cast("set[asyncio.Task[None]]", getattr(helper, ending_in)).add(own)
+        if relay == "ends":
+            asyncio.get_running_loop().call_later(0.05, gate.set)
+        current = targets.read_target(root)
+        assert current is not None and current.consent is not None
+        with targets.registry_lock():
+            targets.write_target(
+                root,
+                replace(
+                    current,
+                    authorized_at="2026-11-11T09:00:00.000Z",
+                    consent=replace(
+                        current.consent, level="L2", retention_kind="days", retention_days=7
+                    ),
+                ),
+            )
+        await helper.step()
+        followed = read_followed_consent(root)
+        gate.set()
+        await own
+        await helper._close_agents()  # pyright: ignore[reportPrivateUsage]
+        assert before is not None
+        return followed
+
+    followed = asyncio.run(run())
+    from finishup.client.authorization import consent_digest
+
+    moved = targets.read_target(root)
+    assert moved is not None
+    if relay == "ends":
+        assert followed == consent_digest(moved)
+    else:
+        assert followed != consent_digest(moved)
 
 
 @pytest.mark.parametrize(
@@ -1251,3 +1662,27 @@ def test_an_agent_refused_for_its_revision_names_it_to_the_helper(
 
     asyncio.run(run())
     assert named == [TEST_REVISION]
+
+
+def test_a_stopping_helper_gives_its_upstream_close_a_share_of_the_stop_deadline(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """Codex review: the upstream's close (an SSH master's exit request and its reaping, up to
+    four seconds) ran after the stop's deadline; it now gets what is left of it, never less than
+    its own reserve, so the master is always asked and reaped and the stop stays bounded."""
+
+    from finishup.client import helper as helper_module
+
+    record, root = ssh_target
+    upstream = FakeUpstream(ScriptedDaemon())
+
+    async def run() -> None:
+        helper = _helper(record, root, upstream)
+        helper.request_stop()
+        async with asyncio.timeout(10):
+            assert await helper.serve(None) == "stop_requested"
+
+    asyncio.run(run())
+    assert upstream.closed and upstream.close_seconds is not None
+    reserve = helper_module._UPSTREAM_CLOSE_SECONDS  # pyright: ignore[reportPrivateUsage]
+    assert reserve <= upstream.close_seconds <= helper_module._SHUTDOWN_SECONDS  # pyright: ignore[reportPrivateUsage]

@@ -58,6 +58,25 @@ _FORBIDDEN: Final = (
     "finishup.client.helper",
     "finishup.client.helper_runtime",
     "finishup.client.ssh_discovery",
+    # ADR-053 (layer 5): the REST client, its mapping and its discovery load only for an HTTPS or
+    # port target in the direct style; the REST edge (routes, listeners, keys, the gateway) and
+    # its HTTP server never load in a client at all.
+    "finishup.client.rest_client",
+    "finishup.client.rest_stream",
+    "finishup.client.rest_discovery",
+    "finishup.rest",
+    "finishup.rest.app",
+    "finishup.rest.listener",
+    "finishup.gateway",
+    "starlette",
+    "uvicorn",
+    # ADR-054 (layer 6, design v2 section 8.9): level L2's exporter, its content scan, the helper's
+    # sync responder and the server's copy store never load on a hook's path: hooks never sync.
+    "finishup.client.code_export",
+    "finishup.client.code_secrets",
+    "finishup.client.code_sync",
+    "finishup.service.code_copy",
+    "finishup.service.code_store",
 )
 # Drift ceiling: the measured set after the diet is well under this, so a
 # future eager import shows up here even if it is not on the named list.

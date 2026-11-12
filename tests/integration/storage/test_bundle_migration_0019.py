@@ -56,7 +56,7 @@ def test_0019_widens_only_the_summary_check() -> None:
         assert db.pragma("user_version") == 18
         before_shape, before_codes = _events_shape(db), _summary_codes(db)
         assert "contact_expectation_declared" not in before_codes
-        report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+        report = run_migrations(db, BUNDLE_MIGRATIONS[:19], maintenance=None)  # type: ignore[arg-type]
         assert (report.from_version, report.to_version, report.applied_versions) == (
             18,
             19,

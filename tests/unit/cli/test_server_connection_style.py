@@ -176,7 +176,36 @@ def test_status_shows_the_style_the_styles_offered_and_the_helper(
     del record
 
 
-def test_status_of_a_target_that_is_not_ssh_has_no_connection(
+def test_an_https_target_shows_and_changes_its_style_through_the_rest_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layer 5: an HTTPS server's profile names the ``rest-1`` edge, which offers both styles."""
+
+    with ambient_home(monkeypatch):
+        open_remote_kinds(monkeypatch, "https")
+        runtime = remote_runtime(monkeypatch)
+        with targets.registry_lock():
+            record, root = targets.new_remote_target(
+                "web", "https", base_url="https://finishup.example"
+            )
+        document = profile_document()
+        document["edges"] = ["rest-1"]
+        consent_to(record, document)
+        status = _invoke("status", "web", "--json")
+        assert status.exit_code == 0, status.output
+        assert json.loads(status.stdout)["target"]["connection"] == {
+            "style": "relay",
+            "styles_offered": ["relay", "direct"],
+            "helper": None,
+        }
+        changed = _invoke("set", "web", "--style", "direct")
+        assert changed.exit_code == 0, changed.output
+        assert "reads its API key" in changed.stdout
+        assert read_connection_style(root) == "direct"
+        assert runtime.calls  # the helper was stopped before the style changed
+
+
+def test_an_https_target_whose_profile_names_only_ssh_offers_no_style(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with ambient_home(monkeypatch):
@@ -187,9 +216,9 @@ def test_status_of_a_target_that_is_not_ssh_has_no_connection(
                 "web", "https", base_url="https://finishup.example"
             )
         consent_to(record)
-        result = _invoke("status", "web", "--json")
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["target"]["connection"] is None
+        result = _invoke("set", "web", "--style", "direct")
+    assert result.exit_code != 0
+    assert result.stderr.startswith("style_unavailable:")
 
 
 def test_connect_after_the_profile_widened_names_the_owners_way_to_agree_again(

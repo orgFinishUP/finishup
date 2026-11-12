@@ -10,15 +10,17 @@ the owner makes ends it before more is sent.
 1. the record is readable (an unreadable one may name a remote kind: ``target_root_is_remote``);
 2. ``zero_network_remote_selected``: this computer last reported a zero-network policy;
 3. ``target_reauthorization_required``: the owner authorized it under an older disclosure;
-4. the kind is open in this release (``OPEN_REMOTE_KINDS``: ``ssh`` only); any other remote root
-   (``https``, ``local_port``, until layer 5) stops here as ``target_root_is_remote``, the refusal
-   layer 1 gave every connection and spawn path for a remote root;
+4. the kind is open in this release (``OPEN_REMOTE_KINDS``: ``ssh``, ``https`` and ``local_port``);
+   any other remote root stops here as ``target_root_is_remote``, the refusal layer 1 gave every
+   connection and spawn path for a remote root;
 5. the consent (``client.server_profile.consent_verdict``, ADR-052): the server's current profile,
    compared with the envelope the owner consented to, is the same or narrower (admitted under its
    revision), requires a level the owner did not agree to (``server_level_unavailable``), or is
    anything else (``server_profile_changed``). After the kind step, because its way on (``finishup
    server use NAME`` on the trusted console) exists only for a kind that is open;
-6. (layer 5) a credential is present for a kind that needs one;
+6. (layer 5, ADR-053) a credential is present for a kind that needs one: checked by the REST
+   transport where the key is read, before its first byte (``remote_auth_failed``), so this gate
+   stays file reads only;
 7. ``repository_egress_held`` or ``repository_egress_kept``: the repository hold
    (``client.repository_hold``), when the repository is known.
 
@@ -101,6 +103,7 @@ __all__ = [
     "bind_prebuilt_check",
     "bump_credential_generation",
     "consent_digest",
+    "credential_generation",
     "credential_generation_path",
     "gate",
     "identity_digest",
@@ -109,10 +112,10 @@ __all__ = [
     "refusal_summary",
 ]
 
-# The remote kinds a connection may be made to in this release: ``ssh``, through the target's
-# helper (design v2 section 3) or directly. Layer 5 opens ``https`` and ``local_port`` once the
-# REST client exists; a test that exercises one of them opens it on purpose, in process only.
-OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset({"ssh"})
+# The remote kinds a connection may be made to in this release: ``ssh`` (layer 4) and, over REST
+# v1, ``https`` and ``local_port`` (layer 5, ADR-053), each through the target's helper (design v2
+# section 3) or directly.
+OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset({"ssh", "https", "local_port"})
 CHANGED: Final = "server_authorization_changed"
 # Every phase the gate or a generation check refuses a remote connection with.
 AUTHORIZATION_REFUSALS: Final = frozenset(
@@ -164,6 +167,17 @@ def credential_generation_path(root: Path) -> Path:
     """``<target root>/config/credential-generation``."""
 
     return root / "config" / CREDENTIAL_GENERATION_NAME
+
+
+def credential_generation(root: Path) -> object:
+    """The identity of the target's credential generation now (``_stamp``); compared with one read
+    earlier, a difference means the owner logged in, out or removed meanwhile. One that cannot be
+    read equals nothing, not even itself read again. Never raises."""
+
+    try:
+        return _stamp(credential_generation_path(root))
+    except OSError:
+        return object()
 
 
 def read_generation(root: Path, *, selection_bound: bool) -> AuthorizationGeneration:
@@ -627,8 +641,9 @@ _TRANSPORT_SUMMARIES: Final[dict[str, str]] = {
         "server, the keys OpenSSH offered)"
     ),
     "remote_identity_changed": (
-        "the selected FinishUP server elsewhere could not be verified (its SSH host key is not "
-        "the one this computer knows), so FinishUP did not connect to it"
+        "the selected FinishUP server elsewhere could not be verified (an SSH server's host key, "
+        "or an HTTPS server's certificate or the CA file chosen for it, is not the one this "
+        "computer agreed to), so FinishUP did not connect to it"
     ),
     "remote_service_not_running": (
         "the selected FinishUP server elsewhere is reachable, but its FinishUP service is not "

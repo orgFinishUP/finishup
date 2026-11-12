@@ -297,8 +297,8 @@ local CLI reads in coverage and capacity.
 
 ## Observations for a server elsewhere
 
-While a FinishUP server on another machine is selected (over SSH; servers on the web or on a
-port arrive in a later release), observations of a project whose privacy policy on this computer
+While a FinishUP server elsewhere is selected (over SSH, or over HTTPS on the web or on a port of
+this computer), observations of a project whose privacy policy on this computer
 allows no network use wait on this computer, and do not count as delivered. If you allow the project for that
 server, the observations recorded while it was held are sent, without the content captured while
 it was held; if you keep it on this computer, they stay here. Observations an agent's hooks capture

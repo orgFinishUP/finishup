@@ -220,3 +220,91 @@ def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_servic
     assert phase in guidance and directive.directive in guidance
     assert "finishup service run" not in guidance
     _clean(" ".join((failure.message, *failure.details, guidance)), home, record)
+
+
+def test_a_changed_identity_names_an_https_servers_trust_as_well_as_an_ssh_host_key() -> None:
+    """Layer-5 review (B1): an HTTPS target refused because its certificate or the CA file chosen
+    for it changed is told so, not only about an SSH host key."""
+
+    summary = cast(str, refusal_summary("remote_identity_changed"))
+    assert "SSH server's host key" in summary
+    assert "HTTPS server's certificate or the CA file" in summary
+
+
+# The owner's WAN-gate decision (2026-11-11): a server elsewhere reached in the direct style that
+# did not answer in time tells the user the direct style is slow on this network and that
+# 'finishup server set NAME --style relay' is the remedy, on every surface that names the outage.
+_RELAY_REMEDY = "'finishup server set NAME --style relay'"
+
+
+@pytest.fixture
+def selected_direct(
+    selected: tuple[Path, targets.ServerTarget],
+) -> Iterator[tuple[Path, targets.ServerTarget]]:
+    from finishup.client.helper_status import write_connection_style
+
+    home, record = selected
+    write_connection_style(targets.target_root(record.target_id), "direct")
+    yield home, record
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_a_direct_style_outage_names_the_relay_style_on_every_surface(
+    selected: tuple[Path, targets.ServerTarget], style: str
+) -> None:
+    from finishup.client.helper_status import write_connection_style
+
+    home, record = selected
+    write_connection_style(targets.target_root(record.target_id), style)  # type: ignore[arg-type]
+    expected = "remote_direct_slow" if style == "direct" else "remote_server_test"
+    phase = "remote_unreachable"
+    assert targets.remote_root_continuation(phase) == expected
+    directive = directive_for(expected)
+    assert directive is not None
+    assert (_RELAY_REMEDY in directive.directive) is (style == "direct")
+    # The CLI, text and --json.
+    err: list[str] = []
+    out: list[JsonValue] = []
+    assert (
+        bootstrap.control_failure(
+            _error(phase), json_output=True, stderr_writer=err.append, stdout_writer=out.append
+        )
+        == 20
+    )
+    assert directive.directive in "\n".join(err)
+    body = cast(dict[str, JsonValue], out[0])
+    assert cast(dict[str, JsonValue], body["recovery"])["continuation"] == expected
+    # MCP.
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        _error(phase), _REQUEST, "start"
+    )
+    structured = cast(dict[str, object], result.structuredContent)
+    details = cast(dict[str, object], cast(dict[str, object], structured["error"])["safe_details"])
+    assert details["continuation"] == expected
+    # Hooks: the attach context and the mapped outage.
+    for text in (
+        observe_hooks._attachment_recovery_context(phase),  # pyright: ignore[reportPrivateUsage]
+        hooks.unavailable_context(phase),
+    ):
+        assert f"Continuation: {expected}." in text
+        assert (_RELAY_REMEDY in text) is (style == "direct")
+    # The terminal interface and the menu.
+    failure = _connect_failure(_error(phase))
+    assert failure.details == (directive.directive,)
+    guidance = menu._control_guidance(_error(phase))  # pyright: ignore[reportPrivateUsage]
+    assert directive.directive in guidance
+    _clean(" ".join([*err, json.dumps(body), json.dumps(structured), guidance]), home, record)
+
+
+def test_only_an_outage_names_the_relay_style_never_a_refusal(
+    selected_direct: tuple[Path, targets.ServerTarget],
+) -> None:
+    """A refusal, a refused key or a changed identity is no slow network: each keeps its own
+    way back in the direct style."""
+
+    for phase in _ALL_PHASES:
+        token = targets.remote_root_continuation(phase)
+        if phase == "remote_unreachable":
+            assert token == "remote_direct_slow"
+        else:
+            assert token != "remote_direct_slow"
