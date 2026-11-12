@@ -53,6 +53,7 @@ class FakeUpstream:
         self.started = 0
         self.not_running = False
         self.closed = False
+        self.close_seconds: float | None = None
         self.zero = False
 
     async def ensure(self) -> None:
@@ -73,8 +74,9 @@ class FakeUpstream:
         self.not_running = False
         return True
 
-    async def close(self) -> None:
+    async def close(self, seconds: float | None = None) -> None:
         self.closed = True
+        self.close_seconds = seconds
 
     async def zero_network(self) -> None:
         self.zero = True
@@ -1289,3 +1291,27 @@ def test_an_agent_refused_for_its_revision_names_it_to_the_helper(
 
     asyncio.run(run())
     assert named == [TEST_REVISION]
+
+
+def test_a_stopping_helper_gives_its_upstream_close_a_share_of_the_stop_deadline(
+    ssh_target: tuple[ServerTarget, Path],
+) -> None:
+    """Codex review: the upstream's close (an SSH master's exit request and its reaping, up to
+    four seconds) ran after the stop's deadline; it now gets what is left of it, never less than
+    its own reserve, so the master is always asked and reaped and the stop stays bounded."""
+
+    from finishup.client import helper as helper_module
+
+    record, root = ssh_target
+    upstream = FakeUpstream(ScriptedDaemon())
+
+    async def run() -> None:
+        helper = _helper(record, root, upstream)
+        helper.request_stop()
+        async with asyncio.timeout(10):
+            assert await helper.serve(None) == "stop_requested"
+
+    asyncio.run(run())
+    assert upstream.closed and upstream.close_seconds is not None
+    reserve = helper_module._UPSTREAM_CLOSE_SECONDS  # pyright: ignore[reportPrivateUsage]
+    assert reserve <= upstream.close_seconds <= helper_module._SHUTDOWN_SECONDS  # pyright: ignore[reportPrivateUsage]
