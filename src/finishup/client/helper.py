@@ -167,12 +167,15 @@ _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
 # Within the stop's shared deadline (``_SHUTDOWN_SECONDS``).
 _STOP_AGENT_SECONDS: Final = 1.5
 # A stop's one deadline, from the stop seen to the lock released: the last drain, the agents'
-# closes and unregistration and the client relays' ends all run within it, so with the
-# one-second tick a stop stays within its stopper's five-second wait
-# (``helper_runtime._STOP_SECONDS``); a drain is shortened first, then a relay left ending.
-_SHUTDOWN_SECONDS: Final = 3.5
+# closes and unregistration, the client relays' ends and the upstream's close (an SSH master's
+# exit and reaping) all run within it, so with the one-second tick a stop stays within its
+# stopper's five-second wait (``helper_runtime._STOP_SECONDS``); a drain is shortened first,
+# then a relay still ending is cancelled.
+_SHUTDOWN_SECONDS: Final = 3.0
 # What the client relays keep of that deadline to end on their own once the agents' wait is over.
 _RELAY_END_SECONDS: Final = 0.5
+# What the upstream's close keeps of it, at the least (it always asks and reaps an SSH master).
+_UPSTREAM_CLOSE_SECONDS: Final = 0.5
 # ``remote_unreachable`` is recorded again for clients at most this often while unchanged: a client
 # keeps waiting and retrying on it (``service.client._connect_through_helper``), whatever the record
 # says, so a fresh record changes no answer and a fast retry never makes a write and a diagnostic
@@ -198,7 +201,9 @@ class Upstream(Protocol):
 
     async def start_remote_service(self) -> bool: ...
 
-    async def close(self) -> None: ...
+    async def close(self, seconds: float | None = None) -> None:
+        """End what the upstream holds open; within about ``seconds`` when given."""
+        ...
 
     async def zero_network(self) -> None: ...
 
@@ -242,8 +247,8 @@ class SshRelayUpstream:
         )
         return code == 0
 
-    async def close(self) -> None:
-        await self._master.close()
+    async def close(self, seconds: float | None = None) -> None:
+        await self._master.close(seconds)
 
     async def zero_network(self) -> None:
         await self._master.close()
@@ -291,7 +296,7 @@ class SshDirectUpstream:
         require_host_key(stderr, expected)
         return code == 0
 
-    async def close(self) -> None:
+    async def close(self, seconds: float | None = None) -> None:
         return None
 
     async def zero_network(self) -> None:
@@ -355,7 +360,7 @@ class RestUpstream:
     async def start_remote_service(self) -> bool:
         return False
 
-    async def close(self) -> None:
+    async def close(self, seconds: float | None = None) -> None:
         async with self._lock:
             if self._transport is not None:
                 await self._transport.aclose()
@@ -1779,8 +1784,9 @@ class Helper:
                 task.cancel()
             await asyncio.gather(*running, *self._tasks, return_exceptions=True)
             zero_network = self._stop_reason == _ZERO_NETWORK
+            after_agents = _RELAY_END_SECONDS + _UPSTREAM_CLOSE_SECONDS
             if not zero_network and self._stop_reason != "target_removed":
-                drain = min(_SHUTDOWN_DRAIN_SECONDS, left(_STOP_AGENT_SECONDS + _RELAY_END_SECONDS))
+                drain = min(_SHUTDOWN_DRAIN_SECONDS, left(_STOP_AGENT_SECONDS + after_agents))
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(drain):
                         await self._drain()
@@ -1790,18 +1796,22 @@ class Helper:
             # Background agents first, so none dials again while the relays are torn down; then
             # their connections end on their own, bounded, so a REST agent is unregistered at the
             # server before anything is cancelled (a dead agent left there is asked first).
-            await self._close_agents(left(_RELAY_END_SECONDS))
-            await self._await_agent_ends(min(_STOP_AGENT_SECONDS, left(_RELAY_END_SECONDS)))
+            await self._close_agents(left(after_agents))
+            await self._await_agent_ends(min(_STOP_AGENT_SECONDS, left(after_agents)))
             self._end_relays()
             relays = tuple(self._relays)
             if relays:
-                # Cancelled already; one still ending (a REST courtesy close) is left to the exit.
-                await asyncio.wait(relays, timeout=left())
+                # Cancelled already; one still ending (a REST courtesy close) at the deadline is
+                # cancelled again, and nothing of the helper runs on once it returns.
+                _ended, ending = await asyncio.wait(relays, timeout=left(_UPSTREAM_CLOSE_SECONDS))
+                for relay in ending:
+                    relay.cancel()
+                await asyncio.gather(*ending, return_exceptions=True)
             with contextlib.suppress(Exception):
                 if zero_network:
                     await self._upstream.zero_network()
                 else:
-                    await self._upstream.close()
+                    await self._upstream.close(max(left(), _UPSTREAM_CLOSE_SECONDS))
             if self._stop_reason != "target_removed":
                 self._write_status("stopped", self._stop_reason)
         return self._stop_reason
