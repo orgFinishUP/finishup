@@ -1455,7 +1455,7 @@ def test_a_new_level_is_acknowledged_only_once_the_old_agents_relays_ended(
     """Re-review (Codex, R3-1): closing an agent closes its end of the helper's own relay; a REST
     stream unregisters the agent at the server only as that relay ends, so the helper says it
     follows a new level only once the old agents' relays ended, and not at all when they do not
-    end within its bound (``server use`` then stops the helper). u5: in the direct style the
+    end within its bound (``server use`` then stops the helper). macOS dogfood: in the direct style the
     agent's own stream close, which runs on past its connection's 50 ms bound, is waited for
     the same way."""
 

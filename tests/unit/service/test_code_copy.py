@@ -517,7 +517,7 @@ def test_a_forget_while_the_helper_prepares_fences_that_sync(tmp_path: Path) -> 
 def test_a_task_start_sync_left_on_a_stale_helper_agent_completes_at_the_newer_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """u4/u5: a helper stopped (or was replaced or killed) without its agent being unregistered at
+    """macOS dogfood: a helper stopped (or was replaced or killed) without its agent being unregistered at
     the server; a task started at once sends the sync's prepare to that agent, which nobody
     answers. The successor helper's agent registers a moment later: the prepare goes on there,
     the sync completes long before the prepare's deadline, and the task reads the copy it made

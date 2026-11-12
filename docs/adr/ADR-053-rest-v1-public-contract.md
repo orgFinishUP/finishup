@@ -460,7 +460,7 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   landing meanwhile sends nothing under the key the stream holds; the server ends an agent whose
   polls stop and forgets answers on its own. A stopping helper waits, at most 1.5 seconds, for its
   background agents' streams to finish this close before it cancels them, and a direct-style
-  agent's close runs on past its connection's own 50 ms close bound (u5), so a helper's agent is
+  agent's close runs on past its connection's own 50 ms close bound (macOS dogfood), so a helper's agent is
   unregistered when the helper stops rather than left registered until its lease ends; a helper
   that is killed still leaves its agent to the lease, and the workspace hub sends a call that agent
   holds on to the newer agent that registers next (ADR-052 decision 12).

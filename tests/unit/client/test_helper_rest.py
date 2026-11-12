@@ -688,7 +688,7 @@ def _slow_unregistration(
 async def test_a_stopping_helper_unregisters_its_relayed_agent_before_ending_its_relays(
     lab: _Lab, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """u4: a stop closes the background agents, then lets their relays end on their own (bounded)
+    """macOS dogfood: a stop closes the background agents, then lets their relays end on their own (bounded)
     before cancelling the rest, so the REST stream's courtesy ``DELETE`` reaches the server and no
     dead agent stays registered there to be asked first by the next task's workspace calls."""
 
@@ -726,7 +726,7 @@ async def test_a_relay_that_never_ends_holds_the_stop_no_longer_than_its_bound(
 async def test_a_stopping_direct_helper_unregisters_the_agent_its_connection_stopped_waiting_for(
     lab: _Lab, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """u4, direct style: the agent's connection waits 50 ms for its stream to close
+    """macOS dogfood, direct style: the agent's connection waits 50 ms for its stream to close
     (``service.client``); the close goes on as the helper's own task and the stop waits for it."""
 
     from finishup.service.client import (
