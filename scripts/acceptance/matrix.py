@@ -15,10 +15,16 @@ handshake and the consent on a pseudo-terminal), uses it, runs a claim-bound sta
 check and receipt, chooses L2 under the warm helper and back (an L1 cell: the command ends once
 the helper follows it and the very next task syncs, then nothing does), proves the repository hold and zero network
 refuse before any dial (the dial counter of a pass-through relay in front of the server, the
-helper's lock, the export database), warms the helper with a task and changes the server's
-profile (the first call is refused typed within 10 s) and agrees again, logs out and in (HTTPS and
-port), forgets the copy (L2), disconnects and removes. The two "warm helper" paths are the
-defects the 2026-11-11 dogfood found and the earlier matrix missed. Every step is recorded with its verdict in ``<out>/<cell>.json``
+helper's lock, the export database). The HTTPS and port L2 cells then stop or lose the helper four
+ways (``server disconnect``, ``server set --style direct``, ``server use local`` and back, the
+helper killed), each followed by a task at once whose start is bounded and whose reads come from
+the server's copy, never a stale one. Every remote cell warms the helper with a task and changes
+the server's profile (the first call is refused typed within 10 s) and agrees again, has its server
+narrow what it offers twice within 30 s (the first start after each is refused at most once,
+``remote_profile_checking``, then served within seconds), logs out and in (HTTPS and port),
+forgets the copy (L2), disconnects and removes. The two "warm helper" paths are the defects the 2026-11-11
+dogfood found and the earlier matrix missed; the stopped-helper and narrowing steps are what the
+macOS dogfood found. Every step is recorded with its verdict in ``<out>/<cell>.json``
 and a transcript excerpt in ``<out>/<cell>.md``. Exit status 1 when any step failed.
 
 See ``harness.py`` for what a run touches (one fresh 0700 folder beneath the home) and how it stops
@@ -32,6 +38,8 @@ import contextlib
 import fnmatch
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
 import time
@@ -444,9 +452,15 @@ def changed_profile(
     first = client.fu("service", "status", "--json", timeout=120)
     took = time.monotonic() - began
     # The first refusal is the one the server named (the hello's answer); every surface names it
-    # typed, with the owner's way back, at once (a warm HTTPS relay helper once made it wait out
-    # a 30 s deadline and read remote_unreachable). The ssh-direct cells once printed a traceback.
-    seen = typed_refusal(first, "server_profile_changed", "remote_reconsent") and took < 10.0
+    # typed at once (a warm HTTPS relay helper once made it wait out a 30 s deadline and read
+    # remote_unreachable; the ssh-direct cells once printed a traceback). Until the profile is
+    # fetched again what changed is not known here: remote_profile_checking (repeat the same
+    # request); once the consent reads the change, remote_reconsent (ADR-052 decision 10).
+    first_continuation = (json_of(first.stdout).get("recovery") or {}).get("continuation")
+    seen = (
+        typed_refusal(first, "server_profile_changed", "remote_profile_checking")
+        or typed_refusal(first, "server_profile_changed", "remote_reconsent")
+    ) and took < 10.0
 
     def consent_changed() -> bool:
         document = json_of(client.fu("server", "status", cell.target, "--json").stdout)
@@ -466,7 +480,8 @@ def changed_profile(
         restarted and changed and seen and refused and quiet,
         f"warm helper still serving: {same}; server restarted with a new revision: {restarted}; "
         f"first call exit {first.returncode} "
-        f"in {took:.1f} s (typed server_profile_changed, remote_reconsent, under 10 s: {seen}); "
+        f"in {took:.1f} s (typed server_profile_changed, {first_continuation}, under 10 s: "
+        f"{seen}); "
         "consent state changed: "
         f"{changed}; next call refused typed: {refused}; it sent nothing: {quiet} "
         f"({json.dumps(sent, sort_keys=True)})",
@@ -508,6 +523,279 @@ def agent_events(server: Server, since: str) -> tuple[int, int]:
                 elif record.get("operation") == "workspace_agent_unregistered":
                     unregistered += 1
     return registered, unregistered
+
+
+# A task's start right after this client stopped or lost what it ran for a target: bounded well
+# under the server's 60-second prepare deadline (a stopped helper's agent once held the start's
+# sync for all of it, and its reads were then answered from a stale copy: macOS dogfood).
+STOPPED_START_SECONDS = 15.0
+# After a narrowing the first start may be refused once (the server's refusal is the first news of
+# it); the profile is then fetched within about 2 seconds and the start is served within this.
+NARROWED_SERVED_SECONDS = 10.0
+# How long a caller waits before it repeats a request refused remote_profile_checking ("repeat
+# the same request in a few seconds").
+REPEAT_SECONDS = 3.0
+
+
+def publish_and_check(world: World, task: Task, label: str) -> subprocess.CompletedProcess[str]:
+    """Publish a plan, change a file and check: the reads a receipt then counts."""
+
+    publish = {
+        **base_request(),
+        "session_id": task.session_id,
+        "writer_id": task.writer_id,
+        "expected_frontier": frontier_of(status_of(world, task)),
+        "event_drafts": [
+            {
+                "event_id": f"evt_{uuid.uuid4()}",
+                "schema": {"name": "plan_published", "version": "1.0.0"},
+                "occurred_at": now_rfc3339(),
+                "causal_parents": [],
+                "payload": {"plan_version": 1, "summary": "Acceptance plan", "obligation_refs": []},
+                "artifact_refs": [],
+                "evidence_refs": [],
+            }
+        ],
+    }
+    world.active.fu(
+        "publish-work", "--input", str(request_file(world.run, "publish", publish)), "--json"
+    )
+    (world.active.work / "src" / "app.py").write_text(f"print('{label}')\n")
+    check = {
+        **base_request(),
+        "session_id": task.session_id,
+        "writer_id": task.writer_id,
+        "expected_frontier": frontier_of(status_of(world, task)),
+    }
+    return world.active.fu(
+        "check", "--input", str(request_file(world.run, "check", check)), "--json", timeout=300
+    )
+
+
+def copy_task(world: World, cell: Cell, label: str) -> tuple[bool, str, str]:
+    """A task at once: its start within ``STOPPED_START_SECONDS``, then a check whose receipt
+    counts reads of the server's copy and none of a stale one. The verdict, the detail and an
+    excerpt."""
+
+    began = time.monotonic()
+    task, result = start_task(world, f"Acceptance {cell.name} {label}")
+    took = time.monotonic() - began
+    if not task.ok:
+        return False, f"start exit {result.returncode} in {took:.1f} s", shown(world, result)
+    checked = publish_and_check(world, task, f"{label} in {cell.name}")
+    receipt, body = receipt_json(world, task)
+    member = body.get("evidence_provenance")
+    reads = (member.get("reads") or {}) if isinstance(member, dict) else {}
+    copy = int(reads.get("server_copy_read") or 0) if isinstance(reads, dict) else 0
+    stale = int(reads.get("stale_copy_read") or 0) if isinstance(reads, dict) else 0
+    ok = (
+        took < STOPPED_START_SECONDS
+        and checked.returncode == 0
+        and receipt.returncode == 0
+        and copy > 0
+        and stale == 0
+    )
+    detail = (
+        f"start exit {result.returncode} in {took:.1f} s (bound {STOPPED_START_SECONDS:.0f} s); "
+        f"check exit {checked.returncode}; receipt exit {receipt.returncode}; server_copy_read "
+        f"{copy}; stale_copy_read {stale}"
+    )
+    transcript = (
+        world.run.redact(json.dumps(member, indent=1))
+        if member is not None
+        else shown(world, receipt)
+    )
+    return ok, detail, transcript
+
+
+def own_helper(root: Path | None, target_id: str) -> int | None:
+    """The running helper's pid when its command line names this run's target (it is ours)."""
+
+    pid = helper_pid(root)
+    if pid is None:
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return pid if target_id.encode() in argv else None
+
+
+def stopped_helper_tasks(world: World, report: Report, cell: Cell) -> None:
+    """Four ways this client stops or loses what it runs for a server, each followed by a task at
+    once (macOS dogfood: a stopped helper's REST agent stayed registered at the server, which sent
+    the next start's sync to it and waited out the 60-second prepare deadline, then answered the
+    task's reads from a stale copy). Each start is bounded by ``STOPPED_START_SECONDS``, its
+    receipt counts reads of the server's copy and ``stale_copy_read 0``, and the server recorded
+    no sync that ended ``deadline_exceeded`` or ``agent_disconnected``."""
+
+    client, server = world.client, world.server(cell)
+    name = cell.target
+    root = client.target_root(name)
+    target_id = "" if root is None else root.name
+
+    def warm() -> bool:
+        """The helper runs (a call starts it when the last step left none); its background agent
+        registers on its first tick, which the caller leaves time for."""
+
+        if own_helper(root, target_id) is None:
+            client.fu("service", "status", "--json", timeout=120)
+        return wait_until(lambda: own_helper(root, target_id) is not None, seconds=30)
+
+    def use_again() -> str:
+        other = client.fu("server", "use", "local")
+        back = client.ceremony(
+            ["server", "use", name], [Reply(r"Type the target name", name, secret=False)]
+        )
+        return f"server use local exit {other.returncode}; server use {name} exit {back.exit_code}"
+
+    def set_direct() -> str:
+        result = client.fu("server", "set", name, "--style", "direct")
+        return f"server set --style direct exit {result.returncode}"
+
+    def kill_helper() -> str:
+        pid = own_helper(root, target_id)
+        if pid is None:
+            return "no helper of this run to kill"
+        os.kill(pid, signal.SIGKILL)
+        gone = wait_until(lambda: helper_pid(root) is None, seconds=10, interval=0.1)
+        return f"helper killed (SIGKILL): {gone}"
+
+    def disconnect() -> str:
+        result = client.fu("server", "disconnect", name)
+        return f"server disconnect exit {result.returncode}"
+
+    triggers = [
+        ("server disconnect", disconnect),
+        ("server set --style direct", set_direct),
+        ("server use local, then this server again", use_again),
+        ("helper killed", kill_helper),
+    ]
+    for label, action in triggers:
+        warmed = warm()
+        time.sleep(2.0)  # the helper's background agent registers on its first tick
+        since = now_rfc3339()
+        done = action()
+        ok, detail, transcript = copy_task(world, cell, label)
+        events = server.copy_events(since)
+        offline = [e for e in events if "deadline_exceeded" in e or "agent_disconnected" in e]
+        report.add(
+            f"{label} → task at once",
+            warmed and ok and not offline,
+            f"helper warm before: {warmed}; {done}; {detail}; copy events: "
+            f"{', '.join(events) or 'none'}",
+            transcript,
+        )
+        if label == "server set --style direct" and cell.style != "direct":
+            client.fu("server", "set", name, "--style", cell.style)
+    # The warm step that follows starts its own helper, as after the zero-network step before.
+    client.fu("server", "disconnect", name)
+    wait_until(lambda: helper_pid(root) is None, seconds=15)
+
+
+def narrowed_twice(world: World, report: Report, cell: Cell) -> None:
+    """The server narrows what it offers twice within 30 seconds (macOS dogfood: the second
+    narrowing was refused on every call until 30 seconds after the helper's profile fetch for the
+    first). After the first, the consent follows the new revision by itself; the second is ready
+    less than 30 seconds after that fetch, and the first start after it may be refused once, typed
+    ``server_profile_changed`` with ``remote_profile_checking`` (repeat the same request), never
+    ``remote_reconsent``, then is served within ``NARROWED_SERVED_SECONDS`` of the server being
+    ready, the consent following again by itself."""
+
+    client, server = world.client, world.server(cell)
+    config = server.root / "config" / "config.toml"
+    root = client.target_root(cell.target)
+    cache = None if root is None else root / "state" / "server-profile.json"
+
+    def consented_revision() -> object:
+        """The server profile revision the consent names now: a narrowing (or an offer that is
+        the same for the consent) moves it without the owner."""
+
+        with contextlib.suppress(OSError, ValueError, AttributeError, TypeError):
+            assert root is not None
+            return (json.loads((root / "target.json").read_text()).get("consent") or {}).get(
+                "profile_revision"
+            )
+        return None
+
+    def fetched_at() -> float | None:
+        with contextlib.suppress(OSError):
+            return None if cache is None else cache.stat().st_mtime
+        return None
+
+    def narrower(round_: int) -> bool:
+        """One more exclusion (narrower), then the server's service restarted and unlocked."""
+
+        text = config.read_text()
+        match = re.search(r"^exclusions = \[(.*)\]$", text, re.MULTILINE)
+        patterns = re.findall(r'"([^"]*)"', match.group(1)) if match else []
+        patterns = sorted({*patterns, f"narrowed-{cell.name}-{round_}/"}, key=str.encode)
+        listed = ", ".join(f'"{pattern}"' for pattern in patterns)
+        config.write_text(
+            re.sub(r"^exclusions = \[.*\]$", f"exclusions = [{listed}]", text, flags=re.MULTILINE)
+        )
+        if server.edge_kind == "native":
+            return server.stop_service() and server.start_service()
+        restarted = server.srv("service", "restart", "--json", timeout=180)
+        return restarted.returncode == 0 and server.unlock()
+
+    before = consented_revision()
+    restarted = narrower(1)
+    first = client.fu("service", "status", "--json", timeout=120)
+
+    def moved_on() -> bool:
+        now = consented_revision()
+        return now is not None and now != before
+
+    followed = wait_until(moved_on, seconds=30, interval=0.3)
+    fetched = fetched_at()
+    report.add(
+        "narrowing 1 → the consent follows by itself",
+        restarted and followed,
+        f"server restarted narrower: {restarted}; first call exit {first.returncode}; the consent "
+        f"followed the new revision by itself: {followed}",
+        shown(world, first),
+    )
+    before = consented_revision()
+    restarted = narrower(2)
+    ready = time.monotonic()
+    since_fetch = None if fetched is None else time.time() - fetched
+    refusals: list[str] = []
+    served: float | None = None
+    last: subprocess.CompletedProcess[str] | None = None
+    while time.monotonic() - ready < 30.0:
+        task, last = start_task(world, f"Acceptance {cell.name} narrowed twice")
+        if task.ok:
+            served = time.monotonic() - ready
+            break
+        document = json_of(last.stdout)
+        continuation = (document.get("recovery") or {}).get("continuation")
+        refusals.append(f"{document.get('phase')}/{continuation}")
+        # As remote_profile_checking's directive asks: the same request again in a few seconds
+        # (in the direct style the helper's own fetch over SSH takes about 3 to 4 of them).
+        time.sleep(REPEAT_SECONDS)
+    checking = all(item == "server_profile_changed/remote_profile_checking" for item in refusals)
+    after = consented_revision()
+    moved = after is not None and after != before
+    report.add(
+        "narrowing 2 within 30 s → refused at most once, then served",
+        restarted
+        and since_fetch is not None
+        and since_fetch < 30.0
+        and served is not None
+        and served <= NARROWED_SERVED_SECONDS
+        and len(refusals) <= 1
+        and checking
+        and moved,
+        f"server restarted narrower: {restarted}; ready "
+        + (f"{since_fetch:.1f} s" if since_fetch is not None else "unknown time")
+        + " after the helper's profile fetch for narrowing 1; refusals before the start was "
+        + f"served: {refusals or 'none'}; served "
+        + (f"{served:.1f} s after the server was ready" if served is not None else "never")
+        + f" (bound {NARROWED_SERVED_SECONDS:.0f} s); the consent followed the new revision by "
+        + f"itself: {moved}",
+        shown(world, last) if last is not None else "",
+    )
 
 
 def warm_helper(world: World, report: Report, cell: Cell) -> tuple[int | None, str]:
@@ -783,8 +1071,11 @@ def remote_cell(world: World, cell: Cell) -> Report:
         "0",
         ZERO_CODE,
     )
+    if cell.level == "L2" and cell.kind in {"https", "port"} and task is not None:
+        stopped_helper_tasks(world, report, cell)
     warm = warm_helper(world, report, cell)
     changed_profile(world, report, cell, warm)
+    narrowed_twice(world, report, cell)
     if cell.kind in {"https", "port"}:
         logout_login(world, report, cell)
     if cell.level == "L2" and task is not None:
