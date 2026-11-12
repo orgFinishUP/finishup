@@ -749,6 +749,17 @@ or port server.
   change. When `listed` mode leaves files unread, the receipt states the omission code
   (`outside_reads_not_listed`) and how many task inputs and declared tests were kept back, never
   which file, and receipts carry the `client_attested` line.
+- **Which folder a task may name** (rule R, ADR-051 amended 2026-11-12). The connection's own
+  folder decides the repository and the worktree: a `start` whose absolute `workspace_ref` names
+  another repository, another worktree of the same repository, or a folder in none is refused in
+  the client, `workspace_ref_not_served`, and nothing about it is sent, read or synced. Cursor's
+  bridge serves the worktree its MCP roots reduce to (checked again before every workflow call;
+  several roots must reduce to one worktree, else `repository_identity_required`), so a subfolder
+  of it, a symlinked spelling or, on macOS, a case variant is the same folder, and a folder
+  outside it is refused. Cursor reads the canonical JSON body, whose message carries the
+  instruction of `workspace_not_served_tell_user`: say so in one line and carry on without
+  FinishUP for that folder; opening that folder as the Cursor workspace gives it its own binding.
+  Host decision: supported, same code path.
 - **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
   and the outbox stay on this computer, and each row a remote target receives carries the client
   attestation. Host decision for content: with `cursor-ordinary-observation-v1` enabled, the

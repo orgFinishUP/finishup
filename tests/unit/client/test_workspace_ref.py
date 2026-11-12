@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -19,6 +22,21 @@ from finishup.protocol.models import StartRequest, public_model_to_wire
 
 _HANDLE = "client:0123456789abcdef"
 _PATH = "/srv/dev/private-project"
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> str:
+    """A real repository worktree: rule R sends a path as the handle only when it names the
+    folder the connection serves (``test_workspace_ref_served`` covers every other folder)."""
+
+    root = tmp_path / "private-project"
+    root.mkdir()
+    subprocess.run(  # noqa: S603 - fixed argv
+        ["git", "init", "-q", os.fspath(root)],
+        check=True,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    return os.fspath(root)
 
 
 def _start(workspace_ref: str | None = _PATH) -> StartRequest:
@@ -48,49 +66,57 @@ def test_a_local_or_unbound_connection_sends_the_ref_as_written(binding: str) ->
     for value in (_PATH, "label", None):
         assert (
             portable_workspace_ref(
-                value, workspace_binding=cast(WorkspaceBinding, binding), workspace_handle=None
+                value,
+                workspace_binding=cast(WorkspaceBinding, binding),
+                workspace_handle=None,
+                serving=None,
             )
             == value
         )
     request = _start()
     assert (
         portable_start_request(
-            request, workspace_binding=cast(WorkspaceBinding, binding), workspace_handle=_HANDLE
+            request,
+            workspace_binding=cast(WorkspaceBinding, binding),
+            workspace_handle=_HANDLE,
+            serving=None,
         )
         is request
     )
 
 
-def test_a_claim_bound_connection_sends_its_handle_for_a_path() -> None:
+def test_a_claim_bound_connection_sends_its_handle_for_a_path(project: str) -> None:
     assert (
-        portable_workspace_ref(_PATH, workspace_binding="client_claim", workspace_handle=_HANDLE)
+        portable_workspace_ref(
+            project, workspace_binding="client_claim", workspace_handle=_HANDLE, serving=project
+        )
         == _HANDLE
     )
     # A ref that is no path, or none at all, is left for the server to judge.
     for value in ("label", _HANDLE, None):
         assert (
             portable_workspace_ref(
-                value, workspace_binding="client_claim", workspace_handle=_HANDLE
+                value, workspace_binding="client_claim", workspace_handle=_HANDLE, serving=project
             )
             == value
         )
 
 
-def test_the_rewritten_request_differs_only_in_its_workspace_ref() -> None:
-    request = _start()
+def test_the_rewritten_request_differs_only_in_its_workspace_ref(project: str) -> None:
+    request = _start(project)
     portable = portable_start_request(
-        request, workspace_binding="client_claim", workspace_handle=_HANDLE
+        request, workspace_binding="client_claim", workspace_handle=_HANDLE, serving=project
     )
     assert type(portable) is StartRequest and portable is not request
     before, after = public_model_to_wire(request), public_model_to_wire(portable)
     assert after.pop("workspace_ref") == _HANDLE
-    assert before.pop("workspace_ref") == _PATH
+    assert before.pop("workspace_ref") == project
     assert after == before
-    assert _PATH not in repr(public_model_to_wire(portable))
+    assert project not in repr(public_model_to_wire(portable))
     unchanged = _start(None)
     assert (
         portable_start_request(
-            unchanged, workspace_binding="client_claim", workspace_handle=_HANDLE
+            unchanged, workspace_binding="client_claim", workspace_handle=_HANDLE, serving=project
         )
         is unchanged
     )
@@ -107,13 +133,16 @@ def test_no_handle_means_nothing_is_sent_and_the_locked_vault_is_named(
 
     with pytest.raises(ControlError) as raised:
         portable_workspace_ref(
-            workspace_ref, workspace_binding="client_claim", workspace_handle=handle
+            workspace_ref, workspace_binding="client_claim", workspace_handle=handle, serving=None
         )
     assert (raised.value.reason, raised.value.retryable) == ("vault_locked", True)
     assert "private-project" not in repr(raised.value)
     with pytest.raises(ControlError) as raised:
         portable_start_request(
-            _start(workspace_ref), workspace_binding="client_claim", workspace_handle=handle
+            _start(workspace_ref),
+            workspace_binding="client_claim",
+            workspace_handle=handle,
+            serving=None,
         )
     assert raised.value.reason == "vault_locked"
 
@@ -131,27 +160,35 @@ def test_the_not_portable_refusal_keeps_its_fixed_shape() -> None:
 def test_an_unknown_binding_is_a_caller_defect() -> None:
     with pytest.raises(ValueError, match="workspace_binding_invalid"):
         portable_workspace_ref(
-            _PATH, workspace_binding=cast(WorkspaceBinding, "remote"), workspace_handle=_HANDLE
+            _PATH,
+            workspace_binding=cast(WorkspaceBinding, "remote"),
+            workspace_handle=_HANDLE,
+            serving=None,
         )
     with pytest.raises(TypeError, match="start_request_invalid"):
         portable_start_request(
-            cast(StartRequest, object()), workspace_binding="none", workspace_handle=None
+            cast(StartRequest, object()),
+            workspace_binding="none",
+            workspace_handle=None,
+            serving=None,
         )
 
 
-def test_the_connection_supplies_its_binding_and_handle() -> None:
-    request = _start()
+def test_the_connection_supplies_its_binding_and_handle(project: str) -> None:
+    request = _start(project)
     bound = SimpleNamespace(workspace_binding="client_claim", workspace_handle=_HANDLE)
-    assert start_request_for_connection(request, bound).workspace_ref == _HANDLE
+    assert start_request_for_connection(request, bound, serving=project).workspace_ref == _HANDLE
     # A connection that reports no binding, or an unreadable one, sends the request as written.
     for connection in (
         object(),
         SimpleNamespace(workspace_binding="local_path", workspace_handle=None),
         SimpleNamespace(workspace_binding=object(), workspace_handle=_HANDLE),
     ):
-        assert start_request_for_connection(request, connection) is request
+        assert start_request_for_connection(request, connection, serving=project) is request
     with pytest.raises(ControlError) as raised:
         start_request_for_connection(
-            request, SimpleNamespace(workspace_binding="client_claim", workspace_handle=None)
+            request,
+            SimpleNamespace(workspace_binding="client_claim", workspace_handle=None),
+            serving=project,
         )
     assert raised.value.reason == "vault_locked"

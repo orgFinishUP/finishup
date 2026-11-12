@@ -613,6 +613,25 @@ named-local root binds by locator, as before, and no remote root can be selected
   `vault_locked` (retryable unless a hard lock holds), and it ends the connection once a ready
   generation is published, so a background agent, which sends no such call, connects again and
   gets a handle.
+- **Rule R: the connection's own folder decides the repository** (amended 2026-11-12, before
+  release, the owner's choice). The rewrite above once swapped any absolute `workspace_ref` for the
+  handle without comparing, so a task naming repository B, started from a folder in repository A,
+  read (and at code level L2 copied) A while its receipts described B. Now the client first checks
+  that the path names the worktree the connection serves: both paths resolved and reduced to their
+  worktree top as the claim does, then compared by file identity, so a subfolder, a symlinked
+  spelling and, on a case-insensitive file system, a case variant are the same worktree, and
+  another repository, another worktree of the same repository, a nested repository, a folder in no
+  repository, a missing path or a file is not. Any other is refused in the client,
+  `workspace_ref_not_served` (`INVALID_REQUEST`, not retryable), before anything about the request
+  is sent, so nothing is read or synced for it. The continuation fits the surface: a command is
+  told to run from the named folder; an agent behind an MCP bridge, which cannot restart its
+  bridge elsewhere, is told to tell the user and carry on without FinishUP for that folder. The
+  alternatives were to serve the named repository (S: an agent-supplied field would choose which
+  repository is disclosed, reversing `main`'s rule that `workspace_ref` never selects disclosure
+  authority) or to serve it only when the owner had admitted it (S′). L0 is unchanged: a
+  locally bound connection sends the path as written, as on `main` (issue #1349 owns `main`'s
+  mix-up there). The server cannot add a fence of its own: an older client sends the handle for
+  any absolute path, and the handle is all the server sees. See INTERFACES, "Rule R".
 - **What stays identical.** Framing (6 MiB frames, 1 MiB ordinary), all 32 methods and their
   bodies, `rpc_id` multiplexing and cancel, the client-kind gate and the client's exact-set check,
   and idempotency by `(installation_id, request_id)`. The YZH1 human-control and YZS1 secret

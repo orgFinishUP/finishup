@@ -5136,9 +5136,78 @@ in-process tests; every client of a local root still sends its locator.
   `reason` (closed token or `null`).
 - On a claim-bound connection a `start` that names a workspace must name the handle; an absolute
   path is `workspace_ref_not_portable`. The MCP bridge and the CLI rewrite an absolute
-  `workspace_ref` to the handle before sending. A start that names no workspace is admitted where
-  it is on one computer, and any session it opens records the connection's handle in its opening
-  event (`execute_start(..., session_workspace_ref=)`, outside the request identity).
+  `workspace_ref` to the handle before sending, but only one that names the worktree the
+  connection serves (rule R, below). A start that names no workspace is admitted where it is on
+  one computer, and any session it opens records the connection's handle in its opening event
+  (`execute_start(..., session_workspace_ref=)`, outside the request identity).
+- **Rule R: the connection's own folder decides the repository and the worktree** (the owner's
+  choice, 2026-11-12). With a server elsewhere, as on `main`, the folder a connection was made from
+  decides which repository and worktree its tasks read; `workspace_ref` never selects disclosure
+  authority. The client compares an absolute `workspace_ref` with that folder before it rewrites
+  it (`client.workspace_ref.names_served_workspace`):
+  - **The comparison.** Both paths are resolved (every symlink followed, `strict`) and reduced to
+    their worktree top: the nearest `.git` entry, a directory for a primary checkout or a file for
+    a linked worktree or a submodule, found as the connection's claim finds it
+    (`canonical_workspace_locator`). The two tops are compared by file identity
+    (`os.path.samefile`: device and inode), never as strings. So a subfolder of the served
+    worktree, a symlinked spelling of it and, on a case-insensitive file system (macOS APFS by
+    default), a spelling that differs only by case are the served worktree; on a case-sensitive
+    file system a case variant is another folder or none. The reduction is the one the remote
+    admission applies to the connection's own locator before it makes the claim, so both sides
+    meet the same rules: a repository at the home folder without home admission and a symlinked
+    `.git` have no top there, and a path in them is refused (fail closed; the start may name no
+    workspace instead).
+  - **Each kind of `workspace_ref`:**
+
+    | `workspace_ref` | Claim-bound connection (a server elsewhere) |
+    |---|---|
+    | absolute, naming the served worktree or a folder in it | sent as the connection's handle, as before |
+    | absolute, naming another repository | refused `workspace_ref_not_served`; nothing sent |
+    | absolute, naming another worktree of the same repository (a linked worktree, or the primary checkout from a linked one) | refused the same way; identity is not recomputed (#1346), only the worktree compared |
+    | absolute, naming a repository nested beneath the served worktree (a submodule, a vendored checkout, a bare repository kept in the tree) or the worktree's own `.git` | refused: another repository's worktree or storage |
+    | absolute, naming a folder in no repository, a path that does not exist, or a file | refused the same way |
+    | not absolute (a label, a relative path) or a `client:` handle | unchanged by rule R: sent as written, and the server accepts only this connection's handle (`workspace_ref_not_portable` otherwise) |
+    | absent | unchanged: the server opens the session on the connection's handle |
+
+  - **Which folder is served.** The folder the caller made the connection from (the CLI's
+    working folder, the bridge's own folder or Cursor's bound root, the hook's locator); where the
+    connection reports the worktree its claim was made for (`ServiceClient.remote_workspace`),
+    that worktree, so the rule compares against exactly what the server reads. A connection to a
+    server elsewhere that carries no claim (made from a folder in no repository) serves no folder:
+    any absolute `workspace_ref` is refused the same way, since sending it as written would name a
+    folder of this computer to that server.
+  - **Which operations.** Only `start` carries a `workspace_ref` (`start-request` 1.0.0 and 1.1.0,
+    in the pair with `external_ref`); the rule applies to every mode that carries one
+    (`create`, `create_or_attach`, `attach` by the pair, and a `delegate` or child start that
+    names a pair). Attach by `session_id` or `attach_handle`, `publish_work`, `check`, `respond`,
+    `status`, `receipt` and `closure_prepare` carry none: they reach the session the start bound,
+    whose handle never changes, and the server's existing repository fence answers a call from
+    another repository (`repository_identity_mismatch`).
+  - **The refusal.** `WorkspaceRefNotServed`: `INVALID_REQUEST`, not retryable,
+    `safe_details` `reason_code: workspace_ref_not_served`, `field: /workspace_ref` and a
+    continuation that fits the surface: `workspace_folder_run_required` from a command (run it
+    from the folder `workspace_ref` names) and `workspace_not_served_tell_user` from an MCP
+    bridge, whose agent cannot restart it in another folder (tell the user in one line and carry
+    on without FinishUP for that folder). The message and details are fixed and name no path,
+    the served one included; the message says which folder is served by how the connection was
+    made ("the repository worktree it runs in", "the repository worktree its host started
+    FinishUP in"), which is the form the honesty rules allow. A JSON caller of the CLI
+    (`--json`, or a stdout that is not a terminal) reads the frozen start failure body on stdout,
+    as it would for a refusal by the server, and the directive on stderr; a refusal the client
+    raises for `workspace_ref_not_portable` answers the same way.
+  - **What is never sent.** The refused request: nothing about it reaches the server, so nothing
+    is read or synced for it, and neither the named folder nor the served one is copied for it.
+    The connection itself (its hello, its claim and, where it serves, its workspace agent) was
+    already made from the caller's own folder before the request was read (the bridge's one
+    cached connection; the CLI's per-command connection) and is unchanged.
+  - **L0 is unchanged.** A connection bound by a local path (`main`'s one-computer service) or
+    not bound sends `workspace_ref` exactly as written, even when it names another repository; that
+    mix-up on `main` (git evidence from the connection's folder, the reviewer's reads from the
+    named one) is issue #1349.
+  - **Old and new builds.** A new client refuses before sending, so an old server sees nothing
+    new. An old client against a new server still sends the connection's handle for any absolute
+    path; the server sees only the handle and cannot tell which folder was named, so with an old
+    client the task is read, and at code level L2 copied, from the connection's own repository.
 
 **Workspace-agent operation catalog** (`ports/workspace_agent.py`, the single source of truth).
 Each operation fixes its argument and result codecs and an argument byte bound and a result byte
@@ -5518,9 +5587,13 @@ and a remote root is refused ("Layer 1 status" above).
   server, or a remote root with no workspace; otherwise the binding under the target's own
   `claim_salt`. `is_remote_active_root()` answers whether the active root is a `local_port`, `ssh`
   or `https` target. Both fail closed with the root's `TargetError`, never reading as local.
-- `finishup.client.workspace_ref`: `start_request_for_connection(request, connection)` rewrites
-  an absolute `workspace_ref` to the connection's handle (the MCP start path, the CLI start path and
-  the SessionStart auto-attach use it); a claim-bound connection without a handle (the server's
+- `finishup.client.workspace_ref`: `start_request_for_connection(request, connection, *, serving,
+  surface="command")` rewrites an absolute `workspace_ref` that names the worktree of `serving`
+  (the locator the caller made the connection from) to the connection's handle, and raises
+  `WorkspaceRefNotServed` for any other (rule R above; `surface="bridge"` picks the bridge's
+  continuation). The MCP start path passes the bridge's own locator (Cursor's bound root), the CLI
+  start path the folder it runs in, and the SessionStart auto-attach the locator it connected with,
+  so the auto-attach meets the rule by construction. A claim-bound connection without a handle (the server's
   vault was not ready at hello, so it could not key the claim) raises the retryable `ControlError`
   `vault_locked` and nothing is sent, so the MCP bridge discards that connection and its next call
   reconnects with a fresh hello. `WorkspaceRefNotPortable` (`INVALID_REQUEST`, reason
@@ -5754,6 +5827,7 @@ claim-bound check is `unavailable` again), instead of "local outbox not readable
 |---|---|---|
 | `workspace_binding_conflict` | a hello carries both `workspace_claim` and `workspace_locator`, or a `start` names a `client:` handle on a connection without a claim | name the workspace by its absolute root (the bridge and CLI pick the form) |
 | `workspace_ref_not_portable` | a claim-bound `start` names an absolute or relative `workspace_ref`, or a handle other than the connection's | send the connection's `workspace_handle`, or no workspace (the bridge and CLI rewrite the absolute root to the handle) |
+| `workspace_ref_not_served` | rule R, in the client: a claim-bound `start`'s absolute `workspace_ref` names another folder than the worktree the connection serves (another repository or worktree, a nested repository, no repository, a missing path or a file); nothing is sent | continuation `workspace_folder_run_required` from a command (run it from the named folder) or `workspace_not_served_tell_user` from an MCP bridge (tell the user, carry on without FinishUP for that folder) |
 | `workspace_agent_unavailable` | no workspace agent answered within the hub's wait | no directive (`REASON_CODE_DIRECTIVE_EXEMPTIONS`): it is recorded as the check-time change gap `check_time_change_unavailable_workspace_agent_unavailable`, never raised as an error, and that gap's fixed sentence names `finishup server status NAME` on the client and that checking again can help |
 | `workspace_agent_refused` | the agent refused a read the check-time change needed as one it does not answer (a workspace it did not claim, an unknown operation or argument, a root no owner could admit) | no directive, on the same terms: the gap `check_time_change_unavailable_workspace_agent_refused` names the release mismatch and installing the same release on both computers. The directives `workspace_agent_reconnect` and `workspace_agent_refusal_review` were removed (2026-11-07): nothing raised an error carrying these reasons, so they never reached an agent. Files listed mode keeps from a server are not refusals of the check but the disclosure `outside_reads_not_listed` |
 | `requires_server_host` | a `server_host` command runs while a remote target is active | run it on the server host (for SSH, through `ssh -t`) |
