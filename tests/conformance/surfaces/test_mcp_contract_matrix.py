@@ -309,8 +309,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:9d602539114cc0b0b689f589ee7b85249742b58b78ed603a309fc83143ab9efc",
-        "strict": "sha256:5a504aa5d9c0665a7ab41a5cded235d547e876241766785c4e483f991e1b360d",
+        "policy": "sha256:da9edb3c63e7acfe3a9e8fca472fdd0ffdc2eeaf87aa59cd7645f82c9b18b06d",
+        "strict": "sha256:bbda09e0ba167c33cce9393a09b7a2bbef85d02f0d98dc2556f2e345b7c21faa",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -374,7 +374,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert status_descriptor.input_schema_ref.endswith("status-request-1.3.0.schema.json")
     assert status_descriptor.output_schema_ref.endswith("status-result-1.5.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.4.0.schema.json")
+    # 1.4.1: the closing-line pattern a unicode-mode ECMAScript engine compiles (1.4.0 is frozen).
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.4.1.schema.json")
     closure_descriptor = descriptor_for("closure_prepare")
     assert closure_descriptor.input_schema_ref.endswith("closure-prepare-request-1.0.0.schema.json")
     assert closure_descriptor.output_schema_ref.endswith("closure-prepare-result-1.0.0.schema.json")

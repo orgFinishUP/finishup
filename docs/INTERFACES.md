@@ -4752,7 +4752,9 @@ decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #73
 0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
 and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
 line reports its inventory, including both setup contracts and `isolation-report` `1.0.0`
-(issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes.
+(issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes. `2.3.0`
+shipped in v0.3.0 and is frozen with them; the inventory after it (receipt-result `1.4.1`) is
+reported by `2.3.1`.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -13180,7 +13182,7 @@ effect on findings, closure readiness or AI-review requirements.
 
 The unreleased `status-request/1.2.0` / `status-result/1.4.0` admit `view=coverage`, and their
 #1139 delivery successors `status-request/1.3.0` / `status-result/1.5.0` inherit it; receipt-document
-`1.3.0`, carried by receipt-result `1.3.0` and `1.4.0`, optionally carries `verification_coverage`. CLI status, TUI `/coverage`
+`1.3.0`, carried by receipt-result `1.3.0`, `1.4.0` and `1.4.1`, optionally carries `verification_coverage`. CLI status, TUI `/coverage`
 and receipt JSON/markdown/text share the projection. Wire quote leaves are separated into
 `task_criterion_quote` (`task_description`) and `obligation_criterion_quote` (`obligation_text`);
 `worst` and `checks` use command metadata; `expected_from` is a closed structural label shown on
@@ -13399,13 +13401,20 @@ unchanged. The receipt Summary appends "Reviewer notes: N; not answered: M (K ma
 gate asks it once per key, after the premise ask and trimmed before it, also on an
 already-continued Stop within the per-turn cap (`advice_recheck` item,
 `closure_gate_advice_asked` diagnostic, whose row also names the asked key as `advice_set`).
-The receipt result (receipt-result 1.3.0 in place, inherited by 1.4.0) carries the optional
+The receipt result (receipt-result 1.3.0 in place, inherited by 1.4.0 and 1.4.1) carries the optional
 `agent_closing_prompt` (D5): "Tell the user in your final message: receipt conclusion
 <conclusion>[; reviewer notes: T, not answered: U[, declined: D]][; name each note not answered or
 declined]." It is derived from the stored document alone (conclusion, `correctness_advisory_counts`
 and the Summary tally for `declined`, left out when unreadable), so a replay reads the same; the
 model admits it only in that closed shape for its own conclusion, and the MCP summary and CLI
-receipt text re-gate and append it. `respond` advisory dispositions are `addressed`,
+receipt text re-gate and append it. Its schema `pattern` is ECMA-262 as a host's unicode-mode
+engine reads it (no escaped spaces) in 1.4.1, which changes nothing else and is what the MCP
+bridge advertises as `receipt`'s `outputSchema`; 1.3.0 and 1.4.0 shipped in v0.3.0 and keep their
+pattern, which escapes each space (`\ `, Python's `re.escape`), accepts the same strings, and
+fails to compile in such an engine (Cursor 3.27.22 dropped every tool over it). The local control
+result `2.9.0`, also shipped, keeps carrying receipt bodies as 1.4.0; a body valid under one is
+valid under the other. Every pattern the MCP bridge advertises is checked in unicode mode
+(`tests/unit/mcp/test_advertised_schema_patterns.py`). `respond` advisory dispositions are `addressed`,
 `kept_choice` (reason only; label "checked, kept my choice") and `declined`; history and receipt
 rows add `kept_choice` and `response_unavailable`. The `default_local_export` receipt row carries
 the agent's reason as one bounded line. The MCP status line reads "unanswered findings: N;

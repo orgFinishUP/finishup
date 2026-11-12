@@ -26,7 +26,9 @@ _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
 # +1 each: the review-packet-row 2.0.0 provider contract (robust lane row contract).
 # ADR-049: +1 member, decision-recorded 1.1.0 (an event schema, not a request/result version).
-_EXPECTED_MEMBER_COUNT = 244  # #1239 +1 contact-expectation-declared 1.0.0;
+_EXPECTED_MEMBER_COUNT = 246  # #1239 +1 contact-expectation-declared 1.0.0;
+# +1 receipt-result 1.4.1 (the closing-line pattern a unicode-mode ECMAScript engine compiles),
+# +1 version-manifest 2.3.1 (2.3.0 shipped in v0.3.0 and is frozen);
 # #1170 +1 result-recorded 1.1.0;
 # #1139 +4 lossless result-delivery schemas;
 # #1118 +1 reviewer-reply 1.0.0, +2 check-result/-recorded 1.6.0,
@@ -232,6 +234,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.5.0.schema.json")
             else "2.4.0"
             if path.endswith("-2.4.0.schema.json")
+            else "2.3.1"
+            if path.endswith("-2.3.1.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
             else "2.2.3"
@@ -258,6 +262,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-1.6.0.schema.json")
             else "1.5.0"
             if path.endswith("-1.5.0.schema.json")
+            else "1.4.1"
+            if path.endswith("-1.4.1.schema.json")
             else "1.4.0"
             if path.endswith("-1.4.0.schema.json")
             else "1.3.0"
@@ -528,12 +534,22 @@ def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
     )
 
 
-def test_live_version_manifest_2_3_tracks_the_current_inventory() -> None:
-    from finishup.version import REVIEWED_RESOURCE_COUNT
+def test_released_version_manifest_2_3_retains_the_0_3_0_inventory() -> None:
+    """v0.3.0 shipped 2.3.0; the inventory after it (receipt-result 1.4.1) is reported by 2.3.1."""
 
     document = _version_manifest_document("2.3.0")
-
     assert document["properties"]["schema_version"]["const"] == "2.3.0"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 342
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["receipt-result"] == "1.4.0"
+
+
+def test_live_version_manifest_2_3_1_tracks_the_current_inventory() -> None:
+    from finishup.version import REVIEWED_RESOURCE_COUNT
+
+    document = _version_manifest_document("2.3.1")
+
+    assert document["properties"]["schema_version"]["const"] == "2.3.1"
     counts = _version_manifest_consts(document, "resource_counts")
     assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
     assert sum(int(count) for name, count in counts.items() if name != "total") == int(
@@ -550,6 +566,8 @@ def test_live_version_manifest_2_3_tracks_the_current_inventory() -> None:
     assert requests["start-request"] == "1.1.0"
     # The sized reviewer exchange bound (#1118).
     assert requests["privacy-policy"] == "1.3.0"
+    # The closing-line pattern a unicode-mode ECMAScript engine compiles.
+    assert requests["receipt-result"] == "1.4.1"
     assert events["session_opened"] == "1.2.0"
 
 
