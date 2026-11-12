@@ -534,10 +534,9 @@ STOPPED_START_SECONDS = 15.0
 # served within this of the server being ready: one refused attempt, the repeat's wait and one
 # whole start with its sync.
 NARROWED_SERVED_SECONDS = 15.0
-# The second narrowing is ready at most this long after the helper's fetch for the first, so the
-# old 30-second floor would have held for 8 more seconds: long enough for the repeated start to be
-# refused again, which "refused at most once" then catches.
-NARROWED_WITHIN_SECONDS = 22.0
+# The old refresh floor: a start served this long after the helper's fetch for the first
+# narrowing could have been served without the fix, so only one served sooner shows it.
+OLD_REFRESH_FLOOR_SECONDS = 30.0
 # How long a caller waits before it repeats a request refused remote_profile_checking ("repeat
 # the same request in a few seconds").
 REPEAT_SECONDS = 3.0
@@ -726,11 +725,13 @@ def stopped_helper_tasks(world: World, report: Report, cell: Cell) -> None:
 def narrowed_twice(world: World, report: Report, cell: Cell) -> None:
     """The server narrows what it offers twice within 30 seconds (macOS dogfood: the second
     narrowing was refused on every call until 30 seconds after the helper's profile fetch for the
-    first). After the first, the consent follows the new revision by itself; the second is ready
-    less than 30 seconds after that fetch, and the first start after it may be refused once, typed
-    ``server_profile_changed`` with ``remote_profile_checking`` (repeat the same request), never
-    ``remote_reconsent``, then is served within ``NARROWED_SERVED_SECONDS`` of the server being
-    ready, the consent following again by itself."""
+    first). After the first, the consent follows the new revision by itself; right after that,
+    the second, and the first start after it may be refused once, typed ``server_profile_changed``
+    with ``remote_profile_checking`` (repeat the same request), never ``remote_reconsent``, then
+    is served within ``NARROWED_SERVED_SECONDS`` of the server being ready, the consent following
+    again by itself. The step passes only when that start was served before the old floor would
+    have let the helper fetch (``OLD_REFRESH_FLOOR_SECONDS`` after its fetch for the first); a
+    server whose restart lands too late for that records it as not conclusive (skipped)."""
 
     client, server = world.client, world.server(cell)
     config = server.root / "config" / "config.toml"
@@ -807,28 +808,40 @@ def narrowed_twice(world: World, report: Report, cell: Cell) -> None:
     checking = all(item == "server_profile_changed/remote_profile_checking" for item in refusals)
     after = consented_revision()
     moved = after is not None and after != before
-    # The old 30-second floor would still hold long enough to refuse the repeated start too: a
-    # pass here cannot come from the floor running out.
-    report.add(
-        "narrowing 2 within 30 s → refused at most once, then served",
+    name = "narrowing 2 within 30 s → refused at most once, then served"
+    detail = (
+        f"server restarted narrower: {restarted}; ready "
+        + (f"{since_fetch:.1f} s" if since_fetch is not None else "unknown time")
+        + " after the helper's profile fetch for narrowing 1; refusals before the start was "
+        + f"served: {refusals or 'none'}; served "
+        + (f"{served:.1f} s after the server was ready" if served is not None else "never")
+        + f" (bound {NARROWED_SERVED_SECONDS:.0f} s); the consent followed the new revision by "
+        + f"itself: {moved}"
+    )
+    transcript = shown(world, last) if last is not None else ""
+    behaved = (
         restarted
-        and since_fetch is not None
-        and since_fetch < NARROWED_WITHIN_SECONDS
         and served is not None
         and served <= NARROWED_SERVED_SECONDS
         and len(refusals) <= 1
         and checking
-        and moved,
-        f"server restarted narrower: {restarted}; ready "
-        + (f"{since_fetch:.1f} s" if since_fetch is not None else "unknown time")
-        + " after the helper's profile fetch for narrowing 1 (under "
-        + f"{NARROWED_WITHIN_SECONDS:.0f} s required); refusals before the start was "
-        + f"served: {refusals or 'none'}; served "
-        + (f"{served:.1f} s after the server was ready" if served is not None else "never")
-        + f" (bound {NARROWED_SERVED_SECONDS:.0f} s); the consent followed the new revision by "
-        + f"itself: {moved}",
-        shown(world, last) if last is not None else "",
+        and moved
     )
+    # Served while the old 30-second floor would still have refused it: only then does a pass
+    # show the fix rather than the floor running out (Codex review).
+    within = (
+        since_fetch is not None
+        and served is not None
+        and since_fetch + served < OLD_REFRESH_FLOOR_SECONDS
+    )
+    if behaved and not within:
+        report.skip(
+            name,
+            detail + "; not conclusive: served after the old 30-second floor would have ended "
+            "(this server's restart took too long to land within it)",
+        )
+    else:
+        report.add(name, behaved, detail, transcript)
 
 
 def warm_helper(world: World, report: Report, cell: Cell) -> tuple[int | None, str]:
