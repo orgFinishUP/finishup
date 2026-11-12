@@ -328,7 +328,11 @@ state and the pin. The script works in four steps:
    is best effort. The script reads `/proc` on Linux and `lsof` on macOS.
    - **When that cannot be determined:** `runtime_in_use_unverifiable`. Examples: there is no
      `/proc` or `lsof`, a held lease no visible process accounts for, or a listing that times out.
-     Stop the service with the launcher (`service stop`), close the host sessions, and retry.
+     - Restore the listing first. On Linux, `/proc` must be mounted and your own processes
+       readable there (a `hidepid` mount that hides them refuses every time). On macOS, `lsof`
+       ships as `/usr/sbin/lsof`; elsewhere, install it.
+     - Then close the host sessions, stop the service with the launcher (`service stop`), and
+       retry.
    - **What it cannot see:**
      - another account's processes, and processes this account cannot inspect;
      - a command that holds no lease and keeps none of the runtime's files open or mapped;
@@ -349,6 +353,14 @@ state and the pin. The script works in four steps:
      instance is still in place and pinned: stop that runtime's service and retry.
    - **Any other failure** (`instance_dispose_incomplete`) may have removed part of the instance,
      so the launchers stay withdrawn.
+   - **Stop the service while the launchers are withdrawn.** A retry that refuses
+     `runtime_in_use` because the instance's own service still runs needs it stopped, and the
+     withdrawn launcher script no longer runs (its first line names `runtime/bin/python`, which
+     is gone). Use the withdrawn interpreter, and name the instance's root explicitly, so that
+     even a runtime that has lost its pin can only reach this instance:
+     `FINISHUP_ISOLATED_ROOT=<base>/<tag>/state <base>/<tag>/runtime/.bin-withdrawn/python -I -m finishup service stop`.
+     For a pre-rename instance, use `YOETZ_ISOLATED_ROOT` and `-m yoetz`. Never stop it by a
+     process name or pattern.
    - **Run `dispose` again.** It checks for hosts again before it stops or removes anything. Once a
      run has begun, the launchers are never put back, even on a typed refusal.
    - **The progress record.** The rerun finishes from the record written before step 3

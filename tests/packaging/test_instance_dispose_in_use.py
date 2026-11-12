@@ -21,12 +21,13 @@ import json
 import os
 import platform
 import secrets
+import selectors
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Final, cast
+from typing import IO, Final, cast
 
 import pytest
 
@@ -119,8 +120,40 @@ def _start_service(launcher: Path, env: dict[str, str]) -> subprocess.Popen[byte
     raise AssertionError("service did not become reachable in time")
 
 
-def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.Popen[bytes]:
-    """``mcp serve`` held open as a connected host holds it, once it has answered ``initialize``."""
+_BRIDGE_ANSWER_SECONDS = 120.0
+
+
+def _read_line(stream: IO[bytes], seconds: float) -> bytes:
+    """One line from ``stream``, read in chunks to a deadline: a partial line never blocks."""
+
+    deadline = time.monotonic() + seconds
+    descriptor = stream.fileno()
+    data = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_READ)
+        while b"\n" not in data:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "the bridge did not answer initialize in time"
+            if not selector.select(timeout=remaining):
+                continue
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                break
+            data += chunk
+    return data.split(b"\n", 1)[0]
+
+
+def _open_bridge(
+    launcher: Path,
+    env: dict[str, str],
+    cwd: Path,
+    processes: list[subprocess.Popen[bytes]],
+) -> subprocess.Popen[bytes]:
+    """``mcp serve`` held open as a connected host holds it, once it has answered ``initialize``.
+
+    The bridge joins ``processes`` before anything is read from it, so the test's cleanup stops
+    it whatever happens next, and its answer is awaited to a bounded deadline.
+    """
 
     proc = subprocess.Popen(
         [str(launcher), "mcp", "serve", "--host", "codex"],
@@ -131,6 +164,7 @@ def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.P
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    processes.append(proc)
     assert proc.stdin is not None and proc.stdout is not None
     message = {
         "jsonrpc": "2.0",
@@ -144,7 +178,7 @@ def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.P
     }
     proc.stdin.write((json.dumps(message) + "\n").encode())
     proc.stdin.flush()
-    line = proc.stdout.readline()
+    line = _read_line(proc.stdout, _BRIDGE_ANSWER_SECONDS)
     assert b'"result"' in line, line[:400]
     return proc
 
@@ -199,8 +233,7 @@ def test_a_disposal_refused_by_a_live_host_session_changes_nothing() -> None:
 
         service = _start_service(launcher, env)
         processes.append(service)
-        bridge = _open_bridge(launcher, env, workdir)
-        processes.append(bridge)
+        bridge = _open_bridge(launcher, env, workdir, processes)
         before = _json(launcher, ["instance", "status"], env)
         assert (before["mode"], before["binding"]) == ("isolated", "runtime_pin")
         serving = _json(launcher, ["service", "status"], env)["service_instance_id"]
@@ -241,3 +274,23 @@ def test_a_disposal_refused_by_a_live_host_session_changes_nothing() -> None:
         if (base / "t").exists():
             _script(["dispose", "--base", str(base), "--tag", "t"], env, 300)
         shutil.rmtree(cell, ignore_errors=True)
+
+
+def test_a_partial_answer_never_outlasts_the_deadline() -> None:
+    """The bridge's answer is read in chunks to a deadline: a partial line from a bridge that
+    stays alive fails the test instead of blocking it."""
+
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, b'{"jsonrpc":"2.0","id":1,')
+        with os.fdopen(os.dup(reader), "rb", buffering=0) as stream:
+            began = time.monotonic()
+            with pytest.raises(AssertionError, match="did not answer initialize in time"):
+                _read_line(stream, 0.5)
+            assert time.monotonic() - began < 5
+        os.write(writer, b'"result":{}}\n{"next":1}\n')
+        with os.fdopen(os.dup(reader), "rb", buffering=0) as stream:
+            assert _read_line(stream, 5) == b'"result":{}}'
+    finally:
+        os.close(reader)
+        os.close(writer)
