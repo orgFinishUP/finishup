@@ -665,6 +665,23 @@ def _read_progress(path: Path) -> dict[str, object] | None:
     return cast(dict[str, object], parsed) if isinstance(parsed, dict) else None
 
 
+def _progress_valid(record: dict[str, object] | None, state: Path) -> bool:
+    """Whether ``record`` is this disposal's whole record for the very folder at ``state``."""
+
+    if record is None or record.get("state") != str(state):
+        return False
+    installation = record.get("installation_id")
+    identity = record.get("identity")
+    current = _directory_identity(state)
+    return (
+        type(installation) is str
+        and bool(installation)
+        and isinstance(identity, list)
+        and current is not None
+        and identity == list(current)
+    )
+
+
 def _directory_identity(path: Path) -> tuple[int, int] | None:
     try:
         facts = path.lstat()
@@ -804,9 +821,9 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
             if logs is not None:
                 _check_logs_destination(logs, layout["root"], status.get("installation_id"))
             _checked(layout["root"], releases, status)
-            if _read_progress(progress) is None:
-                # An earlier run stopped before its record was complete; write it before any
-                # deletion, so another interruption can still be finished.
+            if not _progress_valid(_read_progress(progress), state):
+                # An earlier run stopped before its record was complete, or it is damaged: write
+                # it before any deletion, so another interruption can still be finished.
                 _write_progress(
                     progress,
                     {
@@ -823,15 +840,7 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
     if state.exists() and not marker.is_file():
         # A disposal this script began stopped while it removed the root, after the identity
         # marker went. Finish it, but only for the very folder its progress record names.
-        recorded = _read_progress(progress)
-        identity = _directory_identity(state)
-        if (
-            recorded is None
-            or recorded.get("state") != str(state)
-            or identity is None
-            or recorded.get("identity") != list(identity)
-            or state.is_symlink()
-        ):
+        if not _progress_valid(_read_progress(progress), state) or state.is_symlink():
             raise _fail(
                 "instance_not_disposable: the root has no identity, and no disposal of this very "
                 "folder was begun here; check it and remove it by hand if it is the instance's"

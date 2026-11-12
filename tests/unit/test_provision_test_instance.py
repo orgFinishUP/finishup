@@ -767,18 +767,24 @@ def test_finishing_an_unmarked_remainder_still_refuses_while_a_host_runs_a_copy(
     assert layout["state"].is_dir()
 
 
-def test_a_resumed_disposal_rewrites_a_missing_progress_record_before_deleting(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("record", [None, "{}", "{not json"])
+def test_a_resumed_disposal_rewrites_a_missing_or_damaged_progress_record_before_deleting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, record: str | None
 ) -> None:
     _accept_base(monkeypatch)
     layout = _instance(tmp_path)
     _withdrawn_midway(layout)
-    (layout["root"] / _MODULE._PROGRESS).unlink()
+    progress = layout["root"] / _MODULE._PROGRESS
+    progress.unlink()
+    if record is not None:
+        progress.write_text(record, encoding="utf-8")
     runner = _Runner(layout, _status())
     runner.dispose_exit = 1
     runner.dispose_out = {}
     seen: list[bool] = []
-    runner.on_dispose = lambda: seen.append((layout["root"] / _MODULE._PROGRESS).is_file())
+    runner.on_dispose = lambda: seen.append(
+        _MODULE._progress_valid(_MODULE._read_progress(progress), layout["state"])
+    )
     monkeypatch.setattr(_MODULE, "_run", runner)
     with pytest.raises(_MODULE.ProvisionError, match="^instance_dispose_incomplete: "):
         _dispose(layout)
