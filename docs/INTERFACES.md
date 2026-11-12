@@ -5120,6 +5120,13 @@ in-process tests; every client of a local root still sends its locator.
     | not absolute (a label, a relative path) or a `client:` handle | unchanged by rule R: sent as written, and the server accepts only this connection's handle (`workspace_ref_not_portable` otherwise) |
     | absent | unchanged: the server opens the session on the connection's handle |
 
+  - **Which folder is served.** The folder the caller made the connection from (the CLI's
+    working folder, the bridge's own folder or Cursor's bound root, the hook's locator); where the
+    connection reports the worktree its claim was made for (`ServiceClient.remote_workspace`),
+    that worktree, so the rule compares against exactly what the server reads. A connection to a
+    server elsewhere that carries no claim (made from a folder in no repository) serves no folder:
+    any absolute `workspace_ref` is refused the same way, since sending it as written would name a
+    folder of this computer to that server.
   - **Which operations.** Only `start` carries a `workspace_ref` (`start-request` 1.0.0 and 1.1.0,
     in the pair with `external_ref`); the rule applies to every mode that carries one
     (`create`, `create_or_attach`, `attach` by the pair, and a `delegate` or child start that
