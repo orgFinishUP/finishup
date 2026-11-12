@@ -5094,7 +5094,11 @@ in-process tests; every client of a local root still sends its locator.
     (`os.path.samefile`: device and inode), never as strings. So a subfolder of the served
     worktree, a symlinked spelling of it and, on a case-insensitive file system (macOS APFS by
     default), a spelling that differs only by case are the served worktree; on a case-sensitive
-    file system a case variant is another folder or none.
+    file system a case variant is another folder or none. The reduction is the one the remote
+    admission applies to the connection's own locator before it makes the claim, so both sides
+    meet the same rules: a repository at the home folder without home admission and a symlinked
+    `.git` have no top there, and a path in them is refused (fail closed; the start may name no
+    workspace instead).
   - **Each kind of `workspace_ref`:**
 
     | `workspace_ref` | Claim-bound connection (a server elsewhere) |
@@ -5102,7 +5106,7 @@ in-process tests; every client of a local root still sends its locator.
     | absolute, naming the served worktree or a folder in it | sent as the connection's handle, as before |
     | absolute, naming another repository | refused `workspace_ref_not_served`; nothing sent |
     | absolute, naming another worktree of the same repository (a linked worktree, or the primary checkout from a linked one) | refused the same way; identity is not recomputed (#1346), only the worktree compared |
-    | absolute, naming a repository nested beneath the served worktree (a submodule, a vendored checkout) | refused: another repository |
+    | absolute, naming a repository nested beneath the served worktree (a submodule, a vendored checkout, a bare repository kept in the tree) or the worktree's own `.git` | refused: another repository's worktree or storage |
     | absolute, naming a folder in no repository, a path that does not exist, or a file | refused the same way |
     | not absolute (a label, a relative path) or a `client:` handle | unchanged by rule R: sent as written, and the server accepts only this connection's handle (`workspace_ref_not_portable` otherwise) |
     | absent | unchanged: the server opens the session on the connection's handle |

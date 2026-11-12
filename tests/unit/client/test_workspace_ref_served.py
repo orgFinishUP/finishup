@@ -78,6 +78,10 @@ def layout(tmp_path: Path) -> dict[str, Path]:
     # A repository nested inside the served one (a vendored checkout or a submodule) is another
     # repository even though its path lies under the served worktree.
     nested = _repository(served / "vendor" / "nested")
+    # A bare repository kept inside the worktree is another repository's storage, as is the
+    # worktree's own git directory (Codex review of run u8, finding 1).
+    bare = served / "cache.git"
+    _git("init", "-q", "--bare", os.fspath(bare))
     a_file = served / "tracked.txt"
     return {
         "served": served,
@@ -87,6 +91,9 @@ def layout(tmp_path: Path) -> dict[str, Path]:
         "alias": alias,
         "plain": plain,
         "nested": nested,
+        "bare": bare,
+        "bare_subfolder": bare / "refs",
+        "gitdir": served / ".git",
         "missing": tmp_path / "missing",
         "file": a_file,
     }
@@ -134,7 +141,10 @@ def test_the_served_worktree_in_any_spelling_is_sent_as_the_handle(
     assert _claim_bound(os.fspath(layout[named]) + "/./", layout[serving]) == _HANDLE
 
 
-@pytest.mark.parametrize("named", ["other", "linked", "plain", "nested", "missing", "file"])
+@pytest.mark.parametrize(
+    "named",
+    ["other", "linked", "plain", "nested", "bare", "bare_subfolder", "gitdir", "missing", "file"],
+)
 def test_any_other_folder_is_refused_typed_before_anything_is_sent(
     layout: dict[str, Path], named: str
 ) -> None:
@@ -198,6 +208,18 @@ def test_a_case_variant_is_the_served_folder_only_where_the_file_system_folds_ca
     variant.mkdir()
     with pytest.raises(WorkspaceRefNotServed):
         _claim_bound(os.fspath(variant), served)
+
+
+def test_a_folder_in_no_repository_is_never_served_even_by_itself(
+    layout: dict[str, Path],
+) -> None:
+    """A claim needs a repository, so a connection serving a plain folder cannot exist; if a
+    caller ever passed one, no path is served by it, the plain folder itself included (Codex
+    review of run u8, finding 2)."""
+
+    assert not names_served_workspace(os.fspath(layout["plain"]), os.fspath(layout["plain"]))
+    with pytest.raises(WorkspaceRefNotServed):
+        _claim_bound(os.fspath(layout["plain"]), layout["plain"])
 
 
 def test_a_connection_that_names_no_served_folder_refuses_every_path(

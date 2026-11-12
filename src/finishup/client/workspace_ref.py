@@ -122,12 +122,25 @@ class WorkspaceRefNotServed(PublicOperationError):
         )
 
 
+def _is_git_directory(path: Path) -> bool:
+    """Whether ``path`` is a repository's storage (a bare repository, or a worktree's ``.git``)."""
+
+    try:
+        return (
+            (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir()
+        )
+    except OSError:
+        return True
+
+
 def _worktree_top(path: str) -> Path | None:
     """The worktree top of an existing folder, after resolving every link; ``None`` otherwise.
 
-    The top is found as the connection's own claim finds it (``canonical_workspace_locator``: the
-    nearest ``.git`` entry, a file for a linked worktree or a submodule); a folder in no
-    repository is its own top.
+    The top is found as a remote connection's claim is normalized (``canonical_workspace_locator``:
+    the nearest ``.git`` entry, a file for a linked worktree or a submodule). A folder in no
+    worktree has none: neither a folder in no repository nor a git directory between the folder and
+    that top (a bare repository nested in the worktree, or the worktree's own ``.git``), which is
+    another repository's storage rather than a folder of the worktree.
     """
 
     try:
@@ -136,8 +149,18 @@ def _worktree_top(path: str) -> Path | None:
         return None
     if not resolved.is_dir():
         return None
-    top = canonical_workspace_locator(resolved)
-    return None if top is None else Path(top)
+    canonical = canonical_workspace_locator(resolved)
+    if canonical is None:
+        return None
+    top = Path(canonical)
+    if not os.path.lexists(top / ".git"):
+        return None
+    current = resolved
+    while current != top:
+        if _is_git_directory(current) or current.parent == current:
+            return None
+        current = current.parent
+    return top
 
 
 def names_served_workspace(workspace_ref: str, serving: str) -> bool:
