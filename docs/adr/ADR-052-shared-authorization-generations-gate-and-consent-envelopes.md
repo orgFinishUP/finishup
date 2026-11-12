@@ -923,6 +923,13 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
 16. A key changed outside FinishUP (in the platform store, or the key file edited by hand) moves no
     credential generation: a running helper may keep using the key it read until the owner's next
     `login`, `logout` or `remove` moves the generation, or it restarts (decision 4).
+17. A changed profile reaches this computer through a refusal, and its fetch takes time. In the
+    direct style a helper that serves no workspace learns of a narrowing only from a client's
+    refusal; its fetch over SSH (an OpenSSH connection and the server's own `finishup` start) took
+    3 to 4 seconds on Linux, so a request repeated sooner than that may be refused
+    `remote_profile_checking` again. A helper whose background agent is connected usually learns
+    first and adjusts before the next call. The 2-second wait after the last fetch (decision 17)
+    bounds how often refusals can make it fetch.
 
 ## Reverse states
 
