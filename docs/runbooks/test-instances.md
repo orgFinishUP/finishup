@@ -164,36 +164,41 @@ Disposal never leaves a launcher that has lost its pin. Such a launcher runs amb
 command reaches the everyday install: issue #1350, where a refused disposal had already removed the
 state and the pin. The script works in four steps:
 
-1. **Check, changing nothing.** The script runs the snapshot's own `instance status` and requires
-   that the launcher is pinned to this root (`instance_not_pinned` otherwise) and that the root is
-   persistent or disposable (`instance_not_disposable`). It then requires that no process other
-   than the instance's own service holds the runtime: `runtime_in_use`.
-   - **What "in use" covers.** Every serving process: a host's MCP bridge, a hook, an upgrade, and
-     the service. Each holds a lease on the retained runtime copy it runs from. The service's own
-     lease is told apart from the others by the processes that have the lease open: `/proc` on
-     Linux, `lsof` on macOS, minus the service's own process tree.
-   - **When the service is running and this cannot be determined:**
-     `runtime_in_use_unverifiable`. Stop the service with the launcher (`service stop`), close the
-     host sessions, and retry.
-   - **What it cannot see:**
-     - a command started from the runtime that serves nothing (`status`, `start` and the like hold
-       no lease);
-     - a host that is registered but not running;
-     - a process started after the check.
+1. **Check, changing nothing.** One disposal of a tag runs at a time (`dispose_in_progress`). The
+   script runs the snapshot's own `instance status` and requires:
+   - the launcher is pinned to this very root and installation (`instance_not_pinned`);
+   - the root is persistent or disposable (`instance_not_disposable`);
+   - a `--retain-logs` folder is usable: its parent exists and it holds no copy of these logs yet
+     (`retain_logs_invalid`);
+   - no process other than the instance's own service and its children uses the runtime
+     (`runtime_in_use`).
+
+   "Uses" means any process with a file of the instance open or mapped: a host's MCP bridge, a
+   hook or an upgrade (each holds a retained runtime copy's lease), and a command that serves
+   nothing but runs the runtime (it maps the runtime's modules). The script reads `/proc` on Linux
+   and `lsof` on macOS.
+   - **When that cannot be determined:** `runtime_in_use_unverifiable`, for example a held lease
+     that no visible process accounts for. Stop the service with the launcher (`service stop`),
+     close the host sessions, and retry.
+   - **What it cannot see:** another account's processes, and a host that is registered but not
+     running.
    - **Every refusal here changes nothing.** The instance stays in place and pinned, and its
      service keeps running.
 2. **Withdraw the launchers.** `runtime/bin` is renamed to `runtime/.bin-withdrawn` in one step,
    so no host registration, hook or shell can start the runtime any more. The pin stays in place.
+   The step-1 check then runs again, catching a process that started in between, before anything
+   is stopped. If it refuses, the launchers are put back and nothing has changed.
 3. **Remove the root.** The runtime's own `dispose_instance` probes the root's singleton lock,
    sends the stamped holder (and nothing else) a bounded stop, waits up to the drain window,
    optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. It
    keeps the pin, which therefore names a removed root, and a pinned runtime in that state fails
    closed (`isolation_root_invalid`), never ambient.
-   - **If this step fails having removed nothing**, for example `instance_service_running` when the
-     holder does not release within the window, the launchers are put back. The instance is still
-     in place and pinned: stop that runtime's service and retry.
-   - **If it fails part way** (`instance_dispose_incomplete`), the launchers stay withdrawn. Run
-     `dispose` again.
+   - **A typed refusal** comes before anything is deleted, for example `instance_service_running`
+     when the holder does not release within the window. The launchers are put back, and the
+     instance is still in place and pinned: stop that runtime's service and retry.
+   - **Any other failure** (`instance_dispose_incomplete`) may have removed part of the instance,
+     so the launchers stay withdrawn. Run `dispose` again: it finishes from the progress record it
+     wrote (`.disposing.json`), even if the root's identity marker is already gone.
 4. **Prune and remove.** The script prunes unused retained release runtimes with the runtime's own
    lease-aware cleanup, then removes the withdrawn launchers, the runtime with its pin, and the
    wheel.
@@ -213,6 +218,9 @@ state and the pin. The script works in four steps:
 - `finishup instance dispose --root <root>` run directly removes the pin from the runtime that ran
   it (ADR-028 decision 4). That runtime then runs ambient, so a test instance's own runtime must
   be disposed through this script.
+- A FinishUP process already running from the runtime reads the pin each time it resolves its
+  root. Disposal therefore refuses while one runs (step 1). Making such a process keep the root it
+  started with is a question for the owner (ADR-028 amendment of 2026-11-12).
 
 **Rebuild an instance that hosts are connected to.** Hosts register the instance's absolute
 launcher, and a disposal refuses while any of them runs it.
