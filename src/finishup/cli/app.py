@@ -59,7 +59,11 @@ from finishup.cli.render import (
 )
 from finishup.cli.server import server_app
 from finishup.client.attribution import connection_attribution
-from finishup.client.workspace_ref import WorkspaceRefNotPortable, start_request_for_connection
+from finishup.client.workspace_ref import (
+    WorkspaceRefNotPortable,
+    WorkspaceRefNotServed,
+    start_request_for_connection,
+)
 from finishup.domain.values import JsonObject
 from finishup.legacy_names import RENAME_NOTE
 from finishup.ports.control import (
@@ -69,7 +73,7 @@ from finishup.ports.control import (
     WorkspaceLocator,
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
-from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from finishup.protocol.ids import IdKind, new_id
 from finishup.protocol.models import (
     MAX_TASK_STATEMENT_BYTES,
@@ -902,6 +906,8 @@ async def _call_workflow(
     # workflow result came back (so an output failure afterwards is not called a usage error).
     minted: str | None = None
     completed_request_id: str | None = None
+    # The request id of a start the client may refuse before sending it (ADR-051, rule R).
+    start_request_id: str | None = None
     try:
         if method == "start":
             request = cast(
@@ -954,8 +960,13 @@ async def _call_workflow(
                     return refused
             if type(request) is StartRequest:
                 # ADR-051: a server on another machine is sent the connection's handle, never a
-                # path; a claim the server could not key (a locked vault) sends nothing.
-                request = start_request_for_connection(request, client)
+                # path; a claim the server could not key (a locked vault) sends nothing. Rule R:
+                # the path must name the worktree this command runs in (the connection's own
+                # folder, resolved as ``build_service_client`` resolved it), else nothing is sent.
+                start_request_id = request.request_id
+                request = start_request_for_connection(
+                    request, client, serving=resolve_cli_workspace_locator()
+                )
             call = getattr(client, method)
             result = cast(WorkflowResult, await call(request, deadline_ms=deadline_ms))
             # ADR-051: a claim-bound connection's human status and receipt name their producer.
@@ -1008,13 +1019,52 @@ async def _call_workflow(
         return _operation_failure(
             error, json_output=json_output, operation=method, check_mode=check_mode
         )
-    except WorkspaceRefNotPortable as refusal:
-        # Refused before anything was sent; the fixed message and directive name no path.
-        _stderr(refusal.message)
-        recovery = render_error_recovery_lines(refusal.safe_details)
-        if recovery:
-            _stderr("\n".join(recovery))
-        return exit_code_for(refusal.code)
+    except (WorkspaceRefNotPortable, WorkspaceRefNotServed) as refusal:
+        # Refused before anything was sent; the fixed message and directive name no path. A JSON
+        # caller gets the same failure body a server's refusal prints, on stdout (run u8).
+        return _client_refusal(refusal, request_id=start_request_id, json_output=json_output)
+
+
+def _client_refusal(
+    refusal: PublicOperationError, *, request_id: str | None, json_output: bool
+) -> int:
+    """A start the client refused before sending anything (ADR-051, rule R).
+
+    A JSON caller (``--json``, or a stdout that is not a terminal) gets the frozen operation
+    failure body on stdout, as a refusal by the server would print, and the directive on stderr;
+    otherwise the message and directive go to stderr. The message and details are fixed and name
+    no path; the correlation id is recorded so it resolves.
+    """
+
+    from finishup.observability.logging import record_public_error_without_raising
+
+    reason = refusal.safe_details.get("reason_code")
+    bound = refusal.bind_correlation_id(
+        record_public_error_without_raising(
+            component="cli",
+            operation="start",
+            reason=refusal.code.value.lower(),
+            request_id=request_id,
+            reason_code=reason if type(reason) is str else None,
+        )
+    )
+    recovery = render_error_recovery_lines(bound.safe_details)
+    if json_output or not sys.stdout.isatty():
+        body: dict[str, object] = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "ok": False,
+            "error": bound.as_public_dict(),
+        }
+        if request_id is not None:
+            body["request_id"] = request_id
+        # Validated as the start result's failure branch against the frozen schema catalog.
+        _stdout_json(public_model_to_wire(StartResult.model_validate(body)))
+    else:
+        _stderr(bound.message)
+    if recovery:
+        _stderr("\n".join(recovery))
+    return exit_code_for(bound.code)
 
 
 def _finish(code: int) -> None:
