@@ -1150,3 +1150,23 @@ def test_a_read_carries_the_identity_of_the_file_and_of_each_directory_above_it(
     expected = [os.stat(tmp_path / path) for path in ("a", "a/b", "a/b/c.txt")]
     assert read.parents == tuple((f.st_dev, f.st_ino) for f in expected[:2])
     assert read.identity == (expected[2].st_dev, expected[2].st_ino)
+
+
+def test_a_directory_seen_as_two_different_ones_is_not_known(tmp_path: Path) -> None:
+    """Codex review, fourth pass: ``Vendor`` read once as directory A and, after it was replaced,
+    as directory B is not known; another spelling of it that is held (``vendor``, seen as B) then
+    holds what lies beneath ``Vendor``, rather than comparing with the first directory only."""
+
+    del tmp_path
+    admission = code_export._Admission()  # pyright: ignore[reportPrivateUsage]
+    first = code_export._Read("file", b"a", identity=(1, 10), parents=((1, 100),))  # pyright: ignore[reportPrivateUsage]
+    second = code_export._Read("file", b"b", identity=(1, 11), parents=((1, 200),))  # pyright: ignore[reportPrivateUsage]
+    for path, read in ((b"Vendor/a", first), (b"Vendor/b", second)):
+        admission.saw(path, read)
+        admission.entries[path] = code_export._Entry(b"100644", "0" * 40, 1)  # pyright: ignore[reportPrivateUsage]
+    admission.held[b"vendor"] = "nested_repository"
+    admission.identities[b"vendor"] = (1, 200)
+    assert admission.identities[b"Vendor"] is None
+    code_export._hold_case_aliases(admission)  # pyright: ignore[reportPrivateUsage]
+    assert admission.held.get(b"Vendor/a") == "case_collision"
+    assert admission.held.get(b"Vendor/b") == "case_collision"
