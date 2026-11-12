@@ -198,10 +198,14 @@ def remote_refusal_context(phase: str) -> str:
 
 
 _REFUSAL_HEAD: Final = "FinishUP refused the selected server's connection before anything was sent"
-# A connection whose authorization changed (ADR-052) had sent things before it ended.
+# A connection whose authorization changed (ADR-052) had sent things before it ended; a changed
+# profile may be refused by the server itself, after the hello was sent (from layer 4).
 _REFUSAL_HEADS: Final[dict[str, str]] = {
     "server_authorization_changed": (
         "FinishUP ended the selected server's connection before sending more"
+    ),
+    "server_profile_changed": (
+        "The selected server's connection was refused before that server did any work for it"
     ),
 }
 

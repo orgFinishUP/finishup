@@ -138,15 +138,31 @@ def _remote_refusal_phase(error: ControlError) -> str | None:
     return None
 
 
+_REFUSAL_LINE: Final = "refused before anything was sent"
+# A connection whose authorization changed had sent things before it ended; a changed profile may
+# be refused by the server itself, after the hello was sent (ADR-052, from layer 4).
+_REFUSAL_LINES: Final[dict[str, str]] = {
+    "server_authorization_changed": "ended before sending more",
+    "server_profile_changed": "refused before that server did any work for it",
+}
+
+
+def _refusal_head(phase: str) -> str:
+    """The menu's head for a refusal ``phase``: the phase's own fixed summary where "before
+    anything was sent" would not hold (``_REFUSAL_LINES``)."""
+
+    from finishup.client.authorization import refusal_summary
+
+    summary = refusal_summary(phase) if phase in _REFUSAL_LINES else None
+    return summary or "this computer refused the selected FinishUP server before anything was sent"
+
+
 def _control_guidance(error: ControlError) -> str:
     phase = _remote_refusal_phase(error)
     if phase is not None:
         from finishup.cli.render import render_remote_refusal
 
-        return "service_unavailable: " + render_remote_refusal(
-            phase,
-            head="this computer refused the selected FinishUP server before anything was sent",
-        )
+        return "service_unavailable: " + render_remote_refusal(phase, head=_refusal_head(phase))
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (
@@ -309,7 +325,7 @@ async def _service_summary() -> str:
 
         directive = directive_for(remote_root_continuation(phase))
         assert directive is not None
-        return f"refused before anything was sent ({phase}) — {directive.directive}"
+        return f"{_REFUSAL_LINES.get(phase, _REFUSAL_LINE)} ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
 
