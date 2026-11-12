@@ -112,6 +112,8 @@ _INSTALLATION_DOMAINS: Final[Mapping[MacKeyPurpose, frozenset[bytes]]] = {
             REPOSITORY_CLAIM_MAC_DOMAIN,
             HOST_LINEAGE_MAC_DOMAIN,
             PROJECT_OPERATION_MAC_DOMAIN,
+            # Level L2 (ADR-054): each server copy's key-encryption key, never stored.
+            b"yoetz/code-copy-kek/v1\x00",
         }
     ),
     MacKeyPurpose.LINEAGE_ATTACH: frozenset(

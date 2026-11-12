@@ -38,6 +38,9 @@ MODULE_SIDES: Final[dict[str, Side]] = {
     "finishup.config": "SHARED",
     "finishup.observability": "SHARED",
     "finishup.resources": "SHARED",
+    # The REST v1 edge (ADR-053): its contract, key store, routes and listeners, hosted by the
+    # native backend inside the service and by the separate gateway process alike.
+    "finishup.rest": "SHARED",
     # Agent- and user-facing surfaces.
     "finishup.cli": "CLIENT",
     "finishup.mcp": "CLIENT",

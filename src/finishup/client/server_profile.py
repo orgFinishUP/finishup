@@ -29,7 +29,10 @@ profile and compares it with the consented one (``consent_envelope.compare``):
   missing, unreadable or inconsistent): ``server_profile_changed``. Only the owner agrees again,
   on the trusted console.
 
-``refresh_profile`` records a newly fetched profile; on a narrowing it adjusts the stored consent
+``refresh_profile`` records a newly fetched profile only while what it was fetched under still
+holds (``FetchBasis``, read before the key was: the target's identity and its credential
+generation), so a fetch made with a key the owner has since replaced, logged out or removed is
+never recorded for the key stored now; on a narrowing it adjusts the stored consent
 down to it (stricter: a later widening, even back to what the owner once confirmed, asks again)
 and keeps the notice ``server status`` shows (``server_profile_narrowed``); on the same offer under
 a new revision it records only the revision. It changes only the consent of the record as stored
@@ -40,8 +43,9 @@ broader consent, so a refresh that stops part way can never let the broader offe
 (``server_profile_changed``) until the owner agrees again; stopping after them leaves the older
 cache, wider than the consent now, which refuses until the next refresh records the profile.
 
-In this release no profile source is registered for any kind (``PROFILE_SOURCES``), so nothing is
-fetched: layer 4 registers SSH (``service profile --json`` on the server), layer 5 HTTPS.
+``PROFILE_SOURCES`` holds SSH (``service profile --json`` on the server, fetched over OpenSSH by
+``server add``, ``server use`` and the target's helper) and HTTPS and ``local_port``
+(``GET /v1/server``, layer 5).
 """
 
 from __future__ import annotations
@@ -97,14 +101,20 @@ __all__ = [
     "ENVELOPE_NAME",
     "PROFILE_SOURCES",
     "ConsentVerdict",
+    "FetchBasis",
     "FetchedProfile",
     "ProfileSource",
     "consent_verdict",
+    "consented_endpoint_identity",
+    "consented_host_key",
     "endpoint_origin",
+    "fetch_basis",
+    "forget_cached_profile",
     "read_cached_profile",
     "read_consented_envelope",
     "record_consent",
     "refresh_profile",
+    "styles_offered",
 ]
 
 CACHE_NAME: Final = "server-profile.json"
@@ -129,14 +139,60 @@ class FetchedProfile:
     identity: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class FetchBasis:
+    """What a profile fetch was made under, read before its key was read: the target's identity
+    (``authorization.identity_digest``) and its credential generation."""
+
+    identity: str
+    credential: object
+
+
+def fetch_basis(record: ServerTarget) -> FetchBasis:
+    """The basis a fetch for ``record`` starts from now (read it before the key). Never raises
+    for an unreadable generation: it then equals no later one."""
+
+    from finishup.client.authorization import credential_generation, identity_digest
+
+    return FetchBasis(identity_digest(record), credential_generation(target_root(record.target_id)))
+
+
+def _basis_holds(stored: ServerTarget, basis: FetchBasis) -> bool:
+    from finishup.client.authorization import credential_generation, identity_digest
+
+    return (
+        identity_digest(stored) == basis.identity
+        and credential_generation(target_root(stored.target_id)) == basis.credential
+    )
+
+
 class ProfileSource(Protocol):
     """Fetches the profile of one remote target over its own transport (layers 4 and 5)."""
 
     def fetch(self, record: ServerTarget) -> FetchedProfile: ...
 
 
-# The profile source of each remote kind. Empty in this release: no transport exists yet.
-PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {}
+def _ssh_source() -> ProfileSource:
+    # Loaded only when a profile is fetched (never on a hook's path, design v2 section 8.9).
+    from finishup.client.ssh_discovery import SshProfileSource
+
+    return SshProfileSource()
+
+
+def _rest_source() -> ProfileSource:
+    # Loaded only when a profile is fetched (never on a hook's path, design v2 section 8.9).
+    from finishup.client.rest_discovery import RestProfileSource
+
+    return RestProfileSource()
+
+
+# The profile source of each remote kind: SSH (``service profile --json`` on the server, over
+# OpenSSH) and, over REST v1 (layer 5, ADR-053), HTTPS and ``local_port`` (``GET /v1/server``).
+PROFILE_SOURCES: Final[dict[str, Callable[[], ProfileSource]]] = {
+    "ssh": _ssh_source,
+    "https": _rest_source,
+    "local_port": _rest_source,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +207,45 @@ class ConsentVerdict:
     revision: ServerProfileRevision | None = None
     narrowed: bool = False
     coverage_reduced: frozenset[str] = frozenset()
+
+
+# The connection styles each server edge offers (design v2 section 1.2): a server reached through
+# its owner-only control socket over SSH offers the relay and the direct style.
+_STYLES_BY_EDGE: Final[dict[str, tuple[str, ...]]] = {
+    "ssh-control": ("relay", "direct"),
+    # REST v1 over HTTPS (ADR-053): the helper's REST upstream, or each process's own stream.
+    "rest-1": ("relay", "direct"),
+}
+# The edge each remote kind reaches the server through: only that edge's styles are offered.
+_EDGE_OF_KIND: Final[dict[str, str]] = {
+    "ssh": "ssh-control",
+    "https": "rest-1",
+    "local_port": "rest-1",
+}
+
+
+def styles_offered(record: ServerTarget) -> tuple[str, ...]:
+    """The connection styles the last profile fetched for ``record`` offers; ``()`` for none.
+
+    The owner may choose only among these (``finishup server set NAME --style``). A target with
+    no readable profile offers none. File reads only.
+    """
+
+    try:
+        cached = read_cached_profile(target_root(record.target_id))
+    except Exception:  # noqa: BLE001 - a profile that cannot be read offers nothing
+        return ()
+    edge_of_kind = _EDGE_OF_KIND.get(record.kind)
+    if cached is None or edge_of_kind is None:
+        return ()
+    offered: list[str] = []
+    for edge in cached.profile.edges:
+        if edge != edge_of_kind:
+            continue
+        for style in _STYLES_BY_EDGE.get(edge, ()):
+            if style not in offered:
+                offered.append(style)
+    return tuple(offered)
 
 
 def endpoint_origin(record: ServerTarget) -> str:
@@ -358,6 +453,50 @@ def _verdict_of(comparison: EnvelopeComparison, revision: ServerProfileRevision)
     return ConsentVerdict(_PROFILE_CHANGED)
 
 
+def consented_host_key(root: Path) -> str | None:
+    """The SSH host key the owner's consent for the target at ``root`` is bound to, or ``None``.
+
+    The ``sha256:`` digest the consented envelope's endpoint names (``ssh_host_key``): every new
+    OpenSSH connection to that target must have verified exactly this key before anything is
+    sent over it (``client.ssh_transport``). ``None`` when the record, its consent or the
+    envelope cannot be read, or names no SSH host key: a transport then refuses (fail closed).
+    Never raises; file reads only.
+    """
+
+    try:
+        record = read_target(root)
+        if record is None or record.kind != "ssh" or record.consent is None:
+            return None
+        envelope = read_consented_envelope(root, record.consent)
+    except Exception:  # noqa: BLE001 - a consent that cannot be read verifies nothing
+        return None
+    if envelope is None or envelope.endpoint.identity_type != "ssh_host_key":
+        return None
+    return envelope.endpoint.identity
+
+
+def consented_endpoint_identity(root: Path) -> tuple[str, str | None] | None:
+    """The endpoint identity the owner's consent for the target at ``root`` is bound to.
+
+    ``(identity_type, identity)`` of the consented envelope's endpoint: for an HTTPS or port
+    target, ``tls_pin`` and the pin, ``tls_ca_file`` and the ``sha256:`` of the CA file's bytes,
+    or ``tls_system_ca`` and ``None``. A transport compares it with the trust it actually loaded
+    before any credential is sent (``client.rest_client``). ``None`` when the record, its consent
+    or the envelope cannot be read (fail closed). Never raises; file reads only.
+    """
+
+    try:
+        record = read_target(root)
+        if record is None or record.consent is None:
+            return None
+        envelope = read_consented_envelope(root, record.consent)
+    except Exception:  # noqa: BLE001 - a consent that cannot be read binds nothing
+        return None
+    if envelope is None:
+        return None
+    return envelope.endpoint.identity_type, envelope.endpoint.identity
+
+
 def consent_verdict(record: ServerTarget) -> ConsentVerdict:
     """The consent step for remote ``record`` (see the module text). Never raises; reads only."""
 
@@ -464,17 +603,23 @@ def record_consent(
     envelope: ConsentEnvelope,
     *,
     now: str | None = None,
+    basis: FetchBasis | None = None,
 ) -> ServerTarget:
     """Record the owner's typed consent to ``envelope`` (built by ``consent_envelope_for``).
 
     Writes the profile cache, then the consented envelope, then the record (``/2``) with a fresh
     authorization of the current disclosure; returns the record as written. The caller holds the
     registry lock, read the record again under it (SRV-12), and asked on the trusted console.
+    With ``basis`` (read before the profile was fetched), nothing is recorded once the target or
+    its credential generation changed meanwhile (``TargetError("server_authorization_changed")``):
+    a consent to a profile answered to one key is never recorded for another.
     """
 
     stamp = now or _now()
     cached = _cached_from(fetched, stamp)
     root = target_root(record.target_id)
+    if basis is not None and not _basis_holds(record, basis):
+        raise TargetError("server_authorization_changed")
     _write(_cache_path(root), _encode_cache(cached))
     _write(_envelope_path(root), canonical_bytes(envelope) + b"\n")
     consented = replace(
@@ -487,8 +632,25 @@ def record_consent(
     return consented
 
 
+def forget_cached_profile(root: Path) -> None:
+    """Remove the target's cached profile: what it says no longer describes this computer's
+    credential (a key stored without the server's answer, ``server login``). Until a profile is
+    fetched with the key now stored and compared with the consent, the consent step refuses
+    (``server_profile_changed``) and nothing is sent. The caller holds the registry lock; raises
+    ``TargetError`` when the cache cannot be removed."""
+
+    try:
+        _cache_path(root).unlink(missing_ok=True)
+    except OSError:
+        raise TargetError("target_root_unsafe") from None
+
+
 def refresh_profile(
-    record: ServerTarget, fetched: FetchedProfile, *, now: str | None = None
+    record: ServerTarget,
+    fetched: FetchedProfile,
+    *,
+    now: str | None = None,
+    basis: FetchBasis | None = None,
 ) -> ConsentVerdict:
     """Record a newly fetched profile and adjust the consent to it where that is quiet.
 
@@ -498,6 +660,11 @@ def refresh_profile(
     The profile is cached last when it narrows the consent, after the reduced consent is
     committed, and first otherwise (see the module text). The caller holds the registry lock.
     Returns the verdict.
+
+    With ``basis`` (a background fetch: the helper's refresh), nothing is recorded unless the
+    target is still the one it was fetched for and its credential generation has not moved since
+    (a login, logout or remove meanwhile): ``TargetError("server_authorization_changed")``, and
+    the profile answered to another key never becomes this one's.
     """
 
     stamp = now or _now()
@@ -506,6 +673,8 @@ def refresh_profile(
     stored = read_target(root)
     if stored is None or stored.target_id != record.target_id:
         raise TargetError("target_unknown")
+    if basis is not None and not _basis_holds(stored, basis):
+        raise TargetError("server_authorization_changed")
     consent = stored.consent
     try:
         consented = None if consent is None else read_consented_envelope(root, consent)

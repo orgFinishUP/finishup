@@ -289,7 +289,10 @@ def test_the_declaration_offers_the_catalog_and_the_frame_bound(
     repository: Path, protected: Path
 ) -> None:
     handler = _handler(repository, protected)
-    assert handler.declaration.operations == WORKSPACE_OPERATION_NAMES
+    # Every operation but level L2's sync, which only the helper's background agent offers.
+    assert handler.declaration.operations == tuple(
+        name for name in WORKSPACE_OPERATION_NAMES if not name.startswith("code_sync_")
+    )
     assert handler.declaration.max_reply_bytes == 6_291_456
     narrowed = _handler(repository, protected, operations=("read_task_base", "capture"))
     assert narrowed.declaration.operations == ("capture", "read_task_base")
@@ -2589,9 +2592,11 @@ def test_a_held_repository_is_fenced_from_every_other_repositorys_reads(
     assert [item.path for item in before.inputs] == [secret, spec]
     after = _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments)
     assert [item.path for item in after.inputs] == [spec]
+    # ADR-052 O7: the one value the fence kept unread is counted, never named.
     assert after == OutsideInputsRead(
-        read_outside_inputs((root,), (secret, spec), limit=4, excluded=excluded)
+        read_outside_inputs((root,), (secret, spec), limit=4, excluded=excluded), fenced=1
     )
+    assert before.fenced == 0
     # A reviewer read and a listing beneath an admitted root never enter it.
     assert _ok(
         unfenced,
@@ -2686,14 +2691,71 @@ def test_a_listed_folder_holding_a_held_repository_never_admits_it(
         item.path
         for item in _ok(unfenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments).inputs
     ] == [secret]
-    # Not read, not counted as kept back and not named as listed: exactly as FinishUP's own state.
-    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments) == OutsideInputsRead(())
+    # Not read, not counted as kept back and not named as listed: exactly as FinishUP's own state,
+    # but counted as fenced (ADR-052 O7), also where only the listed folder, walked beside the
+    # server's roots, would reach it.
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, arguments) == OutsideInputsRead(
+        (), fenced=1
+    )
+    beside = ReadOutsideInputsArguments((os.fspath(tmp_path.resolve() / "other"),), (secret,), 4)
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, beside) == OutsideInputsRead(
+        (), fenced=1
+    )
+    assert _ok(unfenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, beside).fenced == 0
     # A read root inside it is refused as one in FinishUP's own directories is.
     assert _refused(
         fenced,
         WorkspaceOperation.READ_TEXT_BENEATH,
         ReadTextBeneathArguments(held, "docs/secret.md"),
     ) == ("refused", "root_not_admitted")
+
+
+@pytest.mark.parametrize("mode", ["local", "listed"])
+def test_an_outside_read_counts_the_values_a_held_repository_fenced(
+    repository: Path,
+    protected: Path,
+    shared: Path,
+    held_repository: Path,
+    tmp_path: Path,
+    mode: OutsideReadMode,
+) -> None:
+    """ADR-052 O7: how many of the server's values the agent left unread because they reached a
+    held repository, by its own spelling or through a link to it, for both outside reads and in
+    both modes. A value the read would never look at for another reason (beneath no root the read
+    walks, inside the claimed workspace, hidden, FinishUP's own directories, a word) is not
+    counted, and an agent with nothing held counts nothing."""
+
+    area = tmp_path.resolve()
+    (area / "alias").symlink_to(held_repository)
+    root = os.fspath(area)
+    held = os.fspath(held_repository)
+    folders = (os.fspath(shared),) if mode == "listed" else ()
+    fenced = _held_handler(repository, protected, (held,), mode=mode, folders=folders)
+    unfenced = _held_handler(repository, protected, (), mode=mode, folders=folders)
+    values = (
+        f"{held}/docs/secret.md",  # by its own spelling
+        f"{root}/alias/docs/secret.md",  # through a link to it
+        f"{held}/docs/absent.md",  # held, whether or not anything is there
+        f"{shared}/spec.md",  # outside the fence
+        f"{held}/.hidden",  # never a candidate
+        f"{repository}/README.md",  # the claimed workspace
+        f"{protected}/state.db",  # FinishUP's own directories, not a held repository
+        "secret.md",  # a word, never located beneath a root
+    )
+    inputs = ReadOutsideInputsArguments((root,), values, limit=4)
+    snapshots = SnapshotOutsideInputsArguments(
+        (root,), values, limit=4, max_bytes=65_536, budget_ms=5_000
+    )
+    for operation, arguments in (
+        (WorkspaceOperation.READ_OUTSIDE_INPUTS, inputs),
+        (WorkspaceOperation.SNAPSHOT_OUTSIDE_INPUTS, snapshots),
+    ):
+        answer = _ok(fenced, operation, arguments)
+        assert answer.fenced == 3
+        assert _ok(unfenced, operation, arguments).fenced == 0
+    # Beneath no root the read walks nor a listed folder, a held value is never read anyway.
+    elsewhere = ReadOutsideInputsArguments((os.fspath(shared),), values[:3], limit=4)
+    assert _ok(fenced, WorkspaceOperation.READ_OUTSIDE_INPUTS, elsewhere).fenced == 0
 
 
 def test_the_held_repositories_are_read_on_every_call_and_a_failure_fences_nothing_more(

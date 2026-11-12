@@ -78,10 +78,16 @@ _STAYS_EXPLICIT: Final = {
     # The host-configuration lock and membership record stay with the installation, as the
     # registrations they guard do (SRV-5).
     ("adapters/integrations/host_projects.py", "lock_path_for", "installation_state_dir"): 1,
+    # An SSH target's helper refuses to run when an isolation variable or pin names another root
+    # than its target's (ADR-052): it never serves a root its process would not resolve.
+    ("client/helper.py", "run_helper", "isolated_root"): 1,
 }
 # New client code that reads the active root to describe or guard the selected target.
 _CLIENT_TARGETS: Final = {
     ("client/targets.py", "active_target_record", "active_root"): 1,
+    # The holder of a remote root is its helper (ADR-052): the bridge's availability latch reads
+    # the helper's stamp and status generation for the root this process uses.
+    ("service/client.py", "_remote_target_root", "active_root"): 1,
     # ``finishup server status``/``connect`` with no name act on this process's own root.
     ("cli/server.py", "_resolve", "active_root"): 1,
     # ``server status|test local`` says "chosen by" only while this process uses the everyday
@@ -147,10 +153,11 @@ def test_the_audit_covers_the_design_table() -> None:
     of the 15 (``codex_mcp.py:578``) is the definition of the Codex adapter's
     ``_expected_isolated_root`` helper, which resolves through ``isolated_root_environment``, so
     the explicit side has 14 calls here. The host-configuration lock's installation state
-    directory stays explicit too (SRV-5)."""
+    directory stays explicit too (SRV-5), and so does an SSH target's helper, which refuses a
+    root an isolation variable or pin names other than its own (ADR-052)."""
 
     assert len(_FOLLOWS_SELECTION) == 5
-    assert len(_STAYS_EXPLICIT) == 14 + 1
+    assert len(_STAYS_EXPLICIT) == 14 + 1 + 1
 
 
 def test_registration_and_upgrade_sites_never_follow_the_selection() -> None:

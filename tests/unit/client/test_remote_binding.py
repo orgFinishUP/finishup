@@ -507,6 +507,11 @@ async def test_the_root_is_resolved_once_and_the_binding_carries_a_live_hold(
     salt = base64.b64decode(record.claim_salt or "", validate=True)
     assert binding.claim == await workspace_claim(workspace, salt)
     assert binding.authorization.refusal() is None
+    # The repository the hold is decided by travels with the binding (on this computer only),
+    # so the target's helper binds a relay to it (B3).
+    from finishup.client.everyday_repository import repository_key_for
+
+    assert binding.repository_key == await repository_key_for(workspace.path)
     # A report that arrives later is seen by the authorization the connection keeps.
     monkeypatch.setattr(remote_binding, "canonical_workspace_root", real)
     await _report_no_network(workspace)

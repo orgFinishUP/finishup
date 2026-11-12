@@ -10,6 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from finishup.config.models import (
+    CODE_COPY_MAX_FILE_BYTES_DEFAULT,
+    CODE_COPY_MAX_REPO_BYTES_DEFAULT,
     PROFILE_CAPABILITIES,
     ConfigError,
     ExternalRuntimeProfileConfig,
@@ -21,6 +23,8 @@ from finishup.config.models import (
     ObservationConfig,
     ProviderProfileConfig,
     SemanticPolicy,
+    ServerCodeCopyConfig,
+    ServerConfig,
     StorageConfig,
     VerificationConfig,
 )
@@ -166,8 +170,26 @@ def test_defaults_are_frozen_and_all_disclosure_is_denied() -> None:
     assert config.privacy == safe_privacy_bootstrap()
     assert not config.privacy.network_egress_permitted
     assert not any(config.privacy.channel_policies.model_dump().values())
+    # Config 1.4.0 (ADR-054): no [server.code_copy] table, so no code-copy offer.
+    assert config.server == ServerConfig(code_copy=None)
     with pytest.raises(ValidationError):
         config.profile = "test-fake"  # type: ignore[misc]
+
+
+def test_a_server_code_copy_table_defaults_to_off_with_the_stricter_caps() -> None:
+    table = ServerCodeCopyConfig()
+    assert table.enabled is False
+    assert (
+        (table.max_repo_bytes, table.max_file_bytes)
+        == (
+            CODE_COPY_MAX_REPO_BYTES_DEFAULT,
+            CODE_COPY_MAX_FILE_BYTES_DEFAULT,
+        )
+        == (64 * 1024 * 1024, 16 * 1024 * 1024)
+    )
+    assert table.retention == ("task_close", "days:30", "until_forgotten")
+    assert table.retention_default == "days:30"
+    assert table.exclusions == ()
 
 
 def test_lineage_fanout_matches_child_manifest_capacity() -> None:
@@ -202,6 +224,38 @@ def test_profile_capability_matrix_is_closed() -> None:
         (lambda: VerificationConfig(finding_attempt_budget=51), "config_value_invalid"),
         (lambda: LineageSettings(max_depth=-1), "config_value_invalid"),
         (lambda: LineageSettings(max_fanout=65), "config_value_invalid"),
+        # Config 1.4.0 (ADR-054): the [server.code_copy] offer, refused with the loader's own
+        # closed reasons whether or not it is enabled.
+        (lambda: ServerCodeCopyConfig(max_repo_bytes=0), "config_value_invalid"),
+        (lambda: ServerCodeCopyConfig(max_file_bytes=0), "config_value_invalid"),
+        (lambda: ServerCodeCopyConfig(max_repo_bytes=(1 << 40) + 1), "config_value_invalid"),
+        (
+            lambda: ServerCodeCopyConfig(max_repo_bytes=1_000, max_file_bytes=1_001),
+            "config_value_invalid",
+        ),
+        (lambda: ServerCodeCopyConfig(retention=()), "config_value_invalid"),
+        (
+            lambda: ServerCodeCopyConfig(retention=("days:0",), retention_default="days:0"),
+            "config_value_invalid",
+        ),
+        (
+            lambda: ServerCodeCopyConfig(
+                retention=("days:7", "days:7"), retention_default="days:7"
+            ),
+            "config_value_invalid",
+        ),
+        (lambda: ServerCodeCopyConfig(retention_default="days:7"), "config_value_invalid"),
+        (lambda: ServerCodeCopyConfig(exclusions=("*",)), "config_value_invalid"),
+        (
+            lambda: ServerCodeCopyConfig.model_validate(
+                {"enabled": True, "max_bytes": 1}, strict=True
+            ),
+            "unknown_config_key",
+        ),
+        (
+            lambda: ServerConfig.model_validate({"code_copy": {}, "rest": {}}, strict=True),
+            "unknown_config_key",
+        ),
         (
             lambda: ObservationConfig.model_validate(
                 {"enabled": True, "interval_seconds": 60}, strict=True

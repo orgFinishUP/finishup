@@ -95,7 +95,8 @@ class StandInRuntime:
     """A runtime registered for the remote kinds by ``remote_runtime``; records every call.
 
     ``probe_result`` is what each probe answers; ``ready_error`` and ``stop_error``, when set,
-    are raised by ``ensure_ready`` and ``stop``.
+    are raised by ``ensure_ready`` and ``stop``; ``new_connection_times`` is what
+    ``time_new_connections`` answers (``new_connection_error``, when set, is raised instead).
     """
 
     def __init__(self) -> None:
@@ -103,6 +104,8 @@ class StandInRuntime:
         self.probe_result = ProbeResult("unavailable", reason="remote_unreachable")
         self.ready_error: Exception | None = None
         self.stop_error: Exception | None = None
+        self.new_connection_times: tuple[int, ...] = (40, 40, 40, 40, 40)
+        self.new_connection_error: Exception | None = None
 
     def ensure_ready(self, root: Path | None) -> None:
         self.calls.append(("ensure_ready", root))
@@ -117,6 +120,12 @@ class StandInRuntime:
     def probe(self, root: Path | None) -> ProbeResult:
         self.calls.append(("probe", root))
         return self.probe_result
+
+    def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+        self.calls.append(("time_new_connections", root))
+        if self.new_connection_error is not None:
+            raise self.new_connection_error
+        return self.new_connection_times[:count]
 
     @property
     def stops(self) -> list[Path | None]:
@@ -154,11 +163,21 @@ def record_remote_target(name: str = "elsewhere") -> ServerTarget:
     return record
 
 
-def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: bool = True) -> None:
+def _refuse_spawn(_root: Path, _target_id: str, *, epoch: str | None = None) -> object:
+    del epoch
+    raise PermissionError("helper_not_spawned_in_unit_tests")
+
+
+def open_remote_kinds(
+    monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: bool = True, rest: bool = False
+) -> None:
     """Open ``kinds`` to connections, in this process and for this test only.
 
     This release opens no remote kind (``client.authorization.OPEN_REMOTE_KINDS`` is empty, and an
     architecture test keeps it so); a test that exercises an admitted connection opens one here.
+
+    ``rest`` keeps HTTPS and port targets on their REST transports (layer 5); without it they dial
+    the target root's own endpoint in process, as the tests of layers 2 to 4 do.
 
     With ``consent`` (the default) every remote target recorded now or later in the test is
     consented to the default test profile (``builders.server_profiles``), as ``finishup server
@@ -166,10 +185,18 @@ def open_remote_kinds(monkeypatch: pytest.MonkeyPatch, *kinds: str, consent: boo
     admits it with real records. A test of the consent itself passes ``consent=False``.
     """
 
-    from finishup.client import authorization
+    from finishup.client import authorization, helper_status
+    from finishup.service import client as service_client
 
     assert set(kinds) <= targets.REMOTE_KINDS
     monkeypatch.setattr(authorization, "OPEN_REMOTE_KINDS", frozenset(kinds))
+    if not rest:
+        # An HTTPS or port target opened in process without a REST server dials the target
+        # root's own endpoint, as before layer 5; a REST test passes ``rest=True``.
+        monkeypatch.setattr(service_client, "_REST_KINDS", frozenset[str]())
+    # A unit test never starts a real helper process (ADR-052): a client that would start one is
+    # told it could not, unless the test stands in for the helper itself.
+    monkeypatch.setattr(helper_status, "spawn_helper", _refuse_spawn)
     if not consent:
         return
     from builders.server_profiles import consent_to

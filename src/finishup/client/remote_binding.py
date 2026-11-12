@@ -25,7 +25,8 @@ import hmac
 import posixpath
 from collections.abc import Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Final, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
 from finishup.client.authorization import ConnectionAuthorization, authorize_active_root
@@ -56,6 +57,8 @@ async def remote_workspace_binding(
     protected: Sequence[str] | None = None,
     target: ServerTarget | None = None,
     authorization: ConnectionAuthorization | None = None,
+    role: Literal["connection", "background"] = "connection",
+    code_sync: bool = False,
 ) -> ClientWorkspaceBinding:
     """The claim on ``workspace`` under ``claim_salt``, with its agent when ``serve_workspace``.
 
@@ -78,6 +81,11 @@ async def remote_workspace_binding(
     computer (``repository_hold.held_worktrees``, read per call), and answers nothing once that
     check lapses (``own_authorization``: its own repository held or kept, or, with an admission,
     any change that ends the connection).
+
+    ``role`` is the agent's declared role: ``background`` for the helper's agent (ADR-052).
+    ``code_sync`` (the helper only, ADR-054) gives a background agent of a target the owner
+    consented to at level L2 the responder of the two code-sync operations, while L2 is released;
+    every other agent never declares them.
     """
 
     if type(workspace) is not WorkspaceLocator:
@@ -91,8 +99,11 @@ async def remote_workspace_binding(
     if authorization is not None:
         check = authorization if hold is None else authorization.for_repository(hold.key)
     claim = workspace_claim_for_root(root, claim_salt, worktree)
+    key = None if hold is None else hold.key
     if not serve_workspace:
-        return ClientWorkspaceBinding(claim, authorization=check, worktree=worktree)
+        return ClientWorkspaceBinding(
+            claim, authorization=check, worktree=worktree, repository_key=key
+        )
     from finishup.client.repository_hold import held_worktrees
     from finishup.client.server_folders import outside_reads_reader
     from finishup.client.targets import target_root
@@ -114,6 +125,21 @@ async def remote_workspace_binding(
         if target is None
         else partial(held_worktrees, target_root(target.target_id), target.target_id)
     )
+    responder = None
+    if code_sync and role == "background" and target is not None and hold is not None:
+        from finishup.protocol.server_copy import l2_released
+
+        consent = target.consent
+        if l2_released() and consent is not None and consent.level == "L2":
+            from finishup.client.code_sync import CodeSyncResponder
+
+            responder = CodeSyncResponder(
+                target_id=target.target_id,
+                repository_key=hold.key,
+                root=Path(worktree),
+                worktree=claim.worktree,
+                check=check,
+            )
     return ClientWorkspaceBinding(
         claim,
         WorkspaceAgentHandler(
@@ -123,9 +149,12 @@ async def remote_workspace_binding(
             outside_reads=outside,
             held_roots=held,
             own_authorization=check,
+            role=role,
+            code_sync=responder,
         ),
         authorization=check,
         worktree=worktree,
+        repository_key=key,
     )
 
 

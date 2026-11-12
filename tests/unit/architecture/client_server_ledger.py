@@ -324,6 +324,31 @@ LEDGER: Final[tuple[Crossing, ...]] = (
         ("privacy apply-desired",),
     ),
     _c("cli.app", "service.daemon", "service_run", 1, "server_host_only", ("service run",)),
+    # finishup.cli.rest_server (ADR-053): the REST edge the server owner runs on the server host.
+    _c(
+        "cli.rest_server",
+        "gateway.run",
+        "_run_gateway",
+        1,
+        "server_host_only",
+        ("service rest run",),
+    ),
+    _c(
+        "cli.rest_server",
+        "service.daemon",
+        "_run_native",
+        1,
+        "server_host_only",
+        ("service rest run",),
+    ),
+    _c(
+        "cli.rest_server",
+        "service.rest_native",
+        "_run_native",
+        1,
+        "server_host_only",
+        ("service rest run",),
+    ),
     _c(
         "cli.app",
         "service.elevated_bootstrap",

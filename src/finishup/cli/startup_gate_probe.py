@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Mapping
+from typing import Final
 
 from finishup.protocol.canonical import JsonValue
+
+# The bound on the probe's connection and the task's status (design v2 section 8.9); its imports
+# come before it. ``server test`` compares a new process's connection and status with it.
+STARTUP_GATE_SECONDS: Final = 0.65
 
 
 async def probe(request: Mapping[str, JsonValue]) -> bool:
@@ -23,7 +28,7 @@ async def probe(request: Mapping[str, JsonValue]) -> bool:
         return False
     client = None
     try:
-        with anyio.fail_after(0.65):
+        with anyio.fail_after(STARTUP_GATE_SECONDS):
             client = await connect_service(
                 ControlClientKind.CLI, workspace_locator=WorkspaceLocator(workspace)
             )

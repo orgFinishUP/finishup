@@ -712,6 +712,11 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         # root's source (``targets.remote_root_continuation``), never through a reason code.
         "remote_root_override_clear",
         "remote_server_test",
+        # ``remote_unreachable`` while the target is reached in the direct style: that style opens
+        # a connection per program, so on a slow network the remedy is the relay style (the
+        # owner's WAN-gate decision, 2026-11-11). Attached by the client that knows the target's
+        # style (``targets.remote_root_continuation``), never through a reason code.
+        "remote_direct_slow",
         "remote_service_start_required",
         "remote_target_no_local_service",
         "server_host_command_required",
@@ -1105,12 +1110,12 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         if value in {"replay", "model", "digest", "projection", "handler", "unknown"}:
             return value
         # A connection the authorization gate refused or ended (ADR-051, ADR-052) names which
-        # refusal it was.
+        # refusal it was; one to a server elsewhere that could not be reached names why.
         if (
             value in SERVICE_STARTUP_PHASES
             or value in SERVICE_HANDSHAKE_PHASES
             or value == SERVICE_START_TIMEOUT_PHASE
-            or value in AUTHORIZATION_REFUSAL_PHASES
+            or value in REMOTE_CONNECTION_PHASES
         ):
             return value
         return None

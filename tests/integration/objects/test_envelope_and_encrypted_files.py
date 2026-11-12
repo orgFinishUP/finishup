@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -541,3 +542,43 @@ def test_staging_path_derivation_is_collision_safe(tmp_path: Path) -> None:
     assert all(
         path.resolve().is_relative_to((tmp_path / "objects").resolve()) for path in staged_paths
     )
+
+
+def test_erasure_primitives_list_describe_and_delete_only_the_exact_object(
+    tmp_path: Path,
+) -> None:
+    """ADR-054 (U20): the forget lists, authenticates and deletes one exact published object."""
+
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.SEMANTIC_RESPONSE, "application/json", _TASK_ID, now)
+    kept = asyncio.run(
+        store.finalize(asyncio.run(store.stage(ObjectSource(data=b"kept"), metadata)))
+    )
+    erased = asyncio.run(
+        store.finalize(asyncio.run(store.stage(ObjectSource(data=b"erased"), metadata)))
+    )
+    # A stage that never finalized and a stray file are not published objects.
+    asyncio.run(store.stage(ObjectSource(data=b"staged only"), metadata))
+    stray = store._path_for(kept.object_id).parent / "not-an-object"  # pyright: ignore[reportPrivateUsage]
+    stray.write_bytes(b"x")
+    stray.chmod(0o600)
+    assert asyncio.run(store.published_object_ids()) == tuple(
+        sorted((kept.object_id, erased.object_id), key=str.encode)
+    )
+    assert asyncio.run(store.describe_published(erased.object_id)) == erased
+
+    # Never another object's bytes: a reference that does not match the file is refused.
+    wrong = replace(erased, envelope_digest=kept.envelope_digest)
+    with pytest.raises(ValueError, match="object_erase_mismatch"):
+        asyncio.run(store.erase_published(wrong))
+    assert asyncio.run(store.describe_published(erased.object_id)) == erased
+
+    assert asyncio.run(store.erase_published(erased)) is True
+    assert asyncio.run(store.erase_published(erased)) is False  # a retry finds it gone
+    assert asyncio.run(store.published_object_ids()) == (kept.object_id,)
+    with pytest.raises(ValueError, match="object_verification_failed"):
+        asyncio.run(store.describe_published(erased.object_id))
+    with pytest.raises(ValueError, match="object_verification_failed"):
+        asyncio.run(store.resolve_verified(erased.object_id, erased.envelope_digest))
+    assert asyncio.run(store.describe_published(kept.object_id)) == kept

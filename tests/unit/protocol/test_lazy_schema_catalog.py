@@ -576,11 +576,67 @@ class _RefusingStream:
         return None
 
 
-def test_a_client_handshake_loads_its_envelopes_before_the_hello(
+_ENVELOPES = ("control-hello", "control-hello-result", "control-request", "control-result")
+
+
+class _ObservedStream:
+    """Takes the hello, then ends unanswered; records which schemas were loaded at the send and
+    at the first read."""
+
+    def __init__(self) -> None:
+        self.peer_identity = object()
+        self.sent: list[bytes] = []
+        self.loaded_at_send: set[str] | None = None
+        self.loaded_at_read: set[str] | None = None
+
+    @staticmethod
+    def _loaded() -> set[str]:
+        lazy = schemas._lazy_catalog()
+        return set() if lazy is None else set(lazy._plain)
+
+    async def receive(self, max_bytes: int) -> bytes:
+        del max_bytes
+        if self.loaded_at_read is None:
+            self.loaded_at_read = self._loaded()
+        return b""
+
+    async def send_all(self, data: bytes) -> None:
+        self.loaded_at_send = self._loaded()
+        self.sent.append(bytes(data))
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_a_client_handshake_loads_its_envelopes_before_the_hello_is_answered(
     lazy_process: Callable[[], None],
 ) -> None:
-    """All schema work stays before the first frame, as when the hello built the whole catalog."""
+    """The hello's own envelope before it leaves; the others while it is in flight, all read
+    before its answer is (design v2 section 8.9): no schema work lands after the handshake, and
+    none of it delays the hello on its way to a server one or more round trips away."""
 
+    full_plain = dict(_FULL_STATE.plain_by_id)
+    stream = _ObservedStream()
+    with pytest.raises(control_protocol.ControlProtocolError, match="handshake_rejected"):
+        asyncio.run(
+            control_protocol.client_handshake(cast(Any, stream), ControlClientKind.CLI, "0.3.0")
+        )
+    assert len(stream.sent) == 1
+    assert stream.loaded_at_send is not None and stream.loaded_at_read is not None
+    assert _closure(full_plain, _schema_id("control-hello", _CONTROL_VERSION)) <= (
+        stream.loaded_at_send
+    )
+    for name in _ENVELOPES[1:]:
+        assert _schema_id(name, _CONTROL_VERSION) not in stream.loaded_at_send, name
+    for name in _ENVELOPES:
+        closure = _closure(full_plain, _schema_id(name, _CONTROL_VERSION))
+        assert closure <= stream.loaded_at_read, name
+    assert not schemas._full_catalog_loaded()
+
+
+def test_a_hello_that_cannot_be_written_parses_no_more_than_its_own_envelope(
+    lazy_process: Callable[[], None],
+) -> None:
     full_plain = dict(_FULL_STATE.plain_by_id)
     stream = _RefusingStream()
     with pytest.raises(LocalControlTransportError):
@@ -590,8 +646,8 @@ def test_a_client_handshake_loads_its_envelopes_before_the_hello(
     assert len(stream.sent) == 1
     lazy = schemas._lazy_catalog()
     assert lazy is not None
-    for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
-        assert _closure(full_plain, _schema_id(name, _CONTROL_VERSION)) <= set(lazy._plain), name
+    assert _closure(full_plain, _schema_id("control-hello", _CONTROL_VERSION)) <= set(lazy._plain)
+    assert _schema_id("control-result", _CONTROL_VERSION) not in lazy._plain
     assert not schemas._full_catalog_loaded()
 
 

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from finishup.config.load import load_config, validate_config_mapping
 from finishup.config.models import (
@@ -503,6 +503,11 @@ def _emit_table(lines: list[str], header: str, mapping: Mapping[str, object]) ->
             lines.append(f"{key} = {raw}")
         elif type(raw) is str:
             lines.append(f"{key} = {_toml_str(raw)}")
+        elif type(raw) is tuple and all(
+            type(item) is str for item in cast(tuple[object, ...], raw)
+        ):
+            items = cast(tuple[str, ...], raw)
+            lines.append(f"{key} = [{', '.join(_toml_str(item) for item in items)}]")
         else:
             raise ConfigError("config_value_invalid", safe_name=key[:256])
     lines.append("")
@@ -642,6 +647,23 @@ def render_config_toml(config: FinishUpConfig) -> str:
                 "judgment_schema_version": local.judgment_schema_version,
                 "capability_digest": local.capability_digest,
                 "timeout_seconds": local.timeout_seconds,
+            },
+        )
+
+    # Config 1.4.0 (ADR-054): written only when the owner has the table, every key stated, so a
+    # file without it keeps its bytes and a rewrite never drops or changes an offer.
+    code_copy = config.server.code_copy
+    if code_copy is not None:
+        _emit_table(
+            lines,
+            "server.code_copy",
+            {
+                "enabled": code_copy.enabled,
+                "max_repo_bytes": code_copy.max_repo_bytes,
+                "max_file_bytes": code_copy.max_file_bytes,
+                "retention": code_copy.retention,
+                "retention_default": code_copy.retention_default,
+                "exclusions": code_copy.exclusions,
             },
         )
 

@@ -306,6 +306,24 @@ def test_bridge_from_before_an_update_asks_to_reopen_instead_of_restarting(
     assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
 
 
+def test_bridge_from_before_an_update_of_a_remote_helper_asks_to_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server elsewhere: a newer build of this release now runs its helper (same version, so
+    the version cannot tell): this older bridge asks to reopen, never ``service restart``."""
+
+    monkeypatch.setattr(bridge, "service_holder_identity", lambda: None)
+    monkeypatch.setattr(bridge, "newer_helper_build_holds_selection", lambda: True)
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_incompatible", retryable=True, correlation_id=_CORRELATION),
+        request_id=_REQUEST,
+        operation="status",
+    )
+    message = cast(str, _error_of(result)["message"])
+    assert "reopen this session" in message
+    assert "finishup service restart" not in message
+
+
 def test_absent_service_maps_to_supervisor_copy_and_control_class_reason(
     diagnostic_root: Path,
 ) -> None:
@@ -596,10 +614,11 @@ def test_a_bridge_whose_root_an_isolation_variable_names_points_to_that_override
     assert "Ask the owner to run 'finishup server use local'" not in text
 
 
-def test_only_the_authorization_refusals_are_admitted_among_the_remote_phases() -> None:
-    """A remote connection phase outside the gate's refusals stays out of the details: the
+def test_every_remote_connection_phase_is_admitted_and_nothing_else() -> None:
+    """Every remote connection phase is admitted as a detail (ADR-052): the gate's refusals (the
     three remote-root refusals, the repository hold and the owner's kept choice, a changed
-    authorization, and a changed profile or level (ADR-052)."""
+    authorization, a changed profile or level) and, since SSH servers open (layer 4), the five
+    transport outages, each with its own repair. Any other remote-looking token stays out."""
 
     from finishup.protocol.errors import (
         AUTHORIZATION_REFUSAL_PHASES,
@@ -618,8 +637,14 @@ def test_only_the_authorization_refusals_are_admitted_among_the_remote_phases() 
         "server_profile_changed",
         "server_level_unavailable",
     }
+    assert REMOTE_CONNECTION_PHASES - AUTHORIZATION_REFUSAL_PHASES == {
+        "remote_auth_failed",
+        "remote_identity_changed",
+        "remote_incompatible",
+        "remote_service_not_running",
+        "remote_unreachable",
+    }
     for phase in REMOTE_CONNECTION_PHASES:
-        kept = normalize_safe_details({"phase": phase}).get("phase")
-        assert kept == (phase if phase in AUTHORIZATION_REFUSAL_PHASES else None)
-    # The five remote_* connection failures of a later layer's transports stay out.
-    assert normalize_safe_details({"phase": "remote_unreachable"}).get("phase") is None
+        assert normalize_safe_details({"phase": phase}).get("phase") == phase
+    for other in ("remote_host_key_unconfirmed", "remote_kind_unavailable", "lab.example"):
+        assert normalize_safe_details({"phase": other}).get("phase") is None

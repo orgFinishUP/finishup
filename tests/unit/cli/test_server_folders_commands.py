@@ -519,7 +519,9 @@ def test_an_official_endpoints_local_is_recorded_only_with_the_typed_name(
     from finishup.client import server_folders
 
     del home
-    monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
+    monkeypatch.setattr(
+        server_folders, "OFFICIAL_ENDPOINT_ORIGINS", (server_folders.OfficialOrigin("fu.example"),)
+    )
     with targets.registry_lock():
         record, root = targets.new_remote_target("fu", "https", base_url="https://fu.example")
     listed = _invoke("list", "fu")
@@ -535,7 +537,7 @@ def test_an_official_endpoints_local_is_recorded_only_with_the_typed_name(
     assert not folders_path(root).exists()
     # So it still follows the list: off it, it is 'listed', not chosen.
     with monkeypatch.context() as patched:
-        patched.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset[str]())
+        patched.setattr(server_folders, "OFFICIAL_ENDPOINT_ORIGINS", ())
         assert server_folders.outside_reads_of(root, record) == OutsideReads(
             "listed", (), "not_chosen"
         )
@@ -551,7 +553,7 @@ def test_an_official_endpoints_local_is_recorded_only_with_the_typed_name(
     assert "stays in mode local, now set by you" in recorded.stdout
     assert "'finishup server folders mode fu listed'" in recorded.stdout
     assert read_record(root, record.target_id) == FolderRecord((), "local")
-    monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset[str]())
+    monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_ORIGINS", ())
     assert server_folders.outside_reads_of(root, record) == OutsideReads("local", (), "owner")
 
 

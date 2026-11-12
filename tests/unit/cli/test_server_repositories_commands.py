@@ -60,6 +60,9 @@ _STAMP = "2026-11-07T09:30:00.000Z"
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
         monkeypatch.setattr(zero_network, "_selection_on_disk", zero_network.read_selection_on_disk)
+        # Every remote kind is open from layer 5: HTTPS stays closed in this process as the
+        # closed kind's example; the 'opened' cases open it again.
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
         yield root
 
 
@@ -79,9 +82,10 @@ def _remote(kind: str = "https", *, select: bool = True, name: str = "lab") -> t
 
 
 @pytest.fixture
-def opened(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every remote kind open, in process: what ``add`` does once a later release opens one."""
+def opened(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every remote kind open, in process (after ``home`` closed HTTPS as the closed example)."""
 
+    del home
     open_remote_kinds(monkeypatch, "ssh", "https", "local_port")
 
 
@@ -810,19 +814,21 @@ def test_server_use_of_a_server_elsewhere_refuses_and_says_nothing_of_the_hold(
     assert "holds its work" not in result.output
 
 
-def test_the_group_is_hidden_and_add_refuses_before_the_console_while_no_kind_is_open(
+def test_the_group_is_shown_and_add_refuses_before_the_console_for_a_closed_kind(
     home: Path,
     remote: targets.ServerTarget,
     repository: str,
     confirmed: list[tuple[str, str, str]],
 ) -> None:
-    """The owner's answer O4: nothing advertises the group, 'add' refuses before anything is asked
-    or recorded, and 'keep', 'list' and 'remove' stay usable as the way back."""
+    """The owner's answer O4, since SSH servers open (layer 4, FR-5): the group is shown; for a
+    kind still closed (HTTPS here) 'add' refuses before anything is asked or recorded, and 'keep',
+    'list' and 'remove' stay usable as the way back."""
 
     plain = re.sub(
         r"\x1b\[[0-9;?]*[A-Za-z]", "", _RUNNER.invoke(cli.app, ["server", "--help"]).output
     )
-    assert "repositories" not in plain
+    assert "repositories" in plain
+    assert remote.kind == "https"
     key = _held(repository)
     added = _invoke("add")
     assert added.exit_code != 0

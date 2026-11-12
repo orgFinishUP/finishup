@@ -14,11 +14,20 @@ from pathlib import Path
 
 import pytest
 
+from finishup.domain.evidence_provenance import (
+    EVIDENCE_COUNT_MAX,
+    EVIDENCE_PROVENANCE_TOKENS,
+    ContentForgotten,
+    CopySnapshotRef,
+    EvidenceProvenance,
+)
 from finishup.domain.receipts import (
     ReceiptDocument,
     client_attested_receipt_block,
+    evidence_provenance_unknown_receipt_block,
     receipt_document_from_json,
     render_receipt_human,
+    server_copy_receipt_block,
     workspace_provenance_unknown_block,
 )
 from finishup.domain.workspace_provenance import (
@@ -71,11 +80,36 @@ def _trailers(markdown: bool) -> dict[str, str]:
         "attested_hook": client_attested_receipt_block(
             _SERVICE_ID, markdown=markdown, hook_observed=True
         ),
+        # ADR-054: the longest level-L2 section, every line present and every count at its bound.
+        "server_copy": server_copy_receipt_block(
+            _SERVICE_ID,
+            EvidenceProvenance(
+                dict.fromkeys(EVIDENCE_PROVENANCE_TOKENS, EVIDENCE_COUNT_MAX),
+                EVIDENCE_COUNT_MAX,
+                CopySnapshotRef("2026-11-10T11:00:00.000Z", "f" * 40),
+                ContentForgotten("2026-11-10T11:00:00.000Z", "expired"),
+            ),
+            markdown=markdown,
+            hook_observed=True,
+        ),
+        "evidence_unknown": evidence_provenance_unknown_receipt_block(
+            _SERVICE_ID, markdown=markdown, hook_observed=True
+        ),
     }
 
 
+_SECTIONS = (
+    "unknown",
+    "unknown_lasting",
+    "attested",
+    "attested_hook",
+    "server_copy",
+    "evidence_unknown",
+)
+
+
 @pytest.mark.parametrize("markdown", [False, True], ids=["text", "markdown"])
-@pytest.mark.parametrize("section", ["unknown", "unknown_lasting", "attested", "attested_hook"])
+@pytest.mark.parametrize("section", _SECTIONS)
 @pytest.mark.parametrize("length", [32_400, 32_700, _HUMAN_TEXT_MAX])
 def test_a_receipt_at_the_bound_still_ends_with_its_whole_closing_section(
     markdown: bool, section: str, length: int
@@ -100,7 +134,7 @@ def test_a_receipt_at_the_bound_still_ends_with_its_whole_closing_section(
 
 
 @pytest.mark.parametrize("markdown", [False, True], ids=["text", "markdown"])
-@pytest.mark.parametrize("section", ["unknown", "unknown_lasting", "attested", "attested_hook"])
+@pytest.mark.parametrize("section", _SECTIONS)
 def test_an_overlong_receipt_is_cut_before_its_closing_section(
     markdown: bool, section: str
 ) -> None:
@@ -118,7 +152,7 @@ def test_an_overlong_receipt_is_cut_before_its_closing_section(
 
 
 @pytest.mark.parametrize("markdown", [False, True], ids=["text", "markdown"])
-@pytest.mark.parametrize("section", ["unknown", "unknown_lasting", "attested", "attested_hook"])
+@pytest.mark.parametrize("section", _SECTIONS)
 def test_a_receipt_with_room_gains_the_section_and_nothing_else(
     markdown: bool, section: str
 ) -> None:

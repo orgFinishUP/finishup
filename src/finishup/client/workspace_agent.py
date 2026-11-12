@@ -77,7 +77,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from finishup.adapters.approved_checks import ApprovedCheckCommand, ApprovedCheckRunner
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
@@ -134,6 +134,9 @@ from finishup.ports.workspace_agent import (
     CaptureMetadataArguments,
     CheckPolicyRead,
     ClassifyUndeclaredReferencesArguments,
+    CodeSyncPrepareArguments,
+    CodeSyncPrepared,
+    CodeSyncReadArguments,
     CountChangeLinesArguments,
     InspectArguments,
     ListBeneathArguments,
@@ -342,6 +345,26 @@ def _reached_through_fence(
     return True
 
 
+# Level L2's sync (ADR-054): declared only by an agent given a responder (the helper's).
+_CODE_SYNC_OPERATIONS: Final[frozenset[str]] = frozenset(
+    {WorkspaceOperation.CODE_SYNC_PREPARE.value, WorkspaceOperation.CODE_SYNC_READ.value}
+)
+
+
+class CodeSyncRefused(Exception):
+    """A closed reply reason from a code-sync responder (``client.code_sync``)."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _CodeSync(Protocol):
+    def prepare(self, arguments: CodeSyncPrepareArguments) -> CodeSyncPrepared: ...
+
+    def read(self, arguments: CodeSyncReadArguments) -> bytes: ...
+
+
 class _OwnAuthorization(Protocol):
     """Whether this agent's own connection may go on (``service.client.AuthorizationCheck``)."""
 
@@ -352,11 +375,14 @@ class _OwnAuthorization(Protocol):
 class _Call:
     """What one call may use: the session's workspace handle, the call's own deadline, and the
     directories it never reads (FinishUP's own, then the held repositories', read once per call).
+    ``held`` is the held repositories' part of ``fence`` alone: the outside reads count the
+    values that reached it (``fenced``, ADR-052 O7).
     """
 
     handle: str | None
     deadline: float
     fence: tuple[str, ...] = ()
+    held: tuple[str, ...] = ()
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
@@ -371,6 +397,7 @@ class WorkspaceAgentHandler:
     __slots__ = (
         "_capture",
         "_check_policy_trust",
+        "_code_sync",
         "_declaration",
         "_held_roots",
         "_inspect",
@@ -400,6 +427,8 @@ class WorkspaceAgentHandler:
         outside_reads: Callable[[], OutsideReads] | None = None,
         held_roots: Callable[[], tuple[str, ...]] | None = None,
         own_authorization: _OwnAuthorization | None = None,
+        role: Literal["connection", "background"] = "connection",
+        code_sync: _CodeSync | None = None,
     ) -> None:
         """``workspace`` is the locator the connection's claim was computed from; never the
         filesystem root, which no claim names (``workspace_locator_path_invalid``).
@@ -436,6 +465,13 @@ class WorkspaceAgentHandler:
         repository's hold included): once it refuses, every call is answered
         ``workspace_unavailable``, so background work between the connection's own checks reads
         nothing more (ADR-052).
+
+        ``role`` is declared in the hello (ADR-052, design v2 section 8.5): ``connection`` for the
+        agent of the connection in front of the workspace, ``background`` for the helper's.
+
+        ``code_sync`` (level L2, ADR-054) answers the two code-sync operations; only a
+        ``background`` agent may have one (the helper's), and only an agent with one declares them,
+        whatever ``operations`` lists: no other agent ever offers to sync.
         """
 
         if type(workspace) is not WorkspaceLocator:
@@ -445,13 +481,20 @@ class WorkspaceAgentHandler:
         directories = client_protected_directories() if protected is None else tuple(protected)
         if any(type(item) is not str or not item.startswith("/") for item in directories):
             raise ValueError("workspace_agent_protected_invalid")
+        if code_sync is not None and role != "background":
+            raise ValueError("workspace_agent_code_sync_role_invalid")
+        syncing: frozenset[str] = frozenset() if code_sync is None else _CODE_SYNC_OPERATIONS
         offered = tuple(
             sorted(
-                set(WORKSPACE_OPERATION_NAMES if operations is None else operations),
+                (
+                    set(WORKSPACE_OPERATION_NAMES if operations is None else operations)
+                    - _CODE_SYNC_OPERATIONS
+                )
+                | syncing,
                 key=str.encode,
             )
         )
-        self._declaration = WorkspaceAgentDeclaration(offered, max_reply_bytes)
+        self._declaration = WorkspaceAgentDeclaration(offered, max_reply_bytes, role=role)
         self._operations = frozenset(offered)
         self._root = workspace.path
         self._protected = directories
@@ -479,6 +522,7 @@ class WorkspaceAgentHandler:
         # this connection's own authorization (ADR-052).
         self._held_roots = held_roots
         self._own_authorization = own_authorization
+        self._code_sync = code_sync
         self._opened: OrderedDict[str, LocalWorkspaceHandle] = OrderedDict()
         self._opened_guard = threading.Lock()
         self._table: dict[WorkspaceOperation, Callable[[Any, _Call], object]] = {
@@ -500,6 +544,8 @@ class WorkspaceAgentHandler:
             WorkspaceOperation.LIST_CHANGED_PATHS: self._list_changed_paths,
             WorkspaceOperation.INSPECT: self._inspect_paths,
             WorkspaceOperation.RUN_APPROVED_CHECK: self._run_approved_check,
+            WorkspaceOperation.CODE_SYNC_PREPARE: self._code_sync_prepare,
+            WorkspaceOperation.CODE_SYNC_READ: self._code_sync_read,
         }
 
     @property
@@ -554,10 +600,12 @@ class WorkspaceAgentHandler:
             arguments = spec.decode_arguments(call.arguments)
         except WorkspaceCodecError:
             raise _Outcome("arguments_invalid") from None
+        held = self._held()
         context = _Call(
             handle if workspace_handle_valid(handle) else None,
             time.monotonic() + call.deadline_ms / 1_000,
-            self._fence(),
+            (*self._protected, *held),
+            held,
         )
         value = self._table[spec.operation](arguments, context)
         try:
@@ -578,8 +626,9 @@ class WorkspaceAgentHandler:
         except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
             return False
 
-    def _fence(self) -> tuple[str, ...]:
-        """FinishUP's own directories, then every other held repository's recorded worktrees.
+    def _held(self) -> tuple[str, ...]:
+        """Every other held repository's recorded worktrees, fenced after FinishUP's own
+        directories.
 
         Read once per call. A held worktree that is, contains or lies inside the claimed
         workspace is left out: fencing it would silently empty the workspace's own reads, and a
@@ -589,15 +638,15 @@ class WorkspaceAgentHandler:
 
         reader = self._held_roots
         if reader is None:
-            return self._protected
+            return ()
         try:
             found = reader()
         except Exception:  # noqa: BLE001 - unknown is not held: nothing more is fenced
-            return self._protected
+            return ()
         if type(found) is not tuple:
-            return self._protected
+            return ()
         root = self._root.rstrip("/") + "/"
-        held = tuple(
+        return tuple(
             path
             for path in cast(tuple[object, ...], found)
             if type(path) is str
@@ -606,7 +655,36 @@ class WorkspaceAgentHandler:
             and not self._inside_claimed(path)
             and not root.startswith(path.rstrip("/") + "/")
         )
-        return (*self._protected, *held) if held else self._protected
+
+    def _fenced_count(self, roots: Sequence[str], values: Sequence[str], call: _Call) -> int:
+        """How many of the server's ``values`` an outside read left unread because they reached
+        a held repository's fence (ADR-052 O7): an absolute value the local outside-input
+        candidate rule would look at, outside the claimed worktree and at or beneath a root the
+        read walks or a listed folder, that lies in a held worktree by its spelling or reaches one
+        through a symlinked or bind-mounted component. A count only: never which value or which
+        repository, and nothing inside a held worktree is examined to tell it.
+        """
+
+        if not call.held:
+            return 0
+        identities = _fence_identities(call.held)
+        every = (*roots, *self._outside().folders)
+        count = 0
+        for value in values:
+            if not value.startswith("/") or "\x00" in value:
+                continue
+            path = posixpath.normpath(value)
+            if (
+                self._inside_claimed(path)
+                or not _outside_candidate(path)
+                or not folder_covers(path, every)
+            ):
+                continue
+            if _folded_within(path, call.held) or (
+                identities is not None and _reached_through_fence(path, call.held, identities)
+            ):
+                count += 1
+        return count
 
     def _workspace(self, named: str, call: _Call) -> str:
         """The claimed root, when ``named`` is this connection's own workspace handle."""
@@ -979,7 +1057,8 @@ class WorkspaceAgentHandler:
         inputs = read_outside_inputs(
             roots, values, limit=arguments.limit, excluded=excluded, space_cut=arguments.space_cut
         )
-        return OutsideInputsRead(inputs, unlisted, listed)
+        fenced = self._fenced_count(arguments.roots, arguments.values, call)
+        return OutsideInputsRead(inputs, unlisted, listed, fenced)
 
     def _snapshot_outside_inputs(
         self, arguments: SnapshotOutsideInputsArguments, call: _Call
@@ -999,7 +1078,8 @@ class WorkspaceAgentHandler:
             seconds=min(arguments.budget_ms / 1_000, call.remaining()),
             excluded=excluded,
         )
-        return OutsideSnapshotsRead(reads, unlisted, listed)
+        fenced = self._fenced_count(arguments.roots, arguments.values, call)
+        return OutsideSnapshotsRead(reads, unlisted, listed, fenced)
 
     def _read_declared_test(self, arguments: ReadDeclaredTestArguments, call: _Call) -> object:
         """One declared test file, read as a local service reads it in ``local`` mode, or within
@@ -1234,6 +1314,26 @@ class WorkspaceAgentHandler:
         from finishup.client.observation_outbox import check_policy_trusted
 
         return check_policy_trusted(self._root, policy_digest)
+
+    def _code_sync_prepare(self, arguments: CodeSyncPrepareArguments, call: _Call) -> object:
+        self._workspace(arguments.workspace, call)
+        responder = self._code_sync
+        if responder is None:
+            raise _Outcome("operation_not_declared")
+        try:
+            return responder.prepare(arguments)
+        except CodeSyncRefused as refused:
+            raise _Outcome(refused.reason) from None
+
+    def _code_sync_read(self, arguments: CodeSyncReadArguments, call: _Call) -> object:
+        self._workspace(arguments.workspace, call)
+        responder = self._code_sync
+        if responder is None:
+            raise _Outcome("operation_not_declared")
+        try:
+            return responder.read(arguments)
+        except CodeSyncRefused as refused:
+            raise _Outcome(refused.reason) from None
 
     def _run_approved_check(self, arguments: RunApprovedCheckArguments, call: _Call) -> object:
         """Run one argv only when the policy the owner trusted on this client approves exactly it.

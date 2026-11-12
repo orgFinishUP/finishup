@@ -594,16 +594,19 @@ def test_remote_add_and_use_are_closed_before_this_computers_policy_is_asked(
     command: str,
     state: str,
 ) -> None:
-    """The remote kinds are closed in this release: ``server add`` and ``server use`` refuse a
-    remote server with ``remote_kind_unavailable`` before the zero-network check, so this
-    computer's policy is never asked and no console opens, whether it is zero-network (live or
-    last reported), cannot be read, or permits network use."""
+    """A closed kind (HTTPS, closed in this process: every kind is open from layer 5): ``server
+    add`` and ``server use`` refuse it with ``remote_kind_unavailable`` before the zero-network
+    check, so this computer's policy is never asked and no console opens, whether it is
+    zero-network (live or last reported), cannot be read, or permits network use. (The open kinds'
+    zero-network refusals are in ``test_server_ssh_add.py`` and ``test_server_https_add.py``.)"""
+
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
 
     if command == "use":
-        _remote(select=False)
+        _remote("https", select=False)
         arguments = ("server", "use", _NAME)
     else:
-        arguments = ("server", "add", "lab2", "ssh://owner@lab.example:22")
+        arguments = ("server", "add", "lab2", "https://lab.example:8443")
     record_reported_policy(zero_network=True, now=_AT)
     reads = _policy(monkeypatch, state)
 
@@ -1666,9 +1669,12 @@ def test_a_process_on_this_computers_server_with_a_remote_selected_meanwhile(
         )
         assert targets.read_selected_target_id() is None
         assert "Using this computer's everyday FinishUP server." in result.stdout
-        # No runtime is registered for a remote kind in this release: this client ran nothing for
-        # it, so no connection is said to have closed.
-        assert "connection to the server" not in result.stdout
+        # An SSH server has its runtime (layer 4): the switch stopped what this client ran for it
+        # (its helper and its OpenSSH master, none running here) and says the connection closed.
+        assert (
+            f"Closed this computer's connection to the server {record.target_id} (ssh)"
+            in result.stdout
+        )
         # The change was made on this computer: its policy is read again and remembered.
         assert policy_reads == [_MACHINE_SCOPE]
         assert cast(ReportedPolicy, read_marker()).zero_network is True

@@ -26,8 +26,10 @@ __all__ = [
     "SERVER_TARGET_STATUS_SCHEMA_VERSION",
     "ServerTargetAllowedRepository",
     "ServerTargetAuthorization",
+    "ServerTargetConnection",
     "ServerTargetConsent",
     "ServerTargetDescription",
+    "ServerTargetHelper",
     "ServerTargetHeldRepository",
     "ServerTargetKeptRepository",
     "ServerTargetOutsideReads",
@@ -226,6 +228,33 @@ class ServerTargetRepositories(BaseModel):
     here: ServerTargetRepositoryHere | None
 
 
+class ServerTargetHelper(BaseModel):
+    """What the target's helper last recorded (ADR-052): closed tokens and its generation.
+
+    ``running`` says whether a helper holds the target's lock now; ``phase`` and ``reason`` are
+    its last record (``ready``, ``unavailable`` with the remote phase, ``stopped`` with why).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    running: bool
+    phase: Literal["starting", "ready", "unavailable", "stopped"]
+    reason: Token | None
+    generation: Annotated[int, Field(ge=1)]
+
+
+class ServerTargetConnection(BaseModel):
+    """How this computer reaches an SSH target (ADR-052, design v2 section 1.2): the owner's
+    connection ``style``, the styles the server's last profile offers, and its helper, if one
+    ever recorded anything."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    style: Literal["relay", "direct"]
+    styles_offered: list[Literal["relay", "direct"]] = Field(max_length=2)
+    helper: ServerTargetHelper | None
+
+
 class ServerTargetDescription(BaseModel):
     """The target the deciding source resolves to (``target_id`` null: not a named target)."""
 
@@ -239,6 +268,8 @@ class ServerTargetDescription(BaseModel):
     authorization: ServerTargetAuthorization | None
     # Null for a target that is not remote, or one never consented to a server profile (ADR-052).
     consent: ServerTargetConsent | None
+    # Null for a target that is not an SSH server (ADR-052): how this computer reaches it.
+    connection: ServerTargetConnection | None
     # Null for a target that is not remote: a local server reads under its own privacy policy.
     outside_reads: ServerTargetOutsideReads | None
     # Null for a target that is not remote: a server on this computer applies this computer's
@@ -254,7 +285,10 @@ class ServerTargetProbe(BaseModel):
     server) or ``zero_network_in_force`` (any other server elsewhere), and ``last_reported_at``
     is when this computer reported that policy, as ``server login``, ``connect`` and ``test``
     say. ``last_reported_at`` is set exactly for ``not_probed`` (amended in place, 2026-11-07,
-    as 1.0.0 is unreleased).
+    as 1.0.0 is unreleased). ``continuation`` (amended in place, 2026-11-11) is the registered
+    way back of a probe that a server elsewhere did not answer: its phase's own continuation, or
+    ``remote_direct_slow`` for a target reached in the direct style that did not answer in time
+    (the owner's WAN-gate decision); ``null`` otherwise.
     """
 
     model_config = ConfigDict(
@@ -287,6 +321,8 @@ class ServerTargetProbe(BaseModel):
     samples: int = Field(ge=0)
     # Set exactly when ``outcome`` is ``not_probed``.
     last_reported_at: Timestamp | None
+    # The registered continuation of a failed probe of a server elsewhere (see the class text).
+    continuation: Token | None
 
     @model_validator(mode="after")
     def _reported_time_matches_the_outcome(self) -> "ServerTargetProbe":

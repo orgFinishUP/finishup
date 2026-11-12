@@ -413,9 +413,11 @@ def is_remote_refusal(error: ControlError) -> bool:
 
     if error.reason != "service_unavailable" or error.phase is None:
         return False
-    from finishup.client.authorization import AUTHORIZATION_REFUSALS
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-    return error.phase in AUTHORIZATION_REFUSALS
+    # From layer 4 a server elsewhere can also be unreachable through its transport: every
+    # phase of ``REMOTE_CONNECTION_PHASES`` (the authorization refusals and the outages).
+    return error.phase in REMOTE_CONNECTION_PHASES
 
 
 def control_failure(
@@ -451,9 +453,9 @@ def control_failure(
     code = public_error_code_for_control_reason(error.reason)
     if is_remote_refusal(error):
         # The shared authorization gate refused or ended a connection to a server elsewhere
-        # (ADR-051, ADR-052): nothing more was sent and nothing started, so the line names the
-        # phase and its fixed summary, then the directive of its way back (for a remote root,
-        # it follows what named the root), never a local service to start.
+        # (ADR-051, ADR-052), or that server could not be reached through its transport: the
+        # line names the phase and its fixed summary, then the directive of its way back (for
+        # a remote root, it follows what named the root), never a local service to start.
         from finishup.cli.render import recovery_directive_json, render_authorization_refusal
         from finishup.client.targets import remote_root_continuation
         from finishup.protocol.recovery import directive_for

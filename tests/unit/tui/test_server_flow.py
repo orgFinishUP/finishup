@@ -31,7 +31,8 @@ pytestmark = pytest.mark.anyio
 _ROWS = (
     ServerRow("local", "local", None, None, True),
     ServerRow("work", "local", "t_1a2b3c4d", None, False),
-    ServerRow("lab", "ssh", "t_9f8e7d6c", "ssh://owner@lab.example:22", False),
+    # An HTTPS server: the closed example (the tests that use it close HTTPS in process).
+    ServerRow("lab", "https", "t_9f8e7d6c", "https://lab.example", False),
 )
 
 
@@ -92,9 +93,14 @@ async def test_switching_to_a_named_local_server_needs_no_terminal_handoff() -> 
     assert isinstance(selection, SelectionView)
 
 
-async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen() -> None:
-    """The remote kinds are closed in this release: "Use lab" asks for no confirmation and hands
-    nothing over; the refusal is reported with its reason and the selection is unchanged."""
+async def test_a_remote_server_is_shown_as_not_available_and_refused_when_chosen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed kind (HTTPS, closed in this process: every kind is open from layer 5): "Use lab"
+    asks for no confirmation and hands nothing over; the refusal is reported with its reason and
+    the selection is unchanged."""
+
+    monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
 
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["use:lab"])
@@ -198,7 +204,11 @@ async def test_adding_offers_only_a_server_on_this_computer(
     from finishup.client import server_folders
 
     if official:
-        monkeypatch.setattr(server_folders, "OFFICIAL_ENDPOINT_HOSTS", frozenset({"fu.example"}))
+        monkeypatch.setattr(
+            server_folders,
+            "OFFICIAL_ENDPOINT_ORIGINS",
+            (server_folders.OfficialOrigin("fu.example"),),
+        )
     runtime = FakeRuntime(servers=_ROWS)
     harness = _Harness(runtime, ["add", "add:local"])
 
@@ -353,9 +363,18 @@ async def test_the_real_runtime_refuses_a_remote_record_and_leaves_one_quietly(
 
     monkeypatch.setattr("finishup.cli.trusted_console.TrustedForegroundConsole", no_console)
     with ambient_home(monkeypatch) as home:
+        # Every remote kind is open from layer 5: HTTPS is closed in this process as the example,
+        # with no runtime for it.
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
+        from finishup.client import target_runtime
+
+        loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+        loaders.pop("https", None)
+        monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
         with targets.registry_lock():
+            # An HTTPS server: closed in this process.
             record, _root = targets.new_remote_target(
-                "lab", "ssh", user="owner", host="lab.example", port=22
+                "lab", "https", base_url="https://lab.example"
             )
             targets.write_selection(record)
         reset_selection_memo()

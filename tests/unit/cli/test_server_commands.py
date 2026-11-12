@@ -14,6 +14,7 @@ runs with one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -25,7 +26,7 @@ from typing import Final, cast
 import pytest
 from typer.testing import CliRunner, Result
 
-from builders.server_targets import ambient_home, remote_runtime
+from builders.server_targets import StandInRuntime, ambient_home, remote_runtime
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.cli import trusted_console
@@ -59,6 +60,16 @@ class _MemoryKeyring:
 @pytest.fixture
 def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     with ambient_home(monkeypatch) as root:
+        # Every remote kind is open from layer 5 (``test_server_https_add`` covers HTTPS and
+        # ports): these tests keep them closed in process, with no runtime, as the closed kinds'
+        # example (a test that needs one registers a stand-in).
+        monkeypatch.setattr("finishup.client.authorization.OPEN_REMOTE_KINDS", frozenset({"ssh"}))
+        from finishup.client import target_runtime
+
+        loaders = dict(target_runtime._RUNTIME_LOADERS)  # pyright: ignore[reportPrivateUsage]
+        for kind in ("https", "local_port"):
+            loaders.pop(kind, None)
+        monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", loaders)
         yield root
 
 
@@ -148,10 +159,11 @@ def test_every_server_command_renders_its_help(home: Path, arguments: tuple[str,
     assert "internal_error" not in result.output
 
 
-def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
-    """The remote kinds are closed in this release: ``login``, ``logout`` and ``folders`` are
-    hidden from ``server --help``, and ``add --help`` names no remote address or option. Hidden
-    commands still parse and show their own help."""
+def test_the_help_offers_servers_on_this_computer_over_ssh_and_over_https(home: Path) -> None:
+    """SSH (layer 4), HTTPS and port servers (layer 5) are open in this release: ``login`` and
+    ``logout`` (API keys) are shown in ``server --help``, as are ``set``, ``folders`` and
+    ``repositories``; ``add --help`` names the ``ssh://`` and ``https://`` addresses and their
+    options. Every command shows its own help."""
 
     listing = _invoke("--help")
     assert listing.exit_code == 0, listing.output
@@ -165,26 +177,34 @@ def test_the_help_offers_only_servers_on_this_computer(home: Path) -> None:
         for group in server_cli.server_app.registered_groups
         if group.name is not None and not group.hidden
     }
-    assert shown == {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"}
+    assert shown == {
+        "add",
+        "list",
+        "use",
+        "status",
+        "test",
+        "remove",
+        "connect",
+        "disconnect",
+        "set",
+        "login",
+        "logout",
+        "folders",
+        "repositories",
+        "code",
+    }
     words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
-    assert not words & {"login", "logout", "folders"}
+    assert {"login", "logout"} <= words
 
     add = _invoke("add", "--help")
     assert add.exit_code == 0, add.output
     add_help = _plain(add.stdout)
     assert "--local" in add_help
-    for remote in (
-        "ssh://",
-        "https://",
-        "--port",
-        "--remote-root",
-        "--remote-launcher",
-        "--ca-file",
-        "--tls-pin",
-        "--outside-reads",
-    ):
-        assert remote not in add_help
+    for ssh in ("ssh://", "--remote-root", "--remote-launcher", "--outside-reads"):
+        assert ssh in add_help
+    for https in ("https://", "--port", "--ca-file", "--tls-pin", "--key-file"):
+        assert https in add_help
     for hidden in (("login", "--help"), ("logout", "--help"), ("folders", "--help")):
         shown = _invoke(*hidden)
         assert shown.exit_code == 0, (hidden, shown.output)
@@ -333,14 +353,13 @@ def test_status_of_the_everyday_server_and_a_named_one(home: Path, quiet_probe: 
     assert named["source"] == "ambient"  # status NAME never changes the selection
 
 
+# SSH servers are open (layer 4; ``tests/unit/cli/test_server_ssh_add.py``); these stay closed.
 _REMOTE_ADDRESSES: Final = (
-    pytest.param(("ssh://owner@lab.example",), id="ssh"),
-    pytest.param(("ssh://owner@lab.example:2222", "--remote-root", "/srv/fu"), id="ssh-root"),
     pytest.param(("https://fu.example",), id="https"),
     pytest.param(("https://fu.example", "--tls-pin", "sha256:" + "a" * 64), id="https-pin"),
     pytest.param(("https://127.0.0.1:9443",), id="loopback-address"),
     pytest.param(("--port", "9443"), id="port"),
-    pytest.param(("ssh://owner@lab.example", "--outside-reads", "local"), id="outside-reads"),
+    pytest.param(("https://fu.example", "--outside-reads", "local"), id="outside-reads"),
     # Nothing is parsed to tell the kind: an address that is no address is refused the same.
     pytest.param(("http://fu.example",), id="plain-http"),
     pytest.param(("not an address",), id="not-an-address"),
@@ -351,9 +370,9 @@ _REMOTE_ADDRESSES: Final = (
 def test_remote_add_is_refused_for_every_kind_before_anything_is_asked_or_written(
     home: Path, monkeypatch: pytest.MonkeyPatch, arguments: tuple[str, ...]
 ) -> None:
-    """The remote kinds are closed in this release: ``server add`` refuses an SSH, HTTPS or port
-    server with ``remote_kind_unavailable`` before any trusted-console prompt, zero-network check,
-    probe, dial, key prompt or write, says what this release connects to, and adds nothing."""
+    """HTTPS and port servers are closed in this release: ``server add`` refuses one with
+    ``remote_kind_unavailable`` before any trusted-console prompt, zero-network check, probe, dial,
+    key prompt or write, says what this release connects to, and adds nothing."""
 
     from finishup.cli import zero_network_selection
 
@@ -372,10 +391,9 @@ def test_remote_add_is_refused_for_every_kind_before_anything_is_asked_or_writte
     assert result.exit_code == 2, result.output
     assert result.stdout == ""
     assert result.stderr == (
-        "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-        "computer: the everyday server and named local servers ('finishup server add NAME "
-        "--local'). SSH, HTTPS and port servers arrive in a later release; nothing was added\n"
+        f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; nothing was added\n"
     )
+    assert "over SSH" in result.stderr
     for owner_text in ("lab.example", "fu.example", "owner", "9443", "/srv/fu"):
         assert owner_text not in result.output
     assert targets.list_targets() == ()
@@ -773,6 +791,7 @@ def test_a_probe_not_sent_carries_when_this_computer_reported_zero_network() -> 
         "round_trip_p95_ms": None,
         "samples": 0,
         "last_reported_at": "2026-11-07T09:30:00.000Z",
+        "continuation": None,
     }
     document = {**payload, "probe": not_sent}
     validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, document))
@@ -906,7 +925,7 @@ def test_an_installation_whose_identity_cannot_be_read_has_an_unreadable_policy(
 
 
 @pytest.mark.parametrize("before", ["everyday", "named_local"])
-@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+@pytest.mark.parametrize("kind", ["https", "local_port"])
 def test_use_refuses_a_remote_record_and_leaves_the_selection(
     home: Path, monkeypatch: pytest.MonkeyPatch, before: str, kind: str
 ) -> None:
@@ -935,9 +954,7 @@ def test_use_refuses_a_remote_record_and_leaves_the_selection(
     assert result.exit_code == 2, result.output
     assert result.stdout == ""
     assert result.stderr == (
-        "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-        "computer: the everyday server and named local servers ('finishup server add NAME "
-        "--local'). SSH, HTTPS and port servers arrive in a later release; the selected server "
+        f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; the selected server "
         "is unchanged\n"
     )
     assert "lab.example" not in result.output
@@ -998,28 +1015,26 @@ def test_use_refuses_a_record_that_turned_remote_before_the_selection_is_written
 def test_list_and_status_show_a_remote_record_as_not_available(
     home: Path, quiet_probe: None
 ) -> None:
-    record, _root = _another_builds_target("lab", "ssh")
+    record, _root = _another_builds_target("lab", "https")
 
     listed = _invoke("list")
     assert listed.exit_code == 0, listed.output
     lines = listed.stdout.splitlines()
     assert lines[0].startswith("* local") and "(not available" not in lines[0]
     (row,) = [line for line in lines if record.target_id in line]
-    assert row.endswith("ssh://owner@lab.example:22 (not available in this release)")
+    assert row.endswith("https://lab.example (not available in this release)")
 
     # What 'server status lab' prints on a terminal (it prints the JSON document otherwise).
     shown = server_cli.status_lines(
         server_cli.build_status_document("lab"), in_use=server_cli.target_in_use("lab")
     )
     assert list(shown[:2]) == [
-        f"Server: lab ({record.target_id}, ssh); not the server in use",
-        "Not available: this release connects only to FinishUP servers on this computer: the "
-        "everyday server and named local servers ('finishup server add NAME --local'). SSH, "
-        "HTTPS and port servers arrive in a later release.",
+        f"Server: lab ({record.target_id}, https); not the server in use",
+        f"Not available: {server_cli.REMOTE_KIND_UNAVAILABLE}.",
     ]
     status = _status_json("lab")
     target = cast(dict[str, JsonValue], status["target"])
-    assert target["location"] == "ssh://owner@lab.example:22"
+    assert target["location"] == "https://lab.example"
     probe = cast(dict[str, JsonValue], status["probe"])
     # No remote runtime is registered: a closed token, never a local fallback, nothing sent.
     assert (probe["outcome"], probe["reason"], probe["phase"]) == (
@@ -1046,8 +1061,9 @@ def test_list_and_status_show_a_remote_record_as_not_available(
         (("add", "lab", "--local", "--remote-root", "/srv"), "usage"),
         (
             ("add", "lab", "ssh://lab.example", "--tls-pin", "sha256:" + "a" * 64),
-            "remote_kind_unavailable",
+            "target_tls_invalid",
         ),
+        (("add", "lab", "ssh://lab.example", "--remote-root", "srv"), "target_path_invalid"),
         (("use", "nowhere"), "target_unknown"),
         (("remove", "nowhere"), "target_unknown"),
         (("login", "nowhere"), "remote_kind_unavailable"),
@@ -1103,9 +1119,7 @@ def test_login_is_refused_before_anything_is_read_and_logout_deletes_a_key_offli
         assert login.exit_code == 2, login.output
         assert login.stdout == ""
         assert login.stderr == (
-            "remote_kind_unavailable: this release connects only to FinishUP servers on this "
-            "computer: the everyday server and named local servers ('finishup server add NAME "
-            "--local'). SSH, HTTPS and port servers arrive in a later release; no key was read "
+            f"remote_kind_unavailable: {server_cli.REMOTE_KIND_UNAVAILABLE}; no key was read "
             "or stored\n"
         )
     assert (root / targets.SERVER_TARGET_FILE_NAME).is_file()
@@ -1118,6 +1132,15 @@ def test_login_is_refused_before_anything_is_read_and_logout_deletes_a_key_offli
     assert stored.read_text(encoding="ascii") == _KEY
     assert targets.find_target("fu").credential == "file"
 
+    # Layer 5: logout stops the target's helper (A-CRED-STALE); a stand-in runtime records it.
+    from builders.server_targets import StandInRuntime
+
+    stand_in = StandInRuntime()
+
+    def runtime_for(_kind: str) -> StandInRuntime:
+        return stand_in
+
+    monkeypatch.setattr(server_cli, "runtime_for", runtime_for)
     logout = _invoke("logout", "fu")
     assert logout.exit_code == 0, logout.output
     assert logout.stdout == f"Deleted the API key for {record.target_id}.\n"
@@ -1258,7 +1281,7 @@ def test_leaving_a_remote_record_without_a_runtime_says_nothing_of_a_connection(
     runtime for its kind in this release this client ran nothing for it, so no connection is
     said to have closed."""
 
-    record, _root = _another_builds_target("lab", "ssh", select=True)
+    record, _root = _another_builds_target("lab", "https", select=True)
 
     back = _invoke("use", "local")
 
@@ -1517,7 +1540,7 @@ def test_a_stopped_remote_service_is_named_alike_for_every_kind(
 
 
 def test_a_remote_kind_without_a_runtime_is_a_typed_refusal(home: Path) -> None:
-    _another_builds_target("lab", "ssh")
+    _another_builds_target("lab", "https")
     for command in ("connect", "disconnect", "test"):
         result = _invoke(command, "lab")
         assert result.exit_code == 20
@@ -1682,21 +1705,24 @@ def test_an_isolation_root_overrides_the_selection(
 def test_a_target_removed_during_a_slow_logout_stays_removed(
     home: Path, no_platform_store: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SRV-12: a target removed while ``logout`` deleted its key is not recreated with only its
-    record."""
+    """SRV-12: a target removed after ``logout`` read it is not recreated with only its record.
 
-    from finishup.client.credentials import KeyringOrFileCredential
+    Since the layer-5 review (C2) the key is deleted inside logout's registry-locked step, so a
+    removal can no longer land between the delete and the record's write; it lands before the
+    lock is taken (here: as logout asks for it), and logout then finds no record to update.
+    """
 
     record, root = _another_builds_target("team", key=True)
-    deleted = KeyringOrFileCredential.delete
+    real_lock = targets.registry_lock
 
-    def delete_then_removed(credential: KeyringOrFileCredential) -> bool:
-        removed = deleted(credential)
-        with targets.registry_lock():
+    @contextlib.contextmanager
+    def removed_first() -> Generator[None]:
+        with real_lock():
             targets.remove_target_root(record)
-        return removed
+        with real_lock():
+            yield
 
-    monkeypatch.setattr(KeyringOrFileCredential, "delete", delete_then_removed)
+    monkeypatch.setattr(server_cli, "registry_lock", removed_first)
     assert _invoke("logout", "team").exit_code == 0
     assert not root.exists()
 
@@ -1707,7 +1733,7 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     """``connect`` sends nothing to a target confirmed under an older disclosure; seeing,
     stopping and removing it stay possible, and ``use`` is refused as for every remote kind."""
 
-    _another_builds_target("lab", "ssh")
+    _another_builds_target("lab", "https")
     # A later release shows a newer disclosure than the one the owner confirmed.
     monkeypatch.setattr(targets, "DISCLOSURE_VERSION", targets.DISCLOSURE_VERSION + 1)
 
@@ -1715,10 +1741,11 @@ def test_a_stale_disclosure_is_refused_by_connect_and_shown_by_status(
     assert refused.exit_code == 2
     assert refused.stderr.startswith("target_reauthorization_required:")
     assert "lab.example" not in refused.stderr
-    # 'server use NAME' cannot confirm it while the remote kinds are closed (it is refused
-    # below), so the way on is a server on this computer; a later release can authorize it.
-    assert "server use NAME" not in refused.stderr
-    assert "only a later release can authorize it again" in refused.stderr
+    # An SSH server is confirmed again with 'server use NAME' on the owner's terminal; an HTTPS
+    # one (refused below while closed) points to a server on this computer.
+    assert "'finishup server use NAME' on your own terminal (an SSH or HTTPS server)" in (
+        refused.stderr
+    )
     assert "'finishup server use local'" in refused.stderr
     status = _status_json("lab")
     authorization = cast(
@@ -1837,10 +1864,10 @@ def test_service_start_is_an_on_demand_start_plus_status(
     assert calls == [(ControlClientKind.CLI, None)]
 
 
-def test_service_profile_is_hidden_and_prints_what_this_server_offers(
+def test_service_profile_is_shown_and_prints_what_this_server_offers(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-052: ``finishup service profile`` (hidden until a server elsewhere can connect) starts
+    """ADR-052: ``finishup service profile`` (shown since SSH discovery runs it, layer 4) starts
     this root's service on demand, as ``service start`` does, and prints its verified profile."""
 
     from finishup.cli.app import service_app
@@ -1877,7 +1904,7 @@ def test_service_profile_is_hidden_and_prints_what_this_server_offers(
         for command in service_app.registered_commands
         if command.name in {"profile", "endpoint", "status"}
     }
-    assert hidden == {"profile": True, "endpoint": False, "status": False}
+    assert hidden == {"profile": False, "endpoint": False, "status": False}
 
 
 def test_ambiguous_everyday_folders_are_a_bounded_refusal(home: Path) -> None:
@@ -1900,8 +1927,14 @@ def _ready_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=5, samples=5
         )
 
+    def timed(_self: object, _root: Path | None, count: int) -> tuple[int, ...]:
+        return (40,) * count
+
     remote_runtime(monkeypatch).probe_result = ready(None, None)
     monkeypatch.setattr("finishup.client.target_runtime.LocalTargetRuntime.probe", ready)
+    monkeypatch.setattr(
+        "finishup.client.target_runtime.LocalTargetRuntime.time_new_connections", timed
+    )
 
 
 @pytest.mark.parametrize("selected", ["lab", None])
@@ -1988,3 +2021,256 @@ def test_server_status_and_test_say_a_refused_key_was_an_answer(
     document = _status_json("lab")
     probe = cast(dict[str, JsonValue], document["probe"])
     assert (probe["outcome"], probe["reason"]) == ("unavailable", "remote_auth_failed")
+
+
+def _ready_lab(monkeypatch: pytest.MonkeyPatch, *, round_trip_ms: int) -> StandInRuntime:
+    from finishup.client.target_runtime import ProbeResult
+
+    with targets.registry_lock():
+        targets.new_remote_target(
+            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+        )
+    runtime = remote_runtime(monkeypatch)
+    runtime.probe_result = ProbeResult(
+        "ready",
+        service_state="ready",
+        service_version="0.3.0",
+        round_trip_p95_ms=round_trip_ms,
+        samples=10,
+    )
+    return runtime
+
+
+def test_server_test_warns_when_a_new_connection_misses_the_startup_gate(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design v2 section 8.9: a warm status round trip of 120 ms said "within the hook budgets"
+    while the startup gate's own connection and status took 673 ms; what is compared with the
+    gate's bound is now what the gate times, a new process's connection and status."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    runtime.new_connection_times = (540, 610, 702, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Round trip p95: 120 ms over 10 status calls" in tested.stdout
+    assert (
+        "New connection and status: 702 ms at the slowest of 5 new processes "
+        "(the required startup gate allows 650 ms)."
+    ) in tested.stdout
+    assert (
+        "Warning: 702 ms is above the 650 ms the required startup gate allows for a connection "
+        "and a status; agent tools would likely be denied."
+    ) in tested.stdout
+    assert "Within" not in tested.stdout
+    roots = [root for call, root in runtime.calls if call == "time_new_connections"]
+    lab = targets.find_target("lab")
+    assert lab is not None
+    assert roots == [targets.target_root(lab.target_id)]
+
+
+def test_server_test_says_a_new_connection_fits_the_gate_with_what_it_did_not_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _ready_lab(monkeypatch, round_trip_ms=320)
+    runtime.new_connection_times = (450, 470, 650, 430, 440)  # the bound itself still fits
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "650 ms at the slowest of 5 new processes" in tested.stdout
+    assert (
+        "Within the startup gate's 650 ms for a new connection and status; a task's status asks "
+        "the server for more than this one."
+    ) in tested.stdout
+    assert "Warning" not in tested.stdout  # the warm round trip alone (320 ms) decides nothing
+
+
+def test_server_test_names_a_new_connection_that_did_not_answer(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "A new connection did not answer a status call (service_unavailable, phase timeout)."
+        in tested.stderr
+    )
+    assert "Within" not in tested.stdout
+
+
+def _direct(name: str = "lab") -> None:
+    from finishup.client.helper_status import write_connection_style
+
+    lab = targets.find_target(name)
+    assert lab is not None
+    write_connection_style(targets.target_root(lab.target_id), "direct")
+
+
+_RELAY_REMEDY = (
+    "Run 'finishup server set lab --style relay' (the default) so this computer's FinishUP "
+    "helper keeps one connection for every program."
+)
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_test_says_the_direct_style_is_slow_here_and_names_the_relay_style(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """The owner's WAN-gate decision (2026-11-11): the direct style stays available and relay
+    stays the default; when 'server test' measures a direct connection slower than the startup
+    gate allows, it says so plainly and names the relay style as the remedy. A relayed target
+    that is slow is not told to switch to the style it already uses."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    if style == "direct":
+        _direct()
+    runtime.new_connection_times = (540, 610, 826, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Warning: 826 ms is above the 650 ms" in tested.stdout
+    if style == "direct":
+        assert (
+            "The direct style is slow on this network: each program here opens its own "
+            "connection to that server. " + _RELAY_REMEDY
+        ) in tested.stdout
+    else:
+        assert "--style relay" not in tested.output
+
+
+def test_server_test_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    _direct()
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "lab could not be reached in time in the direct style, where each program here opens its "
+        "own connection to that server, which is slow on a slow network. " + _RELAY_REMEDY
+    ) in tested.stderr
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "named"),
+    [
+        ("direct", "remote_unreachable", True),
+        ("direct", "timeout", True),
+        ("direct", "remote_auth_failed", False),
+        ("relay", "remote_unreachable", False),
+    ],
+)
+def test_server_status_says_a_direct_connection_that_did_not_answer_in_time_is_slow_here(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, named: bool
+) -> None:
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    document = _status_json("lab")
+    assert cast(dict[str, JsonValue], document["probe"])["phase"] == phase
+    text = "\n".join(server_cli.status_lines(document))
+    assert (_RELAY_REMEDY in text) is named
+
+
+def test_a_remote_probe_keeps_the_phase_its_connection_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'server status' of a server elsewhere names why it could not be reached: the probe keeps
+    the connection's phase (it dropped it, so a direct timeout read as a stopped service)."""
+
+    from finishup.client import target_runtime
+    from finishup.ports.control import ControlError
+
+    async def refuse(*_arguments: object, **_options: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
+
+    monkeypatch.setattr("finishup.service.client.connect_service", refuse)
+    result = target_runtime.LocalTargetRuntime().probe(None)
+    assert (result.outcome, result.reason, result.phase) == (
+        "not_running",
+        "service_unavailable",
+        "remote_unreachable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "expected"),
+    [
+        ("direct", "remote_unreachable", "remote_direct_slow"),
+        ("direct", "timeout", "remote_direct_slow"),
+        ("direct", "remote_auth_failed", "remote_credential_repair"),
+        ("relay", "remote_unreachable", "remote_server_test"),
+        ("relay", "timeout", None),
+        # No consent here: only the owner agrees again.
+        ("relay", "server_profile_changed", "remote_reconsent"),
+    ],
+)
+def test_server_status_json_names_the_continuation_of_a_probe_that_failed(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, expected: str | None
+) -> None:
+    """Review (Codex, layer 7): `server status --json` (and a piped status) named a direct
+    timeout's phase but not its way back; the probe carries its registered continuation, decided
+    by the named target's own style."""
+
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == expected
+    runtime.probe_result = ProbeResult(
+        "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=40, samples=10
+    )
+    assert cast(dict[str, JsonValue], _status_json("lab")["probe"])["continuation"] is None
+
+
+def test_server_status_json_asks_to_repeat_a_probe_refused_while_the_consent_admits_the_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server refused a revision this computer has not fetched while the consent here still
+    admits the cached profile: what changed is not known yet and may be a narrowing FinishUP
+    adjusts to by itself, so the probe continues as ``remote_profile_checking``, not
+    ``remote_reconsent`` (ADR-052 decision 10)."""
+
+    from builders.server_profiles import consent_to
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    consent_to(targets.find_target("lab"))
+    runtime.probe_result = ProbeResult(
+        "unavailable", reason="service_unavailable", phase="server_profile_changed"
+    )
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == "remote_profile_checking"
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_connect_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """Review (Codex, layer 7): `server connect NAME` of a target reached in the direct style that
+    could not be reached in time printed only the network remedy; it names the relay style, by
+    the named target's own style."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+
+    def unreachable(_root: Path | None) -> None:
+        raise TargetRuntimeError("service_unavailable", phase="remote_unreachable")
+
+    monkeypatch.setattr(runtime, "ensure_ready", unreachable)
+    connected = _invoke("connect", "lab")
+    assert connected.exit_code != 0
+    assert connected.stderr.startswith("remote_unreachable: ")
+    assert ("'finishup server set NAME --style relay'" in connected.stderr) is (style == "direct")

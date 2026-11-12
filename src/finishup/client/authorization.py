@@ -10,15 +10,17 @@ the owner makes ends it before more is sent.
 1. the record is readable (an unreadable one may name a remote kind: ``target_root_is_remote``);
 2. ``zero_network_remote_selected``: this computer last reported a zero-network policy;
 3. ``target_reauthorization_required``: the owner authorized it under an older disclosure;
-4. the kind is open in this release (``OPEN_REMOTE_KINDS``); this release opens none, so every
-   remote root stops here as ``target_root_is_remote``, the refusal layer 1 gave every connection
-   and spawn path for a remote root;
+4. the kind is open in this release (``OPEN_REMOTE_KINDS``: ``ssh``, ``https`` and ``local_port``);
+   any other remote root stops here as ``target_root_is_remote``, the refusal layer 1 gave every
+   connection and spawn path for a remote root;
 5. the consent (``client.server_profile.consent_verdict``, ADR-052): the server's current profile,
    compared with the envelope the owner consented to, is the same or narrower (admitted under its
    revision), requires a level the owner did not agree to (``server_level_unavailable``), or is
    anything else (``server_profile_changed``). After the kind step, because its way on (``finishup
    server use NAME`` on the trusted console) exists only for a kind that is open;
-6. (layer 5) a credential is present for a kind that needs one;
+6. (layer 5, ADR-053) a credential is present for a kind that needs one: checked by the REST
+   transport where the key is read, before its first byte (``remote_auth_failed``), so this gate
+   stays file reads only;
 7. ``repository_egress_held`` or ``repository_egress_kept``: the repository hold
    (``client.repository_hold``), when the repository is known.
 
@@ -97,9 +99,11 @@ __all__ = [
     "ConnectionAuthorization",
     "Grant",
     "authorize_active_root",
+    "authorize_target",
     "bind_prebuilt_check",
     "bump_credential_generation",
     "consent_digest",
+    "credential_generation",
     "credential_generation_path",
     "gate",
     "identity_digest",
@@ -108,10 +112,10 @@ __all__ = [
     "refusal_summary",
 ]
 
-# The remote kinds a connection may be made to in this release. Layer 2 opens none: layer 4
-# opens ``ssh`` once the helper exists, layer 5 ``https`` and ``local_port`` once the REST client
-# does. A test that exercises a claim-bound connection opens one on purpose, in process only.
-OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset()
+# The remote kinds a connection may be made to in this release: ``ssh`` (layer 4) and, over REST
+# v1, ``https`` and ``local_port`` (layer 5, ADR-053), each through the target's helper (design v2
+# section 3) or directly.
+OPEN_REMOTE_KINDS: Final[frozenset[str]] = frozenset({"ssh", "https", "local_port"})
 CHANGED: Final = "server_authorization_changed"
 # Every phase the gate or a generation check refuses a remote connection with.
 AUTHORIZATION_REFUSALS: Final = frozenset(
@@ -163,6 +167,17 @@ def credential_generation_path(root: Path) -> Path:
     """``<target root>/config/credential-generation``."""
 
     return root / "config" / CREDENTIAL_GENERATION_NAME
+
+
+def credential_generation(root: Path) -> object:
+    """The identity of the target's credential generation now (``_stamp``); compared with one read
+    earlier, a difference means the owner logged in, out or removed meanwhile. One that cannot be
+    read equals nothing, not even itself read again. Never raises."""
+
+    try:
+        return _stamp(credential_generation_path(root))
+    except OSError:
+        return object()
 
 
 def read_generation(root: Path, *, selection_bound: bool) -> AuthorizationGeneration:
@@ -439,6 +454,45 @@ def authorize_active_root() -> ConnectionAuthorization | None:
     return ConnectionAuthorization(grant, generation)
 
 
+def authorize_target(record: ServerTarget) -> ConnectionAuthorization:
+    """Admit a connection to remote ``record`` from a process that serves that target itself.
+
+    The target's helper (design v2 section 3) admits its relay, its background agents and its
+    profile refresh this way: pinned to the target's own root, never bound to the selection file
+    (the owner's ``server use`` of another server stops the helper instead). The generation is
+    read first, then the record again and the gate (steps 2 to 5), exactly as
+    ``authorize_active_root`` does; a record removed, replaced or changed meanwhile is
+    ``server_authorization_changed``, and any other refusal raises its closed phase.
+    """
+
+    if not record.is_remote:
+        raise TargetError("target_root_is_remote")
+    root = target_root(record.target_id)
+    try:
+        generation = read_generation(root, selection_bound=False)
+        current = read_target(root)
+    except (OSError, PathSafetyError):
+        raise TargetError("target_root_is_remote") from None
+    if (
+        current is None
+        or not current.is_remote
+        or current.target_id != record.target_id
+        or _identity_digest(current) != _identity_digest(record)
+    ):
+        raise TargetError(CHANGED)
+    revision = gate(current)
+    grant = Grant(
+        target_id=current.target_id,
+        kind=current.kind,
+        identity_digest=_identity_digest(current),
+        consent_digest=_consent_digest(current),
+        repository_key=None,
+        selection_bound=False,
+        profile_revision=revision,
+    )
+    return ConnectionAuthorization(grant, generation)
+
+
 class _BoundCheck:
     """An admission and a prebuilt workspace binding's own check, both asked before every frame.
 
@@ -574,10 +628,39 @@ _REFUSAL_SUMMARIES: Final[dict[str, str]] = {
 assert set(_REFUSAL_SUMMARIES) == AUTHORIZATION_REFUSALS
 
 
-def refusal_summary(phase: str) -> str | None:
-    """The fixed one-line summary of an authorization refusal ``phase``; None for any other."""
+# What happened, in fixed words, when a server elsewhere could not be reached through its
+# transport (an SSH target, ADR-052): not a refusal of this computer, an outage of that server or
+# of the way to it. Each phase's continuation names the owner's repair.
+_TRANSPORT_SUMMARIES: Final[dict[str, str]] = {
+    "remote_unreachable": (
+        "FinishUP could not reach the selected FinishUP server elsewhere, or the connection to "
+        "it ended"
+    ),
+    "remote_auth_failed": (
+        "the selected FinishUP server elsewhere refused this computer's credentials (for an SSH "
+        "server, the keys OpenSSH offered)"
+    ),
+    "remote_identity_changed": (
+        "the selected FinishUP server elsewhere could not be verified (an SSH server's host key, "
+        "or an HTTPS server's certificate or the CA file chosen for it, is not the one this "
+        "computer agreed to), so FinishUP did not connect to it"
+    ),
+    "remote_service_not_running": (
+        "the selected FinishUP server elsewhere is reachable, but its FinishUP service is not "
+        "running"
+    ),
+    "remote_incompatible": (
+        "the selected FinishUP server elsewhere runs another FinishUP release, so nothing was "
+        "recorded there"
+    ),
+}
 
-    return _REFUSAL_SUMMARIES.get(phase)
+
+def refusal_summary(phase: str) -> str | None:
+    """The fixed one-line summary of a remote ``phase``: an authorization refusal, or a server
+    elsewhere that could not be reached; None for any other."""
+
+    return _REFUSAL_SUMMARIES.get(phase) or _TRANSPORT_SUMMARIES.get(phase)
 
 
 def bump_credential_generation(root: Path) -> bool:

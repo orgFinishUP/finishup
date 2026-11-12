@@ -353,7 +353,7 @@ class TestCliProjection:
         model = PublicErrorModel.model_validate(
             {
                 "code": "SERVICE_UNAVAILABLE",
-                "message": "The local operation timed out and may still have committed.",
+                "message": "The operation timed out and may still have committed.",
                 "retryable": True,
                 "correlation_id": _CORRELATION_ID,
                 "safe_details": {
@@ -708,13 +708,12 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
 
     def test_the_closed_remote_kinds_say_what_this_release_connects_to(self) -> None:
-        # The remote kinds (ssh, https, local_port) are closed in this release: the refusal says
-        # that only servers on this computer are reached, that nothing was added, selected or
-        # sent, and the owner's way back, and never tells an agent to choose a server itself.
+        # Every kind is open from layer 5: the refusal of an address this release names none of
+        # says which servers are reached, that nothing was added, selected or sent, and the
+        # owner's way back, and never tells an agent to choose a server itself.
         entry = directive_for("server_on_this_computer_required")
         assert entry is not None
-        assert "connects only to servers on this computer" in entry.directive
-        assert "SSH, HTTPS and port servers arrive later" in entry.directive
+        assert "connects to servers on this computer, over SSH and over HTTPS" in entry.directive
         assert "nothing was added, selected or sent" in entry.directive
         assert "'finishup server use local'" in entry.directive
         assert entry.nudge == "Never select or add a FinishUP server for the owner."
@@ -773,21 +772,22 @@ class TestWorkspaceBindingAndServerTargetReasons:
         assert tokens <= set(REASON_CODE_CONTINUATIONS.values())
 
     def test_a_selected_remote_root_points_to_this_computer_and_a_new_session(self) -> None:
-        # Layer 1 reaches no server elsewhere. The way back from a selection is 'finishup server
-        # use local'; an open agent session's MCP bridge keeps the root it started with, so the
-        # owner starts a new one. A stale disclosure cannot be confirmed with 'finishup server use
-        # NAME' while the remote kinds are closed (it answers remote_kind_unavailable).
+        # The way back from a selection is 'finishup server use local'; an open agent session's
+        # MCP bridge keeps the root it started with, so the owner starts a new one. A stale
+        # disclosure of an SSH server (open since layer 4) is confirmed again by the owner with
+        # 'finishup server use NAME' on their own terminal; an HTTPS or port one only later.
         for token in ("remote_target_no_local_service", "server_reauthorization_required"):
             entry = directive_for(token)
             assert entry is not None
             assert "Ask the owner to run 'finishup server use local'" in entry.directive
-            assert entry.directive.endswith("then start a new agent session.")
+            assert entry.directive.endswith("then start a new session.")
             assert "with its name" not in entry.directive
-            assert "server use NAME" not in entry.directive
+        remote = directive_for("remote_target_no_local_service")
+        assert remote is not None and "server use NAME" not in remote.directive
         stale = directive_for("server_reauthorization_required")
         assert stale is not None
         assert "older disclosure" in stale.directive
-        assert "only a later release can authorize it again" in stale.directive
+        assert "'finishup server use NAME' on their own terminal," in stale.directive
 
     def test_a_remote_root_an_override_names_points_to_the_override(self) -> None:
         # With an isolation variable or a pinned launcher naming the root, 'finishup server use

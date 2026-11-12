@@ -403,7 +403,7 @@ async def test_non_dry_run_validation_failure_with_unreachable_oracle_keeps_inva
     assert list(details) == sorted(details)
     message = cast(str, error["message"])
     assert "The tool arguments are invalid." in message
-    assert "the local service was unreachable" in message
+    assert "the FinishUP service was unreachable" in message
     assert "Retry with the same request_id." not in message
     assert len(message.encode("utf-8")) <= _MAX_MESSAGE_BYTES
     await bridge.close_bridge_runtime(runtime)

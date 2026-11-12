@@ -322,6 +322,70 @@ def test_session_admission_cap_duplicate_and_result_correlation() -> None:
     _assert_reason(lost, "correlation_mismatch")
 
 
+def _cancel(sequence: int, target: int) -> ControlCancelRequest:
+    return ControlCancelRequest(
+        kind="cancel",
+        protocol_version="1.0",
+        rpc_id=_rpc_id(sequence),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        target_rpc_id=_rpc_id(target),
+    )
+
+
+def _answered(sequence: int) -> ControlResult:
+    return ControlResult(
+        protocol_version="1.0",
+        rpc_id=_rpc_id(sequence),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        method=ControlMethod.SERVICE_STATUS,
+        outcome="ok",
+        body=_status(),
+    )
+
+
+def test_a_cancel_that_crossed_its_calls_answer_is_a_no_op_and_the_session_goes_on() -> None:
+    """Layer-5 review: a peer that cancels a call whose answer was already on its way (a REST
+    edge's DELETE on an agent's shared connection) changes nothing: the session stays usable for
+    its other calls. A cancel naming a call the session never had is still a mismatch, and only
+    the newest answered calls are remembered."""
+
+    from finishup.service.control_protocol import MAX_FINISHED_CALLS_REMEMBERED
+
+    session = ControlSession(
+        protocol_version="1.0",
+        client_kind=ControlClientKind.CLI,
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        allowed_methods=tuple(sorted(ControlMethod, key=lambda item: item.value.encode("ascii"))),
+        peer_identity=object(),
+        connection_nonce="1" * 64,
+    )
+    session.admit(_status_call(1))
+    session.admit(_status_call(2))
+    assert session.is_running(_rpc_id(1))
+    session.correlate(_answered(1))
+    assert not session.is_running(_rpc_id(1))
+    session.admit(_cancel(100, 1))  # crossed the answer: admitted, nothing to cancel
+    assert session.is_running(_rpc_id(2))
+    session.admit(_cancel(101, 2))  # still running: cancelled as before
+    session.correlate(_answered(2))
+    with pytest.raises(ControlProtocolError) as never_sent:
+        session.admit(_cancel(102, 999))
+    _assert_reason(never_sent, "correlation_mismatch")
+    for sequence in range(3, 3 + MAX_FINISHED_CALLS_REMEMBERED):
+        session.admit(_status_call(sequence))
+        session.correlate(_answered(sequence))
+    with pytest.raises(ControlProtocolError) as forgotten:
+        session.admit(_cancel(103, 1))
+    _assert_reason(forgotten, "correlation_mismatch")
+    session.admit(_cancel(104, 2 + MAX_FINISHED_CALLS_REMEMBERED))
+    session.close()
+    with pytest.raises(ControlProtocolError):
+        session.admit(_cancel(105, 2 + MAX_FINISHED_CALLS_REMEMBERED))
+
+
 def test_wire_frames_convert_to_exact_typed_request_and_result() -> None:
     request = _status_call(7)
     parsed_request = parse_control_request(decode_control_frame(encode_control_frame(request)))

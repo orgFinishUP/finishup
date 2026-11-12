@@ -1,4 +1,4 @@
-"""Every surface renders every authorization refusal the same way (ADR-051, ADR-052).
+"""Every surface renders every authorization refusal and remote outage the same way (ADR-052).
 
 One matrix over the shared gate's eight phases (``client.authorization.AUTHORIZATION_REFUSALS``):
 the zero-network refusal, a stale disclosure, a remote root this release does not connect to, a
@@ -6,7 +6,10 @@ held or kept repository, a changed authorization, and the consent step's two pro
 (a changed profile, a level not agreed to; ADR-052). For each, every surface names the closed
 phase, its fixed summary or text, and the continuation of its way back, as a retryable
 ``service_unavailable``; none tells the owner to start a local service, and none carries a path,
-a server name or a host (the public-boundary canary).
+a server name or a host (the public-boundary canary). Since SSH servers open (layer 4), the same
+holds for the five phases of a server elsewhere that could not be reached through its transport
+(``remote_unreachable``, ``remote_auth_failed``, ``remote_identity_changed``,
+``remote_service_not_running``, ``remote_incompatible``): each names its own repair.
 """
 
 from __future__ import annotations
@@ -26,10 +29,13 @@ from finishup.client.authorization import AUTHORIZATION_REFUSALS, refusal_summar
 from finishup.config.paths import reset_selection_memo
 from finishup.ports.control import ControlError
 from finishup.protocol.canonical import JsonValue
+from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 from finishup.protocol.recovery import directive_for
 from finishup.tui.runtime import _connect_failure  # pyright: ignore[reportPrivateUsage]
 
 _PHASES = sorted(AUTHORIZATION_REFUSALS)
+# Every phase a connection to a server elsewhere names: the refusals, and the transport outages.
+_ALL_PHASES = sorted(REMOTE_CONNECTION_PHASES)
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
 
 
@@ -73,9 +79,16 @@ def test_the_matrix_covers_every_phase_and_each_has_a_summary_and_a_directive() 
         "target_root_is_remote",
         "zero_network_remote_selected",
     }
-    for phase in _PHASES:
+    for phase in _ALL_PHASES:
         assert refusal_summary(phase)
-    assert refusal_summary("remote_unreachable") is None
+    assert set(_ALL_PHASES) - set(_PHASES) == {
+        "remote_auth_failed",
+        "remote_identity_changed",
+        "remote_incompatible",
+        "remote_service_not_running",
+        "remote_unreachable",
+    }
+    assert refusal_summary("service_unavailable") is None
 
 
 def test_the_words_say_refused_before_sending_or_stopped_sending_never_both() -> None:
@@ -116,7 +129,7 @@ def _continuation_token(phase: str) -> str:
     return token
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -153,7 +166,7 @@ def test_the_cli_names_the_phase_its_summary_and_directive_in_text_and_json(
             assert out == []
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_mcp_names_the_phase_and_its_continuation(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -174,7 +187,7 @@ def test_mcp_names_the_phase_and_its_continuation(
     _clean(json.dumps(structured) + text, home, record)
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_hooks_name_the_phase_and_continuation_in_attach_and_mapped_texts(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -192,7 +205,7 @@ def test_hooks_name_the_phase_and_continuation_in_attach_and_mapped_texts(
         assert "before anything was sent" not in attach + mapped
 
 
-@pytest.mark.parametrize("phase", _PHASES)
+@pytest.mark.parametrize("phase", _ALL_PHASES)
 def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_service(
     selected: tuple[Path, targets.ServerTarget], phase: str
 ) -> None:
@@ -207,3 +220,91 @@ def test_the_terminal_interface_and_the_menu_name_the_phase_never_a_local_servic
     assert phase in guidance and directive.directive in guidance
     assert "finishup service run" not in guidance
     _clean(" ".join((failure.message, *failure.details, guidance)), home, record)
+
+
+def test_a_changed_identity_names_an_https_servers_trust_as_well_as_an_ssh_host_key() -> None:
+    """Layer-5 review (B1): an HTTPS target refused because its certificate or the CA file chosen
+    for it changed is told so, not only about an SSH host key."""
+
+    summary = cast(str, refusal_summary("remote_identity_changed"))
+    assert "SSH server's host key" in summary
+    assert "HTTPS server's certificate or the CA file" in summary
+
+
+# The owner's WAN-gate decision (2026-11-11): a server elsewhere reached in the direct style that
+# did not answer in time tells the user the direct style is slow on this network and that
+# 'finishup server set NAME --style relay' is the remedy, on every surface that names the outage.
+_RELAY_REMEDY = "'finishup server set NAME --style relay'"
+
+
+@pytest.fixture
+def selected_direct(
+    selected: tuple[Path, targets.ServerTarget],
+) -> Iterator[tuple[Path, targets.ServerTarget]]:
+    from finishup.client.helper_status import write_connection_style
+
+    home, record = selected
+    write_connection_style(targets.target_root(record.target_id), "direct")
+    yield home, record
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_a_direct_style_outage_names_the_relay_style_on_every_surface(
+    selected: tuple[Path, targets.ServerTarget], style: str
+) -> None:
+    from finishup.client.helper_status import write_connection_style
+
+    home, record = selected
+    write_connection_style(targets.target_root(record.target_id), style)  # type: ignore[arg-type]
+    expected = "remote_direct_slow" if style == "direct" else "remote_server_test"
+    phase = "remote_unreachable"
+    assert targets.remote_root_continuation(phase) == expected
+    directive = directive_for(expected)
+    assert directive is not None
+    assert (_RELAY_REMEDY in directive.directive) is (style == "direct")
+    # The CLI, text and --json.
+    err: list[str] = []
+    out: list[JsonValue] = []
+    assert (
+        bootstrap.control_failure(
+            _error(phase), json_output=True, stderr_writer=err.append, stdout_writer=out.append
+        )
+        == 20
+    )
+    assert directive.directive in "\n".join(err)
+    body = cast(dict[str, JsonValue], out[0])
+    assert cast(dict[str, JsonValue], body["recovery"])["continuation"] == expected
+    # MCP.
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        _error(phase), _REQUEST, "start"
+    )
+    structured = cast(dict[str, object], result.structuredContent)
+    details = cast(dict[str, object], cast(dict[str, object], structured["error"])["safe_details"])
+    assert details["continuation"] == expected
+    # Hooks: the attach context and the mapped outage.
+    for text in (
+        observe_hooks._attachment_recovery_context(phase),  # pyright: ignore[reportPrivateUsage]
+        hooks.unavailable_context(phase),
+    ):
+        assert f"Continuation: {expected}." in text
+        assert (_RELAY_REMEDY in text) is (style == "direct")
+    # The terminal interface and the menu.
+    failure = _connect_failure(_error(phase))
+    assert failure.details == (directive.directive,)
+    guidance = menu._control_guidance(_error(phase))  # pyright: ignore[reportPrivateUsage]
+    assert directive.directive in guidance
+    _clean(" ".join([*err, json.dumps(body), json.dumps(structured), guidance]), home, record)
+
+
+def test_only_an_outage_names_the_relay_style_never_a_refusal(
+    selected_direct: tuple[Path, targets.ServerTarget],
+) -> None:
+    """A refusal, a refused key or a changed identity is no slow network: each keeps its own
+    way back in the direct style."""
+
+    for phase in _ALL_PHASES:
+        token = targets.remote_root_continuation(phase)
+        if phase == "remote_unreachable":
+            assert token == "remote_direct_slow"
+        else:
+            assert token != "remote_direct_slow"

@@ -2870,6 +2870,8 @@ class FinishUpRuntime:
             attribution_lines,
             connection_attribution,
             coverage_hook_observed,
+            evidence_provenance_section,
+            evidence_provenance_unknown_section,
         )
         from finishup.domain.receipts import workspace_provenance_unknown_block
         from finishup.protocol.canonical import canonical_encode
@@ -2906,6 +2908,21 @@ class FinishUpRuntime:
         # retry, a lasting one says why it lasts), and no "read on the client machine" line.
         provenance = success.workspace_provenance
         provenance_unknown = provenance is not None
+        # ADR-054: a level-L2 JSON receipt shows the same fixed server-copy lines a text receipt
+        # ends with, from its ``evidence_provenance`` member, and names only the producer.
+        hook_observed = coverage_hook_observed(success.coverage.publication_channels)
+        server_copy = (
+            None
+            if success.evidence_provenance is None
+            else evidence_provenance_section(
+                success.evidence_provenance, hook_observed=hook_observed
+            )
+        )
+        # ADR-054: and, when that account could not be given, the evidence-unknown lines for its
+        # reason, never the connection's level-L1 line.
+        unknown = success.evidence_provenance_unknown
+        if unknown is not None:
+            server_copy = evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
         rendered = (
             "\n".join(
                 (
@@ -2919,10 +2936,12 @@ class FinishUpRuntime:
                         if provenance is not None
                         else ()
                     ),
+                    *(() if server_copy is None else (server_copy,)),
                     *attribution_lines(
                         attribution,
                         provenance_unknown=provenance_unknown,
-                        hook_observed=coverage_hook_observed(success.coverage.publication_channels),
+                        hook_observed=hook_observed,
+                        server_copy=success.evidence_provenance is not None or unknown is not None,
                     ),
                 )
             )
@@ -3172,6 +3191,19 @@ def _connect_failure(error: BaseException) -> RuntimeError_:
             return RuntimeError_(
                 phase, summary, details=() if directive is None else (directive.directive,)
             )
+    from finishup.client.targets import active_root_may_be_remote
+
+    if active_root_may_be_remote():
+        # A server elsewhere whose failure names no phase (L1's known edge: never "the local
+        # FinishUP service"); one that names a phase was answered above with its own words.
+        return RuntimeError_(
+            str(getattr(error, "reason", "service_unavailable")),
+            "the selected FinishUP server elsewhere could not be reached",
+            details=(
+                "'finishup server status' shows what happened; 'finishup server test' "
+                "tries it again.",
+            ),
+        )
     return RuntimeError_(
         str(getattr(error, "reason", "service_unavailable")),
         "the local FinishUP service is not reachable",

@@ -11,6 +11,7 @@ from finishup.protocol.canonical import JsonValue
 from finishup.protocol.consent_envelope import (
     ConsentEnvelope,
     EnvelopeError,
+    Retention,
     canonical_bytes,
     compare,
     consentable,
@@ -18,6 +19,8 @@ from finishup.protocol.consent_envelope import (
     envelope_from_json,
     envelope_to_json,
     precedes,
+    retention_from_token,
+    retention_to_json,
 )
 
 _IDENTITY = "sha256:" + "ab" * 32
@@ -315,3 +318,54 @@ def test_anything_unknown_asks_again_even_when_unchanged() -> None:
     assert precedes(unknown, unknown)
     assert not precedes(unknown, _envelope())
     assert not precedes(_envelope(), unknown)
+
+
+# --- the written retention token (``--retention`` and ``[server.code_copy]``) -----------------
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("task_close", Retention("task_close", None)),
+        ("until_forgotten", Retention("until_forgotten", None)),
+        ("days:1", Retention("days", 1)),
+        ("days:30", Retention("days", 30)),
+        ("days:36500", Retention("days", 36_500)),
+    ],
+)
+def test_a_retention_token_names_a_retention_an_envelope_admits(
+    token: str, expected: Retention
+) -> None:
+    retention = retention_from_token(token)
+    assert retention == expected
+    parsed = envelope_from_json(_document(retention=retention_to_json(retention)))
+    assert parsed.retention == expected
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "days",
+        "days:",
+        "days:0",
+        "days:07",
+        "days:36501",
+        "days:-1",
+        "days:+1",
+        "days: 1",
+        "days:1 ",
+        "days:1\n",
+        "days:\u0661",
+        "Days:1",
+        "TASK_CLOSE",
+        "task_close ",
+        "forever",
+        30,
+        None,
+    ],
+)
+def test_any_other_retention_token_is_refused_by_a_closed_reason(token: object) -> None:
+    with pytest.raises(EnvelopeError) as refused:
+        retention_from_token(token)
+    assert refused.value.reason == "retention_token_invalid"

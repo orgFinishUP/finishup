@@ -31,6 +31,7 @@ from finishup.adapters.keys.secret_memory import LocalSecretMemory
 from finishup.config.models import FinishUpConfig
 from finishup.domain.events import SessionOpenedPayload
 from finishup.domain.receipts import CLIENT_ATTESTED_WORKSPACE_LINE
+from finishup.domain.values import JsonObject
 from finishup.ports.change_capture import decode_task_change_base
 from finishup.ports.control import (
     ControlCallRequest,
@@ -1172,6 +1173,153 @@ async def test_a_pending_workspace_call_keeps_an_idle_agent_connection_open(
         assert not service.hub.has_agent(handle)
     finally:
         await client.close()
+
+
+async def test_a_cancel_that_crossed_its_calls_answer_keeps_the_connection_and_its_calls() -> None:
+    """Layer-5 review: a REST edge's agent shares one control connection among its calls, and a
+    DELETE can reach it after the service answered the call it names. That cancel is a no-op: the
+    connection, and every other call on it, go on. A cancel naming a call the connection never
+    sent still ends it."""
+
+    from finishup.ports.control import ControlCancelRequest
+    from integration.service import test_daemon_clients as clients
+
+    daemon, _application, _vault, _listener = clients._daemon()  # pyright: ignore[reportPrivateUsage]
+    await daemon.start()
+    client_stream, server_stream = _pair()
+    served = asyncio.create_task(
+        daemon._serve_control_connection(server_stream)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    )
+
+    def status_call(session: ControlSession) -> ControlCallRequest:
+        return ControlCallRequest(
+            kind="call",
+            protocol_version="1.0",
+            rpc_id=new_id(IdKind.CONTROL_RPC),
+            service_instance_id=session.service_instance_id,
+            service_generation=session.service_generation,
+            method=ControlMethod.SERVICE_STATUS,
+            body=JsonObject({}),
+        )
+
+    def cancel_of(session: ControlSession, target: str) -> ControlCancelRequest:
+        return ControlCancelRequest(
+            kind="cancel",
+            protocol_version="1.0",
+            rpc_id=new_id(IdKind.CONTROL_RPC),
+            service_instance_id=session.service_instance_id,
+            service_generation=session.service_generation,
+            target_rpc_id=target,
+        )
+
+    async def answer_of(call: ControlCallRequest) -> ControlResult:
+        frame = await asyncio.wait_for(read_control_frame(client_stream), 5)  # pyright: ignore[reportArgumentType]
+        result = parse_control_result(frame)
+        assert result.rpc_id == call.rpc_id
+        return result
+
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")  # pyright: ignore[reportArgumentType]
+        first = status_call(session)
+        await write_control_frame(client_stream, first)  # pyright: ignore[reportArgumentType]
+        assert (await answer_of(first)).outcome == "ok"
+        # The cancel the peer sent before it read that answer arrives now.
+        await write_control_frame(client_stream, cancel_of(session, first.rpc_id))  # pyright: ignore[reportArgumentType]
+        second = status_call(session)
+        await write_control_frame(client_stream, second)  # pyright: ignore[reportArgumentType]
+        assert (await answer_of(second)).outcome == "ok"
+        assert not served.done()
+        await write_control_frame(  # pyright: ignore[reportArgumentType]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            cancel_of(session, new_id(IdKind.CONTROL_RPC)),
+        )
+        await asyncio.wait_for(served, 5)
+    finally:
+        await client_stream.aclose()
+        served.cancel()
+        await asyncio.gather(served, return_exceptions=True)
+        await daemon.close()
+
+
+class _GatedStream(_Stream):
+    """A service-side stream whose writes wait while ``gate`` is clear (``waiting`` says one
+    does): a call's answer can be held on its way while the peer's next frames arrive."""
+
+    def __init__(self, peer_identity: object) -> None:
+        super().__init__(peer_identity)
+        self.gate = asyncio.Event()
+        self.gate.set()
+        self.waiting = asyncio.Event()
+
+    async def send_all(self, data: object) -> None:
+        if not self.gate.is_set():
+            self.waiting.set()
+            await self.gate.wait()
+        await super().send_all(data)
+
+    def drained(self) -> bool:
+        return self._chunks.empty() and not self._buffer  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_cancel_arriving_while_its_answer_is_written_never_tears_the_connection() -> None:
+    """Layer-5 review: the service answered the call (it is correlated) and is writing that
+    answer when the peer's cancel for it arrives: the write is never interrupted (that would shut
+    the connection for every other call on it); the answer and later calls arrive whole."""
+
+    from finishup.ports.control import ControlCancelRequest
+    from integration.service import test_daemon_clients as clients
+
+    daemon, _application, _vault, _listener = clients._daemon()  # pyright: ignore[reportPrivateUsage]
+    await daemon.start()
+    client_stream, plain_server = _pair()
+    server_stream = _GatedStream(plain_server.peer_identity)
+    client_stream.other, server_stream.other = server_stream, client_stream
+    served = asyncio.create_task(
+        daemon._serve_control_connection(server_stream)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    )
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")  # pyright: ignore[reportArgumentType]
+        calls = [
+            ControlCallRequest(
+                kind="call",
+                protocol_version="1.0",
+                rpc_id=new_id(IdKind.CONTROL_RPC),
+                service_instance_id=session.service_instance_id,
+                service_generation=session.service_generation,
+                method=ControlMethod.SERVICE_STATUS,
+                body=JsonObject({}),
+            )
+            for _ in range(2)
+        ]
+        server_stream.gate.clear()
+        await write_control_frame(client_stream, calls[0])  # pyright: ignore[reportArgumentType]
+        await asyncio.wait_for(server_stream.waiting.wait(), 5)  # its answer is on its way
+        cancel = ControlCancelRequest(
+            kind="cancel",
+            protocol_version="1.0",
+            rpc_id=new_id(IdKind.CONTROL_RPC),
+            service_instance_id=session.service_instance_id,
+            service_generation=session.service_generation,
+            target_rpc_id=calls[0].rpc_id,
+        )
+        await write_control_frame(client_stream, cancel)  # pyright: ignore[reportArgumentType]
+        await write_control_frame(client_stream, calls[1])  # pyright: ignore[reportArgumentType]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5
+        while not server_stream.drained():  # the service read the cancel and the next call
+            assert loop.time() < deadline
+            await asyncio.sleep(0)
+        server_stream.gate.set()
+        for call in calls:
+            frame = await asyncio.wait_for(read_control_frame(client_stream), 5)  # pyright: ignore[reportArgumentType]
+            result = parse_control_result(frame)
+            assert (result.rpc_id, result.outcome) == (call.rpc_id, "ok")
+        assert not served.done()
+    finally:
+        await client_stream.aclose()
+        served.cancel()
+        await asyncio.gather(served, return_exceptions=True)
+        await daemon.close()
 
 
 async def test_a_claim_on_a_locked_service_binds_no_handle_and_registers_no_agent(

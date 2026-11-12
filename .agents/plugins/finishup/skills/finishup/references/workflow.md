@@ -411,7 +411,7 @@ Continue authorized implementation and focused verification through completion. 
 completed work from an unmet required review; never silently substitute local-check coverage
 for required AI-powered review. If required review is unavailable or fails, report completed
 implementation/structural checks separately from the unmet requirement and do not claim overall
-completion. Describe local ledger writes separately from product-file changes.
+completion. Describe FinishUP ledger writes separately from product-file changes.
 
 ## Errors and continuations
 

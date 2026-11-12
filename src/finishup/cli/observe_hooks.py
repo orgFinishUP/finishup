@@ -633,9 +633,9 @@ def _attachment_recovery_context(reason: str) -> str:
         from finishup.client.repository_hold import hook_context
 
         return hook_context(reason, "attach")
-    from finishup.protocol.errors import AUTHORIZATION_REFUSAL_PHASES
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
 
-    if reason in AUTHORIZATION_REFUSAL_PHASES:
+    if reason in REMOTE_CONNECTION_PHASES:
         # ADR-051 decision 8: this computer refused the selected server before anything was sent
         # (zero-network, an older disclosure, or any other remote root, which this release does
         # not connect to), or ended a connection whose authorization changed (ADR-052). Name the
@@ -3602,10 +3602,10 @@ async def _try_auto_start(
         # A validated local predecessor selects recovery before admission. An
         # ordinary create attempt would now succeed and strand predecessor work.
     except ControlError as error:
-        from finishup.client.authorization import AUTHORIZATION_REFUSALS
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
         from finishup.service.client import handshake_failure
 
-        if error.phase in AUTHORIZATION_REFUSALS:
+        if error.phase in REMOTE_CONNECTION_PHASES:
             # The connection seam refused it before anything was claimed or dialled: a selection
             # that changed after the check above, or this repository held from the selected
             # server elsewhere or kept on this computer (ADR-051 decision 8, ADR-052). It is
