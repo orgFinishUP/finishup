@@ -469,6 +469,12 @@ answered), every receipt says so instead, JSON ones as `evidence_provenance_unkn
 that the server did not read the repository. Status and receipts read over a connection to such a
 server also say that the server reads evidence from its copy where it has one.
 
+**Which project was read.** A task reads only the project FinishUP was started in. A task naming
+another project is refused (`workspace_ref_not_served`), and nothing is copied for it. The tree in
+the last evidence line is the start of the git tree id of the files the copy holds. In that
+project, with every change committed and nothing excluded or held back, `git rev-parse HEAD^{tree}`
+begins with the same twelve characters, so you can check which project's files were read.
+
 ### See and forget
 
 ```text
@@ -658,3 +664,4 @@ now).
 | `code_export_unsafe` | This computer's record of the copies it sent that server can be read by others or is a link, so FinishUP does not know which projects they came from. | Fix its permissions, or run `finishup server code forget` in each project. |
 | `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server whose record on this computer cannot be read; or a command that runs only where the server lives (setup, for example) ran while a server elsewhere is in use. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |
 | `workspace_binding_conflict` | A request named the project in a form its connection cannot use, such as a `client:` handle sent to a FinishUP on this computer. | Name the project by its folder path through FinishUP's own tools; a hand-written client must not send a `client:` handle to a server on this computer. |
+| `workspace_ref_not_served` | With a FinishUP server on another machine, a task named another project folder than the one FinishUP was started in: another repository, or another worktree of the same one. That server reads only the project FinishUP was started in (a subfolder of it, or the same folder spelled another way, is the same project), so the request was not sent and nothing of either project was read or copied for it. | Run the command, or start the agent session, in the project the task is about. An agent whose FinishUP tools were started in another folder tells you so and carries on without FinishUP for that project; open a session in that project to use FinishUP there. |

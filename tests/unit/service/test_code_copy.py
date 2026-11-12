@@ -680,3 +680,18 @@ def test_a_syncs_reads_stay_on_the_agent_that_prepared_it_when_a_newer_one_regis
     assert newer_asked == []
     assert view is not None and not view.stale  # type: ignore[union-attr]
     assert view.manifest.snapshot == helper.prepared.manifest.snapshot  # type: ignore[union-attr]
+
+
+def test_a_connection_s_hello_alone_syncs_and_reads_nothing(tmp_path: Path) -> None:
+    """Rule R (run u8) refuses, in the client, a start naming another folder than the worktree the
+    connection serves, so the server never sees it. What the server does see is the connection
+    itself: its hello keys the claim (``remember``) and its agent registers. That alone must copy
+    nothing and call the agent for nothing; only a task's own base or check read syncs. So a
+    refused start leaves no copy of either repository, and ``server code list`` shows none."""
+
+    copies, hub, store = _copies(tmp_path)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)
+    copies.remember(HANDLE, COMMITMENT, WORKTREE)  # a reconnect keys the same claim again
+    assert hub.calls == [] and hub.prepares == []
+    assert store.have("claim", COMMITMENT) == ()
+    assert store.copies("claim") == ()

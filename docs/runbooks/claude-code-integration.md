@@ -600,6 +600,19 @@ or port server.
   and with no registration change. When `listed` mode leaves files unread, the receipt states the
   omission code (`outside_reads_not_listed`) and how many task inputs and declared tests were kept
   back, never which file, and receipts carry the `client_attested` line.
+- **Which folder a task may name** (rule R, ADR-051 amended 2026-11-12). The connection's own
+  folder decides the repository and the worktree: a `start` whose absolute `workspace_ref` names
+  another repository, another worktree of the same repository, or a folder in none is refused in
+  the client, `workspace_ref_not_served`, and nothing about it is sent, read or synced. A subfolder
+  of the project, a symlinked spelling or, on macOS, a case variant is the same folder. The plugin
+  bridge has no `cwd` of its own, so it runs in, and serves, the project directory Claude Code
+  started in, one bridge per Claude Code process; hooks name `${CLAUDE_PROJECT_DIR}`, so the
+  auto-attach meets the rule by construction. An agent that moves to another repository inside
+  the session (a `cd`, or an added working directory) and names it is told
+  `workspace_not_served_tell_user`: say so in one line and carry on without FinishUP for that
+  folder; a Claude Code session started in that project gets its own bridge. `finishup start`
+  from a shell is told `workspace_folder_run_required`, with the failure body on stdout for
+  `--json`. Host decision: supported, same code path.
 - **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
   and the outbox stay on this computer, and each row a remote target receives carries the client
   attestation. Host decision for content: with `claude-code-ordinary-observation-v1` enabled, the
