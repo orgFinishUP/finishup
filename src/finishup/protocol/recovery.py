@@ -768,6 +768,28 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="The FinishUP MCP bridge and CLI send the handle in place of that path.",
     ),
+    # Rule R (run u8): with a server elsewhere the connection's own folder decides the
+    # repository and the worktree, so a start naming another folder was refused in the client.
+    RecoveryDirective(
+        token="workspace_folder_run_required",
+        directive=(
+            "This command's connection serves only the repository worktree it runs in, so the "
+            "start naming another folder was not sent. Run the command from the folder "
+            "workspace_ref names, under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never name another folder to reach a task; the folder decides what is read.",
+    ),
+    RecoveryDirective(
+        token="workspace_not_served_tell_user",
+        directive=(
+            "This FinishUP connection serves only the repository worktree its host started it in, "
+            "so the start naming another folder was not sent. Tell the user in one line, then "
+            "carry on without FinishUP for that folder."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Do not retry with another path or search for a substitute.",
+    ),
     RecoveryDirective(
         token="server_host_command_required",
         directive=(

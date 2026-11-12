@@ -1534,6 +1534,21 @@ none can be added or selected yet.
   `listed` mode leaves files unread, the receipt states the omission code
   (`outside_reads_not_listed`) and how many task inputs and declared tests were kept back, never
   which file, and receipts carry the `client_attested` line.
+- **Which folder a task may name** (rule R, ADR-051 amended 2026-11-12). The connection's own
+  folder decides the repository and the worktree: a `start` whose absolute `workspace_ref` names
+  another repository, another worktree of the same repository, or a folder in none is refused in
+  the client, `workspace_ref_not_served`, and nothing about it is sent, read or synced. A subfolder
+  of the bridge's worktree, a symlinked spelling or, on macOS, a case variant is the same folder.
+  The Codex registration sets no `cwd`, so a session's bridge runs in the folder Codex starts it
+  in and serves that worktree; hooks name the session `cwd`, so the auto-attach meets the rule by
+  construction. A session whose agent works in another checkout than the one its bridge was
+  started in (seen on the Mac on 2026-11-12: bridge in one repository, agent in another) is told
+  `workspace_not_served_tell_user`: say so in one line and carry on without FinishUP for that
+  folder, since the agent cannot restart its bridge. `finishup start` from a shell is told
+  `workspace_folder_run_required` (run it from the named folder), with the failure body on stdout
+  for `--json`. Host decision: same code path for Codex CLI and the Codex app. Gap: whether the
+  app starts a thread's bridge in that thread's worktree (`~/.codex/worktrees/`) is not recorded;
+  until it is, a thread working in a worktree its bridge does not serve is refused as above.
 - **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
   and the outbox stay on this computer, and each row a remote target receives carries the client
   attestation. Host decision for content: Codex hook content is the profileless arm of observation

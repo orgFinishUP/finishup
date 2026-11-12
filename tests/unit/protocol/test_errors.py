@@ -401,6 +401,7 @@ workspace_agent_refused
 workspace_agent_unavailable
 workspace_binding_conflict
 workspace_ref_not_portable
+workspace_ref_not_served
 workspace_task_exists
 zero_network_remote_selected
 """.splitlines()
@@ -574,8 +575,9 @@ def test_protocol_reason_registry_is_exact_and_import_order_independent() -> Non
     assert source_values == _EXPECTED_REASON_CODES
     # #1244 +4 delivery_*; #1190 review_mode_parent_is_check; ADR-051 +15 workspace/target/remote
     # (zero_network_remote_selected, the maintainer's decision of 2026-11-07, and
-    # remote_kind_unavailable, the remote kinds this release keeps closed).
-    assert len(source_values) == 371
+    # remote_kind_unavailable, the remote kinds this release keeps closed); rule R's
+    # workspace_ref_not_served (run u8).
+    assert len(source_values) == 372
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

@@ -3499,7 +3499,11 @@ async def _try_auto_start(
     from pydantic import ValidationError
 
     from finishup import __version__
-    from finishup.client.workspace_ref import WorkspaceRefNotPortable, start_request_for_connection
+    from finishup.client.workspace_ref import (
+        WorkspaceRefNotPortable,
+        WorkspaceRefNotServed,
+        start_request_for_connection,
+    )
     from finishup.ports.control import ControlClientKind, ControlError, WorkspaceLocator
     from finishup.protocol.ids import IdKind, new_id
     from finishup.protocol.models import OperationFailureModel, StartRequest
@@ -3560,8 +3564,13 @@ async def _try_auto_start(
         else:
             client = await connect(ControlClientKind.CLI)
         # ADR-051: a server on another machine is sent the connection's handle, never the locator.
+        # The start names the locator the connection was made from, so rule R holds by
+        # construction; the check still runs, and a refusal is ``auto_attach_refused``.
         result = await client.start(
-            start_request_for_connection(request, client), deadline_ms=_remaining_deadline_ms()
+            start_request_for_connection(
+                request, client, serving=WorkspaceLocator(workspace_locator)
+            ),
+            deadline_ms=_remaining_deadline_ms(),
         )
         # A validated local predecessor selects recovery before admission. An
         # ordinary create attempt would now succeed and strand predecessor work.
@@ -3582,8 +3591,9 @@ async def _try_auto_start(
         )
     except TimeoutError:
         return AutoAttachOutcome(None, "timeout")
-    except WorkspaceRefNotPortable as refusal:
-        # Nothing was sent: the connection had no workspace handle to name instead of a path.
+    except (WorkspaceRefNotPortable, WorkspaceRefNotServed) as refusal:
+        # Nothing was sent: the connection had no workspace handle to name instead of a path, or
+        # (rule R) the locator does not name the worktree it serves.
         return AutoAttachOutcome(None, _AUTO_ATTACH_ERROR_REASONS[refusal.code])
     except Exception:
         return AutoAttachOutcome(None, "service_unavailable")
