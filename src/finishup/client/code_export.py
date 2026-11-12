@@ -804,17 +804,24 @@ class _Admission:
         # Worktree paths sent as their LFS pointer (never the bytes on disk).
         self.pointers: set[bytes] = set()
         # Worktree path (file, link or directory, a read path's directories included) → the
-        # (device, inode) read there, as captured while it was read.
-        self.identities: dict[bytes, tuple[int, int]] = {}
+        # (device, inode) read there, as captured while it was read; None once two reads saw
+        # different ones (a directory replaced in between): not known.
+        self.identities: dict[bytes, tuple[int, int] | None] = {}
 
     def saw(self, path: bytes, read: _Read) -> None:
         """Keep what ``read`` identified: ``path`` itself and each directory above it."""
 
-        if read.identity is not None:
-            self.identities[path] = read.identity
         parts = path.split(b"/")
-        for depth, identity in enumerate(read.parents, start=1):
-            self.identities.setdefault(b"/".join(parts[:depth]), identity)
+        seen = [
+            (b"/".join(parts[:depth]), identity) for depth, identity in enumerate(read.parents, 1)
+        ]
+        if read.identity is not None:
+            seen.append((path, read.identity))
+        for where, identity in seen:
+            if where not in self.identities:
+                self.identities[where] = identity
+            elif self.identities[where] != identity:
+                self.identities[where] = None
 
 
 class _Exporter:
