@@ -432,3 +432,31 @@ def test_the_lock_is_seen_held_before_its_stamp_is_readable(root: Path) -> None:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
     assert helper_lock_held(root) is False
+
+
+def test_the_refresh_marker_names_the_refused_revision_and_an_empty_one_names_none(
+    root: Path,
+) -> None:
+    """A refused client names the revision its hello named (macOS dogfood), so the helper can
+    tell a cache that is stale for sure; an older client's empty marker, or content that cannot be
+    read, is still a request, naming none."""
+
+    from builders.server_profiles import TEST_REVISION
+    from finishup.client.helper_status import (
+        ProfileRefreshRequest,
+        take_named_profile_refresh_request,
+    )
+
+    marker = root / "state" / "profile-refresh-requested"
+    assert take_named_profile_refresh_request(root) is None
+    request_profile_refresh(root, TEST_REVISION)
+    assert marker.stat().st_mode & 0o777 == 0o600
+    assert take_named_profile_refresh_request(root) == ProfileRefreshRequest(TEST_REVISION)
+    assert take_named_profile_refresh_request(root) is None
+    request_profile_refresh(root)
+    assert take_named_profile_refresh_request(root) == ProfileRefreshRequest(None)
+    marker.write_bytes(b'{"schema":"yoetz.profile-refresh-request/1","server_profile":{}}\n')
+    marker.chmod(0o600)
+    assert take_named_profile_refresh_request(root) == ProfileRefreshRequest(None)
+    request_profile_refresh(root, TEST_REVISION)
+    assert take_profile_refresh_request(root) is True

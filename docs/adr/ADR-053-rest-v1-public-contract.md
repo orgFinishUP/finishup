@@ -458,7 +458,12 @@ per-frame check) holds over REST unchanged. States: `await_hello` → `opening` 
   the admission lapsed: a `logout` or `login` moves the credential generation); that is asked after
   the close awaited its running requests' cancellation, right before the `DELETE`s, so a logout
   landing meanwhile sends nothing under the key the stream holds; the server ends an agent whose
-  polls stop and forgets answers on its own.
+  polls stop and forgets answers on its own. A stopping helper waits, at most 1.5 seconds, for its
+  background agents' streams to finish this close before it cancels them, and a direct-style
+  agent's close runs on past its connection's own 50 ms close bound (u5), so a helper's agent is
+  unregistered when the helper stops rather than left registered until its lease ends; a helper
+  that is killed still leaves its agent to the lease, and the workspace hub sends a call that agent
+  holds on to the newer agent that registers next (ADR-052 decision 12).
 
 Nothing in the mapping logs or raises a host, URL, path or body. "Identical fault vectors" are
 tested over direct REST, relay REST and SSH control alike.
@@ -481,8 +486,9 @@ address that names none of the open kinds (`http://`, another scheme).
   for this server (input hidden): "); then `GET /v1/server` with it (a refused key adds nothing,
   `remote_auth_failed`); then the disclosure, the outside-read question (not for an official
   target) and the typed name; then, under the registry lock, the record, the consent, the key (the
-  platform credential store, else an owner-only file) and a credential generation. A server that
-  cannot be reached adds nothing: no consent can be given without its profile.
+  platform credential store when there is one and it takes the key, else an owner-only file, as
+  ADR-051 decision 7 says; `login` keeps a key the same way) and a credential generation. A server
+  that cannot be reached adds nothing: no consent can be given without its profile.
 - **`finishup server add official`**: decision 9.
 - **`finishup server login NAME [--key-file F]`** (shown in help): `https` and `local_port` only
   (`credential_not_applicable` otherwise); zero-network refusal first; the key is checked with the
@@ -567,6 +573,12 @@ advertises.
    direct styles, with the relay remedy shown to the user: ADR-052 decision 24) and ran an upgrade over running
    helpers. Not built: adding an HTTPS server from the terminal interface; OAuth credential
    sources; an official service (another repository).
+10. The macOS keychain check before a key is stored (a default keychain that exists and is
+    unlocked, read through Security.framework without user interaction; ADR-051 decision 7) ran
+    only against stand-ins on Linux. On a Mac it is unverified: that no keychain dialog appears
+    under a private `HOME`, that a locked keychain and a headless SSH session put the key in the
+    file, and that an unlocked login keychain still takes it (owner: layer 7, with the macOS run
+    of limit 6).
 
 ## Reverse states
 

@@ -728,6 +728,11 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "repository_kept_on_this_computer",
         "server_connection_renew",
         "remote_reconsent",
+        # A server elsewhere refused the profile revision a request named while this computer's
+        # copy of its profile still agrees with the consent: what changed is not known yet, so
+        # the owner is not asked. Attached by the client that knows the target's state
+        # (``targets.remote_root_continuation``), never through a reason code.
+        "remote_profile_checking",
         "server_level_decision_required",
     }
 )

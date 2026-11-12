@@ -34,7 +34,8 @@ one spawned before such a stop never serves. Its roles:
    start, every 10 minutes while an upstream was used, when one of its own connections or a
    relayed one is refused ``server_profile_changed`` (over HTTPS the refusal ends the stream
    unanswered, so the helper asks itself) and when a client left the refresh marker; at most
-   every 30 seconds.
+   every 30 seconds, except that a refusal of the very revision this computer's cached profile
+   still holds proves the cache stale, so that fetch waits only 2 seconds after the last one.
 
 **Admission (FR-3).** Everything above runs only under the helper's own admission through the
 shared gate (``authorization.authorize_target``: pinned to its root, steps 2 to 5 and the
@@ -59,8 +60,8 @@ import os
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Buffer, Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -92,7 +93,7 @@ from finishup.client.helper_status import (
     read_helper_status,
     read_relay_binding,
     starts_relay_binding,
-    take_profile_refresh_request,
+    take_named_profile_refresh_request,
     write_helper_status,
 )
 from finishup.client.ssh_transport import (
@@ -119,6 +120,8 @@ if TYPE_CHECKING:
     from finishup.client.helper_registrations import Registration, ServedWorkspace
     from finishup.client.rest_client import RestTransport
     from finishup.client.server_profile import FetchedProfile
+    from finishup.protocol.canonical import JsonValue
+    from finishup.protocol.server_profile import ServerProfileRevision
     from finishup.service.client import ClientWorkspaceBinding, ServiceClient
 
 __all__ = [
@@ -137,6 +140,9 @@ DRAIN_INTERVAL_SECONDS: Final = 30.0
 REFRESH_INTERVAL_SECONDS: Final = 600.0
 # The fewest seconds between two profile fetches, whatever asked for them.
 _REFRESH_MIN_SECONDS: Final = 30.0
+# A refusal of the revision the cached profile still holds proves the cache stale: that fetch
+# waits only this long after the last one (never a hammering), not ``_REFRESH_MIN_SECONDS``.
+_STALE_REFRESH_MIN_SECONDS: Final = 2.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
 # How long an agent opened under an earlier consent keeps serving while its replacement connects.
@@ -154,6 +160,13 @@ _FRAME_PREFIX: Final = 4
 _RESTART_WINDOW_SECONDS: Final = 30.0
 # The last delivery as the helper stops is bounded, so a stop finishes within the stopper's wait.
 _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
+# How long a stopping helper waits for its background agents' connections to end on their own:
+# a REST stream unregisters its agent at the server as it closes (a courtesy ``DELETE`` bounded at
+# one second, ``RestControlStream.aclose``); a dead agent left registered there is the one the
+# server asks next (the u4 dogfood finding: a task started right after a stop waited 60 s for it).
+# With the one-second tick and the last drain, a stop stays within its stopper's five-second wait
+# (``helper_runtime._STOP_SECONDS``).
+_STOP_AGENT_SECONDS: Final = 1.5
 # ``remote_unreachable`` is recorded again for clients at most this often while unchanged: a client
 # keeps waiting and retrying on it (``service.client._connect_through_helper``), whatever the record
 # says, so a fresh record changes no answer and a fast retry never makes a write and a diagnostic
@@ -467,7 +480,7 @@ class HelperAgent:
         dial: Dial,
         *,
         transport: ConnectionTransport,
-        on_profile_changed: Callable[[], None],
+        on_profile_changed: Callable[[ServerProfileRevision | None], None],
         reconnect_wait: Callable[[float], Awaitable[None]] = _wait,
     ) -> None:
         self.registration = registration
@@ -525,7 +538,10 @@ class HelperAgent:
                 )
             except ControlError as error:
                 if error.phase == _PROFILE_CHANGED:
-                    self._on_profile_changed()
+                    # The revision this agent's hello named, which the server no longer issues.
+                    self._on_profile_changed(
+                        getattr(self._binding.authorization, "server_profile", None)
+                    )
                 await self._reconnect_wait(delay)
                 delay = min(delay * 2, _RECONNECT_MAX_SECONDS)
                 continue
@@ -591,7 +607,7 @@ async def open_helper_agent(
     dial: Dial,
     *,
     transport: ConnectionTransport,
-    on_profile_changed: Callable[[], None],
+    on_profile_changed: Callable[[ServerProfileRevision | None], None],
 ) -> HelperAgent | None:
     """The background agent for ``registration``; ``None`` when it may not be served now.
 
@@ -638,13 +654,34 @@ async def open_helper_agent(
     return agent
 
 
+def _hello_revision(hello: Mapping[str, object]) -> ServerProfileRevision | None:
+    """The profile revision a relayed client's hello named; ``None`` when it names none it can be
+    read as (a refresh then keeps the 30-second floor)."""
+
+    from finishup.protocol.server_profile import revision_from_json
+
+    try:
+        return revision_from_json(cast("JsonValue", hello.get("server_profile")))
+    except Exception:  # noqa: BLE001 - a malformed revision names nothing
+        return None
+
+
+def _no_revisions() -> list[ServerProfileRevision]:
+    return []
+
+
 @dataclass(slots=True)
 class _Refresh:
-    """When the profile was last fetched, and why the next fetch is due."""
+    """When the profile was last fetched, and why the next fetch is due.
+
+    ``named`` holds the revisions refused connections named since the last fetch (a client's
+    marker, the helper's own agents): one the cached profile still holds makes the fetch urgent.
+    """
 
     last: float | None = None
     requested: bool = True
     task: asyncio.Task[None] | None = None
+    named: list[ServerProfileRevision] = field(default_factory=_no_revisions)
 
 
 type Refresher = Callable[[ServerTarget], Awaitable[None]]
@@ -721,6 +758,43 @@ def _declares_code_sync(record: ServerTarget) -> bool:
     return l2_released() and consent is not None and consent.level == "L2"
 
 
+class _ClosingStream:
+    """A background agent's upstream stream whose ``aclose`` runs as its own task.
+
+    A caller that stops waiting for the close (the agent connection's 50 ms bound) never
+    cancels it: a REST stream still sends its courtesy unregistration (``RestControlStream.
+    aclose``, itself bounded). ``closes`` holds the running close, which a stopping helper
+    awaits. Everything else is the stream's own (``failure_phase``, ``bind``...).
+    """
+
+    __slots__ = ("_closes", "_closing", "_inner")
+
+    def __init__(self, inner: ControlStream, closes: set[asyncio.Task[None]]) -> None:
+        self._inner = inner
+        self._closes = closes
+        self._closing: asyncio.Task[None] | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    @property
+    def peer_identity(self) -> object:
+        return self._inner.peer_identity
+
+    async def send_all(self, data: Buffer) -> None:
+        await self._inner.send_all(data)
+
+    async def receive(self, max_bytes: int) -> bytes:
+        return await self._inner.receive(max_bytes)
+
+    async def aclose(self) -> None:
+        if self._closing is None:
+            self._closing = asyncio.ensure_future(self._inner.aclose())
+            self._closes.add(self._closing)
+            self._closing.add_done_callback(self._closes.discard)
+        await asyncio.shield(self._closing)
+
+
 class Helper:
     """One remote target's helper: relay, background agents, drain, profile refresh, idle exit."""
 
@@ -791,7 +865,10 @@ class Helper:
         self._delivery: asyncio.Task[None] | None = None
         self._refresh = _Refresh()
         self._relays: set[asyncio.Task[None]] = set()
+        # The relays of the helper's own background agents (relay style), and the closes of the
+        # streams they dial themselves (direct style): what a stop and a new level wait for.
         self._own_relays: set[asyncio.Task[None]] = set()
+        self._agent_closes: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._stop_reason = "stop_requested"
@@ -1119,9 +1196,10 @@ class Helper:
                 if error.reason == _PROFILE_CHANGED:
                     # A REST server refused the consented revision: the stream ended unanswered,
                     # so no client (the helper's own agents included) sees the typed refusal an
-                    # SSH relay passes on. Fetch the profile again now (at most every 30 s) so the
-                    # consent reads what changed (defect B).
-                    self._profile_changed()
+                    # SSH relay passes on. Fetch the profile again so the consent reads what
+                    # changed (defect B), naming the revision the refused hello named: while the
+                    # cache still holds it the fetch waits 2 s, not the 30-s floor (ADR-052).
+                    self._profile_changed(_hello_revision(hello))
                 return
             self._last_upstream_use = self._clock()
             self._write_status("ready", None)
@@ -1243,7 +1321,27 @@ class Helper:
     def _agent_dial(self) -> Dial:
         if self._style == "relay":
             return self._dial_own
-        return self._upstream.open_stream
+        return self._dial_direct
+
+    async def _dial_direct(self) -> ControlStream:
+        """A background agent's own upstream stream (direct style), whose close runs to its end.
+
+        The agent's connection closes its stream within 50 ms (``service.client``), which would
+        cut a REST stream's courtesy unregistration short; the close runs as the helper's own task
+        instead (``_ClosingStream``), and a stop waits for it (``_await_agent_ends``).
+        """
+
+        return _ClosingStream(await self._upstream.open_stream(), self._agent_closes)
+
+    async def _await_agent_ends(self, seconds: float | None) -> bool:
+        """Wait, at most ``seconds`` (None: the caller bounds it), for the background agents'
+        relays and stream closes to end on their own; whether they all did."""
+
+        pending = {task for task in (*self._own_relays, *self._agent_closes) if not task.done()}
+        if not pending:
+            return True
+        _done, left = await asyncio.wait(pending, timeout=seconds)
+        return not left
 
     def _registrations_changed(self) -> bool:
         from finishup.client.helper_registrations import registrations_dir
@@ -1257,8 +1355,13 @@ class Helper:
         self._registrations_stamp = stamp
         return changed
 
-    def _profile_changed(self) -> None:
+    def _profile_changed(self, named: ServerProfileRevision | None = None) -> None:
+        """One of this helper's connections was refused ``server_profile_changed``; ``named``
+        is the revision its hello named, when known."""
+
         self._refresh.requested = True
+        if named is not None:
+            self._refresh.named.append(named)
 
     async def _sync_agents(self) -> None:
         """Open one agent for each workspace a registration serves now; close every other one.
@@ -1398,19 +1501,18 @@ class Helper:
         if not closing:
             return True
         # Gone from the server before the helper says it follows the new consent (``_follow``):
-        # each agent closed, then every background agent's relay ended, since a relayed REST
-        # stream unregisters its agent as it ends (no other agent runs now: a new level closes
-        # them all, and the next sync opens their replacements). Bounded, so a close that hangs
-        # never holds the tick; one that does not finish in time is not acknowledged, and
-        # ``server use`` then stops the helper instead.
+        # each agent closed, then every background agent's relay (relay style) or stream close
+        # (direct style, ``_ClosingStream``) ended, since a REST stream unregisters its agent as
+        # it closes (no other agent runs now: a new level closes them all, and the next sync
+        # opens their replacements). Bounded, so a close that hangs never holds the tick; one
+        # that does not finish in time is not acknowledged, and ``server use`` then stops the
+        # helper instead.
         try:
             async with asyncio.timeout(_CLOSE_SECONDS):
                 closed = await asyncio.gather(
                     *(agent.aclose() for agent in closing), return_exceptions=True
                 )
-                relays = tuple(self._own_relays)
-                if relays:
-                    await asyncio.wait(relays)
+                await self._await_agent_ends(None)
         except TimeoutError:
             return False
         return not any(isinstance(result, BaseException) for result in closed)
@@ -1457,14 +1559,31 @@ class Helper:
             await agent.drain(may_send=self._may_send)
 
     def _refresh_due(self) -> bool:
+        """Whether the profile fetch is due now.
+
+        Never faster than every 30 seconds (``_REFRESH_MIN_SECONDS``), which bounds the periodic
+        fetch and repeated requests, except one asked for by a refusal that named the revision
+        this computer's cached profile still holds: that refusal proves the cache stale, so the
+        fetch waits only ``_STALE_REFRESH_MIN_SECONDS`` after the last one. A request naming a
+        revision the cache no longer holds (a fetch since), or none (an older client's empty
+        marker), waits for the floor as before.
+        """
+
         state = self._refresh
         now = self._clock()
         if state.task is not None and not state.task.done():
             return False
-        if state.last is not None and now - state.last < _REFRESH_MIN_SECONDS:
-            return False
-        if take_profile_refresh_request(self._root):
+        request = take_named_profile_refresh_request(self._root)
+        if request is not None:
             state.requested = True
+            if request.revision is not None:
+                state.named.append(request.revision)
+        if state.last is not None and now - state.last < _REFRESH_MIN_SECONDS:
+            return (
+                state.requested
+                and now - state.last >= _STALE_REFRESH_MIN_SECONDS
+                and self._cache_holds(state.named)
+            )
         if state.requested:
             return True
         used = self._last_upstream_use
@@ -1487,6 +1606,22 @@ class Helper:
             return False
         return self._may_refresh()
 
+    def _cache_holds(self, named: list[ServerProfileRevision]) -> bool:
+        """Whether this computer's cached profile still holds one of ``named`` (stale for sure).
+
+        Read only when a named request waits on the floor; a cache that cannot be read holds
+        none."""
+
+        if not named:
+            return False
+        from finishup.client.server_profile import read_cached_profile
+
+        try:
+            cached = read_cached_profile(self._root)
+        except Exception:  # noqa: BLE001 - a cache that cannot be read decides nothing
+            return False
+        return cached is not None and cached.profile.revision in named
+
     def _may_refresh(self) -> bool:
         """Gate steps 2 to 4 only: the refresh is how the consent catches up with the server."""
 
@@ -1504,6 +1639,8 @@ class Helper:
         state = self._refresh
         state.last = self._clock()
         state.requested = False
+        # This fetch answers every refusal named so far; a later one names its own revision.
+        state.named.clear()
         if not self._may_refresh():
             return
         from finishup.client.targets import read_target
@@ -1629,8 +1766,11 @@ class Helper:
             if listener is not None:
                 with contextlib.suppress(Exception):
                     await listener.aclose()
-            # Background agents first, so none dials again while the relays are torn down.
+            # Background agents first, so none dials again while the relays are torn down; then
+            # their connections end on their own, bounded, so a REST agent is unregistered at the
+            # server before anything is cancelled (a dead agent left there is asked first).
             await self._close_agents()
+            await self._await_agent_ends(_STOP_AGENT_SECONDS)
             self._end_relays()
             await asyncio.gather(*tuple(self._relays), return_exceptions=True)
             with contextlib.suppress(Exception):

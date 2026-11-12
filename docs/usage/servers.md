@@ -129,10 +129,12 @@ What `server add` does, in order:
    `--outside-reads` answers it up front), and asks you to type the server's name.
 
 Only then is the server added, with your agreement and its key. The key is kept in your system's
-credential store, or, where there is none, in a file only you can read; it is never shown again,
-and never in a command line, a setting, a log or anything your agents see. FinishUP binds your
-agreement to the way you chose to trust the server's certificate and to the key: if either changes,
-FinishUP does not connect until you agree again.
+credential store, or, where there is none or it cannot take the key (a locked or missing keychain,
+say), in a file only you can read; `finishup server status` says which. On a Mac, FinishUP first
+checks, without asking you, that your keychain is there and unlocked. The key is never shown
+again, and never in a command line, a setting, a log or anything your agents see. FinishUP binds
+your agreement to the way you chose to trust the server's certificate and to the key: if either
+changes, FinishUP does not connect until you agree again.
 
 ### The official FinishUP service
 

@@ -279,7 +279,15 @@ def test_a_server_that_refuses_the_consented_revision_asks_the_helper_to_refresh
 
     error = asyncio.run(run())
     assert error.phase == "server_profile_changed"
-    assert (root / "state" / "profile-refresh-requested").exists()
+    # The marker names the revision the refused hello named (the cached one), so the helper
+    # fetches at its next tick rather than after the 30-second floor (macOS dogfood).
+    from builders.server_profiles import TEST_REVISION
+    from finishup.client.helper_status import (
+        ProfileRefreshRequest,
+        take_named_profile_refresh_request,
+    )
+
+    assert take_named_profile_refresh_request(root) == ProfileRefreshRequest(TEST_REVISION)
 
 
 @pytest.mark.parametrize("running", [False, True])
@@ -547,8 +555,10 @@ def test_service_status_names_a_multiplexed_direct_streams_refusal_with_its_cont
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """``finishup service status --json`` (its fast path) names the refusal and the owner's way
-    back (``remote_reconsent``), exit 20; never a traceback, never exit 1."""
+    """``finishup service status --json`` (its fast path) names the refusal and its continuation,
+    exit 20; never a traceback, never exit 1. The consent here still admits the cached profile,
+    so the server's refusal is the first news of a change that may be a narrowing: repeat the
+    same request (``remote_profile_checking``, ADR-052 decision 10), not the owner's way back."""
 
     import json
 
@@ -565,7 +575,7 @@ def test_service_status_names_a_multiplexed_direct_streams_refusal_with_its_cont
     assert "Traceback" not in captured.err
     document = json.loads(captured.out)
     assert document["phase"] == "server_profile_changed"
-    assert document["recovery"]["continuation"] == "remote_reconsent"
+    assert document["recovery"]["continuation"] == "remote_profile_checking"
     assert "server_profile_changed" in captured.err
 
 

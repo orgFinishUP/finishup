@@ -76,6 +76,7 @@ __all__ = [
     "CLAIM_SALT_BYTES",
     "DISCLOSURE_VERSION",
     "PRE_DIAL_REFUSALS",
+    "PROFILE_CHECKING_CONTINUATION",
     "REMOTE_KINDS",
     "DIRECT_STYLE_SLOW_CONTINUATION",
     "REMOTE_ROOT_OVERRIDE_CONTINUATION",
@@ -103,6 +104,7 @@ __all__ = [
     "read_selected_target_id",
     "read_target",
     "reauthorized",
+    "profile_change_continuation",
     "registry_lock",
     "remote_root_continuation",
     "root_named_explicitly",
@@ -238,6 +240,12 @@ REMOTE_ROOT_OVERRIDE_CONTINUATION: Final = "remote_root_override_clear"
 # connection per program, so on a slow network the remedy is ``finishup server set NAME --style
 # relay`` (the owner's WAN-gate decision, 2026-11-11).
 DIRECT_STYLE_SLOW_CONTINUATION: Final = "remote_direct_slow"
+# The continuation of ``server_profile_changed`` while this computer's copy of that server's
+# profile still agrees with the owner's consent (``profile_change_continuation``): the server
+# refused a revision this computer has not fetched, so what changed is not known yet and the
+# request may be repeated; ``remote_reconsent`` stays for a consent known to need the owner.
+PROFILE_CHECKING_CONTINUATION: Final = "remote_profile_checking"
+_PROFILE_CHANGED_PHASE: Final = "server_profile_changed"
 
 
 class TargetError(Exception):
@@ -1347,9 +1355,11 @@ def remote_root_continuation(phase: str) -> str | None:
     ``remote_unreachable`` while that root is a server elsewhere reached in the direct style is
     ``DIRECT_STYLE_SLOW_CONTINUATION``: the direct style is slow on this network, and 'finishup
     server set NAME --style relay' is the remedy (the owner's decision, 2026-11-11).
-    Any other phase resolves as ``continuation_for_reason`` does. Every surface that names a
-    remote-root refusal or outage (the CLI, setup, the menu, the terminal interface, hooks and
-    MCP) reads its continuation here. Hook-safe: environment, pin and record reads only.
+    ``server_profile_changed`` resolves by the active target's consent
+    (``profile_change_continuation``). Any other phase resolves as ``continuation_for_reason``
+    does. Every surface that names a remote-root refusal, an outage or a remote connection phase
+    (the CLI, setup, the menu, the terminal interface, hooks and MCP) reads its continuation here.
+    Hook-safe: environment, pin and target-file reads only.
     """
 
     from finishup.protocol.recovery import continuation_for_reason
@@ -1358,6 +1368,12 @@ def remote_root_continuation(phase: str) -> str | None:
         return REMOTE_ROOT_OVERRIDE_CONTINUATION
     if phase == "remote_unreachable" and _active_direct_style():
         return DIRECT_STYLE_SLOW_CONTINUATION
+    if phase == _PROFILE_CHANGED_PHASE:
+        try:
+            record = active_target_record()
+        except Exception:  # noqa: BLE001 - an unreadable record is no known consent
+            record = None
+        return profile_change_continuation(record)
     return continuation_for_reason(phase)
 
 
@@ -1380,6 +1396,31 @@ def _active_direct_style() -> bool:
         return read_connection_style(target_root(record.target_id)) == "direct"
     except (TargetError, PathSafetyError, OSError):
         return False
+
+
+def profile_change_continuation(record: ServerTarget | None) -> str:
+    """The continuation of a ``server_profile_changed`` refusal for the server ``record`` names.
+
+    ``remote_reconsent`` when the consent step already refuses ``record`` on what this computer
+    holds (``server_profile.consent_verdict``: a wider or changed profile, a level above the
+    consent, another issuer, or a consent that is missing or cannot be read): only the owner
+    agrees again. ``PROFILE_CHECKING_CONTINUATION`` when it admits it: the refusal came from
+    the server, naming a revision this computer has not fetched yet, so what changed is not
+    known, and the refresh such a refusal asks for may show only a narrowing this computer adjusts
+    to by itself; the agent repeats the same request instead of asking the owner. A ``record``
+    that is ``None`` or not remote has no consent to read: ``remote_reconsent``. Hook-safe: file
+    reads only; never raises.
+    """
+
+    if record is None or not record.is_remote:
+        return "remote_reconsent"
+    from finishup.client.server_profile import consent_verdict
+
+    try:
+        verdict = consent_verdict(record)
+    except Exception:  # noqa: BLE001 - a verdict that cannot be read is no known consent
+        return "remote_reconsent"
+    return "remote_reconsent" if verdict.phase is not None else PROFILE_CHECKING_CONTINUATION
 
 
 def _root_named_explicitly() -> bool:

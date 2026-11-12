@@ -16,6 +16,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, Final, Literal, Protocol, cast
 
+from credential_store_guard import NO_PLATFORM_CREDENTIAL_STORE
+
 __all__ = [
     "ChildHandle",
     "ChildLimits",
@@ -162,6 +164,8 @@ def _minimal_environment(temp_root: Path, artifact_env: Mapping[str, str]) -> di
         "XDG_DATA_HOME": str(temp_root / "data"),
         "XDG_RUNTIME_DIR": str(temp_root / "runtime"),
         "FINISHUP_TEST_MARKER": temp_root.name,
+        # Built from scratch, so the suite's credential-store pin is not inherited: add it.
+        **NO_PLATFORM_CREDENTIAL_STORE,
     }
     for key in ("VIRTUAL_ENV", "SYSTEMROOT"):
         value = artifact_env.get(key)

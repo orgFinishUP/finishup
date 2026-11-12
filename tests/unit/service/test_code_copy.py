@@ -512,3 +512,90 @@ def test_a_forget_while_the_helper_prepares_fences_that_sync(tmp_path: Path) -> 
     outcome = copies.sync_blocking(HANDLE, purpose="check")
     assert (outcome.outcome, outcome.reason) == ("refused", "code_copy_forgotten")
     assert store.copies("claim") == ()
+
+
+def test_a_task_start_sync_left_on_a_stale_helper_agent_completes_at_the_newer_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """u4/u5: a helper stopped (or was replaced or killed) without its agent being unregistered at
+    the server; a task started at once sends the sync's prepare to that agent, which nobody
+    answers. The successor helper's agent registers a moment later: the prepare goes on there,
+    the sync completes long before the prepare's deadline, and the task reads the copy it made
+    (not the copy as last synced, nor this computer)."""
+
+    import asyncio
+
+    from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
+    from finishup.ports.workspace_agent import WORKSPACE_OPERATION_NAMES, operation_spec
+    from finishup.service import code_copy as code_copy_module
+    from finishup.service.workspace_hub import (
+        WorkspaceAgentChannel,
+        WorkspaceAgentHub,
+        WorkspaceCallWriter,
+    )
+
+    # Bounds a regression's wait; the takeover itself happens within a second.
+    monkeypatch.setattr(code_copy_module, "_PREPARE_SECONDS", 8.0)
+    _copies_unused, helper, store = _copies(tmp_path)
+    declaration = WorkspaceAgentDeclaration(
+        tuple(sorted(WORKSPACE_OPERATION_NAMES, key=str.encode)), 6_291_456, role="background"
+    )
+
+    async def run() -> tuple[object, list[str], list[str], float]:
+        hub = WorkspaceAgentHub(inline_wait_seconds=2.0, background_wait_seconds=2.0)
+        copies = CodeCopies(store, hub, lambda: REVISION)
+        copies.remember(HANDLE, COMMITMENT, WORKTREE)
+        stale: list[str] = []
+        fresh: list[str] = []
+
+        async def silent(call: WorkspaceCall) -> None:
+            stale.append(call.operation)
+
+        holder: list[WorkspaceAgentChannel] = []
+
+        async def answering(call: WorkspaceCall) -> None:
+            fresh.append(call.operation)
+            spec = operation_spec(call.operation)
+            assert spec is not None
+            value = helper.call_blocking(
+                HANDLE,
+                WorkspaceOperation(call.operation),
+                spec.decode_arguments(call.arguments),
+                timeout_seconds=1.0,
+            )
+            reply = WorkspaceReply(
+                "workspace_reply", "1.0", call.call_id, "ok", spec.encode_result(value), None
+            )
+            asyncio.get_running_loop().call_soon(hub.deliver, holder[0], reply)
+
+        async def register(writer: WorkspaceCallWriter) -> WorkspaceAgentChannel:
+            return await hub.register(
+                handle=HANDLE,
+                declaration=declaration,
+                service_instance_id="svc_00000000-0000-4000-8000-000000000054",
+                service_generation="7",
+                writer=writer,
+                worktree=WORKTREE,
+            )
+
+        older = await register(silent)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        start = asyncio.ensure_future(
+            asyncio.to_thread(copies.git_view, HANDLE, purpose="base", base=None, task_id="tsk_u5")
+        )
+        while not stale:
+            assert loop.time() - began < 5.0, "the prepare never reached the stale agent"
+            await asyncio.sleep(0.01)
+        holder.append(await register(answering))
+        view = await start
+        took = loop.time() - began
+        assert older.pending_count == 0 and not older.closed
+        return view, stale, fresh, took
+
+    (view, _effective), stale, fresh, took = asyncio.run(run())  # type: ignore[misc]
+    assert stale == ["code_sync_prepare"]
+    assert fresh[:1] == ["code_sync_prepare"] and set(fresh[1:]) == {"code_sync_read"}
+    assert view is not None and not view.stale  # type: ignore[union-attr]
+    assert view.manifest.snapshot == helper.prepared.manifest.snapshot  # type: ignore[union-attr]
+    assert took < 4.0

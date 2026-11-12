@@ -68,12 +68,15 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from finishup.config.installation import format_rfc3339_ms, parse_rfc3339_ms
 from finishup.config.paths import PathSafetyError, existing_owner_only_dir
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+if TYPE_CHECKING:
+    from finishup.protocol.server_profile import ServerProfileRevision
 
 __all__ = [
     "CONNECTION_STYLES",
@@ -90,6 +93,7 @@ __all__ = [
     "HELPER_STATUS_NAME",
     "HELPER_STATUS_SCHEMA",
     "PROFILE_REFRESH_MARKER",
+    "PROFILE_REFRESH_SCHEMA",
     "RELAY_BINDING_BYTES",
     "ConnectionStyle",
     "HelperHolderChanged",
@@ -98,6 +102,7 @@ __all__ = [
     "HelperPhase",
     "HelperStamp",
     "HelperStatus",
+    "ProfileRefreshRequest",
     "helper_environment",
     "helper_holder",
     "helper_lock_held",
@@ -116,6 +121,7 @@ __all__ = [
     "starts_relay_binding",
     "stop_helper",
     "supersede_helper",
+    "take_named_profile_refresh_request",
     "take_profile_refresh_request",
     "write_connection_style",
     "write_followed_consent",
@@ -132,6 +138,8 @@ PROFILE_REFRESH_MARKER: Final = "profile-refresh-requested"
 # were opened under (``client.authorization.consent_digest``), written once it followed a change.
 HELPER_CONSENT_SCHEMA: Final = "yoetz.helper-consent/1"
 HELPER_CONSENT_NAME: Final = "helper-consent"
+# The marker's optional content: the profile revision the refused hello named.
+PROFILE_REFRESH_SCHEMA: Final = "yoetz.profile-refresh-request/1"
 HELPER_EPOCH_SCHEMA: Final = "yoetz.helper-epoch/1"
 HELPER_EPOCH_NAME: Final = "helper-epoch"
 _EPOCH_FENCE_NAME: Final = "helper-epoch.lock"
@@ -390,22 +398,46 @@ def write_connection_style(root: Path, style: ConnectionStyle) -> None:
     _write_owner_only(_style_path(root), canonical_encode(body) + b"\n")
 
 
-def request_profile_refresh(root: Path) -> None:
+@dataclass(frozen=True, slots=True)
+class ProfileRefreshRequest:
+    """A refused client's request to fetch the server's profile again.
+
+    ``revision`` is the profile revision the refused hello named (``yoetz.profile-refresh-
+    request/1``); ``None`` for a marker that names none (an older client's empty one, or content
+    that cannot be read). The refusal proves the server issues another revision now, so a helper
+    whose cached profile still holds ``revision`` knows its cache is stale (``client.helper``).
+    """
+
+    revision: ServerProfileRevision | None
+
+
+def request_profile_refresh(root: Path, revision: ServerProfileRevision | None = None) -> None:
     """Leave the marker that asks the target's helper to fetch the server's profile again.
 
     Written by a client the server refused with ``server_profile_changed``; never a fetch itself
-    (design v2 section 8.9: no profile refresh on a hook's path). Never raises.
+    (design v2 section 8.9: no profile refresh on a hook's path). ``revision`` is the revision
+    the refused hello named, written into the marker (replaced atomically: the latest refusal's
+    revision is the one kept); without it the marker is left empty, as before. Never raises.
     """
 
     path = root / "state" / PROFILE_REFRESH_MARKER
     try:
         if not existing_owner_only_dir(path.parent):
             return
+        if revision is not None:
+            from finishup.protocol.server_profile import revision_to_json
+
+            document: dict[str, JsonValue] = {
+                "schema": PROFILE_REFRESH_SCHEMA,
+                "server_profile": revision_to_json(revision),
+            }
+            _write_owner_only(path, canonical_encode(document) + b"\n")
+            return
         descriptor = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600
         )
         os.close(descriptor)
-    except (OSError, PathSafetyError):
+    except (OSError, PathSafetyError, ValueError):
         return
 
 
@@ -536,14 +568,44 @@ def start_fenced(root: Path, epoch: str | None) -> bool:
     return epoch is not None and read_helper_epoch(root) != epoch
 
 
+def take_named_profile_refresh_request(root: Path) -> ProfileRefreshRequest | None:
+    """Remove the refresh marker and return what it asked; ``None`` when none was there.
+
+    A marker that names no readable revision (an older client's empty one) is a request whose
+    ``revision`` is ``None``. Never raises.
+    """
+
+    path = root / "state" / PROFILE_REFRESH_MARKER
+    data = _read_owner_only(path)
+    try:
+        os.unlink(path)
+    except OSError:
+        return None
+    return ProfileRefreshRequest(_named_revision(data))
+
+
+def _named_revision(data: bytes | None) -> ServerProfileRevision | None:
+    if not data or not data.endswith(b"\n"):
+        return None
+    from finishup.protocol.server_profile import ProfileError, revision_from_json
+
+    try:
+        parsed = strict_json_parse(data[:-1])
+        if (
+            type(parsed) is not dict
+            or set(cast(dict[str, JsonValue], parsed)) != {"schema", "server_profile"}
+            or cast(dict[str, JsonValue], parsed)["schema"] != PROFILE_REFRESH_SCHEMA
+        ):
+            return None
+        return revision_from_json(cast(dict[str, JsonValue], parsed)["server_profile"])
+    except (ValueError, TypeError, ProfileError):
+        return None
+
+
 def take_profile_refresh_request(root: Path) -> bool:
     """Remove the refresh marker; whether one was there. Never raises."""
 
-    try:
-        os.unlink(root / "state" / PROFILE_REFRESH_MARKER)
-    except OSError:
-        return False
-    return True
+    return take_named_profile_refresh_request(root) is not None
 
 
 @dataclass(frozen=True, slots=True)

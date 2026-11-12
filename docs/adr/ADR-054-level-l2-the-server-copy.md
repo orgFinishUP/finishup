@@ -228,12 +228,16 @@ Only the target's helper declares them: `client.code_sync.CodeSyncResponder` is 
 background agent built with `remote_workspace_binding(..., code_sync=True)` for a target consented
 at L2. The MCP bridge, CLI commands and hooks never declare them; the hub sends an operation only to
 an agent that declares it, so the server never asks them, and it never replays either to another
-connection. The declaration is made when the agent opens (defect A of the 2026-11-11 dogfood), so
+connection. A prepare still unanswered on an older helper agent goes on, with the time it has left,
+at a newer helper agent of the same workspace that registers meanwhile (ADR-052 decision 12: a
+helper stopped, replaced or killed without its agent being unregistered at the server), which
+builds the snapshot the sync's reads then fetch from it; a read is never taken over, since its
+snapshot lives only in the agent that prepared it (u5). The declaration is made when the agent opens (defect A of the 2026-11-11 dogfood), so
 a running helper follows the consent (`client.helper.Helper._follow`): it opens each background
 agent again under the record as it is now, then records which consent its agents follow
 (`state/helper-consent`, `yoetz.helper-consent/1`): after a new level, only once each old agent is
-closed and its relay ended (a relayed REST stream unregisters its agent at the server as it
-ends), within 3 seconds, or not at all. `server use NAME --level` that changes the
+closed and its relay (relay style) or its stream's close (direct style) ended (a REST stream
+unregisters its agent at the server as it closes), within 3 seconds, or not at all. `server use NAME --level` that changes the
 level ends only once that server's running helper has recorded the new consent, a few seconds at
 most; a helper that does not is stopped instead (its agents closed, as `server set --style` does),
 and with none running the next client starts one under the new level. A workspace
@@ -732,9 +736,11 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     asking on the trusted console (`sshd`). Not run over a network: a reviewer read from the copy
     (it needs an AI-powered review against a real provider credential), the erasure of real
     captured excerpts (no review held any) and an approved check while offline (none configured);
-    each is covered in process. Over REST, a client whose helper stopped without closing its
-    connection is noticed only when the sync's 60-second wait ends (`deadline_exceeded`), so that
-    check returned `operation_pending` while the server finished it.
+    each is covered in process. That run found that over REST a helper stopped without its agent
+    being unregistered left the agent registered until its lease ended, and a sync's prepare sent
+    to it waited out its 60 seconds (`deadline_exceeded`; that check returned `operation_pending`
+    while the server finished it); since u5 the stop waits for the unregistration and a newer
+    helper agent takes such a prepare over (limit 17).
 15. The authenticated principal does not reach the service over the control channel yet (the REST
     edges namespace the claim by the key's principal but send only the namespaced claim), so the
     service remembers every claim without an account and charges all uploads to one shared
@@ -749,15 +755,23 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     whose id they know. The owner plans OAuth, or an identity derived from the server's URL plus
     the API key; the control-hello field that limit 15 names is not built until then. Until it is,
     one server should be used by one person, or by people who may see each other's tasks.
-17. **A new level reaches the server when the old agents are gone from it, which is best effort.**
-    `server use NAME --level` ends once the running helper says its agents follow the new level,
-    and the helper says so once each old agent's close and relay ended. The server learns that an
-    agent is gone from the connection closing (SSH) or from a courtesy unregistration that
-    FinishUP sends but does not confirm (REST: a failed or slow one is not retried, and a direct-
-    style agent's close waits for it only briefly; the server also ends an agent whose polls
-    stop). When that unregistration is lost or delayed, a task started at once can still find the
-    old agent, be refused the sync and read from this computer for its whole life, as its receipt
-    says; the next task syncs. Confirming the unregistration needs a REST contract change.
+17. **The server learns that an old agent is gone on a best-effort basis.** `server use NAME
+    --level` ends once the running helper says its agents follow the new level, and the helper
+    says so once each old agent's close ended (its relay in the relay style, its stream's close in
+    the direct style); a stopping helper (`server disconnect`, `server use` of another target,
+    `server set --style`, a replacement) waits for the same, at most 1.5 seconds. The server learns
+    that an agent is gone from the connection closing (SSH) or from a courtesy unregistration that
+    FinishUP sends but does not confirm (REST: a failed one is not retried, a killed helper sends
+    none; the server also ends an agent whose polls stop, after 60 seconds). An old agent left
+    registered that way no longer holds a sync: a prepare sent to it goes on at the newer helper
+    agent as soon as that registers (decision 4's takeover), so a task started at once syncs.
+    Two cases remain. A prepare sent to an old agent while no newer one registers within its 60
+    seconds (a helper killed and not started again) waits them out, and the task reads the copy as
+    last synced (`stale_copy_read`) or this computer, as its receipt says. An old agent of level L1
+    left registered when L2 is chosen declares no sync, so a task started before the new agent
+    registers is refused the sync at once (`operation_not_declared`) and reads from this computer
+    for its whole life; the next task syncs. Confirming the unregistration needs a REST contract
+    change.
 
 ## Reverse states
 
