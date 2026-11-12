@@ -761,6 +761,12 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Fixed
 
+- Disposing a test instance (`scripts/provision_test_instance.py dispose`) while a host session still
+  ran it refused, but only after it had already removed the instance's state and runtime pin. The
+  launcher was left at its path, unpinned, and its next command reached the everyday install
+  (#1350). Disposal now checks first and changes nothing when it refuses. It withdraws the
+  launchers before anything is removed, and the pin goes only with the runtime itself, so a
+  launcher of a test instance never runs against the everyday install.
 - Ctrl-C at a secure prompt (a passphrase, an approve/deny decision, a recovery-set path) now
   cancels it at once and sends no answer; `finishup service unlock` and
   `finishup privacy decide-policy`, for example, print `cancelled` and exit 130. The first Ctrl-C

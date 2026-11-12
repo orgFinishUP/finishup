@@ -160,17 +160,72 @@ uv run python scripts/provision_test_instance.py dispose --base ~/.yz-instances 
     [--retain-logs ~/.yz-instances/retained]
 ```
 
-The snapshot's own launcher runs `finishup instance dispose --root <base>/<tag>/state`: it probes
-the root's singleton lock, sends the stamped holder (and nothing else) a bounded stop, waits up to
-the drain window, optionally copies the log files to `<retain>/<installation_id>/`, removes the
-root, and removes the pin that named it. The script then prunes unused retained release runtimes and removes the runtime and wheel.
-If a host still holds a retained-runtime lease, it reports `runtime_in_use` and keeps those
-runtime files; close that instance's host sessions and retry. It never kills a bridge to remove
-a copy. Repeating
-`dispose` reports `absent` and exits 0. `dispose` refuses roots without a persistent or
-disposable marker (`instance_not_disposable`): it cannot remove the everyday install or an
-unlabeled ADR-026 root. If a holder does not release within the window
-(`instance_service_running`), the root is left in place; stop that runtime's service and retry.
+Disposal never leaves a launcher that has lost its pin. Such a launcher runs ambient, and its next
+command reaches the everyday install: issue #1350, where a refused disposal had already removed the
+state and the pin. The script works in four steps:
+
+1. **Check, changing nothing.** The script runs the snapshot's own `instance status` and requires
+   that the launcher is pinned to this root (`instance_not_pinned` otherwise) and that the root is
+   persistent or disposable (`instance_not_disposable`). It then requires that no process other
+   than the instance's own service holds the runtime: `runtime_in_use`.
+   - **What "in use" covers.** Every serving process: a host's MCP bridge, a hook, an upgrade, and
+     the service. Each holds a lease on the retained runtime copy it runs from. The service's own
+     lease is told apart from the others by the processes that have the lease open: `/proc` on
+     Linux, `lsof` on macOS, minus the service's own process tree.
+   - **When the service is running and this cannot be determined:**
+     `runtime_in_use_unverifiable`. Stop the service with the launcher (`service stop`), close the
+     host sessions, and retry.
+   - **What it cannot see:**
+     - a command started from the runtime that serves nothing (`status`, `start` and the like hold
+       no lease);
+     - a host that is registered but not running;
+     - a process started after the check.
+   - **Every refusal here changes nothing.** The instance stays in place and pinned, and its
+     service keeps running.
+2. **Withdraw the launchers.** `runtime/bin` is renamed to `runtime/.bin-withdrawn` in one step,
+   so no host registration, hook or shell can start the runtime any more. The pin stays in place.
+3. **Remove the root.** The runtime's own `dispose_instance` probes the root's singleton lock,
+   sends the stamped holder (and nothing else) a bounded stop, waits up to the drain window,
+   optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. It
+   keeps the pin, which therefore names a removed root, and a pinned runtime in that state fails
+   closed (`isolation_root_invalid`), never ambient.
+   - **If this step fails having removed nothing**, for example `instance_service_running` when the
+     holder does not release within the window, the launchers are put back. The instance is still
+     in place and pinned: stop that runtime's service and retry.
+   - **If it fails part way** (`instance_dispose_incomplete`), the launchers stay withdrawn. Run
+     `dispose` again.
+4. **Prune and remove.** The script prunes unused retained release runtimes with the runtime's own
+   lease-aware cleanup, then removes the withdrawn launchers, the runtime with its pin, and the
+   wheel.
+   - A process that started before the disposal and still runs a copy is reported as
+     `runtime_in_use`, with the launchers withdrawn. That copy carries its own pin naming the
+     removed root, so it fails closed. Close it and run `dispose` again.
+   - It never kills a bridge to remove a copy.
+
+**Other outcomes.**
+- Repeating `dispose` reports `absent` and exits 0. A `dispose` after one that stopped part way
+  finishes it; `status` reports such an instance as `disposing`.
+- An instance left behind by a dispose from before this fix (its state and pin removed, its
+  launcher still installed) shows as `unpinned` in `status`. `dispose` removes it without ever
+  running that launcher.
+- `dispose` refuses roots without a persistent or disposable marker: it cannot remove the everyday
+  install or an unlabeled ADR-026 root.
+- `finishup instance dispose --root <root>` run directly removes the pin from the runtime that ran
+  it (ADR-028 decision 4). That runtime then runs ambient, so a test instance's own runtime must
+  be disposed through this script.
+
+**Rebuild an instance that hosts are connected to.** Hosts register the instance's absolute
+launcher, and a disposal refuses while any of them runs it.
+1. Close those host sessions, and remove FinishUP from those hosts with that instance's launcher:
+   `setup disconnect --host …`, the reverse of `setup run`.
+2. Dispose.
+3. Create the new instance under the same tag.
+4. Connect the hosts again with its launcher (`setup run --host …`).
+
+Skip the disconnect, and the Cursor plugin installed from the earlier instance stays in
+`~/.cursor`. With it still there, a non-interactive `setup run --host cursor-ide` refuses the plugin
+step (`human_authority_unavailable`, change `install_plugin`), as the Mac recorded on 2026-11-12. In
+that case, disconnect first or run that setup interactively.
 
 Expiry is a serving limit, not a sweeper: an expired snapshot refuses to start until disposed.
 Disposal deletes files; it is not secure erasure.
@@ -440,7 +495,7 @@ one still waits 5 seconds. The steps below approve between misses so each wait s
       Expected, unverified: the service cannot show a dialog, and because this vault's
       passphrase is kept in the credential store the command ends with `owner_view_unavailable`
       naming `--use-passphrase`, with no passphrase prompt.
-11. `$L service stop` and dispose of the instance
+11. `$L service stop`, close any host session using the instance, and dispose of it
     (`uv run python scripts/provision_test_instance.py dispose --base ~/.yz-instances --tag
     touchid`). If Keychain Access still lists that instance's `bundle-…` auto-unlock entry, delete
     it; it is scoped to the disposed instance's path.
