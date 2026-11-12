@@ -198,6 +198,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/operations/receipt-result-1.4.1.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/operations/status-request-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1894,6 +1900,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/version/version-manifest-2.3.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/version/version-manifest-2.3.1.schema.json",
         "json_schema",
         "application/schema+json",
         True,

@@ -134,7 +134,9 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # verification coverage).
 # #1275: +2 canonical status vectors on the status-result 1.5.0 wire carrying closure readiness
 # (CAN-025, CAN-026); the released 1.4.0 vectors (CAN-011, CAN-012) stay append-only.
-REVIEWED_RESOURCE_COUNT: Final = 342
+# +2 schemas: receipt-result 1.4.1 (the closing-line pattern a unicode-mode ECMAScript engine
+# compiles) and version manifest 2.3.1, which reports this inventory; v0.3.0's 2.3.0 stays frozen.
+REVIEWED_RESOURCE_COUNT: Final = 344
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -184,7 +186,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("read-guidance-result", "1.1.0"),
     ("receipt-document", "1.3.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.4.0"),
+    ("receipt-result", "1.4.1"),
     ("respond-request", "1.1.0"),
     ("respond-result", "1.1.0"),
     ("review-packet-row", "2.0.0"),
@@ -831,7 +833,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     if not platform_cell().certified:
         limitations = tuple(sorted({*limitations, PLATFORM_CELL_UNTESTED}, key=str.encode))
     return VersionManifest(
-        schema_version="2.3.0",
+        schema_version="2.3.1",
         package_name="finishup",
         package_version=_distribution_version("finishup") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,
