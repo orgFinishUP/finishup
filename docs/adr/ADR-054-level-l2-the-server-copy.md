@@ -759,9 +759,11 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     the API key; the control-hello field that limit 15 names is not built until then. Until it is,
     one server should be used by one person, or by people who may see each other's tasks.
 17. **The server learns that an old agent is gone on a best-effort basis.** `server use NAME
-    --level` ends once the running helper says its agents follow the new level, and the helper
-    says so once each old agent's close ended (its relay in the relay style, its stream's close in
-    the direct style); a stopping helper (`server disconnect`, `server use` of another target,
+    --level` ends once the running helper says its agents follow the new level. After choosing L2
+    the helper says so once each old agent's close ended (its relay in the relay style, its
+    stream's close in the direct style); after any other change (L2 back to L1 among them) the old
+    agents keep serving until their replacements connect (at most 30 seconds), so it may say so
+    before they closed. A stopping helper (`server disconnect`, `server use` of another target,
     `server set --style`, a replacement) waits for the same, at most 1.5 seconds. The server learns
     that an agent is gone from the connection closing (SSH) or from a courtesy unregistration that
     FinishUP sends but does not confirm (REST: a failed one is not retried, a killed helper sends
