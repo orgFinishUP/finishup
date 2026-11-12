@@ -24,8 +24,9 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    allowed that exact content (``held_for_content``); a Git LFS file whose bytes are not its
    pointer (``lfs_content``); case-fold collisions, chosen among the names nothing else holds,
    and any other spelling of a worktree name held or sent as its LFS pointer that is the same
-   file on disk, as on a case-insensitive file system such as APFS (``case_collision``); nested
-   repositories that are not submodules; special files, links to
+   file on disk (identity as read, or the same bytes), as on a case-insensitive file system such
+   as APFS (``case_collision``, which leaves the name out of that tree only; any other hold leaves
+   a path out of both trees); nested repositories that are not submodules; special files, links to
    directories through a path and multiply-linked files (``special``). Symlinks are sent as
    their target text, submodules as gitlinks (commit id only), LFS files as their pointers.
 4. Every admitted object is re-created from the bytes read, by this module, into the target's
@@ -795,7 +796,7 @@ class _Entry:
 class _Admission:
     """The admitted entries and the held-out paths of one tree."""
 
-    __slots__ = ("entries", "held", "identities", "objects", "pointers")
+    __slots__ = ("digests", "entries", "held", "identities", "objects", "pointers")
 
     def __init__(self) -> None:
         self.entries: dict[bytes, _Entry] = {}
@@ -807,6 +808,8 @@ class _Admission:
         # (device, inode) read there, as captured while it was read; None once two reads saw
         # different ones (a directory replaced in between): not known.
         self.identities: dict[bytes, tuple[int, int] | None] = {}
+        # Worktree file path → the SHA-256 of the bytes read there (a file read whole).
+        self.digests: dict[bytes, bytes] = {}
 
     def saw(self, path: bytes, read: _Read) -> None:
         """Keep what ``read`` identified: ``path`` itself and each directory above it."""
@@ -817,6 +820,8 @@ class _Admission:
         ]
         if read.identity is not None:
             seen.append((path, read.identity))
+        if read.kind == "file" and not read.over:
+            self.digests[path] = hashlib.sha256(read.data).digest()
         for where, identity in seen:
             if where not in self.identities:
                 self.identities[where] = identity
@@ -1174,6 +1179,14 @@ def _under(path: bytes, held: Container[bytes]) -> bool:
     return any(b"/".join(parts[:depth]) in held for depth in range(1, len(parts) + 1))
 
 
+def _held_in(tree: _Admission, base: _Admission, current: _Admission) -> set[bytes]:
+    """The paths left out of ``tree``: its own holds, and the other tree's holds but for its
+    case collisions (which only that tree cannot represent)."""
+
+    other = current if tree is base else base
+    return {*tree.held, *(p for p, reason in other.held.items() if reason != "case_collision")}
+
+
 def _folded_parts(path: bytes) -> tuple[str, ...] | None:
     """``path``'s components as a case-insensitive file system compares them; None for a name
     that is not UTF-8 (held as unrepresentable, so never another name's spelling)."""
@@ -1191,8 +1204,9 @@ def _hold_case_aliases(admission: _Admission) -> None:
     Only a case-insensitive file system (APFS, NTFS) makes two spellings one file; there the
     reason one is held for, or its LFS pointer, covers the bytes under every spelling, which
     would otherwise leave under the other one. The identities compared are the ones captured
-    while each was read (``_Read.identity``, ``_Read.parents``), never a later look; where
-    either is unknown the other spelling is held. On a case-sensitive file system the spellings
+    while each was read (``_Read.identity``, ``_Read.parents``), never a later look, and the
+    bytes read (a file saved atomically between the two reads is a new inode with the same
+    bytes); where either identity is unknown the other spelling is held. On a case-sensitive file system the spellings
     are distinct files and nothing more is held. A path held this way is listed as a case
     collision.
     """
@@ -1204,7 +1218,7 @@ def _hold_case_aliases(admission: _Admission) -> None:
             sources.setdefault(folded, []).append(path)
     if not sources:
         return
-    identities = admission.identities
+    identities, digests = admission.identities, admission.digests
     for path in sorted(admission.entries):
         if path in admission.pointers or _under(path, admission.held):
             continue
@@ -1215,8 +1229,11 @@ def _hold_case_aliases(admission: _Admission) -> None:
         for depth in range(1, len(parts) + 1):
             prefix = b"/".join(parts[:depth])
             mine = identities.get(prefix)
+            content = digests.get(prefix)
             if any(
-                mine is None or identities.get(other) in {None, mine}
+                mine is None
+                or identities.get(other) in {None, mine}
+                or (content is not None and digests.get(other) == content)
                 for other in sources.get(folded[:depth], ())
                 if other != prefix
             ):
@@ -1398,15 +1415,17 @@ def export_snapshot(
     # that was the same file when read (a case-insensitive file system) is held.
     _hold_case_aliases(current)
     # Then the case collisions, among the names nothing else holds on either side, so a held
-    # spelling never takes the file another spelling can still send down with it.
-    held_paths = {*base.held, *current.held}
+    # spelling never takes the file another spelling can still send down with it. A path held for
+    # what it is holds it in both trees; a case collision is one tree's alone (that tree cannot
+    # hold both names), so it never removes a name from the other.
     for admission in (base, current):
-        left = {p: e for p, e in admission.entries.items() if not _under(p, held_paths)}
+        held = _held_in(admission, base, current)
+        left = {p: e for p, e in admission.entries.items() if not _under(p, held)}
         for path in _case_collisions(left):
             admission.held[path] = "case_collision"
-    held_paths = {*base.held, *current.held}
-    base_entries = {p: e for p, e in base.entries.items() if not _under(p, held_paths)}
-    current_entries = {p: e for p, e in current.entries.items() if not _under(p, held_paths)}
+    held_base, held_current = _held_in(base, base, current), _held_in(current, base, current)
+    base_entries = {p: e for p, e in base.entries.items() if not _under(p, held_base)}
+    current_entries = {p: e for p, e in current.entries.items() if not _under(p, held_current)}
     objects: dict[str, GitObject] = {}
     base_tree, base_bytes, _base_files = _build_tree(base_entries, objects)
     tree, tree_bytes, tree_files = _build_tree(current_entries, objects)
@@ -1414,12 +1433,13 @@ def export_snapshot(
     # worktree is sent too. Nothing is written or packed before both fit.
     if base_bytes > policy.max_repo_bytes or tree_bytes > policy.max_repo_bytes:
         raise ExportRefused("code_copy_too_large")
-    for admission in (base, current):
-        for path, entry in admission.entries.items():
-            if path in base_entries or path in current_entries:
-                item = admission.objects.get(entry.oid)
-                if item is not None:
-                    objects[item.oid] = item
+    # Each tree's objects from its own admission: a path kept in one tree only never brings the
+    # other tree's object for that path (a held spelling's bytes) into the copy.
+    for admission, kept in ((base, base_entries), (current, current_entries)):
+        for entry in kept.values():
+            item = admission.objects.get(entry.oid)
+            if item is not None:
+                objects[item.oid] = item
     base_object = GitObject("commit", encode_commit(base_tree, None))
     snapshot_object = GitObject("commit", encode_commit(tree, base_object.oid))
     objects[base_object.oid] = base_object

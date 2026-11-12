@@ -150,8 +150,10 @@ the worktree identity, the exclusion-policy digest, the completeness lists (`exc
 `held_for_content`, `too_large`, `lfs_content`, `case_collision`, `nested_repository`: paths only,
 at most 256 each plus an overflow count; `case_collision` names a later name that differs from an
 earlier one only by case, the first being chosen among the names nothing else holds, and any other
-spelling of a worktree name held or sent as its LFS pointer that is the same file on disk, as two
-spellings are on a case-insensitive file system such as APFS) and counts (`links`, `gitlinks`, `lfs_pointers`,
+spelling of a worktree name held or sent as its LFS pointer that is the same file on disk (its
+identity as read, or the same bytes), as two spellings are on a case-insensitive file system such as
+APFS; a case collision leaves the name out of that tree only, while any other hold leaves a path out
+of both trees) and counts (`links`, `gitlinks`, `lfs_pointers`,
 `special`, `unrepresentable`), the subject-state commitment (decision 13), the profile-revision
 triple, the purpose (`base` or `check`), `synced_at`, `files` and `bytes`. The module also defines
 the per-evidence provenance tokens (`EVIDENCE_PROVENANCE`: `server_copy_read`,

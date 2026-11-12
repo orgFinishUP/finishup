@@ -1170,3 +1170,37 @@ def test_a_directory_seen_as_two_different_ones_is_not_known(tmp_path: Path) -> 
     code_export._hold_case_aliases(admission)  # pyright: ignore[reportPrivateUsage]
     assert admission.held.get(b"Vendor/a") == "case_collision"
     assert admission.held.get(b"Vendor/b") == "case_collision"
+
+
+def test_spellings_with_the_same_bytes_are_one_file_even_with_another_identity() -> None:
+    """Codex review, fifth pass: a file saved atomically between the two reads (same bytes, a new
+    inode) is still the held spelling's file: the bytes read decide too."""
+
+    admission = code_export._Admission()  # pyright: ignore[reportPrivateUsage]
+    same = code_export._Read("file", b"payload", identity=(1, 7))  # pyright: ignore[reportPrivateUsage]
+    admission.saw(b"README", same)
+    admission.entries[b"README"] = code_export._Entry(b"100644", "0" * 40, 7)  # pyright: ignore[reportPrivateUsage]
+    admission.saw(b"readme", code_export._Read("file", b"payload", identity=(1, 9)))  # pyright: ignore[reportPrivateUsage]
+    admission.held[b"readme"] = "lfs_content"
+    code_export._hold_case_aliases(admission)  # pyright: ignore[reportPrivateUsage]
+    assert admission.held.get(b"README") == "case_collision"
+
+
+def test_a_case_collision_in_the_base_never_drops_the_only_spelling_left_on_disk(
+    tmp_path: Path,
+) -> None:
+    """Codex review, fifth pass: the base holds README and readme (readme a case collision there)
+    and the worktree only readme now; the collision is the base tree's alone, so the file on disk
+    is still sent as readme."""
+
+    root = _repository(tmp_path, {"README": b"upper\n", "z.txt": b"z\n"})
+    _in_git_only(root, "readme", b"lower\n")
+    git(root, "commit", "-q", "-m", "both")
+    git(root, "rm", "-q", "--cached", "README")
+    if not _folds_case(root):
+        (root / "README").unlink()
+    (root / "readme").write_bytes(b"lower\n")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "readme" in tree and "README" not in tree
+    assert _content(tmp_path, "readme") == b"lower\n"
