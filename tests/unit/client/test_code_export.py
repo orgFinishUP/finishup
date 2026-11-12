@@ -991,3 +991,68 @@ def test_an_incremental_export_reuses_a_held_link_target_the_server_accepts(
         second.bundle, have=have.get, limits=BundleLimits(max_file_bytes=65_536)
     )
     assert GitObject("blob", b"README.md").oid not in verified.objects
+
+
+def _one_file_for(
+    monkeypatch: pytest.MonkeyPatch, spellings: frozenset[bytes], on_disk: bytes
+) -> None:
+    """Read every name in ``spellings`` from the one file ``on_disk`` names, as a case-insensitive
+    file system does (APFS), on every system."""
+
+    read = code_export._read_beneath  # pyright: ignore[reportPrivateUsage]
+
+    def one_file(root_fd: int, relative: bytes, limit: int) -> object:
+        return read(root_fd, on_disk if relative in spellings else relative, limit)
+
+    monkeypatch.setattr(code_export, "_read_beneath", one_file)
+
+
+def test_held_bytes_never_leave_under_another_spelling_of_their_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: git's index holds an ordinary ``README`` and an LFS ``readme``; on a
+    case-insensitive file system both are the one file, here an edited LFS payload. ``readme``
+    is held (``lfs_content``), so ``README`` holds those same bytes and is held too
+    (``case_collision``): they never leave under the other spelling."""
+
+    pointer = (
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:"
+        + hashlib.sha256(b"payload\n").hexdigest().encode()
+        + b"\nsize 8\n"
+    )
+    root = _repository(tmp_path, {".gitattributes": b"readme filter=lfs -text\n", "README": b"a\n"})
+    _in_git_only(root, "readme", pointer)
+    git(root, "commit", "-q", "-m", "lfs alias")
+    (root / "README").write_bytes(b"large binary payload, edited, so no pointer names it\n")
+    _one_file_for(monkeypatch, frozenset({b"README", b"readme"}), b"README")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "README" not in tree and "readme" not in tree
+    assert "readme" in prepared.manifest.lists["lfs_content"]
+    # Held as another spelling of a held name; where the file system itself folds case, git
+    # matches the attribute case-insensitively too (core.ignorecase) and holds it as LFS content.
+    lists = prepared.manifest.lists
+    assert "README" in {*lists["case_collision"], *lists["lfs_content"]}
+
+
+def test_a_held_spelling_never_drops_the_file_another_spelling_can_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: the base holds ``README`` (a known secret in its git blob) and a benign
+    ``readme``; on a case-insensitive file system the disk now holds one benign file under both
+    names. ``README`` is held on both sides, and the case collision then chooses among the names
+    left, so the file is still sent as ``readme`` rather than dropped with both names."""
+
+    secret = (
+        b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH " + b"PRIVATE KEY-----\n"
+    )
+    root = _repository(tmp_path, {"README": secret, "z.txt": b"z\n"})
+    _in_git_only(root, "readme", b"benign\n")
+    git(root, "commit", "-q", "-m", "secret alias")
+    (root / "README").write_bytes(b"benign\n")  # the owner removed the key since
+    _one_file_for(monkeypatch, frozenset({b"README", b"readme"}), b"README")
+    prepared = _export(root, tmp_path)
+    tree = _tree_of(prepared, tmp_path)
+    assert "README" not in tree
+    assert _content(tmp_path, "readme") == b"benign\n"
+    assert "README" in prepared.manifest.lists["held_for_content"]

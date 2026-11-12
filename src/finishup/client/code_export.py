@@ -22,8 +22,9 @@ produces one ``git-bundle-1`` bundle (``protocol.server_copy``) and its snapshot
    (``excluded``); not representable as a safe tree entry. Then its content: over
    ``max_file_bytes`` (``too_large``); a known secret format in its bytes unless the owner
    allowed that exact content (``held_for_content``); a Git LFS file whose bytes are not its
-   pointer (``lfs_content``); case-fold collisions
-   (``case_collision``); nested repositories that are not submodules; special files, links to
+   pointer (``lfs_content``); case-fold collisions, chosen among the names nothing else holds,
+   and every other spelling of a worktree name held for its bytes, since on a case-insensitive
+   file system (APFS) it is the same file (``case_collision``); nested repositories that are not submodules; special files, links to
    directories through a path and multiply-linked files (``special``). Symlinks are sent as
    their target text, submodules as gitlinks (commit id only), LFS files as their pointers.
 4. Every admitted object is re-created from the bytes read, by this module, into the target's
@@ -1114,6 +1115,37 @@ def _under(path: bytes, held: Iterable[bytes]) -> bool:
     return any(path == item or path.startswith(item + b"/") for item in held)
 
 
+def _folded_parts(path: bytes) -> tuple[str, ...] | None:
+    """``path``'s components as a case-insensitive file system compares them; None for a name
+    that is not UTF-8 (held as unrepresentable, so never another name's spelling)."""
+
+    try:
+        return tuple(folded_name(part) for part in path.split(b"/"))
+    except UnicodeDecodeError:
+        return None
+
+
+def _hold_case_aliases(admission: _Admission) -> None:
+    """Hold each admitted worktree path that is another spelling of a held one (or lies beneath).
+
+    On a case-insensitive file system (APFS, NTFS) names that differ only by case are one file
+    on disk, so the reason one spelling is held for (its bytes are LFS content, a known secret,
+    too large) holds the bytes under every spelling. Applied on every system, so a copy never
+    depends on the file system it was made on: on a case-sensitive one it holds a distinct file
+    whose name differs from a held one only by case, listed as a case collision.
+    """
+
+    held = {folded for path in admission.held if (folded := _folded_parts(path)) is not None}
+    if not held:
+        return
+    for path in tuple(admission.entries):
+        if _under(path, admission.held):
+            continue
+        folded = _folded_parts(path)
+        if folded is not None and any(folded[:n] in held for n in range(1, len(folded) + 1)):
+            admission.held[path] = "case_collision"
+
+
 def _build_tree(
     entries: Mapping[bytes, _Entry], objects: dict[str, GitObject]
 ) -> tuple[str, int, int]:
@@ -1284,8 +1316,15 @@ def export_snapshot(
         current = exporter.current(index, untracked)
     finally:
         os.close(root_fd)
+    # The worktree's names first: a name held for its bytes holds every other spelling of it,
+    # which is the same file on a case-insensitive file system (APFS).
+    _hold_case_aliases(current)
+    # Then the case collisions, among the names nothing else holds on either side, so a held
+    # spelling never takes the file another spelling can still send down with it.
+    held_paths = {*base.held, *current.held}
     for admission in (base, current):
-        for path in _case_collisions(admission.entries):
+        left = {p: e for p, e in admission.entries.items() if not _under(p, held_paths)}
+        for path in _case_collisions(left):
             admission.held[path] = "case_collision"
     held_paths = {*base.held, *current.held}
     base_entries = {p: e for p, e in base.entries.items() if not _under(p, held_paths)}
