@@ -870,10 +870,33 @@ def test_an_unpinned_launcher_beside_a_live_state_still_refuses_logs_inside_the_
     (layout["runtime"] / _MODULE._PIN_NAME).unlink()
     runner = _Runner(layout, _status())
     monkeypatch.setattr(_MODULE, "_run", runner)
-    with pytest.raises(_MODULE.ProvisionError, match="^retain_logs_invalid: "):
+    with pytest.raises(_MODULE.ProvisionError, match="^retain_logs_invalid: ") as raised:
         _dispose(layout, retain_logs=str(layout["root"] / "retained"))
+    assert "launchers are withdrawn" in str(raised.value)
     assert runner.calls == []
     assert (layout["state"] / "state" / "instance-identity.json").is_file()
+    # The refusal left a record, so disposing again without the option finishes.
+    assert _dispose(layout)["state"] == "removed"
+
+
+@pytest.mark.parametrize(
+    ("command", "advice"), [("dispose", "dispose again"), ("status", "run it again")]
+)
+def test_a_timeout_ends_with_advice_that_fits_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    advice: str,
+) -> None:
+    def slow(_args: argparse.Namespace) -> dict[str, object]:
+        raise subprocess.TimeoutExpired(["finishup"], 1)
+
+    monkeypatch.setattr(_MODULE, f"command_{command}", slow)
+    assert _MODULE.main([command, "--tag", "inst"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("timeout: ") and advice in err
+    if command == "status":
+        assert "dispose" not in err
 
 
 def _damage_pin(layout: dict[str, Path]) -> None:

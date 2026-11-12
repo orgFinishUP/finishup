@@ -712,7 +712,9 @@ def _directory_identity(path: Path) -> tuple[int, int] | None:
     return facts.st_dev, facts.st_ino
 
 
-def _check_logs_destination(logs: Path, tag_root: Path, installation_id: object) -> None:
+def _check_logs_destination(
+    logs: Path, tag_root: Path, installation_id: object, *, withdrawn: bool = False
+) -> None:
     """Refuse, before anything is stopped, a ``--retain-logs`` folder disposal would reject or
     delete: what ``dispose_instance`` requires of it (an existing parent, an owner-only folder
     if it exists, no copy of these logs yet), and outside the tree being removed."""
@@ -736,9 +738,13 @@ def _check_logs_destination(logs: Path, tag_root: Path, installation_id: object)
     elif not os.access(logs.parent, os.W_OK | os.X_OK):
         problem = "it cannot be created in its parent folder"
     if problem is not None:
-        raise _fail(
-            f"retain_logs_invalid: --retain-logs cannot be used: {problem}; nothing was changed"
+        done = (
+            "the instance's launchers are withdrawn, so nothing can start it, and nothing else "
+            "was changed; dispose again with a usable folder or without --retain-logs"
+            if withdrawn
+            else "nothing was changed"
         )
+        raise _fail(f"retain_logs_invalid: --retain-logs cannot be used: {problem}; {done}")
 
 
 def _status_of(command: list[str]) -> dict[str, object]:
@@ -822,8 +828,6 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
             # retry finish once nothing uses the runtime; nothing is stopped or removed before.
             identity = _read_progress(marker)
             installation = None if identity is None else identity.get("installation_id")
-            if logs is not None:
-                _check_logs_destination(logs, layout["root"], installation)
             if type(installation) is str and not _progress_valid(_read_progress(progress), state):
                 _write_progress(
                     progress,
@@ -833,6 +837,8 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
                         "identity": list(_directory_identity(state) or ()),
                     },
                 )
+            if logs is not None:
+                _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
             _checked(layout["root"], releases, {}, withdrawn=True)
         if status:
             try:
@@ -875,7 +881,7 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
                 "run recorded that it was; nothing was stopped or removed"
             )
         if logs is not None:
-            _check_logs_destination(logs, layout["root"], installation)
+            _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
         _checked(layout["root"], releases, status, withdrawn=True)
         if not _progress_valid(recorded, state):
             # An earlier run stopped before its record was complete, or it is damaged: write
@@ -1036,10 +1042,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"{error}\n")
         return 2
     except subprocess.TimeoutExpired:
-        sys.stderr.write(
-            "timeout: a step of this command did not finish in time; dispose again to finish "
-            "or check what is left\n"
+        advice = (
+            "dispose again to finish, or run status to see what is left"
+            if args.command == "dispose"
+            else "nothing was removed by this command; run it again"
         )
+        sys.stderr.write(f"timeout: a step of this command did not finish in time; {advice}\n")
         return 2
     sys.stdout.write(
         (json.dumps(result, indent=2, sort_keys=True) if args.json else _render(result)) + "\n"
