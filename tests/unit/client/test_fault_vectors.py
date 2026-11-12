@@ -92,7 +92,7 @@ class _AsgiUpstream:
     async def start_remote_service(self) -> bool:
         return False
 
-    async def close(self) -> None:
+    async def close(self, seconds: float | None = None) -> None:
         return None
 
     async def zero_network(self) -> None:

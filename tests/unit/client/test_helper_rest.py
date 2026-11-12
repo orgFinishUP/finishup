@@ -764,6 +764,8 @@ async def test_a_stop_ends_within_one_shared_deadline_whatever_lingers(
         async with asyncio.timeout(15):
             assert await helper.serve(None) == "stop_requested"
         took = loop.time() - stopping
+        # Nothing of the helper runs on once it returned (its lock is released next).
+        assert relay.done()
     finally:
         relay.cancel()
         await asyncio.gather(relay, return_exceptions=True)
