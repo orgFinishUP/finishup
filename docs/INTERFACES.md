@@ -9877,7 +9877,7 @@ outside-plan code remains expected until the claim is superseded. See ADR-019 fo
 
 ### Command-gap independence for repaired action findings (issue #682)
 
-Maintainer acknowledgement: [issue #682](https://github.com/TheGaySupreme123/finishup/issues/682#issuecomment-5761527250).
+Maintainer acknowledgement: [issue #682](https://github.com/orgFinishUP/finishup/issues/682#issuecomment-5761527250).
 `finding_resolution` admits a narrow exception for a deterministic `action_without_result`
 finding with readable original proof, one exact action-event subject, explicit readable obligation
 links, and an accepted linked result present at the checked frontier. It bounds the possible

@@ -1,6 +1,6 @@
 # ADR-033 — Deterministic task facts, explicit blockers, and the Stop-time closure gate
 
-**Status:** Accepted for [issue #977](https://github.com/TheGaySupreme123/finishup/issues/977). The
+**Status:** Accepted for [issue #977](https://github.com/orgFinishUP/finishup/issues/977). The
 owner requested this design-gated work explicitly in the 2026-10-06 session that reviewed TB4 run
 tb4f1; the issue records that acknowledgement. It covers host hook behaviour, the control-request
 structural fields, the work-integrity policy-pack version, and the change to "FinishUP is not an

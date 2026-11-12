@@ -1,11 +1,11 @@
 # ADR-020 — Typed evidence digest provenance
 
 **Status:** Accepted (2026-08-09), acknowledged in
-[issue #131](https://github.com/TheGaySupreme123/finishup/issues/131). Decision 7 amended
-(2026-08-10) for [issue #176](https://github.com/TheGaySupreme123/finishup/issues/176); decisions
+[issue #131](https://github.com/orgFinishUP/finishup/issues/131). Decision 7 amended
+(2026-08-10) for [issue #176](https://github.com/orgFinishUP/finishup/issues/176); decisions
 9–12 added (2026-08-30) for
-[issue #302](https://github.com/TheGaySupreme123/finishup/issues/302). Decision 13 added (2026-09-30)
-for [issue #912](https://github.com/TheGaySupreme123/finishup/issues/912).
+[issue #302](https://github.com/orgFinishUP/finishup/issues/302). Decision 13 added (2026-09-30)
+for [issue #912](https://github.com/orgFinishUP/finishup/issues/912).
 **Implemented by:** `src/finishup/domain/events.py`, `src/finishup/application/publish_work.py`,
 `src/finishup/application/observation_coordinator.py`, `src/finishup/kernel/deterministic_checks.py`,
 `src/finishup/kernel/policies/work_integrity.py`, `src/finishup/kernel/receipt_builder.py`,

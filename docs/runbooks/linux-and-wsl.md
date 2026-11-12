@@ -426,7 +426,7 @@ Use `setup status --next --operation local|review|connection` to identify the ne
 for the selected installation. The common host flow and the terminal interface retain the same
 storage capability diagnosis and human-secret boundary. No Windows credential bridge is added.
 
-The [0.2.4 installation evidence](https://github.com/TheGaySupreme123/finishup/issues/767#issuecomment-5750168131)
+The [0.2.4 installation evidence](https://github.com/orgFinishUP/finishup/issues/767#issuecomment-5750168131)
 records preview, connect, status, no-op, disconnect and reconnect on macOS, Ubuntu 24.04, and actual
 WSL 2 for Codex CLI, Claude Code and Cursor Agent CLI. It excludes provider login and model tasks.
 The prior 0.2.3 WSL run recorded above tested passphrase unlock after distribution restart. These

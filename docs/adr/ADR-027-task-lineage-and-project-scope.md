@@ -1,8 +1,8 @@
 # ADR-027 — Task lineage and project scope identity
 
 **Status:** Accepted design (2026-09-05), tracked by
-[issue #494](https://github.com/TheGaySupreme123/finishup/issues/494). The recorded foundation
-[PR #591](https://github.com/TheGaySupreme123/finishup/pull/591) is merged; the 0.3 candidate now
+[issue #494](https://github.com/orgFinishUP/finishup/issues/494). The recorded foundation
+[PR #591](https://github.com/orgFinishUP/finishup/pull/591) is merged; the 0.3 candidate now
 implements the Increment-A lineage/project primitives and Increment-B admission, rollup,
 coordination-grant, and host-mapping surfaces described here. This ADR records durable design and
 implementation scope; native capability evidence and limits are maintained in the host integration

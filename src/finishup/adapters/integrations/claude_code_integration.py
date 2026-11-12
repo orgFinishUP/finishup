@@ -1001,7 +1001,7 @@ def render_claude_code_plugin(
         "displayName": "FinishUP",
         "license": "Apache-2.0",
         "name": "finishup",
-        "repository": "https://github.com/TheGaySupreme123/finishup",
+        "repository": "https://github.com/orgFinishUP/finishup",
         "version": version,
     }
     members: dict[str, bytes] = {

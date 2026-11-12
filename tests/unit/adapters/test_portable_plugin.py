@@ -235,6 +235,13 @@ def test_portable_tree_is_skills_only_and_guidance_is_byte_identical() -> None:
         item.relative_path for item in rendered.plan.inventory
     )
     assert "plugin.json" in tree
+    manifest = strict_json_parse(tree["plugin.json"])
+    assert isinstance(manifest, Mapping)
+    assert manifest["repository"] == "https://github.com/orgFinishUP/finishup"
+    assert manifest["homepage"] == manifest["repository"]
+    author = manifest["author"]
+    assert isinstance(author, Mapping)
+    assert author["url"] == manifest["repository"]
     assert "skills/finishup/SKILL.md" in tree
     assert "mcp.json" not in tree
     assert "skills/finishup/manifest.json" not in tree

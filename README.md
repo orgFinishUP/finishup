@@ -1,13 +1,13 @@
 <p align="center">
-  <a href="https://finishup.dev"><img src="https://raw.githubusercontent.com/TheGaySupreme123/finishup/main/docs/assets/finishup-logo.png" alt="FinishUP" width="360"></a>
+  <a href="https://finishup.dev"><img src="https://raw.githubusercontent.com/orgFinishUP/finishup/main/docs/assets/finishup-logo.png" alt="FinishUP" width="360"></a>
 </p>
 
 <h1 align="center">Agents claim they're done.<br>FinishUP checks if they actually did.</h1>
 
 <p align="center">
   <a href="https://pypi.org/project/finishup/"><img src="https://img.shields.io/pypi/v/finishup?style=flat-square&label=PyPI" alt="PyPI version"></a>
-  <a href="https://github.com/TheGaySupreme123/finishup/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache-2.0 license"></a>
-  <a href="https://github.com/TheGaySupreme123/finishup/actions/workflows/pr-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/TheGaySupreme123/finishup/pr-ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
+  <a href="https://github.com/orgFinishUP/finishup/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/orgFinishUP/finishup/actions/workflows/pr-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/orgFinishUP/finishup/pr-ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
 </p>
 
 <p align="center">
@@ -16,9 +16,9 @@
 
 <p align="center">
   <a href="https://finishup.dev">finishup.dev</a> ·
-  <a href="https://github.com/TheGaySupreme123/finishup/tree/main/docs/usage">Docs</a> ·
-  <a href="https://github.com/TheGaySupreme123/finishup/releases">Releases</a> ·
-  <a href="https://github.com/TheGaySupreme123/finishup/blob/main/CHANGELOG.md">Changelog</a>
+  <a href="https://github.com/orgFinishUP/finishup/tree/main/docs/usage">Docs</a> ·
+  <a href="https://github.com/orgFinishUP/finishup/releases">Releases</a> ·
+  <a href="https://github.com/orgFinishUP/finishup/blob/main/CHANGELOG.md">Changelog</a>
 </p>
 
 > [!NOTE]
@@ -109,10 +109,10 @@ see [Linux](docs/usage/install-and-first-run.md#linux)); on Windows, install it 
 > installation, showing you every proposed change first:
 >
 > ```text
-> Install FinishUP for me (https://github.com/TheGaySupreme123/finishup). Fetch its agent install
+> Install FinishUP for me (https://github.com/orgFinishUP/finishup). Fetch its agent install
 > guide and follow "The short version" at the top:
 >
-> curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/finishup/main/docs/usage/agent-start.md
+> curl -fsSL https://raw.githubusercontent.com/orgFinishUP/finishup/main/docs/usage/agent-start.md
 >
 > If your sandbox blocks that fetch, ask me to approve it or to paste the guide. Setup's questions
 > are mine to answer, so ask me each one and wait, and show me any proposed change before it is
@@ -233,7 +233,7 @@ See [Architecture](docs/architecture.md).
 Every release is more than a tag. The tag workflow builds each distribution once, tests those exact
 candidate bytes, publishes them to PyPI and npm through dedicated approval environments, and
 attaches the same approved artifacts to the
-[GitHub release](https://github.com/TheGaySupreme123/finishup/releases) alongside `SHA256SUMS`, an
+[GitHub release](https://github.com/orgFinishUP/finishup/releases) alongside `SHA256SUMS`, an
 SBOM, the support matrix, known limitations, the release-evidence bundle, and a `VERIFY.md` that
 walks through checking the bytes you installed. Post-publication jobs re-download the public
 artifacts and compare them to the approved bytes.

@@ -400,7 +400,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    database contents, unrestricted logs/stderr/transcripts, and files outside the selected scope
    can never be placed in an approved external, local-model, or agent-context case. No profile,
    local-human click, provider trust label, plugin, or request override can weaken this set.
-   *Amended 2026-10-31 ([#1248](https://github.com/TheGaySupreme123/finishup/issues/1248), owner
+   *Amended 2026-10-31 ([#1248](https://github.com/orgFinishUP/finishup/issues/1248), owner
    decisions P-D1 to P-D5):* the set, its floor and every ceiling are unchanged. How a match is
    found and bounded (markers by recorded position, item-level hits in the reviewer conversation,
    values that end at a line break, slices cut from redacted text) is in the amendment of that date
@@ -1774,7 +1774,7 @@ although nothing could or would be sent, and it had no receipt.
 ## One scanning model: marker positions, item-level hits, value ends and redacted slices (*Amended 2026-10-31, #1248*)
 
 Owner decisions P-D1 to P-D5, made in session on 2026-10-29 and recorded on
-[#1248](https://github.com/TheGaySupreme123/finishup/issues/1248), which also records the maintainer
+[#1248](https://github.com/orgFinishUP/finishup/issues/1248), which also records the maintainer
 acknowledgement for the privacy and egress design gate. This is the approved text that steps P1 to
 P4 of #1248 implement. Until a step merges, the code keeps the behaviour the earlier amendments
 describe.
@@ -1870,7 +1870,7 @@ P3 implements P-D4 (#1236, #1237, #1238, #1015, #1134). P4 implements P-D5. Reco
 recovery wording and local filtering belong to #1247 (step G10).
 
 **Implemented.** P-D1 and P-D2 shipped with step P1
-([#1271](https://github.com/TheGaySupreme123/finishup/pull/1271)). Spans are recorded from egress
+([#1271](https://github.com/orgFinishUP/finishup/pull/1271)). Spans are recorded from egress
 minimization onward: the minimizer records each marker it writes, the spans travel with the packet
 (and are persisted with a prepared proposal), and every later scan carries them through each JSON
 string by its exact offset map. Markers written at capture or composition are stored without a

@@ -1,6 +1,6 @@
 # ADR-044 — A bounded, sourced recap of FinishUP state when a host resumes after compaction
 
-**Status:** Accepted for [issue #1027](https://github.com/TheGaySupreme123/finishup/issues/1027)
+**Status:** Accepted for [issue #1027](https://github.com/orgFinishUP/finishup/issues/1027)
 (tb4n3 N3-7 / RC-4). Maintainer acknowledgement (TheGaySupreme123, 2026-10-11, owner decision 2 for
 the tb4n3 remediation): "on the post-compaction session start, inject a bounded receipt-style recap
 of FinishUP state so the agent resumes with what FinishUP knows." The one wire change is an optional

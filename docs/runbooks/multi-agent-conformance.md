@@ -1,7 +1,7 @@
 # Multi-agent conformance and native acceptance
 
-This is the scenario map for [issue #509](https://github.com/TheGaySupreme123/finishup/issues/509),
-including its [2026-09-15 capture acceptance comment](https://github.com/TheGaySupreme123/finishup/issues/509#issuecomment-5686714958).
+This is the scenario map for [issue #509](https://github.com/orgFinishUP/finishup/issues/509),
+including its [2026-09-15 capture acceptance comment](https://github.com/orgFinishUP/finishup/issues/509#issuecomment-5686714958).
 Use it when changing delegation, project grouping, observation, or source selection on `0.3`.
 Test names identify executable coverage; their presence is not a claim that a particular revision,
 host, operating system, or installed package passed. Record exact commands and results in the owning
@@ -162,4 +162,4 @@ All four detections were advisory, with no declared, addressed or resolved coord
 obligation. Native display/consumption and the declaration-to-resolution workflow were not
 qualified. The operator's disjoint ownership prompts and shared coordination files are not
 FinishUP detection evidence. The bounded outcome and remaining cells are recorded in the
-[issue #509 qualification report](https://github.com/TheGaySupreme123/finishup/issues/509#issuecomment-5855208779).
+[issue #509 qualification report](https://github.com/orgFinishUP/finishup/issues/509#issuecomment-5855208779).

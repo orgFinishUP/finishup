@@ -230,7 +230,7 @@ the result says whether one *happened*.
   observation, not a verdict.
 - It does not measure whether feedback changed the agent's behaviour. Influence measurement is
   governed by the [influence dogfood runbook](influence-dogfood.md) (issue
-  [#133](https://github.com/TheGaySupreme123/finishup/issues/133)): four separate evidence streams,
+  [#133](https://github.com/orgFinishUP/finishup/issues/133)): four separate evidence streams,
   seeded-defect and miss taxonomy, and a forbidden-summary rule so zero influence cannot be sold as
   improvement.
 

@@ -502,7 +502,7 @@ proof; it is not Luna acceptance and does not migrate.
 
 ## Luna acceptance boundary (2026-09-05)
 
-[Issue #513](https://github.com/TheGaySupreme123/finishup/issues/513) records two fresh packaged
+[Issue #513](https://github.com/orgFinishUP/finishup/issues/513) records two fresh packaged
 `semantic_required` attempts on the exact macOS arm64 Codex `0.150.1` cell using Luna/high.
 Both returned schema-valid judgments, distinct one-use authorizations and terminal privacy
 receipts, finalized runtime provenance, and verified process cleanup. Their check results also

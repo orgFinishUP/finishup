@@ -1,7 +1,7 @@
 # ADR-014 — TOML as alternate settings surface and owner-declared OpenAI-compatible endpoints
 
 **Status:** Working decision — implementing against [issue
-#2](https://github.com/TheGaySupreme123/finishup/issues/2) under explicit product authorization to ship
+#2](https://github.com/orgFinishUP/finishup/issues/2) under explicit product authorization to ship
 the filed design (maintainer ack recorded as implement-now). **Implemented by:**
 `src/finishup/config/models.py`, `src/finishup/config/privacy.py`, `src/finishup/config/load.py`,
 `src/finishup/config/write.py`, `src/finishup/config/privacy_desired.py`,
