@@ -13412,7 +13412,8 @@ engine reads it (no escaped spaces) in 1.4.1, which changes nothing else and is 
 bridge advertises as `receipt`'s `outputSchema`; 1.3.0 and 1.4.0 shipped in v0.3.0 and keep their
 pattern, which escapes each space (`\ `, Python's `re.escape`), accepts the same strings, and
 fails to compile in such an engine (Cursor 3.27.22 dropped every tool over it). The local control
-result `2.9.0`, also shipped, keeps carrying receipt bodies as 1.4.0; a body valid under one is
+result `2.9.0`, also shipped, keeps carrying receipt bodies as 1.4.0; wherever both patterns
+compile (Python's `re`, which the service and bridge validate with), a body valid under one is
 valid under the other. Every pattern the MCP bridge advertises is checked in unicode mode
 (`tests/unit/mcp/test_advertised_schema_patterns.py`). `respond` advisory dispositions are `addressed`,
 `kept_choice` (reason only; label "checked, kept my choice") and `declined`; history and receipt

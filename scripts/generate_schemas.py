@@ -13870,6 +13870,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
         "operations/receipt-result-1.3.0.schema.json",
+        # Rebuilt by --check too: its closing-line pattern is derived, not copied (1.4.0 is frozen).
+        "operations/receipt-result-1.4.1.schema.json",
         "operations/respond-request-1.1.0.schema.json",
         "operations/respond-result-1.1.0.schema.json",
         "operations/publish-work-result-1.1.0.schema.json",
