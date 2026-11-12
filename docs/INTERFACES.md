@@ -15172,6 +15172,21 @@ when its owner's `[server.code_copy]` table enables an offer, and a client sends
 its owner consents at L2 on the trusted console. Without both, every surface behaves as at level
 L1, byte for byte.
 
+**Rule R at level L2** (run u8; INTERFACES "Rule R" in the claim-bound start section). The copy
+a task reads is the copy of the worktree its connection serves. A start naming another folder is
+refused in the client and never reaches the server, so no copy of either folder is made or
+refreshed for it. A connection's hello keys its claim (`CodeCopies.remember`) and its agent
+registers; neither syncs, and only a task's own base or check read does
+(`test_code_copy.py::test_a_connection_s_hello_alone_syncs_and_reads_nothing`). The server adds no
+fence of its own, because the wire does not allow one: an older client sends the connection's
+handle for any absolute path, and the handle is all the server sees. So with an older client, a
+task naming repository B, started from a folder in repository A, is copied from A, under A's
+hold, level, exclusions and scan, never from B. A's copy is of the folder the user ran it from.
+The receipt's `(tree …)` is the first twelve hex digits of the git tree the copy holds (the
+worktree's files as exported, exclusions and held files left out). In a clean checkout with
+nothing excluded, `git rev-parse HEAD^{tree}` there starts with the same digits, which a reader
+can check.
+
 **Release switch.** `protocol.server_copy.L2_RELEASED` (`True`) and `l2_released()`; no flag,
 variable or file a user can set changes it, and `enable_unreleased_l2` is gone.
 `tests/unit/architecture/test_level_l2_released.py` names each design v2 section 8.3 protection
