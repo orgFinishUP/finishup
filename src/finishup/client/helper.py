@@ -152,7 +152,7 @@ _SHUTDOWN_DRAIN_SECONDS: Final = 2.0
 # How long a stopping helper waits for its background agents' connections to end on their own:
 # a REST stream unregisters its agent at the server as it closes (a courtesy ``DELETE`` bounded at
 # one second, ``RestControlStream.aclose``); a dead agent left registered there is the one the
-# server asks next (the u4 dogfood finding: a task started right after a stop waited 60 s for it).
+# server asks next (a macOS dogfood finding: a task started right after a stop waited 60 s for it).
 # With the one-second tick and the last drain, a stop stays within its stopper's five-second wait
 # (``helper_runtime._STOP_SECONDS``).
 _STOP_AGENT_SECONDS: Final = 1.5

@@ -830,7 +830,7 @@ async def test_a_helper_that_does_not_declare_the_operation_leaves_it_to_a_conne
     assert (len(helper), len(connection)) == (0, 1)
 
 
-# --- u5: a newer helper agent takes over a call an older one left unanswered -------------------
+# --- a newer helper agent takes over a call an older one left unanswered (macOS dogfood) -------
 
 
 async def test_a_call_left_on_a_silent_helper_agent_goes_on_at_a_newer_one() -> None:
