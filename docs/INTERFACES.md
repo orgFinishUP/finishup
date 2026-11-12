@@ -15183,9 +15183,12 @@ handle for any absolute path, and the handle is all the server sees. So with an 
 task naming repository B, started from a folder in repository A, is copied from A, under A's
 hold, level, exclusions and scan, never from B. A's copy is of the folder the user ran it from.
 The receipt's `(tree …)` is the first twelve hex digits of the git tree the copy holds (the
-worktree's files as exported, exclusions and held files left out). In a clean checkout with
-nothing excluded, `git rev-parse HEAD^{tree}` there starts with the same digits, which a reader
-can check.
+worktree's files as exported, exclusions and held files left out, always as SHA-1 objects of
+the worktree's raw bytes). A reader can check it where the export and `HEAD` hold the same
+objects: a SHA-1 repository (git's default) with every change committed, no line-ending or other
+content conversion between the worktree and `HEAD`, and nothing excluded or held back. There,
+`git rev-parse HEAD^{tree}` starts with the same digits. A mismatch alone does not show that
+another repository was read (Codex review of run u8).
 
 **Release switch.** `protocol.server_copy.L2_RELEASED` (`True`) and `l2_released()`; no flag,
 variable or file a user can set changes it, and `enable_unreleased_l2` is gone.
