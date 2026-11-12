@@ -49,6 +49,9 @@ from finishup.client.attribution import (
     attribution_lines,
     connection_attribution,
     coverage_hook_observed,
+    evidence_provenance_section,
+    evidence_provenance_unknown_section,
+    shows_server_copy_section,
 )
 from finishup.client.workspace_ref import start_request_for_connection
 from finishup.config.env import EnvNameConflictError, read_env
@@ -182,6 +185,7 @@ from finishup.service.client import (
     connect_service_on_demand,
     handshake_failure,
     holder_version_order,
+    newer_helper_build_holds_selection,
     path_refusal_reason,
     service_holder_identity,
     start_timed_out,
@@ -1035,6 +1039,51 @@ async def _lease_wait(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+# How often a lease looks at its target's consent while it waits to renew (defect A of the
+# 2026-11-11 dogfood): one ``lstat``, and a read of ``target.json`` only when its stamp moved.
+_LEASE_WATCH_SECONDS: Final = 2.0
+
+
+class _ConsentWatch:
+    """Whether a target's consent is no longer the one a registration was made under.
+
+    The owner agreed again under the same profile revision (``server use NAME --level L2``, say):
+    the connection's authorization still admits it, but the helper no longer serves a
+    registration made under the earlier consent (``helper_registrations.served_workspaces``:
+    ``consent_changed``), so the bridge renews it now, under its connection's authorization as
+    it stands (a renewal it refuses ends the lease), instead of at half its lease. A record that
+    cannot be read, or is gone, also asks for the renewal, whose own checks then decide.
+    """
+
+    __slots__ = ("_digest", "_path", "_stamp")
+
+    def __init__(self, target_id: str) -> None:
+        from finishup.client.targets import target_root
+        from finishup.config.paths import SERVER_TARGET_FILE_NAME
+
+        self._path = target_root(target_id) / SERVER_TARGET_FILE_NAME
+        self._stamp: object = None
+        self._digest: str | None = None
+
+    def moved(self, registration: Registration) -> bool:
+        from finishup.client.authorization import consent_digest
+        from finishup.client.targets import TargetError, read_target
+
+        try:
+            facts = os.lstat(self._path)
+        except OSError:
+            return True
+        stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+        if stamp != self._stamp:
+            self._stamp = stamp
+            try:
+                record = read_target(self._path.parent)
+            except (TargetError, OSError):
+                return True
+            self._digest = None if record is None else consent_digest(record)
+        return self._digest is None or self._digest != registration.consent_digest
+
+
 def _connection_authorization(client: ServiceClient) -> ConnectionAuthorization | None:
     from finishup.client.authorization import ConnectionAuthorization
 
@@ -1121,7 +1170,8 @@ async def _register_for_helper(runtime: BridgeRuntime, client: ServiceClient) ->
 async def _renew_helper_lease(
     client: ServiceClient, authorization: ConnectionAuthorization, lease: _HelperLease
 ) -> None:
-    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3).
+    """Renew ``lease`` at half its lease while ``client``'s connection lives (C3), and at once
+    when the target's consent moved under the same authorization (``_ConsentWatch``, defect A).
 
     Ends when the connection has ended (its registration released), when a renewal is refused
     (``renew`` released it: the selection, record, key, consent or hold changed), or when
@@ -1133,14 +1183,25 @@ async def _renew_helper_lease(
     from finishup.client.helper_registrations import LEASE_SECONDS, Registration, release, renew
     from finishup.config.installation import parse_rfc3339_ms
 
+    watch: _ConsentWatch | None = None
+    with contextlib.suppress(Exception):
+        watch = _ConsentWatch(lease.target_id)
     while True:
-        current = lease.registration
+        current: Registration | None = lease.registration
         if current is None:
             return
         due = parse_rfc3339_ms(current.registered_at) + timedelta(seconds=LEASE_SECONDS / 2)
-        await _lease_wait(max(0.0, (due - datetime.now(UTC)).total_seconds()))
+        left = max(0.0, (due - datetime.now(UTC)).total_seconds())
+        # At most a few seconds at a time: the consent is looked at again (defect A).
+        await _lease_wait(left if watch is None else min(left, _LEASE_WATCH_SECONDS))
         if not lease.wanted():
             return
+        if (
+            not getattr(client, "closed", False)
+            and (due - datetime.now(UTC)).total_seconds() > 0
+            and (watch is None or not watch.moved(current))
+        ):
+            continue
         if getattr(client, "closed", False):
             # The connection ended without the bridge closing it yet: its lease ends with it.
             _drop_lease(client, lease)
@@ -1603,23 +1664,41 @@ def _attributed_text(
     receipt_page: bool = False,
     provenance_unknown: bool = False,
     hook_observed: bool = False,
+    server_copy: object = None,
+    evidence_unknown: object = None,
 ) -> str:
     """``text`` followed by a claim-bound connection's provenance lines (ADR-051), unchanged for
     any other connection. A line the text already carries is not repeated, and a page of a paged
     receipt, or a receipt whose ``workspace_provenance`` says it is unknown, names only the
     producing service (``attribution_lines``). A receipt with hook-observed evidence also gets
-    the fixed client-attested observation line (decision 12)."""
+    the fixed client-attested observation line (decision 12).
 
+    ``server_copy`` is a receipt's ``evidence_provenance`` member (ADR-054): unless ``text``
+    already carries the service's server-copy section, the same fixed lines rendered from the
+    member follow it, whatever the connection, and the connection then names only the producing
+    service. ``evidence_unknown`` is its ``evidence_provenance_unknown`` member: the
+    evidence-unknown lines for its reason follow on the same terms, never the level-L1 line."""
+
+    extra: tuple[str, ...] = ()
+    if server_copy is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_section(server_copy, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
+    if evidence_unknown is not None and not shows_server_copy_section(text):
+        section = evidence_provenance_unknown_section(evidence_unknown, hook_observed=hook_observed)
+        if section is not None:
+            extra = (section,)
     lines = attribution_lines(
         attribution,
         shown=text,
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy is not None or evidence_unknown is not None,
     )
-    if not lines:
+    if not lines and not extra:
         return text
-    return "\n".join((text, *lines) if text else lines)
+    return "\n".join((text, *extra, *lines) if text else (*extra, *lines))
 
 
 def result_from_public_model(
@@ -1639,7 +1718,9 @@ def result_from_public_model(
     "Workspace evidence" section is on at most one page. So does a receipt whose
     ``workspace_provenance`` member says the provenance is unknown (decision D4); that member is
     in the canonical text and, paged, on the first page. The structured result never carries
-    the connection's lines.
+    the connection's lines. A receipt whose ``evidence_provenance`` member carries a level-L2
+    account (ADR-054) gets the fixed server-copy lines rendered from it when its text does not
+    already hold them (a JSON receipt), and names only the producing service.
     """
 
     wire = public_model_to_wire(result)
@@ -1648,6 +1729,10 @@ def result_from_public_model(
     )
     # ADR-051 decision D4: every receipt format, JSON included, says when its provenance is unknown.
     provenance_unknown = "receipt_id" in wire and "workspace_provenance" in wire
+    # ADR-054: and, for a level-L2 task, where each kind of evidence was read.
+    server_copy = wire.get("evidence_provenance") if "receipt_id" in wire else None
+    # ADR-054: or, when that account could not be given, why (never the level-L1 line).
+    evidence_unknown = wire.get("evidence_provenance_unknown") if "receipt_id" in wire else None
     coverage = wire.get("coverage") if "receipt_id" in wire else None
     hook_observed = isinstance(coverage, Mapping) and coverage_hook_observed(
         cast(Mapping[str, object], coverage).get("publication_channels")
@@ -1658,6 +1743,8 @@ def result_from_public_model(
         receipt_page=receipt_page,
         provenance_unknown=provenance_unknown,
         hook_observed=hook_observed,
+        server_copy=server_copy,
+        evidence_unknown=evidence_unknown,
     )
     # The service budgets canonical text plus structured content. A small result's prose can
     # repeat several fields more often: fall back to that complete canonical text if needed.
@@ -1671,6 +1758,8 @@ def result_from_public_model(
             receipt_page=receipt_page,
             provenance_unknown=provenance_unknown,
             hook_observed=hook_observed,
+            server_copy=server_copy,
+            evidence_unknown=evidence_unknown,
         )
         if mcp_delivery_bytes(wire, text=canonical) < rendered_bytes:
             rendered = canonical
@@ -2737,7 +2826,11 @@ def _holder_is_newer_than_bridge() -> bool:
         holder = service_holder_identity()
     except Exception:
         return False
-    return holder is not None and holder_version_order(holder.service_version) == "newer"
+    if holder is not None and holder_version_order(holder.service_version) == "newer":
+        return True
+    # A server elsewhere: its helper of another build of this release, and this bridge is not the
+    # build installed now (it predates an in-place upgrade).
+    return newer_helper_build_holds_selection()
 
 
 def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:

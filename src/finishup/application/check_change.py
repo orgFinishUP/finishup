@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Final, TypedDict, cast
 
 from finishup.adapters.task_input_read import task_input_from_bytes
+from finishup.application.content_fence import content_forgotten_after, content_publication_fence
 from finishup.application.semantic_case import CheckTimeChange, check_time_change_shown_record
 from finishup.domain.events import (
     MAX_CHECK_CHANGE_SHOWN_FILES,
@@ -69,6 +70,8 @@ from finishup.ports.change_capture import (
     drop_space_cut_words,
     encode_check_change,
     encode_task_change_base,
+    evidence_task_of,
+    evidence_task_scope,
 )
 from finishup.ports.clock import ClockPort
 from finishup.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
@@ -113,6 +116,7 @@ _STRUCTURAL_METADATA_UNAVAILABLE: Final = "metadata_unavailable"
 # A claim-bound task's workspace agent did not answer a read the capture needed (ADR-051).
 _WORKSPACE_AGENT_UNAVAILABLE: Final = "workspace_agent_unavailable"
 _WORKSPACE_AGENT_REFUSED: Final = "workspace_agent_refused"
+_CODE_COPY_UNAVAILABLE: Final = "code_copy_unavailable"
 # The hub reasons for an agent that answered with a refusal, or declared no such operation.
 _AGENT_REFUSALS: Final = frozenset({"agent_refused", "operation_not_declared"})
 
@@ -124,9 +128,13 @@ def _agent_loss_reason(exc: WorkspaceAgentUnavailable) -> str:
     other loss (no agent, a dropped connection, a deadline, a busy agent, a reply that did not
     decode, an agent that failed or was itself unavailable) is ``workspace_agent_unavailable``.
     Each has its own fixed receipt sentence, so a receipt never says the agent was silent when it
-    refused, nor that it refused when it failed (ADR-051).
+    refused, nor that it refused when it failed (ADR-051). A read of a task pinned to the
+    server's copy that the copy could not serve is ``code_copy_unavailable`` (ADR-054): the
+    client's agent was never asked, so its sentence names the copy instead.
     """
 
+    if exc.reason == _CODE_COPY_UNAVAILABLE:
+        return _CODE_COPY_UNAVAILABLE
     if exc.reason in _AGENT_REFUSALS:
         return _WORKSPACE_AGENT_REFUSED
     return _WORKSPACE_AGENT_UNAVAILABLE
@@ -268,6 +276,16 @@ async def _resolve(
     ):
         raise ValueError("check_change_object_invalid")
     return ref
+
+
+async def _erased(runtime: TaskRuntime, object_id: str) -> bool:
+    """Whether the task's ledger records ``object_id`` as erased with forgotten content."""
+
+    reader = getattr(runtime.ledger, "erased_object_ids", None)
+    if not callable(reader):
+        return False
+    erased = await cast(Callable[[], Awaitable[frozenset[str]]], reader)()
+    return object_id in erased
 
 
 async def _load_task_base(runtime: TaskRuntime, request_id: str) -> TaskChangeBase | None:
@@ -856,6 +874,7 @@ async def capture_check_time_change(
     space_cut_paths: frozenset[str] = frozenset(),
     snapshots: tuple[TaskInputSnapshotSet, ...] = (),
     current_reader: CurrentInputReader | None = None,
+    subject_sequence: int | None = None,
 ) -> CheckChangeOutcome:
     """Capture, redact and store one check's change; every failure is a disclosed absence.
 
@@ -870,6 +889,10 @@ async def capture_check_time_change(
     outside the workspace that none of them covers (``outside_inputs_not_admitted``, #1102).
     ``space_cut_paths`` are the candidates only the spaces of a quoted value cut out
     (``space_cut_input_paths``); no other candidate ever gives way to a spaced one on disk.
+    ``subject_sequence`` is the frontier the check tests: the change is stored inside the task's
+    content fence (``application.content_fence``), and never when a server copy's content was
+    forgotten after that frontier (``content_forgotten``: every view masks this check's excerpts,
+    so its change must not outlive the forget that erased the rest).
     """
 
     if type(source) is not CheckWorkspaceSource:
@@ -907,7 +930,20 @@ async def capture_check_time_change(
             snapshots=snapshots,
             current_reader=current_reader,
         )
-        ref = await _store(runtime, encode_check_change(capture), CHECK_CHANGE_MEDIA_TYPE, clock)
+        async with content_publication_fence(runtime.task_id):
+            if subject_sequence is not None and await content_forgotten_after(
+                runtime, subject_sequence
+            ):
+                record_bounded_event_without_raising(
+                    component=_COMPONENT,
+                    operation="check_time_change_unavailable",
+                    reason="content_forgotten",
+                    request_id=request_id,
+                )
+                return CheckChangeOutcome(unavailable=True, reason="content_forgotten")
+            ref = await _store(
+                runtime, encode_check_change(capture), CHECK_CHANGE_MEDIA_TYPE, clock
+            )
         return CheckChangeOutcome(CheckTimeChange(ref, capture))
     except ChangeCaptureUnavailable as exc:
         record_bounded_event_without_raising(
@@ -1013,12 +1049,19 @@ async def recover_check_time_change(runtime: TaskRuntime, binding: object) -> Ch
     fields = cast(dict[str, object], pointer)
     if set(fields) != {"commitment", "envelope_digest", "object_id"}:
         raise ValueError("check_change_binding_invalid")
-    ref = await _resolve(
-        runtime,
-        cast(str, fields["object_id"]),
-        cast(str, fields["envelope_digest"]),
-        CHECK_CHANGE_MEDIA_TYPE,
-    )
+    try:
+        ref = await _resolve(
+            runtime,
+            cast(str, fields["object_id"]),
+            cast(str, fields["envelope_digest"]),
+            CHECK_CHANGE_MEDIA_TYPE,
+        )
+    except ValueError:
+        # ADR-054 (U20): a change erased with the forgotten server copy it was read from is a
+        # disclosed absence, never a corrupt job; any other unreadable object still refuses.
+        if await _erased(runtime, cast(str, fields["object_id"])):
+            return CheckChangeOutcome(unavailable=True, reason="content_forgotten")
+        raise
     if ref.commitment != fields["commitment"]:
         raise ValueError("check_change_binding_invalid")
     return CheckChangeOutcome(CheckTimeChange(ref, decode_check_change(await _read(runtime, ref))))
@@ -1046,7 +1089,9 @@ async def record_task_change_base(
     try:
         if await cast(Callable[[], Awaitable[ObjectRef | None]], loader)() is not None:
             return False
-        base = await asyncio.to_thread(port.read_task_base, workspace)
+        # Level L2 (ADR-054): the base is this task's evidence, read (and pinned) for it.
+        with evidence_task_scope(evidence_task_of(runtime)):
+            base = await asyncio.to_thread(port.read_task_base, workspace)
         if type(base) is not TaskChangeBase:
             raise TypeError("task_change_base_invalid")
         ref = await _store(

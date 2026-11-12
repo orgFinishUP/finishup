@@ -25,6 +25,7 @@ import hmac
 import posixpath
 from collections.abc import Sequence
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from finishup.adapters.workspace_root import RepositoryIdentityError, canonical_workspace_root
@@ -57,6 +58,7 @@ async def remote_workspace_binding(
     target: ServerTarget | None = None,
     authorization: ConnectionAuthorization | None = None,
     role: Literal["connection", "background"] = "connection",
+    code_sync: bool = False,
 ) -> ClientWorkspaceBinding:
     """The claim on ``workspace`` under ``claim_salt``, with its agent when ``serve_workspace``.
 
@@ -81,6 +83,9 @@ async def remote_workspace_binding(
     any change that ends the connection).
 
     ``role`` is the agent's declared role: ``background`` for the helper's agent (ADR-052).
+    ``code_sync`` (the helper only, ADR-054) gives a background agent of a target the owner
+    consented to at level L2 the responder of the two code-sync operations, while L2 is released;
+    every other agent never declares them.
     """
 
     if type(workspace) is not WorkspaceLocator:
@@ -120,6 +125,21 @@ async def remote_workspace_binding(
         if target is None
         else partial(held_worktrees, target_root(target.target_id), target.target_id)
     )
+    responder = None
+    if code_sync and role == "background" and target is not None and hold is not None:
+        from finishup.protocol.server_copy import l2_released
+
+        consent = target.consent
+        if l2_released() and consent is not None and consent.level == "L2":
+            from finishup.client.code_sync import CodeSyncResponder
+
+            responder = CodeSyncResponder(
+                target_id=target.target_id,
+                repository_key=hold.key,
+                root=Path(worktree),
+                worktree=claim.worktree,
+                check=check,
+            )
     return ClientWorkspaceBinding(
         claim,
         WorkspaceAgentHandler(
@@ -130,6 +150,7 @@ async def remote_workspace_binding(
             held_roots=held,
             own_authorization=check,
             role=role,
+            code_sync=responder,
         ),
         authorization=check,
         worktree=worktree,

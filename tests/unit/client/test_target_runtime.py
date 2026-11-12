@@ -64,6 +64,10 @@ def test_an_approach_registers_its_runtime(monkeypatch: pytest.MonkeyPatch) -> N
             del root
             return ProbeResult("ready", samples=1, round_trip_p95_ms=3)
 
+        def time_new_connections(self, root: Path | None, count: int) -> tuple[int, ...]:
+            del root
+            return (3,) * count
+
     monkeypatch.setattr(target_runtime, "_RUNTIME_LOADERS", dict(target_runtime._RUNTIME_LOADERS))  # pyright: ignore[reportPrivateUsage]
     register_target_runtime("ssh", _Runtime)
     assert runtime_for("ssh").probe(Path("/x")).outcome == "ready"

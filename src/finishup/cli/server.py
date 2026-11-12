@@ -45,6 +45,7 @@ import contextlib
 import functools
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -54,9 +55,12 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, NoReturn, cast
 import typer
 
 from finishup import __version__
+from finishup.cli.startup_gate_probe import STARTUP_GATE_SECONDS
 from finishup.client.authorization import bump_credential_generation
 from finishup.client.target_runtime import (
+    NEW_CONNECTION_SAMPLES,
     ProbeResult,
+    TargetRuntime,
     TargetRuntimeError,
     runtime_for,
 )
@@ -95,7 +99,7 @@ if TYPE_CHECKING:
     from finishup.client.server_profile import FetchedProfile
     from finishup.client.ssh_discovery import HostKeyQuestion, SshDiscovery
     from finishup.client.targets import ServerConsent
-    from finishup.protocol.consent_envelope import ConsentEnvelope
+    from finishup.protocol.consent_envelope import ConsentEnvelope, Retention
 
 __all__ = [
     "DISCLOSURE_LINES",
@@ -124,9 +128,6 @@ server_app = typer.Typer(
 
 _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _EXPLICIT_SOURCES: Final = frozenset({"environment", "runtime_pin", "environment_and_pin"})
-# p95 status round trip above which a required-mode startup gate (0.65 s for connect + status)
-# would likely deny on a cold hook (design section 8).
-_STARTUP_GATE_RISK_MS: Final = 200
 _USAGE: Final = 2
 _UNSAFE: Final = 20
 _UNAVAILABLE: Final = 20
@@ -343,8 +344,9 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         _USAGE,
     ),
     "server_level_unavailable": (
-        "that server requires more of this computer than this release can agree to (it keeps a "
-        "copy of the code, level L2, which arrives in a later release), so nothing was changed",
+        "that server does not offer the level or retention asked for, or it requires more than "
+        "the level chosen (level L2, a copy of your code kept there, is offered only when the "
+        "server's owner turns it on, with the retentions they allow), so nothing was changed",
         _USAGE,
     ),
     "style_invalid": ("give --style relay or --style direct", _USAGE),
@@ -409,6 +411,30 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "owner-only or is a link, so it receives none of them (each is held); repair it on this "
         "computer with 'finishup server repositories remove NAME --all', then run this command "
         "again",
+        _UNSAFE,
+    ),
+    # 'server code forget --all' and 'server remove' (level L2, ADR-054): fixed text, no path.
+    "code_copy_forget_incomplete": (
+        "not every copy on that server was forgotten; each line above says why and what to do, "
+        "and each stays there until it expires or is forgotten",
+        _UNAVAILABLE,
+    ),
+    "code_copy_deletion_unfinished": (
+        "that server could not finish deleting its copy yet; what it deleted is named above, the "
+        "rest stays fenced there and its deletion is retried; run the same command again later",
+        _UNAVAILABLE,
+    ),
+    "code_copy_fence_unavailable": (
+        "this computer could not stop sending copies of code to that server while it forgets "
+        "them (its folder for that server could not be written), so the target was not removed "
+        "and nothing more was forgotten; check that folder's owner and permissions, then run "
+        "the same command again",
+        _UNSAFE,
+    ),
+    "code_export_unsafe": (
+        "this computer's record of the copies it sent that server is not owner-only or is a "
+        "link, so which repositories they came from is not known; fix its permissions, or run "
+        "'finishup server code forget' in each repository",
         _UNSAFE,
     ),
 }
@@ -765,6 +791,20 @@ _LEVEL_LINES: Final[dict[str, tuple[str, ...]]] = {
         "Level of use: that server keeps your tasks, its ledger and reviews; your code stays on",
         "this computer, and the server reads it only through the FinishUP workspace agent here.",
     ),
+    # Level L2 (design v2 section 4.4, ADR-054): locally owned text only, never server prose.
+    "L2": (
+        "Level of use: that server keeps your tasks, its ledger and reviews, and a copy of each",
+        "repository you use with it: its git-visible files (tracked, and untracked but not",
+        "ignored), never its history, minus the names this release always leaves out, that",
+        "server's own exclusions and your list for the repository. The names of the files left",
+        "out are sent, never their contents. Before a file is sent its content is scanned for",
+        "known secret formats, and a match is held back until you allow it. Names and scans are",
+        "not a guarantee that no secret is sent.",
+    ),
+}
+_RETENTION_LINES: Final[dict[str, str]] = {
+    "task_close": "That server keeps each copy until the tasks that read it are closed.",
+    "until_forgotten": "That server keeps each copy until you forget it.",
 }
 _PROVIDER_NAMES: Final[dict[str, str]] = {
     "anthropic": "Anthropic",
@@ -806,8 +846,23 @@ def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
                 f"({_provider_name(review.fallback_disclosure)}),",
                 "as that server's own privacy policy decides.",
             )
+    copy_lines: tuple[str, ...] = ()
+    if envelope.level == "L2" and envelope.retention is not None:
+        retention = envelope.retention
+        kept = (
+            f"That server keeps each copy for {retention.days} days after its last sync."
+            if retention.kind == "days"
+            else _RETENTION_LINES[retention.kind]
+        )
+        copy_lines = (
+            kept,
+            "'finishup server code forget' deletes a copy there; 'finishup server code level L1'",
+            "keeps one repository at level L1. Stopping or holding a repository later does not",
+            "remove what was already sent; only forget does.",
+        )
     return (
         *_LEVEL_LINES[envelope.level],
+        *copy_lines,
         *review_lines,
         "Checks you approved still run on this computer.",
         "",
@@ -968,19 +1023,90 @@ def _fetch_profile(record: ServerTarget) -> FetchedProfile:
         raise ServerCommandRefused(error.reason) from None
 
 
+@dataclass(frozen=True, slots=True)
+class LevelChoice:
+    """The level and retention the owner asked for (``--level``, ``--retention``); ``None``
+    keeps level L1 (or, for ``server use``, the level already consented to)."""
+
+    level: str | None = None
+    retention: str | None = None
+
+
+def _retention_of(value: str) -> Retention:
+    from finishup.protocol.consent_envelope import EnvelopeError, retention_from_token
+
+    try:
+        return retention_from_token(value)
+    except EnvelopeError:
+        raise ServerCommandRefused(
+            "usage", message="--retention is task_close, until_forgotten or days:N"
+        ) from None
+
+
+def _chosen_terms(
+    fetched: FetchedProfile, choice: LevelChoice, stored: ServerTarget | None = None
+) -> tuple[str, Retention | None]:
+    """The level and retention to consent to (design v2 sections 2.3 and 4.3, U11)."""
+
+    from finishup.protocol.server_copy import l2_released
+    from finishup.protocol.server_profile import ProfileError, profile_from_json
+
+    level = choice.level
+    retention_text = choice.retention
+    consent = None if stored is None else stored.consent
+    if level is None and consent is not None and consent.level == "L2" and l2_released():
+        # 'server use' keeps the level and retention already agreed to.
+        level = "L2"
+        if retention_text is None and consent.retention_kind is not None:
+            retention_text = (
+                f"days:{consent.retention_days}"
+                if consent.retention_kind == "days"
+                else consent.retention_kind
+            )
+    if level in {None, "L1"}:
+        if retention_text is not None:
+            raise ServerCommandRefused("usage", message="--retention applies to --level L2 only")
+        return "L1", None
+    if level != "L2":
+        raise ServerCommandRefused("usage", message="--level is L1 or L2")
+    if not l2_released():
+        raise ServerCommandRefused("server_level_unavailable")
+    try:
+        profile = profile_from_json(fetched.document)
+    except ProfileError:
+        raise ServerCommandRefused("server_profile_changed") from None
+    if "L2" not in profile.levels.offered or profile.retention is None:
+        raise ServerCommandRefused("server_level_unavailable")
+    if retention_text is None:
+        return "L2", profile.retention.default
+    retention = _retention_of(retention_text)
+    if retention not in profile.retention.options:
+        raise ServerCommandRefused(
+            "usage",
+            message="that server does not offer this retention; see 'finishup server status'",
+        )
+    return "L2", retention
+
+
 def _consent_offer(
-    record: ServerTarget, fetched: FetchedProfile
+    record: ServerTarget,
+    fetched: FetchedProfile,
+    choice: LevelChoice | None = None,
+    stored: ServerTarget | None = None,
 ) -> tuple[ConsentEnvelope, tuple[str, ...]]:
-    """The envelope the owner is asked to consent to at level L1, and its disclosure lines.
+    """The envelope the owner is asked to consent to (level L1 unless ``choice`` asks for L2),
+    and its disclosure lines.
 
     Refused before any console: a profile this release cannot read or understand
-    (``server_profile_changed``), or one requiring more than level L1 (``server_level_unavailable``).
+    (``server_profile_changed``), one requiring more than the level chosen, or a level or
+    retention it does not offer (``server_level_unavailable``).
     """
 
     from finishup.client.server_profile import consent_envelope_for
 
+    level, retention = _chosen_terms(fetched, choice or LevelChoice(), stored)
     try:
-        envelope, _profile = consent_envelope_for(record, fetched, level="L1", retention=None)
+        envelope, _profile = consent_envelope_for(record, fetched, level=level, retention=retention)
     except TargetError as error:
         raise ServerCommandRefused(error.reason) from None
     return envelope, profile_disclosure_lines(envelope)
@@ -995,6 +1121,23 @@ def _warn_open_sessions() -> None:
     from finishup.cli.zero_network_selection import OPEN_SESSIONS_LINE
 
     typer.echo(OPEN_SESSIONS_LINE)
+
+
+# Level L2 (ADR-054): the level and, at L2, the retention among those the server offers.
+_LEVEL_OPTION = Annotated[
+    str | None,
+    typer.Option(
+        "--level",
+        help="L1 (the default) or L2: whether the server also keeps a copy of your code.",
+    ),
+]
+_RETENTION_OPTION = Annotated[
+    str | None,
+    typer.Option(
+        "--retention",
+        help="L2: how long it keeps a copy (task_close, until_forgotten, days:N) among its options.",
+    ),
+]
 
 
 @server_app.command("add")
@@ -1048,6 +1191,8 @@ def server_add(
             help="local or listed: what the server may read outside your projects here.",
         ),
     ] = None,
+    level: _LEVEL_OPTION = None,
+    retention: _RETENTION_OPTION = None,
 ) -> None:
     """Add a server: a named local one on this computer, an SSH server, or an HTTPS server.
 
@@ -1082,8 +1227,13 @@ def server_add(
             tls_pin=tls_pin,
             key_file=key_file,
             outside_reads=outside_reads,
+            choice=LevelChoice(level, retention),
         )
         return
+    if level is not None or retention is not None:
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
     _require_selection_in_force()
     try:
         validate_name(name)
@@ -1183,6 +1333,7 @@ def _add_remote(
     tls_pin: str | None,
     outside_reads: str | None,
     key_file: Path | None = None,
+    choice: LevelChoice | None = None,
 ) -> None:
     """``server add`` for a server elsewhere, once its kind is open.
 
@@ -1284,7 +1435,7 @@ def _add_remote(
         fetched, api_key = _discover_rest(provisional, key_file)
     else:
         fetched = _fetch_profile(provisional)
-    envelope, lines = _consent_offer(provisional, fetched)
+    envelope, lines = _consent_offer(provisional, fetched, choice)
     mode = outside_reads
     official = official_address(kind, base_url, ca_file=ca_text, tls_pin=tls_pin)
     answered = _confirm_on_trusted_console(
@@ -1314,7 +1465,7 @@ def _add_remote(
             try:
                 # The envelope again for the record as written (its own id): the same terms.
                 consented, _profile = consent_envelope_for(
-                    record, fetched, level="L1", retention=None
+                    record, fetched, level=envelope.level, retention=envelope.retention
                 )
                 if consented != envelope:
                     raise TargetError("server_profile_changed")
@@ -1773,7 +1924,10 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
 
 
 def use_target(
-    name: str, *, authorize: Callable[[str, str, tuple[str, ...]], None] | None = None
+    name: str,
+    *,
+    authorize: Callable[[str, str, tuple[str, ...]], None] | None = None,
+    choice: LevelChoice | None = None,
 ) -> TargetSwitch:
     """Select ``name`` (``record`` ``None`` back means this computer's everyday server).
 
@@ -1806,7 +1960,11 @@ def use_target(
     if record.is_remote:
         if not _open_kind(record.kind):
             raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
-        return _use_remote(record, authorize)
+        return _use_remote(record, authorize, choice)
+    if choice is not None and (choice.level is not None or choice.retention is not None):
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
     try:
         with registry_lock():
             # Read again under the lock: a target removed meanwhile stays gone, and one whose
@@ -1823,7 +1981,9 @@ def use_target(
 
 
 def _use_remote(
-    record: ServerTarget, authorize: Callable[[str, str, tuple[str, ...]], None] | None
+    record: ServerTarget,
+    authorize: Callable[[str, str, tuple[str, ...]], None] | None,
+    choice: LevelChoice | None = None,
 ) -> TargetSwitch:
     """``use_target`` for a remote target of an open kind (see there)."""
 
@@ -1842,7 +2002,7 @@ def _use_remote(
             fetched = _fetch_profile(record)
     else:
         fetched = _fetch_profile(record)
-    envelope, lines = _consent_offer(record, fetched)
+    envelope, lines = _consent_offer(record, fetched, choice, stored=record)
     if authorize is None:
         _confirm_on_trusted_console(record.name, record.kind, lines)
     else:
@@ -1854,7 +2014,9 @@ def _use_remote(
             stored = _stored_record(record)
             if not stored.is_remote or stored.kind != record.kind:
                 raise ServerCommandRefused("server_profile_changed")
-            consented, _profile = consent_envelope_for(stored, fetched, level="L1", retention=None)
+            consented, _profile = consent_envelope_for(
+                stored, fetched, level=envelope.level, retention=envelope.retention
+            )
             if consented != envelope:
                 raise ServerCommandRefused("server_profile_changed")
             stored = record_consent(stored, fetched, consented, basis=basis)
@@ -1896,10 +2058,16 @@ def _stored_record(record: ServerTarget) -> ServerTarget:
 @_cli
 def server_use(
     name: Annotated[str, typer.Argument(help="A target name, or 'local' for this computer.")],
+    level: _LEVEL_OPTION = None,
+    retention: _RETENTION_OPTION = None,
 ) -> None:
     """Select the server new client processes use ('local' returns to this computer's)."""
 
-    switch = use_target(name)
+    before = _consented_level(name)
+    switch = use_target(
+        name,
+        choice=None if level is None and retention is None else LevelChoice(level, retention),
+    )
     record = switch.record
     if record is None:
         typer.echo("Using this computer's everyday FinishUP server.")
@@ -1909,7 +2077,83 @@ def server_use(
         typer.echo(line, err=switch.left_open)
     if record is not None:
         _say_repository_hold(record)
+        if before is not None and before != _level_key(record):
+            _helper_follows_level(record)
     _warn_open_sessions()
+
+
+def _level_key(record: ServerTarget) -> tuple[str, str] | None:
+    """The target and the level its consent names; ``None`` for no remote consent."""
+
+    if not record.is_remote or record.consent is None:
+        return None
+    return record.target_id, record.consent.level
+
+
+def _consented_level(name: str) -> tuple[str, str] | None:
+    """``_level_key`` of the target named ``name`` before ``server use`` changes it."""
+
+    if name == "local":
+        return None
+    try:
+        return _level_key(find_target(name))
+    except TargetError:
+        return None
+
+
+# How long ``server use`` waits for a running helper to follow a new level before it stops it.
+_FOLLOW_SECONDS: Final = 5.0
+_FOLLOW_POLL_SECONDS: Final = 0.1
+
+
+def _helper_follows_level(record: ServerTarget) -> None:
+    """The owner chose another level for a server: this command ends once its helper follows it.
+
+    A background agent declares the code-sync operations only when it opens, under the level of
+    its time; one opened before would still be the one the server asks, and at L1 it refuses the
+    sync at once, so a task sent right after this command would be read from this computer for
+    its whole life (defect A of the 2026-11-11 dogfood). A running helper follows the consent at
+    its next tick and then says so (``helper_status.read_followed_consent``), once every agent
+    that declared less is closed; this waits for that, a few seconds at most. A helper that does
+    not say so in time is stopped instead (``_stop_helper_for_level``), and with no helper
+    running the next client starts one under the new level.
+    """
+
+    from finishup.client.authorization import consent_digest
+    from finishup.client.helper_status import helper_holder, read_followed_consent
+
+    root = target_root(record.target_id)
+    try:
+        current = read_target(root)
+    except TargetError:
+        current = None
+    if current is None:
+        return
+    wanted = consent_digest(current)
+    deadline = time.monotonic() + _FOLLOW_SECONDS
+    while helper_holder(root) is not None:
+        if read_followed_consent(root) == wanted:
+            return
+        if time.monotonic() >= deadline:
+            _stop_helper_for_level(record)
+            return
+        time.sleep(_FOLLOW_POLL_SECONDS)
+
+
+def _stop_helper_for_level(record: ServerTarget) -> None:
+    """Stop a helper that did not follow a new level in time (``_helper_follows_level``): its
+    agents closed, as ``server set --style`` does; the next client starts one under the new
+    level. A stop that does not finish in time is named, with its fix."""
+
+    try:
+        runtime_for(record.kind).stop(target_root(record.target_id))
+    except TargetRuntimeError:
+        typer.echo(
+            f"The connection this computer keeps for {record.name} did not stop in time; it "
+            f"follows the new level within a few seconds, or run 'finishup server disconnect "
+            f"{record.name}'.",
+            err=True,
+        )
 
 
 def _probe_document(result: ProbeResult | None, error: TargetRuntimeError | None) -> JsonValue:
@@ -1983,9 +2227,13 @@ def _resolve(name: str | None) -> tuple[ServerTarget | None, Path | None, bool]:
     return record, target_root(record.target_id), False
 
 
-def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+def _runtime(record: ServerTarget | None) -> TargetRuntime:
     kind: TargetKind = "local" if record is None else record.kind
-    return runtime_for(kind).probe(root)
+    return runtime_for(kind)
+
+
+def _probe(record: ServerTarget | None, root: Path | None) -> ProbeResult:
+    return _runtime(record).probe(root)
 
 
 def build_status_document(
@@ -2077,7 +2325,11 @@ def build_status_document(
         "client_version": __version__,
         "target": target,
         # Nothing is sent to probe it while this computer is zero-network (ADR-051 decision 8).
-        "probe": (_probe_document(result, failure) if refused is None else _not_probed(refused)),
+        "probe": _with_continuation(
+            _probe_document(result, failure) if refused is None else _not_probed(refused),
+            target,
+            record,
+        ),
         "zero_network_selection": zero_network_item,
         "observed_at": format_rfc3339_ms(stamp),
     }
@@ -2085,6 +2337,35 @@ def build_status_document(
 
     ServerTargetStatusContract.model_validate(document)
     return document
+
+
+def _with_continuation(
+    probe: JsonValue, target: Mapping[str, JsonValue], record: ServerTarget | None
+) -> JsonValue:
+    """``probe`` with the registered continuation of its failure, for a server elsewhere.
+
+    The target's own style and consent decide it, never the selected one's: a probe of a target
+    reached in the direct style that did not answer in time is ``remote_direct_slow`` (the
+    owner's WAN-gate decision); ``server_profile_changed`` is ``remote_profile_checking`` while
+    the consent here still admits the cached profile and ``remote_reconsent`` otherwise
+    (``targets.profile_change_continuation``); any other remote phase is its own continuation;
+    anything else has none.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+    from finishup.protocol.recovery import continuation_for_reason
+
+    document = cast(dict[str, JsonValue], probe)
+    phase = document.get("phase")
+    continuation: str | None = None
+    if document.get("outcome") in {"not_running", "unavailable"} and type(phase) is str:
+        if _direct_style(target) and phase in _DIRECT_TIMEOUT_PHASES:
+            continuation = "remote_direct_slow"
+        elif phase == "server_profile_changed":
+            continuation = profile_change_continuation(record)
+        elif phase in REMOTE_CONNECTION_PHASES:
+            continuation = continuation_for_reason(phase)
+    return {**document, "continuation": continuation}
 
 
 def _connection_document(record: ServerTarget | None, root: Path | None) -> JsonValue:
@@ -2323,6 +2604,46 @@ def _key_refused_line(kind: str, name: str) -> str:
     return f"The server answered and refused this client's key; {fix}."
 
 
+# What a direct-style connection that did not answer in time looks like in a probe: the
+# connection's own deadline (``remote_unreachable``) or the probe's bound (``timeout``).
+_DIRECT_TIMEOUT_PHASES: Final = frozenset({"remote_unreachable", "timeout"})
+
+
+def _reached_directly(record: ServerTarget | None, root: Path | None) -> bool:
+    """Whether ``record`` is a server elsewhere this computer reaches in the direct style."""
+
+    if record is None or root is None or record.kind not in _STYLE_KINDS:
+        return False
+    from finishup.client.helper_status import read_connection_style
+
+    return read_connection_style(root) == "direct"
+
+
+def _direct_style(target: Mapping[str, JsonValue]) -> bool:
+    connection = target.get("connection")
+    return isinstance(connection, Mapping) and connection.get("style") == "direct"
+
+
+def direct_style_slow_line(name: str, *, answered: bool) -> str:
+    """The plain line of a slow direct-style connection and its remedy (the owner's decision,
+    2026-11-11): the direct style opens a connection per program, which a slow network makes
+    slow; ``finishup server set NAME --style relay`` keeps one for every program instead.
+    ``answered``: measured slow (``server test``); otherwise it could not be reached in time,
+    which a server that is down also does, so that line says only what the style costs."""
+
+    head = (
+        "The direct style is slow on this network: each program here opens its own connection "
+        "to that server"
+        if answered
+        else f"{name} could not be reached in time in the direct style, where each program here "
+        "opens its own connection to that server, which is slow on a slow network"
+    )
+    return (
+        f"{head}. Run 'finishup server set {name} --style relay' (the default) so this "
+        "computer's FinishUP helper keeps one connection for every program."
+    )
+
+
 def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tuple[str, ...]:
     """The owner display of a status document, a remote target's outside reads included.
 
@@ -2371,6 +2692,8 @@ def status_lines(document: dict[str, JsonValue], *, in_use: bool = True) -> tupl
         )
     lines.extend(consent_lines(target))
     lines.extend(connection_lines(target))
+    if _direct_style(target) and probe["phase"] in _DIRECT_TIMEOUT_PHASES:
+        lines.append(direct_style_slow_line(str(target["name"] or "NAME"), answered=False))
     lines.extend(outside_read_lines(target))
     lines.extend(repository_lines(target))
     if document["selection_overridden"]:
@@ -2582,7 +2905,7 @@ def server_test(
 ) -> None:
     """Probe a target and compare its round trip with the hook and startup-gate budgets."""
 
-    record, _root, _everyday = _resolve(name)
+    record, root, _everyday = _resolve(name)
     # These lines never show the zero-network item (``status`` and ``list`` do), so this
     # computer's service is not asked for its policy, nor for this folder's repository.
     document = build_status_document(name, zero_network=lambda: None, repository_here=False)
@@ -2607,14 +2930,41 @@ def server_test(
             err=True,
         )
         raise typer.Exit(_UNAVAILABLE)
-    p95 = probe["round_trip_p95_ms"]
-    if isinstance(p95, int) and p95 > _STARTUP_GATE_RISK_MS:
+    target = cast(dict[str, JsonValue], document["target"])
+    direct = _direct_style(target)
+    target_name = str(target["name"] or "NAME")
+    # What the required startup gate times (design v2 section 8.9): a new process's connection
+    # and a status, after its imports. The round trip above is one warm status only; a new
+    # connection adds its handshake's round trips (and, relayed, the server's new channel) and
+    # the process's own schema work, so only this is compared with the gate's bound.
+    try:
+        times = _runtime(record).time_new_connections(root, NEW_CONNECTION_SAMPLES)
+    except TargetRuntimeError as error:
+        phase = "" if error.phase is None else f", phase {error.phase}"
         typer.echo(
-            f"Warning: {p95} ms p95 is above {_STARTUP_GATE_RISK_MS} ms; with the required "
-            "startup gate (0.65 s for connect and status) agent tools would likely be denied."
+            f"A new connection did not answer a status call ({error.reason}{phase}).", err=True
         )
+        if direct and error.phase in _DIRECT_TIMEOUT_PHASES:
+            typer.echo(direct_style_slow_line(target_name, answered=False), err=True)
+        raise typer.Exit(_UNAVAILABLE) from None
+    bound = round(STARTUP_GATE_SECONDS * 1000)
+    slowest = max(times)
+    typer.echo(
+        f"New connection and status: {slowest} ms at the slowest of {len(times)} new processes "
+        f"(the required startup gate allows {bound} ms)."
+    )
+    if slowest > bound:
+        typer.echo(
+            f"Warning: {slowest} ms is above the {bound} ms the required startup gate allows for "
+            "a connection and a status; agent tools would likely be denied."
+        )
+        if direct:
+            typer.echo(direct_style_slow_line(target_name, answered=True))
     else:
-        typer.echo("Within the hook budgets (0.65 s startup gate, 1.0 s hook connect).")
+        typer.echo(
+            f"Within the startup gate's {bound} ms for a new connection and status; a task's "
+            "status asks the server for more than this one."
+        )
 
 
 @server_app.command("remove")
@@ -2628,11 +2978,36 @@ def server_remove(
         bool,
         typer.Option("--select-local", help="If it is selected, switch to 'local' first."),
     ] = False,
+    forget_copies: Annotated[
+        bool,
+        typer.Option(
+            "--forget-copies",
+            help="L2: first forget every copy of code this computer sent it; if one is not "
+            "forgotten, nothing is removed.",
+        ),
+    ] = False,
+    keep_copies: Annotated[
+        bool,
+        typer.Option(
+            "--keep-copies",
+            help="L2: remove it and leave the copies of code this computer sent it there.",
+        ),
+    ] = False,
 ) -> None:
     """Remove a target: stop what this client runs for it, delete its key and its folder."""
 
     _require_no_explicit_source()
+    if forget_copies and keep_copies:
+        raise ServerCommandRefused(
+            "usage", message="give --forget-copies or --keep-copies, not both"
+        )
     if _LEFTOVER_ID.match(name):
+        if forget_copies:
+            raise ServerCommandRefused(
+                "usage",
+                message="a leftover folder names no server to ask, so nothing can be forgotten "
+                "through it; remove it without --forget-copies",
+            )
         _remove_leftover(name)
         return
     record = _target_or_fail(name)
@@ -2649,8 +3024,21 @@ def server_remove(
     if selected == record.target_id and not select_local:
         raise ServerCommandRefused("target_selected")
     root = target_root(record.target_id)
+    fence = False
+    if record.is_remote and _copies_sent(root):
+        # Level L2 (ADR-054): removing the target here leaves what it was sent there, and its
+        # claim salt goes with it, so this is the last moment this computer can forget them.
+        fence = _forget_or_keep_copies(record, root, forget=forget_copies, keep=keep_copies)
+    elif forget_copies:
+        typer.echo(
+            f"This computer has no record of a copy of code it sent to {record.name}; nothing "
+            "was forgotten."
+        )
     key_left = cleared = finished = reports_removed = False
     try:
+        if fence:
+            # Still fenced while its helper is stopped and its folder deleted (with the fence).
+            _renew_fence(root)
         with registry_lock():
             # The selection goes first, so a new hook or command can no longer dial the target
             # while its connection is stopped (as ``use_target`` does).
@@ -2679,6 +3067,11 @@ def server_remove(
         typer.echo(f"{error.reason_code}: the target folder is unsafe to remove", err=True)
         raise typer.Exit(_UNSAFE) from None
     finally:
+        if fence and not finished:
+            # The target stays, so does its way back to sending copies at level L2.
+            from finishup.client.code_sync_fence import lower_fence
+
+            lower_fence(root)
         if cleared and not finished:
             # A remove that did not finish keeps the switch it already made (SRV-2): say so.
             _say_using_everyday()
@@ -2705,6 +3098,124 @@ def server_remove(
 def _say_using_everyday() -> None:
     typer.echo("Using this computer's everyday FinishUP server.")
     _warn_open_sessions()
+
+
+def _copies_sent(root: Path) -> bool:
+    """Whether this computer's export records say it sent copies of code to the target at
+    ``root`` (level L2): an export folder that cannot be listed may name some, so it counts."""
+
+    folder = root / "state" / "code-export"
+    try:
+        return folder.is_dir() and any(folder.iterdir())
+    except OSError:
+        return True
+
+
+def _copies_stay_line(record: ServerTarget) -> str:
+    return (
+        f"{record.name} may still keep copies of code this computer sent it. Removing it here does "
+        "not delete them there, and afterwards this computer cannot ask it to forget them: they "
+        "stay until they expire or that server's owner deletes them."
+    )
+
+
+def _ask_forget_first(record: ServerTarget) -> bool | None:
+    """Ask on the trusted console whether to forget the copies before removing ``record``.
+
+    True to forget them first, False to keep them there; None when there is no trusted console
+    (a script or a pipe), so nothing could be asked. Any other answer cancels the remove.
+    """
+
+    from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
+
+    try:
+        with TrustedForegroundConsole() as console:
+            for line in (
+                f"{record.name} may still keep copies of code this computer sent it.",
+                f"Forget deletes those copies and their snapshots on {record.name} now.",
+                f"Keeping them leaves them there: removing {record.name} here does not delete "
+                "them, and once it is removed this computer cannot ask it to forget them, so they "
+                "stay until they expire or that server's owner deletes them.",
+                f"Forget the copies on {record.name} before removing it?",
+            ):
+                console.write(line + "\n")
+            answer = console.read_choice(
+                "Type yes to forget them first, or no to keep them there (anything else cancels): ",
+                (b"yes", b"no"),
+            )
+    except TrustedConsoleError as error:
+        if error.reason == "trusted_console_required":
+            return None
+        raise ServerCommandRefused(
+            "authorization_declined",
+            message="neither yes nor no was typed, so nothing was removed",
+        ) from None
+    return answer == b"yes"
+
+
+def _renew_fence(root: Path) -> None:
+    """Raise or renew the target's L2 sync fence (``client.code_sync_fence``), or refuse."""
+
+    from finishup.client.code_sync_fence import CodeSyncFenceError, raise_fence
+
+    try:
+        raise_fence(root)
+    except CodeSyncFenceError:
+        raise ServerCommandRefused("code_copy_fence_unavailable") from None
+
+
+def _forget_or_keep_copies(record: ServerTarget, root: Path, *, forget: bool, keep: bool) -> bool:
+    """Before ``server remove`` changes anything: forget the copies sent, or say they stay.
+
+    ``--forget-copies`` (or yes on the trusted console) forgets every repository as ``server
+    code forget --all`` does, through this target's own root, and refuses the remove when one
+    was not forgotten, so the owner can retry. ``--keep-copies`` (or no) and a run with no
+    trusted console and no flag remove it and say the copies stay: never silent, and never a
+    forget nobody asked for.
+
+    Forgetting first raises the target's L2 sync fence before the repositories are listed and
+    renews it before each one (``client.code_sync_fence``), so no check can make its helper sync
+    a repository again, under its new epoch, while the others are forgotten; a fence that cannot
+    be raised refuses the remove before anything is forgotten. Returns whether the fence is up:
+    the caller keeps it through the removal, and lowers it when the target stays.
+    """
+
+    choice: bool | None
+    if forget:
+        choice = True
+    elif keep:
+        choice = False
+    else:
+        choice = _ask_forget_first(record)
+    if choice:
+        from finishup.cli.server_code import forget_every_copy, forget_lines
+        from finishup.client.code_sync_fence import lower_fence
+
+        _renew_fence(root)
+        try:
+            outcomes = forget_every_copy(record, renew=lambda: _renew_fence(root))
+            for line in forget_lines(record, outcomes):
+                typer.echo(line)
+            if not all(outcome.forgotten for outcome in outcomes):
+                raise ServerCommandRefused(
+                    "code_copy_forget_incomplete",
+                    message="not every copy on that server was forgotten (each line above says "
+                    "why and what to do), so the target was not removed; run the same command "
+                    "again once they are, or pass --keep-copies to remove it and leave them there",
+                )
+        except BaseException:
+            lower_fence(root)
+            raise
+        return True
+    typer.echo(_copies_stay_line(record), err=True)
+    if choice is None:
+        typer.echo(
+            f"'finishup server remove {record.name} --forget-copies' forgets them before it "
+            "removes a target; this command could not ask, since it does not run on your own "
+            "terminal.",
+            err=True,
+        )
+    return False
 
 
 def _stop_for_remove(record: ServerTarget, root: Path) -> None:
@@ -3112,6 +3623,17 @@ def _runtime_call(name: str | None, action: Literal["ensure_ready", "stop"]) -> 
                     else _PROFILE_CHECKING_AT_CONNECT
                 ),
                 continuation=continuation,
+            ) from None
+        if (
+            error.reason == "service_unavailable"
+            and error.phase in _DIRECT_TIMEOUT_PHASES
+            and _reached_directly(record, root)
+        ):
+            # This target, reached in the direct style, could not be reached in time: the
+            # direct style is slow on a slow network, and the relay style is the remedy (the
+            # owner's WAN-gate decision; the named target's own style, never the selected one's).
+            raise ServerCommandRefused(
+                "remote_unreachable", continuation="remote_direct_slow"
             ) from None
         _runtime_failure(error)
     if record is not None:

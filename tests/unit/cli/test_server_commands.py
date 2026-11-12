@@ -26,7 +26,7 @@ from typing import Final, cast
 import pytest
 from typer.testing import CliRunner, Result
 
-from builders.server_targets import ambient_home, remote_runtime
+from builders.server_targets import StandInRuntime, ambient_home, remote_runtime
 from finishup.cli import app as cli
 from finishup.cli import server as server_cli
 from finishup.cli import trusted_console
@@ -191,6 +191,7 @@ def test_the_help_offers_servers_on_this_computer_over_ssh_and_over_https(home: 
         "logout",
         "folders",
         "repositories",
+        "code",
     }
     words = set(re.findall(r"[a-z]+", _plain(listing.stdout)))
     assert {"add", "list", "use", "status", "test", "remove", "connect", "disconnect"} <= words
@@ -790,6 +791,7 @@ def test_a_probe_not_sent_carries_when_this_computer_reported_zero_network() -> 
         "round_trip_p95_ms": None,
         "samples": 0,
         "last_reported_at": "2026-11-07T09:30:00.000Z",
+        "continuation": None,
     }
     document = {**payload, "probe": not_sent}
     validate_schema_instance("server-target-status", "1.0.0", cast(JsonValue, document))
@@ -1925,8 +1927,14 @@ def _ready_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=5, samples=5
         )
 
+    def timed(_self: object, _root: Path | None, count: int) -> tuple[int, ...]:
+        return (40,) * count
+
     remote_runtime(monkeypatch).probe_result = ready(None, None)
     monkeypatch.setattr("finishup.client.target_runtime.LocalTargetRuntime.probe", ready)
+    monkeypatch.setattr(
+        "finishup.client.target_runtime.LocalTargetRuntime.time_new_connections", timed
+    )
 
 
 @pytest.mark.parametrize("selected", ["lab", None])
@@ -2013,3 +2021,256 @@ def test_server_status_and_test_say_a_refused_key_was_an_answer(
     document = _status_json("lab")
     probe = cast(dict[str, JsonValue], document["probe"])
     assert (probe["outcome"], probe["reason"]) == ("unavailable", "remote_auth_failed")
+
+
+def _ready_lab(monkeypatch: pytest.MonkeyPatch, *, round_trip_ms: int) -> StandInRuntime:
+    from finishup.client.target_runtime import ProbeResult
+
+    with targets.registry_lock():
+        targets.new_remote_target(
+            "lab", "ssh", host="lab.example", port=22, remote_launcher="/opt/fu/bin/finishup"
+        )
+    runtime = remote_runtime(monkeypatch)
+    runtime.probe_result = ProbeResult(
+        "ready",
+        service_state="ready",
+        service_version="0.3.0",
+        round_trip_p95_ms=round_trip_ms,
+        samples=10,
+    )
+    return runtime
+
+
+def test_server_test_warns_when_a_new_connection_misses_the_startup_gate(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design v2 section 8.9: a warm status round trip of 120 ms said "within the hook budgets"
+    while the startup gate's own connection and status took 673 ms; what is compared with the
+    gate's bound is now what the gate times, a new process's connection and status."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    runtime.new_connection_times = (540, 610, 702, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Round trip p95: 120 ms over 10 status calls" in tested.stdout
+    assert (
+        "New connection and status: 702 ms at the slowest of 5 new processes "
+        "(the required startup gate allows 650 ms)."
+    ) in tested.stdout
+    assert (
+        "Warning: 702 ms is above the 650 ms the required startup gate allows for a connection "
+        "and a status; agent tools would likely be denied."
+    ) in tested.stdout
+    assert "Within" not in tested.stdout
+    roots = [root for call, root in runtime.calls if call == "time_new_connections"]
+    lab = targets.find_target("lab")
+    assert lab is not None
+    assert roots == [targets.target_root(lab.target_id)]
+
+
+def test_server_test_says_a_new_connection_fits_the_gate_with_what_it_did_not_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _ready_lab(monkeypatch, round_trip_ms=320)
+    runtime.new_connection_times = (450, 470, 650, 430, 440)  # the bound itself still fits
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "650 ms at the slowest of 5 new processes" in tested.stdout
+    assert (
+        "Within the startup gate's 650 ms for a new connection and status; a task's status asks "
+        "the server for more than this one."
+    ) in tested.stdout
+    assert "Warning" not in tested.stdout  # the warm round trip alone (320 ms) decides nothing
+
+
+def test_server_test_names_a_new_connection_that_did_not_answer(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "A new connection did not answer a status call (service_unavailable, phase timeout)."
+        in tested.stderr
+    )
+    assert "Within" not in tested.stdout
+
+
+def _direct(name: str = "lab") -> None:
+    from finishup.client.helper_status import write_connection_style
+
+    lab = targets.find_target(name)
+    assert lab is not None
+    write_connection_style(targets.target_root(lab.target_id), "direct")
+
+
+_RELAY_REMEDY = (
+    "Run 'finishup server set lab --style relay' (the default) so this computer's FinishUP "
+    "helper keeps one connection for every program."
+)
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_test_says_the_direct_style_is_slow_here_and_names_the_relay_style(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """The owner's WAN-gate decision (2026-11-11): the direct style stays available and relay
+    stays the default; when 'server test' measures a direct connection slower than the startup
+    gate allows, it says so plainly and names the relay style as the remedy. A relayed target
+    that is slow is not told to switch to the style it already uses."""
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=120)
+    if style == "direct":
+        _direct()
+    runtime.new_connection_times = (540, 610, 826, 580, 560)
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 0, tested.output
+    assert "Warning: 826 ms is above the 650 ms" in tested.stdout
+    if style == "direct":
+        assert (
+            "The direct style is slow on this network: each program here opens its own "
+            "connection to that server. " + _RELAY_REMEDY
+        ) in tested.stdout
+    else:
+        assert "--style relay" not in tested.output
+
+
+def test_server_test_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    _direct()
+    runtime.new_connection_error = TargetRuntimeError("service_unavailable", phase="timeout")
+    tested = _invoke("test", "lab")
+    assert tested.exit_code == 20
+    assert (
+        "lab could not be reached in time in the direct style, where each program here opens its "
+        "own connection to that server, which is slow on a slow network. " + _RELAY_REMEDY
+    ) in tested.stderr
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "named"),
+    [
+        ("direct", "remote_unreachable", True),
+        ("direct", "timeout", True),
+        ("direct", "remote_auth_failed", False),
+        ("relay", "remote_unreachable", False),
+    ],
+)
+def test_server_status_says_a_direct_connection_that_did_not_answer_in_time_is_slow_here(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, named: bool
+) -> None:
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    document = _status_json("lab")
+    assert cast(dict[str, JsonValue], document["probe"])["phase"] == phase
+    text = "\n".join(server_cli.status_lines(document))
+    assert (_RELAY_REMEDY in text) is named
+
+
+def test_a_remote_probe_keeps_the_phase_its_connection_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'server status' of a server elsewhere names why it could not be reached: the probe keeps
+    the connection's phase (it dropped it, so a direct timeout read as a stopped service)."""
+
+    from finishup.client import target_runtime
+    from finishup.ports.control import ControlError
+
+    async def refuse(*_arguments: object, **_options: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
+
+    monkeypatch.setattr("finishup.service.client.connect_service", refuse)
+    result = target_runtime.LocalTargetRuntime().probe(None)
+    assert (result.outcome, result.reason, result.phase) == (
+        "not_running",
+        "service_unavailable",
+        "remote_unreachable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("style", "phase", "expected"),
+    [
+        ("direct", "remote_unreachable", "remote_direct_slow"),
+        ("direct", "timeout", "remote_direct_slow"),
+        ("direct", "remote_auth_failed", "remote_credential_repair"),
+        ("relay", "remote_unreachable", "remote_server_test"),
+        ("relay", "timeout", None),
+        # No consent here: only the owner agrees again.
+        ("relay", "server_profile_changed", "remote_reconsent"),
+    ],
+)
+def test_server_status_json_names_the_continuation_of_a_probe_that_failed(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str, phase: str, expected: str | None
+) -> None:
+    """Review (Codex, layer 7): `server status --json` (and a piped status) named a direct
+    timeout's phase but not its way back; the probe carries its registered continuation, decided
+    by the named target's own style."""
+
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+    runtime.probe_result = ProbeResult("unavailable", reason="service_unavailable", phase=phase)
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == expected
+    runtime.probe_result = ProbeResult(
+        "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=40, samples=10
+    )
+    assert cast(dict[str, JsonValue], _status_json("lab")["probe"])["continuation"] is None
+
+
+def test_server_status_json_asks_to_repeat_a_probe_refused_while_the_consent_admits_the_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server refused a revision this computer has not fetched while the consent here still
+    admits the cached profile: what changed is not known yet and may be a narrowing FinishUP
+    adjusts to by itself, so the probe continues as ``remote_profile_checking``, not
+    ``remote_reconsent`` (ADR-052 decision 10)."""
+
+    from builders.server_profiles import consent_to
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    consent_to(targets.find_target("lab"))
+    runtime.probe_result = ProbeResult(
+        "unavailable", reason="service_unavailable", phase="server_profile_changed"
+    )
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == "remote_profile_checking"
+
+
+@pytest.mark.parametrize("style", ["direct", "relay"])
+def test_server_connect_names_the_relay_style_when_a_direct_connection_did_not_answer_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    """Review (Codex, layer 7): `server connect NAME` of a target reached in the direct style that
+    could not be reached in time printed only the network remedy; it names the relay style, by
+    the named target's own style."""
+
+    from finishup.client.target_runtime import TargetRuntimeError
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    if style == "direct":
+        _direct()
+
+    def unreachable(_root: Path | None) -> None:
+        raise TargetRuntimeError("service_unavailable", phase="remote_unreachable")
+
+    monkeypatch.setattr(runtime, "ensure_ready", unreachable)
+    connected = _invoke("connect", "lab")
+    assert connected.exit_code != 0
+    assert connected.stderr.startswith("remote_unreachable: ")
+    assert ("'finishup server set NAME --style relay'" in connected.stderr) is (style == "direct")

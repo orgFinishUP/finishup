@@ -145,7 +145,9 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # ADR-052: +1 schema (server-profile 1.0.0).
 # ADR-053: +7 schemas (the REST v1 documents rest-agent, rest-agent-declaration, rest-agent-work,
 # rest-discovery, rest-error, rest-operation and rest-session 1.0.0).
-REVIEWED_RESOURCE_COUNT: Final = 367
+# ADR-054: +1 schema (config 1.4.0 with the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
+# ADR-054 (U20): +1 schema (content-forgotten 1.0.0), +1 bundle migration (0020).
+REVIEWED_RESOURCE_COUNT: Final = 370
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -236,6 +238,7 @@ _EVENT_NAMES: Final = (
     "child_written_off",
     "claim_recorded",
     "contact_expectation_declared",
+    "content_forgotten",
     "coordination_context_recorded",
     "coordination_disposition_recorded",
     "coordination_obligation_declared",

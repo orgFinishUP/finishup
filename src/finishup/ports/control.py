@@ -327,6 +327,8 @@ class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base
     OBSERVATION_RESUME = "observation_resume"
     OBSERVATION_REVOKE = "observation_revoke"
     SERVER_PROFILE = "server_profile"
+    # Level L2 (ADR-054): the server's copy of the claimed repository (status, forget).
+    CODE_COPY = "code_copy"
     SERVICE_STATUS = "service_status"
     SERVICE_LOCK = "service_lock"
     SERVICE_STOP = "service_stop"

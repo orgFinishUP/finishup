@@ -144,9 +144,10 @@ check-time change, requested-output facts, task inputs, declared tests, reviewer
 observation verification and approved checks. A server on another machine cannot. For a remote
 target the client sends a keyed workspace *claim* instead of a path, and a client-side workspace
 agent (`client/workspace_agent.py`, eighteen bounded operations cataloged in
-`ports/workspace_agent.py`) answers the server's `workspace_call`s with the same adapters and
-fences the local service uses. On the server, `service/workspace_hub.py` keeps the live agent
-channels keyed by workspace handle and correlates each call with its reply, and
+`ports/workspace_agent.py`, twenty with level L2's two sync operations from layer 6) answers the
+server's `workspace_call`s with the same adapters and fences the local service uses. On the
+server, `service/workspace_hub.py` keeps the live agent channels keyed by workspace handle and
+correlates each call with its reply, and
 `service/workspace_routing.py` wraps every workspace port the service composes: an absolute path
 goes to the local adapter unchanged, a `client:` handle goes to the hub, and no local adapter is
 ever handed a handle. Evidence obtained that way is labelled `client_attested`, and every
@@ -212,8 +213,8 @@ part of it is CLIENT and never runs or loads on a hook's path unless an SSH targ
   server's profile. It admits itself through the shared gate (`authorization.authorize_target`);
   a lapse ends every relayed connection and agent, and zero-network stops it at once.
   `client/helper_status.py` (hook-safe) is what a client needs of it: the lock, the status record
-  and its phases, start (with the stop epoch it read) and stop (the epoch, then the lock seen
-  free). `client/helper_runtime.py` is the SSH
+  and its phases, start (with the stop epoch its client read before dialling), stop (the epoch,
+  then the lock seen free) and the fenced replacement of exactly one holder. `client/helper_runtime.py` is the SSH
   `TargetRuntime` and the CLI's one-time registration.
 - `service/client.py` dispatches an admitted SSH root on its connection style (the helper's
   endpoint, or `ssh -W`), within one deadline for a hook (design v2 section 8.9), and names a
@@ -248,6 +249,60 @@ Layer 5 opens `https` and `local_port` over REST v1, the one public network cont
   and only it reads the API key in the relay style. `server login` and `server logout` stop it so
   nothing goes on under the old key.
 
+**Level L2, the server copy (layer 6, [ADR-054](adr/ADR-054-level-l2-the-server-copy.md)).**
+Built and **released**, and still opt-in at both ends: a server offers L2 only when its owner's
+`[server.code_copy]` table (config 1.4.0) enables an offer, and a client sends a copy only after
+its owner consents at L2 on the trusted console; otherwise every surface behaves as at L1. The
+server pulls; only the target's helper answers.
+
+Reads from the copy, provenance and erasure: `service/workspace_routing.py` serves a claim-bound
+task's git and in-root reads (task base, capture, change counts, reviewer reads beneath the root,
+task inputs inside it, an observation workspace's changed paths and inspection) from the snapshot
+the task is pinned to, through an owner-only checkout the service materializes from verified copy
+objects, while outside reads and approved checks stay with the client's workspace agent; an
+offline client's reads use the copy as last synced (`stale_copy_read`), and its approved checks
+fail `workspace_agent_unavailable`. A task keeps one source for its git reads, and an approved
+check whose subject state differs from the pinned snapshot is never a pass
+(`code_snapshot_mismatch`). Every routed read is counted per task by where it was answered
+(`domain/evidence_provenance.py`), and the receipt of a task that read the copy carries that
+account (`evidence_provenance`) and fixed "Workspace evidence" lines in every rendering instead of
+level L1's client-attested line. Forgetting a copy (by its owner or on expiry) records a
+service-written `content_forgotten` event in each pinned task's ledger, erases the task's
+captured-change and review objects, and masks the quoted excerpts in every later projection,
+leaving findings and checks and a "content forgotten" marker on the receipt.
+
+- `protocol/server_copy.py` (SHARED, pure): the `git-bundle-1` wire format, its one verifier for the
+  client's audit and the server's admission, the snapshot manifest, the provenance tokens and the
+  release switch.
+- `domain/code_exclusions.py` (SHARED): the names always left out of a copy and how a pattern
+  matches.
+- `client/code_secrets.py` (CLIENT): the content scan for known secret formats before a file enters
+  a copy.
+- `client/code_copy_settings.py` (CLIENT): the owner's per-repository choices
+  (`config/code-copy.json`: level L1, exclusions, allowed contents).
+- `client/code_export.py` (CLIENT, helper only): the sanitized exporter and its FinishUP-owned
+  export object database.
+- `client/code_sync.py` (CLIENT, helper only): answers the server's two code-sync operations after
+  the gate and the consent are checked again.
+- `client/code_sync_fence.py` (CLIENT): the lease-bound fence `server remove` raises so no code is
+  synced to a target while its copies are forgotten.
+- `service/code_store.py` (SERVER): the encrypted copy store (keys under the vault's authority,
+  admission, quotas, forget with its tombstone, expiry).
+- `service/code_copy.py` (SERVER): the puller that syncs before the task-base and check reads,
+  the pins, the evidence tally, the expiry (`days:N`, `task_close`) and the vault-derived copy
+  keys.
+- `service/code_checkout.py` (SERVER): the owner-only checkout of a copy's snapshot that routed
+  reads are served from.
+- `domain/evidence_provenance.py` (SHARED): one task's per-evidence account,
+  `yoetz.evidence-provenance/1`.
+- `application/content_forgetting.py` and `kernel/forgotten_content.py` (SERVER): the
+  `content_forgotten` event, the erasure of a task's derived content objects and the masks every
+  projection applies after it.
+- `application/content_fence.py` (SERVER): the per-task fence a forget and every content publisher
+  hold, and the refusal of content for work a forget came after.
+- `cli/server_code.py` (CLIENT): `finishup server code` (`list`, `forget [--all]`, `exclude`,
+  `allow add|list|remove`, `level`).
+
 ### Topology by target
 
 ```
@@ -281,7 +336,8 @@ local_port in layer 5
 
 None of the remote path existed in layer 1. Layer 4 builds the SSH part (the helper, both
 connection styles and the SSH edge); layer 5 builds the REST part (REST v1, the gateway and native
-edges, the one REST client and its mapping, the helper's REST upstream). The remote path follows
+edges, the one REST client and its mapping, the helper's REST upstream); layer 6 builds level L2's
+server copy and releases it. The remote path follows
 ADR-051's unified model, delivered in later layers: a *level* says where
 the work happens (L0 everything on this computer, the default; L1 the server keeps tasks and
 review while this computer's workspace agent answers its reads; L2 the server also keeps a copy of

@@ -458,8 +458,10 @@ in the [servers guide](../usage/servers.md#add-a-server-on-another-machine-ssh),
 [ADR-052](../adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)
 decisions 13 to 19. Evidence state: the OpenSSH paths below ran for real on Linux x86-64 (the
 capability tests against a private, unprivileged `sshd`, and an end-to-end run of the CLI, both on
-one machine over loopback). **WSL 2 and macOS are untested** at either end (gap, owner: layer 7);
-no host session (Codex, Claude Code, Cursor) has run against an SSH server yet (layer 7).
+one machine over loopback), and every SSH cell of the [acceptance matrix](acceptance-matrix.md)
+(relay and direct, L1 and L2) passed on Linux at layer 7. **WSL 2 and macOS are untested** at either
+end, and no host session (Codex, Claude Code, Cursor) has run against an SSH server: gaps with
+owners in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
 
 - **On the client.** The OpenSSH client (`ssh` on `PATH`; none is `remote_unreachable`) and a key
   login to the server account that runs FinishUP. FinishUP runs OpenSSH with `BatchMode=yes`, so a
@@ -498,8 +500,9 @@ no host session (Codex, Claude Code, Cursor) has run against an SSH server yet (
   `ServerAliveCountMax=3`) notices a dead connection within about 45 seconds, or the next channel
   failure does, and the helper restarts it; a hook spends only its own deadline and fails open
   naming `remote_unreachable`.
-- **WSL 2: untested** (gap, owner: layer 7). No run of the helper or of SSH is recorded inside a
-  distribution at either end; do not claim a WSL 2 cell until layer 7 records one. A distribution
+- **WSL 2: untested** (gap, owner: the maintainer, on a Windows machine with WSL 2; see the
+  [acceptance matrix](acceptance-matrix.md#gaps-and-owners)). No run of the helper or of SSH is
+  recorded inside a distribution at either end; do not claim a WSL 2 cell until one is recorded. A distribution
   that stops (idle or `wsl --shutdown`) stops every process in it, a helper or a server service
   included.
 
@@ -510,8 +513,11 @@ the [servers guide](../usage/servers.md#add-an-https-server), the decisions in
 [ADR-053](../adr/ADR-053-rest-v1-public-contract.md) and ADR-052 decisions 20 to 23. Evidence
 state: both server edges ran for real on Linux x86-64 (the REST conformance kit, 18 cases, nine
 per edge over real TLS from a throwaway CA, and an end-to-end run of the CLI, both on one machine
-over loopback). **WSL 2 and macOS are untested** at either end (gap, owner: layer 7); no host
-session (Codex, Claude Code, Cursor) has run against an HTTPS server yet (layer 7).
+over loopback), and every `https` and `local_port` cell of the
+[acceptance matrix](acceptance-matrix.md) (both edges, relay and direct, L1 and L2) passed on Linux
+at layer 7. **WSL 2 and macOS are untested** at either end, and no host session (Codex, Claude Code,
+Cursor) has run against an HTTPS server: gaps with owners in the matrix's
+[gaps](acceptance-matrix.md#gaps-and-owners).
 
 - **On the server.** Keys first: `finishup service api-key create --label L --scope
   agent|operator [--output-file F]` on the server's own terminal (a key is shown once, or written
@@ -558,7 +564,8 @@ session (Codex, Claude Code, Cursor) has run against an HTTPS server yet (layer 
   epoch (no process is signalled);
   `finishup server logout NAME` deletes the key and stops it too; `finishup server remove NAME`
   removes only this computer's record and key. The server's own edge and service keep running.
-- **WSL 2: untested** (gap, owner: layer 7). No run of the REST edge or of an HTTPS client is
+- **WSL 2: untested** (gap, owner: the maintainer, on a Windows machine with WSL 2; see the
+  [acceptance matrix](acceptance-matrix.md#gaps-and-owners)). No run of the REST edge or of an HTTPS client is
   recorded inside a distribution. A listener inside WSL 2 is reached from Windows or the network
   only as WSL's own networking forwards it; check that before claiming any cell.
 

@@ -186,8 +186,11 @@ finishup server test lab
 
 `list` shows every server and which one is in use. `status` shows which setting chose the server
 in use, its kind, its state (for example ready, locked or not running), its FinishUP release and
-its vault mode. `test` connects, measures the round trip and warns when it is slow enough that a startup
-check required by your agent setup would likely time out.
+its vault mode. `test` connects, measures the round trip of a status call, then times a new
+connection and one status in five fresh FinishUP processes, the way the startup check required by
+some agent setups makes them, and warns when the slowest of those exceeds that check's 0.65 s.
+A task's own status asks the server for a little more than this test's, so a result close to
+0.65 s may still be too slow.
 
 For an SSH or HTTPS server, `status` also shows how this computer reaches it and what FinishUP's
 helper last did, for example:
@@ -223,6 +226,18 @@ finishup server set lab --style relay
 
 You can choose only a way the server offers. Changing it stops the helper (and, for SSH, the SSH
 connection) first; restart open agent sessions afterwards.
+
+The direct way is slower over a long distance: every program pays for its own new connection.
+When FinishUP sees that, it tells you and names the fix:
+
+- `finishup server test lab` measures a new connection the way an agent's tools need it; past
+  650 ms in the direct way it says the direct way is slow on this network;
+- `finishup server status lab`, `finishup server connect lab`, and the message an agent or a
+  command shows when the server could not be reached in time in the direct way, say that the direct
+  way is slow on a slow network (a server that is down looks the same; `server test` tells them
+  apart);
+- the fix is `finishup server set lab --style relay`, which makes the helper keep one connection
+  for every program again.
 
 ## Log in and out of an HTTPS server
 
@@ -287,7 +302,9 @@ using the removed server stops reaching FinishUP and says so until you restart i
 
 For an SSH or HTTPS server, `remove` stops this computer's helper (and SSH connection) and removes
 what FinishUP kept on this computer for it, an HTTPS server's API key included; nothing on the
-server is deleted, and its tasks stay there.
+server is deleted, and its tasks stay there. If this computer sent that server copies of your code,
+`remove` first asks whether to forget them (see
+[Removing a server that keeps copies](#removing-a-server-that-keeps-copies)).
 
 If adding or removing a server was interrupted, or something changed a server's folder while
 `remove` deleted it (`remove` then says so), `list` may name a leftover folder (`t_` and eight
@@ -332,6 +349,207 @@ port of this computer.
   FinishUP itself reads and claims for the project, not what an agent working in another folder
   reads and its hooks capture. A project inside another project follows the outer project's
   policy.
+
+## Keeping a copy of your code on a server (level L2)
+
+A server elsewhere normally keeps your tasks and reviews and reads your project only through
+FinishUP on this computer, while it works (level L1). A server whose owner offers it can also keep
+a copy of your code (level L2): it then reads most of a task's evidence from its copy itself, and
+FinishUP on this computer answers the rest. Nothing changes until the server's owner offers it and
+you choose it; level L1 stays the default.
+
+### Offering it on a server you run
+
+On the server, add a `[server.code_copy]` table to FinishUP's settings file (`config.toml`) and
+restart its service (`finishup service restart` there). FinishUP reads the table only when its
+service starts:
+
+```toml
+[server.code_copy]
+enabled = true
+retention = ["task_close", "days:30", "until_forgotten"]
+retention_default = "days:30"
+max_repo_bytes = 67108864
+max_file_bytes = 16777216
+exclusions = ["*.sqlite", "datasets/"]
+```
+
+- `enabled` (`false` unless you set it): without it, or with no table at all, the server offers
+  nothing more than level L1.
+- `retention`: the choices you give the people who connect (1 to 16): `task_close` (until the
+  tasks that read the copy are closed), `until_forgotten`, or `days:N` (N days after its last
+  update, 1 to 36500). `retention_default`, one of them, is what a person who names none gets.
+- `max_repo_bytes` (64 MiB unless you set it) and `max_file_bytes` (16 MiB, at most
+  `max_repo_bytes`): a project larger than that is not sent at all, and a larger file is left out.
+  A single update above 64 MiB, or 200,000 objects, is refused whatever you set.
+- `exclusions`: patterns your server always leaves out, on top of the names FinishUP always leaves
+  out. A pattern without `/` matches a file's name anywhere in the project, one ending in `/` a
+  folder anywhere, and one with `/` inside it a path from the project's top; `*` matches any
+  characters, and case does not matter.
+
+A key FinishUP does not know is refused as `unknown_config_key`, and a value it cannot use as
+`config_value_invalid`; both name only the key. Every value is checked even while `enabled` is
+`false`. After a change, the people who use your server are asked to agree again. To stop offering it, set
+`enabled = false` (or remove the table) and restart: nothing more is sent or read from the copies
+already kept, which stay in your server's FinishUP folder, encrypted, until they expire or the
+people who sent them forget them (`finishup server code forget` still works).
+
+### Choosing it on your computer
+
+```text
+finishup server add lab ssh://me@lab.example --level L2 --retention days:30
+finishup server use lab --level L2 --retention task_close
+finishup server use lab --level L1
+```
+
+Run these in your own terminal. FinishUP shows what keeping a copy means, in its own words, and
+you confirm by typing the server's name. `--retention` must be one the server offers; without it
+you get the server's default. `server use lab` on its own keeps the level and retention you
+already agreed to. A new level takes effect at once: the command ends once FinishUP's background
+helper for that server follows it (a few seconds at most; if it does not, FinishUP stops it, and
+the next program starts a new one), and your next task uses the new level. If the server stops offering a copy, `server use lab` refuses
+(`server_level_unavailable`) until you choose `--level L1`: FinishUP never narrows your choice on
+its own. `--level L1` stops future updates; the copy already sent stays until you forget it or its
+time runs out.
+
+### What is sent, scanned and kept
+
+- **What is sent.** A copy of each project you use with that server: the files git can see
+  (tracked, and untracked but not ignored), never the project's history. Files with names that are
+  always left out (environment files such as `.env`, SSH keys such as `id_rsa`, `.netrc`, `.npmrc`,
+  `*.pem` and `*.key` files, cloud and Kubernetes credentials, Terraform state and similar), the
+  server's own exclusions and the list you keep for the project are not sent. The **names** of the
+  files left out are sent, never their contents.
+- **What is scanned.** Before a file is sent, FinishUP checks its contents for known secret
+  formats (private keys, access tokens of common services, passwords written into URLs). A file
+  that matches is held back until you allow that exact content. Looser matches, such as
+  `password = …` in a file, do not hold a file back. Names and scans reduce what is sent; they are
+  not a guarantee that no secret is.
+- **When it is sent.** Only FinishUP's background helper on this computer sends it, when the
+  server asks, at the start of a task and before a check; your agents' hooks and FinishUP tools
+  never do. Each time, before it reads anything, FinishUP checks again that you agreed, that the
+  project is not held from that server, and that this computer's privacy policy allows network
+  use; if not, nothing is sent and the server asks this computer, as at level L1.
+- **What is kept, and for how long.** The server keeps the copy encrypted, readable only while its
+  vault is unlocked, for the retention you chose. It checks for copies whose time is up when its
+  FinishUP starts and every 10 minutes. A `task_close` copy that no task has read yet does not
+  expire that way.
+
+### What the server reads from its copy
+
+- **From its copy:** where a task started and what changed since, what its reviewer reads inside
+  the project, and task inputs inside the project.
+- **Still from this computer:** files outside the project (under the choice you made at `server
+  add`) and the checks you approved, which still run here.
+- **While this computer is offline,** the server reads its copy as it was last updated and says so
+  in the receipt; a check you approved cannot run and says so (`workspace_agent_unavailable`),
+  never a pass. A check that ran on different files than the copy the server read is reported as
+  stale, never as a pass.
+
+The receipt of a task that read the copy ends with a "Workspace evidence" section that says, in
+fixed words, where each kind of evidence was read, for example:
+
+```text
+Workspace evidence
+Workspace evidence was read by the server from its copy of the repository, synced from the client machine; the FinishUP workspace agent on the client machine answered the rest over the connection.
+Evidence reads by source (yoetz.evidence-provenance/1): server_copy_read 12, client_attested_read 0, client_check 1, client_observation 0, outside_read 2, stale_copy_read 0.
+Outside reads the client's workspace agent left unread because they reached a repository its owner holds from this server: 0.
+The task's evidence was last read from the server's copy as synced at 2026-11-10T09:30:00.000Z (tree 3f1c0a9b2d4e).
+Served by FinishUP service svc_… (connection: client_claim).
+```
+
+`server_copy_read` counts reads from the copy, `client_attested_read` reads FinishUP on this
+computer answered, `client_check` checks run here, `client_observation` what your agents' hooks
+captured, `outside_read` reads outside the project, and `stale_copy_read` reads from the copy while
+this computer was offline (the receipt then says its files may have changed since). JSON receipts
+carry the same account as `evidence_provenance`, and the CLI, your agent's FinishUP tools and the
+terminal interface show the same lines. When the server cannot say where a task's evidence was
+read (its account could not be read, or the server stopped before it counted reads its copy
+answered), every receipt says so instead, JSON ones as `evidence_provenance_unknown`, and never
+that the server did not read the repository. Status and receipts read over a connection to such a
+server also say that the server reads evidence from its copy where it has one.
+
+**Which project was read.** A task reads only the project FinishUP was started in. A task naming
+another project is refused (`workspace_ref_not_served`), and nothing is copied for it. The tree in
+the last evidence line is the start of the git tree id of the files the copy holds. You can check
+it in a project that uses git's default object format, with every change committed, no
+line-ending conversion, and nothing excluded or held back: there, `git rev-parse HEAD^{tree}`
+begins with the same twelve characters. Elsewhere the two can differ even though that project's
+files were read.
+
+### See and forget
+
+```text
+finishup server code list
+finishup server code forget
+finishup server code forget --repository /path/to/project
+finishup server code forget --all
+```
+
+`list` shows what the server keeps of the project you are in. `forget` asks the server to delete
+its copy of that project and says exactly what it deleted; this computer's record of what it sent
+goes too. The tasks that read the copy lose the captured changes and review excerpts they kept
+from it, and their receipts say the copy and the excerpts derived from it were deleted, when, and
+whether you forgot it or its time ran out; their findings and checks stay. `forget --all` forgets
+every project this computer sent a copy to that server and names any it could not, with what to
+do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten.
+
+Forget does not reach copies of the server's folder in backups its owner made, receipts you
+already received, the reviewer's own words about its findings, files from outside the project
+that this computer sent as task inputs, or what your agents' hooks captured.
+
+### Your choices for one project
+
+```text
+finishup server code exclude add 'datasets/'
+finishup server code exclude list
+finishup server code exclude remove 'datasets/'
+finishup server code allow add tests/fixtures/sample-tokens.txt
+finishup server code allow list
+finishup server code allow remove tests/fixtures/sample-tokens.txt
+finishup server code level L1
+finishup server code level default
+```
+
+What sends less needs no question: `exclude add`, `allow remove` and `level L1` (keep this project
+at level L1 on that server). What sends more is confirmed on your own terminal: `exclude remove`,
+`level default` and `allow add`, which sends one file the scan held back exactly as it is now; if
+it changes, it is scanned again. `allow list` shows the allowed paths and a short fingerprint of
+their contents, never the contents. An exclusion wins over an allowed file. None of these takes
+back what was already sent; only forget does.
+
+### Removing a server that keeps copies
+
+`finishup server remove lab` asks you first, on your own terminal, whether to forget the copies
+this computer sent to that server: `yes` forgets them and stops without removing anything if one
+could not be forgotten, `no` removes the server and leaves them there. `--forget-copies` and
+`--keep-copies` answer without asking. While it forgets them, this computer sends that server no
+more code, so a check still running cannot send a copy again that was just forgotten; if the
+server is not removed after all, sending resumes. Run without your terminal and without either, it
+removes the server and warns that the copies stay. Once the server is removed, this computer can no longer
+ask it to forget them: they stay until their time runs out, or, kept `until_forgotten`, until that
+server's owner deletes them.
+
+### Stopping is not forgetting
+
+Holding a project, keeping one project at level L1, choosing another server or removing the
+server only stops future updates; what was already sent stays on the server until you forget it
+or its time runs out.
+
+### Limits
+
+- The server's owner controls that server: locking its vault makes the copies unreadable but
+  does not take back anything already read out of it. While a copy is in use, the server keeps a
+  readable working copy of it on its disk, removed when its FinishUP starts again or the copy is
+  forgotten or expires. FinishUP does not manage the server's backups.
+- Evidence read from the copy names FinishUP's own snapshot commits, not your repository's
+  commits. A task input given by its full path on this computer is not found in the copy.
+- After the server's FinishUP restarts, files that were untracked when a task started can show as
+  added: more change, never less.
+- The terminal interface offers no level L2 choices: use your shell for `--level`, `server code`
+  and `server remove`'s question. It shows the receipt lines.
+- Keeping a copy has been tested on Linux only; macOS, and Windows through WSL 2, have not been
+  tested yet.
 
 ## Serve this computer over HTTPS
 
@@ -400,8 +618,8 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 
 ## Not supported yet
 
-- Keeping a copy of your code on the server; a server elsewhere reads your code only through
-  FinishUP on this computer.
+- Choosing level L2 from the terminal interface (use your shell; see
+  [Keeping a copy of your code on a server](#keeping-a-copy-of-your-code-on-a-server-level-l2)).
 - Adding an SSH or HTTPS server from the terminal interface (use your shell).
 - Signing in to an HTTPS server with anything other than an API key (for example OAuth).
 - An official FinishUP service: this release names none.
@@ -442,7 +660,10 @@ now).
 | `repository_egress_kept` | You chose to keep this project on this computer for the selected server elsewhere. | Nothing to do; FinishUP does not ask again. |
 | `server_authorization_changed` | Something a connection to a server elsewhere was allowed under changed while it was open (the server choice, the server's record or key, a `server login` or `logout`, this computer's privacy policy, or a project's hold), so FinishUP stopped sending over it. What that server already received stays there. A request that was already on its way may or may not have been recorded there; FinishUP does not send it again, since your current choice may be another server. | Later requests use your current choice, or say what refuses it now. If that request was a change, check whether it was recorded before you make it again. |
 | `server_profile_changed` | What that server offers or needs (for example whether its AI-powered review sends what it reads to a model provider) changed since you agreed to use it, you logged in with a new API key, or FinishUP could not confirm it, so that server did no work for this request. Another request already on its way over the same connection ends with `server_authorization_changed`: it may or may not have been recorded there. | Agree again in your own terminal with `finishup server use NAME`, or go back with `finishup server use local`. |
-| `server_level_unavailable` | That server requires more of this computer than you agreed to (for example keeping a copy of your code), so nothing was sent for this project. | `finishup server use NAME` shows what it requires; or use another server. |
+| `server_level_unavailable` | That server requires more of this computer than you agreed to, or you asked for a level it does not offer: `--level L2` of a server that keeps no copies, `finishup server use NAME` of a server you agreed to at level L2 that no longer offers it, or a `finishup server code` command sent to a server that keeps no copies. Nothing was sent for this project. | `finishup server use NAME` shows what it offers and requires; choose `--level L1`, or use another server. |
+| `code_copy_forget_incomplete` | `finishup server code forget --all`, or `finishup server remove` after you chose to forget first, could not forget every copy this computer sent; each line above it says which and why. `remove` then removed nothing. | Do what each line says, then run the same command again; or `finishup server remove NAME --keep-copies` to remove the server and leave the copies there. |
+| `code_copy_fence_unavailable` | `finishup server remove --forget-copies` (or `yes`) could not stop this computer from sending that server more code while it forgets the copies, because its folder for that server could not be written. The server was not removed and nothing more was forgotten. | Check that the folder belongs to you and only you can write it, then run the same command again. |
+| `code_export_unsafe` | This computer's record of the copies it sent that server can be read by others or is a link, so FinishUP does not know which projects they came from. | Fix its permissions, or run `finishup server code forget` in each project. |
 | `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server whose record on this computer cannot be read; or a command that runs only where the server lives (setup, for example) ran while a server elsewhere is in use. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |
 | `workspace_binding_conflict` | A request named the project in a form its connection cannot use, such as a `client:` handle sent to a FinishUP on this computer. | Name the project by its folder path through FinishUP's own tools; a hand-written client must not send a `client:` handle to a server on this computer. |
 | `workspace_ref_not_served` | With a FinishUP server on another machine, a task named another project folder than the one FinishUP was started in: another repository, or another worktree of the same one. That server reads only the project FinishUP was started in (a subfolder of it, or the same folder spelled another way, is the same project), so the request was not sent and nothing of either project was read or copied for it. | Run the command, or start the agent session, in the project the task is about. An agent whose FinishUP tools were started in another folder tells you so and carries on without FinishUP for that project; open a session in that project to use FinishUP there. |

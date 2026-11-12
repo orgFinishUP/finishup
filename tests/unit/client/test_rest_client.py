@@ -36,6 +36,8 @@ class _Server:
     port: int
     tls: TlsMaterial
     seen: list[str]
+    # Each request's client address: a new port is a new connection.
+    clients: list[object]
 
     @property
     def url(self) -> str:
@@ -54,6 +56,7 @@ def tls() -> Iterator[TlsMaterial]:
 @pytest.fixture
 async def server(tls: TlsMaterial) -> AsyncIterator[_Server]:
     seen: list[str] = []
+    clients: list[object] = []
 
     async def app(scope: MutableMapping[str, Any], receive: Any, send: Any) -> None:
         del receive
@@ -61,6 +64,7 @@ async def server(tls: TlsMaterial) -> AsyncIterator[_Server]:
             return
         path = scope["path"]
         seen.append(path)
+        clients.append(scope.get("client"))
         headers: list[tuple[bytes, bytes]] = []
         status, body = 200, b"{}"
         if path == "/redirect":
@@ -77,7 +81,7 @@ async def server(tls: TlsMaterial) -> AsyncIterator[_Server]:
     )
     await listener.start(app)
     try:
-        yield _Server(listener.port, tls, seen)
+        yield _Server(listener.port, tls, seen, clients)
     finally:
         await listener.close()
 
@@ -113,6 +117,49 @@ async def test_a_pin_is_checked_before_any_request_byte(server: _Server) -> None
     finally:
         await wrong.aclose()
     assert server.seen == ["/pinned"]
+
+
+@pytest.mark.parametrize("trust", ["ca_file", "tls_pin"])
+async def test_an_idle_connection_is_kept_for_the_next_request_within_the_edges_keep_alive(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, trust: str
+) -> None:
+    """A warm helper's connection outlives a pause between a session's hooks: reused after 20 s
+    idle (httpx's own 5 s made every hook after a pause open a TCP and TLS connection first, two
+    more round trips), dropped past this client's bound, which stays under the edge's own
+    keep-alive so a reused connection is never one the server already closed. The idle time is
+    the connection pool's clock moved forward, never a wait."""
+
+    import time as real_time
+
+    from httpcore._async import http11
+
+    from finishup.rest.listener import KEEP_ALIVE_SECONDS
+
+    moved = [0.0]
+
+    class _Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return real_time.monotonic() + moved[0]
+
+    monkeypatch.setattr(http11, "time", _Clock)
+    transport = (
+        RestTransport(server.url, key="fuk_x", ca_file=str(server.tls.ca_file))
+        if trust == "ca_file"
+        else RestTransport(server.url, key="fuk_x", tls_pin=server.tls.pin)
+    )
+    try:
+        assert (await transport.request("GET", "/first")).status == 200
+        moved[0] = 20.0
+        assert (await transport.request("GET", "/after-a-pause")).status == 200
+        moved[0] = 20.0 + rest_client.KEEPALIVE_SECONDS + 1.0
+        assert (await transport.request("GET", "/after-a-long-pause")).status == 200
+    finally:
+        await transport.aclose()
+    first, paused, long_paused = server.clients[-3:]
+    assert paused == first
+    assert long_paused != paused
+    assert rest_client.KEEPALIVE_SECONDS < KEEP_ALIVE_SECONDS
 
 
 async def test_a_redirect_is_never_followed_and_a_large_answer_is_refused(

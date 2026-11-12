@@ -112,8 +112,11 @@ def consent_to(
     lock: bool = True,
     identity: str | None = None,
     identity_type: str | None = None,
+    level: str = "L1",
+    retention: Retention | None = None,
 ) -> ServerTarget:
-    """Record the owner's consent to ``document`` at level L1 for ``record``; the new record.
+    """Record the owner's consent to ``document`` at ``level`` (L1 by default; L2 with the
+    ``retention`` chosen) for ``record``; the new record.
 
     ``lock`` takes the registry lock; pass False where the caller already holds it.
     ``identity`` is the endpoint identity the transport observed (an SSH target's default is
@@ -125,7 +128,7 @@ def consent_to(
     def write() -> ServerTarget:
         stored = targets.read_target(targets.target_root(record.target_id))
         assert stored is not None
-        envelope, _profile = consent_envelope_for(stored, profile, level="L1", retention=None)
+        envelope, _profile = consent_envelope_for(stored, profile, level=level, retention=retention)
         return record_consent(stored, profile, envelope)
 
     if not lock:

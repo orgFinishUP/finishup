@@ -240,7 +240,14 @@ from finishup.domain.coordination import (
     ProjectTextStore,
     WorkState,
 )
-from finishup.domain.events import CheckChangeShownFiles, RuntimeProfile, SessionOpenedPayload
+from finishup.domain.events import (
+    AcceptedEvent,
+    CheckChangeShownFiles,
+    PublicationChannel,
+    RuntimeProfile,
+    SessionOpenedPayload,
+)
+from finishup.domain.evidence_provenance import ContentForgotten, EvidenceProvenance
 from finishup.domain.findings import (
     Finding,
     SemanticDispatchKind,
@@ -345,6 +352,8 @@ from finishup.ports.change_capture import (
     TaskInputFile,
     TaskInputSnapshotSet,
     current_check_workspace_source,
+    evidence_task_of,
+    evidence_task_scope,
 )
 from finishup.ports.clock import ClockPort
 from finishup.ports.control import ControlError, ControlMethod, RepositoryPrivacyContext
@@ -5661,16 +5670,19 @@ def _privacy_gated_semantic_evaluator(
         """
 
         kept_back: list[OutsideReadsKeptBack | None] = [None]
-        result = await _evaluate_case(
-            frozen,
-            findings,
-            runtime,
-            lineage_evaluation,
-            require_complete_specification,
-            final_review,
-            task_fact_gaps,
-            kept_back=kept_back,
-        )
+        # Level L2 (ADR-054): the review's reads (the change, the reviewer's files, the inputs)
+        # are this task's evidence, pinned to its snapshot and counted for it.
+        with evidence_task_scope(evidence_task_of(runtime)):
+            result = await _evaluate_case(
+                frozen,
+                findings,
+                runtime,
+                lineage_evaluation,
+                require_complete_specification,
+                final_review,
+                task_fact_gaps,
+                kept_back=kept_back,
+            )
         if (
             result is None
             or kept_back[0] is None
@@ -6096,6 +6108,8 @@ def _privacy_gated_semantic_evaluator(
                             port=change_capture,
                             clock=clock,
                             request_id=frozen.lease.operation_id,
+                            # ADR-054 (U20): never stored for a frontier a forget came after.
+                            subject_sequence=frozen.lease.frontier.sequence,
                             # Declared deliverables first, so a clipped packet keeps them.
                             priority_paths=declared_output_paths(frozen.case.projection),
                             input_paths=review_inputs[0],
@@ -6863,16 +6877,33 @@ def _privacy_gated_semantic_evaluator(
                 )
 
             async def _publish_success(handle: object, evaluation: object) -> ObjectRef:
+                from finishup.application.content_fence import (
+                    ContentForgottenError,
+                    content_forgotten_after,
+                    content_publication_fence,
+                )
                 from finishup.ports.ledger import SemanticAttemptHandle as _Handle
 
                 assert type(handle) is _Handle
                 assert type(evaluation) is FinalSemanticEvaluation
-                return await _publish_semantic_response_object(
-                    runtime,
-                    attempt_id=handle.attempt_id,
-                    evaluation=evaluation,
-                    clock=clock,
-                )
+                # ADR-054 (U20): inside the task's content fence, and never for a review of a
+                # frontier a forget of its server-copy content came after (every view masks it):
+                # the attempt then ends failed, with no response object left behind.
+                async with content_publication_fence(runtime.task_id):
+                    if await content_forgotten_after(runtime, frozen.lease.frontier.sequence):
+                        record_bounded_event_without_raising(
+                            component="semantic_composition",
+                            operation="semantic_response_not_published",
+                            reason="content_forgotten",
+                            request_id=frozen.lease.operation_id,
+                        )
+                        raise ContentForgottenError
+                    return await _publish_semantic_response_object(
+                        runtime,
+                        attempt_id=handle.attempt_id,
+                        evaluation=evaluation,
+                        clock=clock,
+                    )
 
             # ``current_lease`` / ``_on_lease_renewed`` are bound at the top of _evaluate so the
             # catch-all can return the newest token too, not only the normal returns here.
@@ -7262,6 +7293,61 @@ class _RoutedCoordinationDetailStore:
             released = lease.release()
             if inspect.isawaitable(released):
                 await released
+
+
+def _copy_evidence_source(
+    hub: WorkspaceAgentHub | None,
+) -> Callable[[str, TaskRuntime], Awaitable[EvidenceProvenance | None]] | None:
+    """The receipt's source of a claim-bound task's evidence account (level L2, ADR-054).
+
+    Two parts, combined: what the server's copy recorded for the task while it serves it (counts
+    per token, the fenced reads, the snapshot last read; ``CodeCopies.provenance``), and what the
+    task's own ledger keeps of a copy that was forgotten (the latest ``content_forgotten`` event:
+    its recorded counts, when and why). None for a task with neither, so its receipt keeps the
+    level-L1 words. A forgotten copy whose event cannot be read raises: the receipt then says the
+    evidence's source is unknown rather than that the server did not read the repository.
+    """
+
+    if hub is None:
+        return None
+
+    async def account(handle: str, runtime: TaskRuntime) -> EvidenceProvenance | None:
+        del handle  # the task, not the handle, owns the account
+        from finishup.kernel.forgotten_content import latest_content_forgotten
+
+        records = [record async for record in runtime.ledger.load_events(runtime.session_id)]
+        marker = latest_content_forgotten(records)
+        forgotten: EvidenceProvenance | None = None
+        if marker is not None:
+            if marker.payload is None:
+                raise LookupError("content_forgotten_unreadable")
+            recorded = marker.payload.provenance
+            forgotten = EvidenceProvenance(
+                recorded.reads,
+                recorded.fenced_reads,
+                None,
+                ContentForgotten(marker.at, marker.payload.reason),
+            )
+        copies = hub.code_copies
+        live = (
+            None if copies is None else await asyncio.to_thread(copies.provenance, runtime.task_id)
+        )
+        found = live if forgotten is None else forgotten if live is None else forgotten.plus(live)
+        if found is None:
+            return None
+        # A claim-bound task's hook observations were captured on the client (ADR-051 decision
+        # 12): the ledger itself says how many were accepted, so they are counted from it.
+        observed = sum(
+            1
+            for record in records
+            if type(record) is AcceptedEvent
+            and record.publication_channel is PublicationChannel.HOOK_OBSERVED
+        )
+        if observed:
+            found = found.plus(EvidenceProvenance({"client_observation": observed}))
+        return found
+
+    return account
 
 
 async def provide_service_ready_context(
@@ -8986,6 +9072,7 @@ async def provide_service_ready_context(
         input_snapshot_scope=input_snapshot_scope,
         conversation_review_context=conversation_review_context,
         lineage_parent_refresh=lineage_manifest_coordinator.sweep_parent_of,
+        evidence_provenance=_copy_evidence_source(workspace_hub),
     )
 
 

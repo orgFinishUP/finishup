@@ -134,6 +134,15 @@ coexist with a separately consented bounded structural non-LLM channel.
 A project's own privacy policy also governs FinishUP servers elsewhere (over SSH or HTTPS): a
 project whose policy on this computer allows no network use is held from such a server until you
 allow it from your own terminal or keep it on this computer (see [FinishUP servers](servers.md)).
+A server elsewhere reads your project only through FinishUP on this computer, while it works,
+unless its owner offers to keep a copy of your code (level L2) and you agree on your own terminal.
+A copy holds the files git can see, never the project's history, minus credential file names, the
+server's and your own exclusions, and files whose contents match known secret formats until you
+allow them; the names of the files left out are sent, never their contents. FinishUP checks this project's hold and this
+computer's network policy again before every update, and sends nothing if either refuses.
+Holding the project or stopping only stops future updates: `finishup server code forget` is the
+only way to delete what was sent, and it also deletes the excerpts tasks kept from it (see
+[Keeping a copy of your code on a server](servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2)).
 
 **True zero-network mode** is the composite of `local_only`, the global ceiling off, and all five
 network channels disabled. Even then, exact release-profiled local IPC is permitted for the FinishUP

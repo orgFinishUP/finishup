@@ -14,7 +14,7 @@ import signal
 import stat
 import struct
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -264,7 +264,11 @@ from finishup.service.owner_view import (
 )
 from finishup.service.ready_composition import build_ready_application_factory
 from finishup.service.secret_ingress import SecretIngressService
-from finishup.service.server_profile import ProfileUnavailable, ServerProfileSource
+from finishup.service.server_profile import (
+    ProfileUnavailable,
+    ServerProfileSource,
+    code_copy_offer,
+)
 from finishup.service.session_routes import SESSION_ROUTE_FILE_NAME, SessionRouteMemory
 from finishup.service.startup_failure import ServiceStartupError, record_startup_failure
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -423,6 +427,10 @@ _STRUCTURAL_METHODS = frozenset(
         ControlMethod.SERVICE_STOP,
         # What this server offers (ADR-052): no ledger, no vault, answered while locked.
         ControlMethod.SERVER_PROFILE,
+        # Level L2 (ADR-054): the claimed repository's copy, its status and forget; no ledger,
+        # and forget is answered even under another revision (reducing what is kept is always
+        # allowed).
+        ControlMethod.CODE_COPY,
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
@@ -1424,6 +1432,12 @@ class ServiceDaemon:
                     # cannot state exactly (it never offers one that understates it, ADR-052).
                     raise ControlError("method_forbidden")
                 body: object = freeze_json(source.document(self.status(), schema_manifest_digest()))
+            elif request.method is ControlMethod.CODE_COPY:
+                body = freeze_json(
+                    await asyncio.to_thread(
+                        self._code_copy, request, repository_privacy_context, client_kind
+                    )
+                )
             elif request.method is ControlMethod.SERVICE_STATUS:
                 body = self.status()
             elif request.method is ControlMethod.SERVICE_LOCK:
@@ -2316,7 +2330,12 @@ class ServiceDaemon:
         if not vault.ready:
             return None
         key = cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
-        return claim_repository_privacy_context(claim, key)
+        context = claim_repository_privacy_context(claim, key)
+        copies = self._composition.workspace_hub.code_copies
+        if copies is not None:
+            # Level L2 (ADR-054): the copy of a claimed workspace is keyed by its commitment.
+            copies.remember(context.workspace_handle, context.commitment, claim.worktree)
+        return context
 
     async def _serve_control_connection(self, stream: ControlStream) -> None:
         session: ControlSession | None = None
@@ -2729,6 +2748,58 @@ class ServiceDaemon:
         source = self._composition.server_profile
         return None if source is None else source.revision
 
+    def _code_copy(
+        self,
+        request: ControlCallRequest,
+        context: RepositoryPrivacyContext | None,
+        client_kind: ControlClientKind,
+    ) -> dict[str, JsonValue]:
+        """``code_copy`` (level L2, ADR-054): the claimed repository's copy, ``status`` or
+        ``forget``. Only a claim-bound connection names a repository, and only a service that
+        keeps copies answers; forget is idempotent and says exactly what it deleted."""
+
+        copies = self._composition.workspace_hub.code_copies
+        if (
+            copies is None
+            or client_kind is ControlClientKind.MCP_BRIDGE
+            or context is None
+            or context.identity_kind != "client_claim"
+        ):
+            raise ControlError("method_forbidden")
+        action = cast("Mapping[str, object]", request.body).get("action")
+        from finishup.service.code_copy import COPY_PRINCIPAL
+
+        commitment = context.commitment
+        if action == "forget":
+            report = copies.forget(commitment)
+            return {
+                "action": "forget",
+                "copy": None,
+                "forgot": {
+                    key: value for key, value in report.to_json().items() if key != "reason"
+                },
+            }
+        if action != "status":
+            raise ControlError("frame_invalid")
+        repository = copies.store.repository_id(commitment)
+        summary = next(
+            (item for item in copies.store.copies(COPY_PRINCIPAL) if item.repository == repository),
+            None,
+        )
+        return {
+            "action": "status",
+            "copy": None
+            if summary is None
+            else {
+                "snapshots": summary.snapshots,
+                "stored_bytes": summary.stored_bytes,
+                "created_at": summary.created_at,
+                "last_sync_at": summary.last_sync_at,
+                "retention": {"kind": summary.retention_kind, "days": summary.retention_days},
+            },
+            "forgot": None,
+        }
+
     @staticmethod
     def _validate_client_method(client_kind: ControlClientKind, method: ControlMethod) -> None:
         if client_kind is ControlClientKind.MCP_BRIDGE and method not in _WORKFLOW_METHODS:
@@ -2789,6 +2860,17 @@ class ServiceDaemon:
             Callable[[], Awaitable[object]] | None,
             getattr(application, "recover_lineage", None),
         )
+        copies = self._composition.workspace_hub.code_copies
+        lineage = getattr(application, "lineage", None)
+        if copies is not None and lineage is not None:
+            # Level L2 (ADR-054): a ``task_close`` copy expires once no task pinned to it is open.
+            copies.attach_task_closed(
+                _lineage_task_closed(getattr(lineage, "store", None), asyncio.get_running_loop())
+            )
+        if copies is not None:
+            # U20: a forgotten or expired copy's tasks record that their content was forgotten
+            # and lose the excerpts they derived from it; pending ones are retried until done.
+            copies.attach_erasure(_copy_erasure(application, asyncio.get_running_loop()))
         if (
             not callable(recommendation_refresh)
             and not callable(observation_sweep)
@@ -5541,6 +5623,117 @@ def _refuse_remote_target_root(root: Path | None) -> None:
         raise LifecycleError("target_root_is_remote")
 
 
+def _attach_code_copies(
+    hub: WorkspaceAgentHub, source: ServerProfileSource, state: Path, vault: object
+) -> None:
+    """Give the hub the copy puller of a service whose profile offers level L2 (ADR-054): the
+    encrypted store under the state directory, its keys derived by the vault, opened now
+    (removing what a crash left), the checkouts reads are served from (every one left by a
+    previous run removed now), and its expiry run now and every ten minutes.
+
+    A service whose owner withdrew the offer still keeps the copies an earlier offer left: it
+    attaches the store without serving it (nothing is synced or read from it), so those copies
+    can still be listed, forgotten and expire, and their tasks' excerpts erased. A way in that
+    can be closed must not strand what it let in."""
+
+    offer = source.code_copy
+    if vault is None:
+        return
+    serving = source.keeps_copies and offer is not None
+    if not serving and not (state / "code-copies").is_dir():
+        return
+    from finishup.service.code_checkout import CopyCheckouts
+    from finishup.service.code_copy import CodeCopies, VaultCopyKeyring
+    from finishup.service.code_store import CodeStore, StoreLimits
+
+    keyring = VaultCopyKeyring(
+        lambda: cast(KeyStorePort, vault).installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
+    )
+    # Without an offer nothing is admitted, so the caps only bound reads of what is kept.
+    limits = (
+        StoreLimits(max_file_bytes=offer.max_file_bytes, max_repo_bytes=offer.max_repo_bytes)
+        if offer is not None and serving
+        else StoreLimits(max_file_bytes=1 << 30, max_repo_bytes=1 << 30)
+    )
+    store = CodeStore(state / "code-copies", keyring, limits)
+    store.open()
+    checkouts = CopyCheckouts(state / "code-copies" / "checkouts", store)
+    checkouts.sweep()
+    copies = CodeCopies(store, hub, lambda: source.revision, checkouts=checkouts, serving=serving)
+    copies.start_expiry()
+    hub.attach_code_copies(copies)
+
+
+def _copy_erasure(application: object, loop: asyncio.AbstractEventLoop) -> Callable[[object], bool]:
+    """Erase one forgotten task's derived content (``CodeCopies.attach_erasure``, ADR-054 U20).
+
+    Runs E's ``forget_task_content`` on the service loop from the erasure's own thread: the
+    task's ledger records ``content_forgotten`` first, then its content objects are erased. True
+    only when nothing is left to retry for that task; anything else (a slow or failed run, a call
+    from the loop itself, a closed loop) keeps the pending record, retried at the next forget,
+    expiry or service start.
+    """
+
+    from finishup.application.content_forgetting import forget_task_content
+
+    def erase(pending: object) -> bool:
+        if loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                forget_task_content(
+                    cast(Any, application),
+                    cast(str, getattr(pending, "task_id")),
+                    forget_id=cast(str, getattr(pending, "forget_id")),
+                    reason=getattr(pending, "reason"),
+                    provenance=getattr(pending, "account"),
+                ),
+                loop,
+            )
+            report = future.result(timeout=120.0)
+        except Exception:  # noqa: BLE001 - retried later; nothing is claimed done
+            return False
+        return getattr(report, "complete", False) is True
+
+    return erase
+
+
+def _lineage_task_closed(store: object, loop: asyncio.AbstractEventLoop) -> Callable[[str], bool]:
+    """Whether a task's work is no longer open, from the lineage catalog (``task_close``
+    retention, ADR-054): asked from the copy expiry's thread on the service loop; anything it
+    cannot say (no such task, a read that fails or is slow, a call from the loop itself) is open,
+    so the copy stays."""
+
+    from finishup.domain.coordination import WorkState
+
+    get_task = getattr(store, "get_task", None)
+
+    def closed(task_id: str) -> bool:
+        if not callable(get_task) or loop.is_closed():
+            return False
+        try:
+            if asyncio.get_running_loop() is loop:
+                return False
+        except RuntimeError:
+            pass
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                cast(Callable[[str], Coroutine[object, object, object]], get_task)(task_id), loop
+            )
+            snapshot = future.result(timeout=10.0)
+        except Exception:  # noqa: BLE001 - unknown is open
+            return False
+        state = getattr(snapshot, "work_state", None)
+        return state is not None and state is not WorkState.OPEN
+
+    return closed
+
+
 async def _production_composition(
     *,
     _config: FinishUpConfig | None = None,
@@ -5731,6 +5924,10 @@ async def _production_composition(
         observation_gate = asyncio.Lock()
         # One hub: the daemon registers agent connections, the ready application calls them.
         workspace_hub = WorkspaceAgentHub()
+        # Level L2 (ADR-054): the offer ``[server.code_copy]`` makes; a service whose profile
+        # offers L2 keeps copies, and none otherwise.
+        profile_source = ServerProfileSource.load(config, paths.state, code_copy_offer(config))
+        _attach_code_copies(workspace_hub, profile_source, paths.state, vault)
         ready_application_factory = (
             _ready_application_factory
             if _ready_application_factory is not None
@@ -5811,7 +6008,7 @@ async def _production_composition(
             owner_view_grants=owner_view_grants,
             workspace_hub=workspace_hub,
             # What this server offers a client elsewhere, and its revision (ADR-052).
-            server_profile=ServerProfileSource.load(config, paths.state),
+            server_profile=profile_source,
             rest_edge=rest_edge,
         )
     except BaseException:

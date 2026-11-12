@@ -187,9 +187,9 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   server answer the server's reads of your project while they run, and leave a 15-minute
   registration so the helper answers what the server goes on with. FinishUP's tools never resend a
   request to a different server from the one it was first sent to.
-- **Not in this release:** a copy of your code on the server, adding an SSH server from the
-  terminal interface, SSH host certificates. SSH servers were tested on Linux; macOS and Windows
-  through WSL 2 are not tested yet.
+- **Not in this release:** adding an SSH server from the terminal interface, SSH host
+  certificates. SSH servers were tested on Linux; macOS and Windows through WSL 2 are not tested
+  yet. A copy of your code on the server is described below.
 
 ### HTTPS servers (#1308)
 
@@ -239,6 +239,104 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 - **Not in this release:** adding an HTTPS server from the terminal interface (use your shell),
   signing in with anything but an API key, an official FinishUP service. HTTPS servers were tested
   on Linux; macOS and Windows through WSL 2 are not tested yet.
+
+### A copy of your code on a server (level L2) (#1308)
+
+- **A server can keep a copy of your code, if its owner offers it and you agree.** Nothing changes
+  unless both happen: a server offers it only when its owner turns it on in the server's
+  `config.toml` (`[server.code_copy]`, with the retention choices, size limits and exclusions it
+  offers), and FinishUP sends a copy only after you choose `finishup server add|use NAME --level L2
+  --retention …` on your own terminal. The copy holds the files git can see, never the project's
+  history, and leaves out credential file names, the server's exclusions and your own list; it
+  sends only the names of what it leaves out, and holds back files whose contents match known
+  secret formats until you allow those exact contents. Only FinishUP's background helper on this
+  computer sends it, and only after your agreement, the project's hold and this computer's network
+  policy are checked again. The server keeps it encrypted under its vault, reads a task's evidence
+  from it, and still asks this computer for files outside the project and runs approved checks
+  here; while this computer is offline it reads the copy as last updated and says so, and checks
+  cannot pass.
+- **Receipts say where each kind of evidence was read.** A task that read the copy ends its
+  receipt with fixed lines counting reads from the copy, from this computer, checks, hook
+  observations, outside reads and reads made while this computer was offline, and carries the same
+  account as `evidence_provenance` in JSON, on every surface.
+- **Forget deletes the copy and what tasks kept from it.** `finishup server code list` shows what a
+  server keeps; `forget` (or `forget --all` for every project) deletes the copy and its snapshots,
+  and the tasks that read it lose the captured changes and review excerpts they kept from it,
+  keeping their findings and checks and a "content forgotten" note on their receipts. Copies also
+  expire as you chose: a number of days after the last update, once the tasks that read them are
+  closed, or never. `server code exclude`, `allow add|list|remove` and `level L1|default` set
+  per-project choices, and `finishup server remove` asks whether to forget a server's copies first
+  (`--forget-copies`, `--keep-copies`). Holding a project or stopping only stops future updates;
+  only forget removes what was sent.
+- **Limits.** Names and scans are not a guarantee that no secret is sent, and the names of
+  left-out files are sent. Forget does not reach the server's backups, receipts already delivered,
+  the reviewer's own words about its findings, files from outside the project sent as task inputs,
+  or what hooks captured. A server's copy is readable on its disk while in use, and the server's
+  owner controls that server. The terminal interface has no level L2 choices (use your shell).
+  Tested on Linux only; macOS and Windows through WSL 2 are not tested yet. Config 1.4.0 adds the
+  `[server]` table (1.3.0 is unchanged); control envelopes 2.10.0, receipt-result 1.5.0 and the
+  REST contract 1.0.0, all unreleased, are amended in place, and task bundles move to storage
+  version 20 (a new service-written `content_forgotten` record), upgrading in place. See
+  [FinishUP servers](docs/usage/servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2) and
+  [ADR-054](docs/adr/ADR-054-level-l2-the-server-copy.md).
+
+### Servers elsewhere across upgrades and slow networks (#1308)
+
+- **An upgrade no longer makes helpers flap.** When FinishUP is upgraded in place while an agent
+  session is open, that session's MCP bridge keeps running its earlier build. Between two builds
+  of one version, the bridge and the newer commands used to replace each other's background
+  helper on every use. Now only the build that is installed replaces a helper of another build,
+  and exactly that helper; the older session is told to reopen instead of being told to run
+  `finishup service restart`.
+- **A deselected server stays stopped.** A command or hook that was connecting to a server when
+  you switched away from it (`finishup server use`), disconnected or removed it no longer starts
+  that server's background helper again afterwards.
+- **A server that was not upgraded says so.** When this computer runs a newer release than its SSH
+  server, the error is now `remote_incompatible` ("install the same release on both"), not "the
+  running local service … run `finishup service restart`", which repaired nothing.
+- **The direct style notices a changed server.** In the direct style, a request refused because the
+  server's profile changed now starts the background helper to read the new profile, so `finishup
+  server status` shows the change (and a profile that only asks for less is adjusted) instead of
+  calling the consent current while every request is refused. Through a shared SSH connection
+  that refusal used to reach `finishup service status` as a Python traceback (exit 1), and the
+  helper was never started; it is now the usual refusal, with `finishup server use NAME` as the
+  way back, on every surface.
+- **A server that does not answer in time is named.** In the direct style, a hook or command whose
+  server elsewhere did not answer within its time now names `remote_unreachable`, as the relay
+  style does, instead of reading as this computer's own service being down.
+- **A slow direct connection says so, and names the fix.** The direct style opens a new
+  connection in every program, which a slow network makes slow. When a server reached that way
+  cannot be reached in time, every surface (commands, `--json`, agents' tools, hooks, the terminal
+  interface, `finishup server connect` and `server status`, whose JSON carries the continuation)
+  now says so, that the direct style is slow on a slow network, and that `finishup server set NAME
+  --style relay` is the remedy (continuation `remote_direct_slow`); `finishup server test` says
+  this network is slow when it measures it. Relay stays the default; nothing changes for it.
+- **Level L2 chosen later takes effect at once.** `finishup server use NAME --level L2` on a server
+  already in use at L1 now makes the running background helper serve the copy at once (it opens
+  its connection again under your new choice); before, nothing was copied until the helper
+  restarted, and tasks started meanwhile never read from the copy. Back to L1 works the same way.
+- **A changed HTTPS server is named at once.** When an HTTPS server's profile changed while the
+  background helper was connected, every request waited about 30 seconds and read
+  `remote_unreachable`, and `finishup server status` kept calling your agreement current. Now the
+  request is refused at once with `server_profile_changed` and `finishup server use NAME` as the
+  way back, and the status says the agreement changed.
+- **Faster status reads and warm HTTPS connections.** A server's status read no longer looks up
+  every mount point of the computer again for each file it opens (about half its time), and the
+  background helper keeps its HTTPS connection to a server for 25 seconds between requests instead
+  of 5, so a hook after a pause no longer waits for a new TLS connection first.
+- **`finishup server test` measures what the startup gate measures.** It now times a new
+  connection and one status in five fresh FinishUP processes and compares the slowest with the
+  required startup gate's 0.65 s. It used to compare one status round trip on an open connection
+  with 200 ms, and so said "within the hook budgets" on a 100 ms network where the gate itself
+  needed 0.67 s.
+- **Tested for real on Linux.** Every combination of server kind, edge, connection style and level
+  passed end to end, as did an upgrade over a running helper, bridge and service; Claude Code and
+  the Cursor agent started FinishUP's MCP server and Codex listed it. On a network with a 100 ms
+  round trip, the required startup gate's 0.65 s is met through the background helper over SSH
+  and over HTTPS (the default), and not by direct HTTPS, where every new process makes its own
+  TLS connection: that is reported, not required, for the direct styles, and FinishUP tells you
+  when it happens (above). macOS and Windows through WSL 2 are not tested yet. See the
+  [acceptance matrix](docs/runbooks/acceptance-matrix.md).
 
 ### Added
 

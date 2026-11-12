@@ -7,9 +7,14 @@ client decides (design v2 §1).
 
 **Where the offer comes from** (layer 3's decision D2):
 
-* ``levels``: pinned by this release, not configurable: L1 is offered and required (a server
-  elsewhere always keeps the tasks); L2, the server keeping a copy of the code, is never offered
-  before the layer that builds it, so ``code_sync``, ``retention`` and ``exclusions`` are null.
+* ``levels``: L1 is always offered and required (a server elsewhere always keeps the tasks). L2,
+  the server keeping a copy of the code, is offered only when the service is given a code-copy
+  offer (``CodeCopyOffer``: the caps of ``code_sync``, the ``retention`` options and the
+  ``exclusions`` it enforces, which always include the client's own always-excluded list) **and**
+  level L2 is released (``protocol.server_copy.l2_released``); otherwise ``code_sync``,
+  ``retention`` and ``exclusions`` are null, as in layers 3 to 5. The service takes its offer
+  from its own ``config.toml`` (``[server.code_copy]`` with ``enabled = true``, config 1.4.0;
+  ``code_copy_offer``) and from nowhere else.
 * ``review``: derived from this service's own ``config.toml``, from the same settings that decide
   whether it can reach an AI provider at all, so the profile never understates it: a profile whose
   semantic capability is an external provider states ``server_policy`` (its owner's privacy policy
@@ -46,11 +51,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
-from finishup.protocol.consent_envelope import ReviewEgress
+from finishup.protocol.consent_envelope import CodeSync, Retention, ReviewEgress
+from finishup.protocol.server_copy import CODE_SYNC_METHOD, l2_released
 from finishup.protocol.server_profile import (
     ProfileError,
     ProfileKey,
     ProfileLevels,
+    ProfileRetention,
     ServerProfile,
     ServerProfileRevision,
     consent_subset,
@@ -63,24 +70,61 @@ if TYPE_CHECKING:
     from finishup.ports.control import ServiceStatus
 
 __all__ = [
+    "COPY_LEVELS",
     "OFFERED_LEVELS",
+    "CodeCopyOffer",
     "REVISION_FILE_NAME",
     "REVISION_SCHEMA",
     "ProfileRevisionStore",
     "ProfileUnavailable",
     "ServerProfileSource",
+    "code_copy_offer",
     "offer_digest",
     "review_offer",
 ]
 
 REVISION_FILE_NAME: Final = "server-profile-revision.json"
 REVISION_SCHEMA: Final = "yoetz.server-profile-revision/1"
-# Layer 3 offers L1 only and requires it; L2 arrives with the layer that builds the server copy.
+# L1 is always offered and required; L2 is added only by a code-copy offer while L2 is released.
 OFFERED_LEVELS: Final = ProfileLevels(("L1",), "L1")
+COPY_LEVELS: Final = ProfileLevels(("L1", "L2"), "L1")
 _EDGES: Final = ("ssh-control",)
 _OWNER_KEY: Final = ProfileKey(None, "operator", "owner")
 _PROVIDER_TOKEN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$", re.ASCII)
 _MAX_RECORD_BYTES: Final = 1_024
+
+
+@dataclass(frozen=True, slots=True)
+class CodeCopyOffer:
+    """What a server that keeps copies of code offers (level L2; design v2 §2.2, §4.3, U11).
+
+    ``exclusions`` are the patterns the server itself enforces; the client always adds its own
+    always-excluded list, and the profile states both (``with_client_list``). ``retention`` holds
+    the options its owner allows, the default among them.
+    """
+
+    max_repo_bytes: int
+    max_file_bytes: int
+    retention: tuple[Retention, ...]
+    retention_default: Retention
+    exclusions: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_file_bytes <= self.max_repo_bytes <= 1 << 40:
+            raise ValueError("code_copy_offer_invalid")
+        if not self.retention or self.retention_default not in self.retention:
+            raise ValueError("code_copy_offer_invalid")
+
+    def code_sync(self) -> CodeSync:
+        return CodeSync(frozenset({CODE_SYNC_METHOD}), self.max_repo_bytes, self.max_file_bytes)
+
+    def profile_retention(self) -> ProfileRetention:
+        return ProfileRetention(tuple(self.retention), self.retention_default)
+
+    def with_client_list(self) -> frozenset[str]:
+        from finishup.domain.code_exclusions import ALWAYS_EXCLUDED
+
+        return frozenset({*self.exclusions, *ALWAYS_EXCLUDED})
 
 
 class ProfileUnavailable(Exception):
@@ -124,19 +168,52 @@ def review_offer(config: FinishUpConfig) -> ReviewEgress:
     )
 
 
-def _subset(review: ReviewEgress) -> dict[str, JsonValue]:
-    return consent_subset(
-        levels=OFFERED_LEVELS, code_sync=None, retention=None, exclusions=None, review=review
+def code_copy_offer(config: FinishUpConfig) -> CodeCopyOffer | None:
+    """The code-copy offer ``config``'s ``[server.code_copy]`` table makes (config 1.4.0).
+
+    ``None`` when the table is absent or not ``enabled``: the profile, its digest and every
+    surface are then exactly those of a service without the table. An offer made here is still
+    honoured only while level L2 is released (``ServerProfileSource``).
+    """
+
+    table = config.server.code_copy
+    if table is None or not table.enabled:
+        return None
+    return CodeCopyOffer(
+        max_repo_bytes=table.max_repo_bytes,
+        max_file_bytes=table.max_file_bytes,
+        retention=table.retention_options(),
+        retention_default=table.retention_choice(),
+        exclusions=frozenset(table.exclusions),
     )
 
 
-def offer_digest(config: FinishUpConfig) -> str:
-    """The ``profile_digest`` of what this service offers under ``config``.
+def _copy_offered(code_copy: CodeCopyOffer | None) -> CodeCopyOffer | None:
+    return code_copy if code_copy is not None and l2_released() else None
+
+
+def _subset(review: ReviewEgress, code_copy: CodeCopyOffer | None = None) -> dict[str, JsonValue]:
+    offered = _copy_offered(code_copy)
+    if offered is None:
+        return consent_subset(
+            levels=OFFERED_LEVELS, code_sync=None, retention=None, exclusions=None, review=review
+        )
+    return consent_subset(
+        levels=COPY_LEVELS,
+        code_sync=offered.code_sync(),
+        retention=offered.profile_retention(),
+        exclusions=offered.with_client_list(),
+        review=review,
+    )
+
+
+def offer_digest(config: FinishUpConfig, code_copy: CodeCopyOffer | None = None) -> str:
+    """The ``profile_digest`` of what this service offers under ``config`` (and ``code_copy``).
 
     Raises ``ProfileUnavailable`` when ``config`` cannot be stated exactly.
     """
 
-    return profile_digest(_subset(review_offer(config)))
+    return profile_digest(_subset(review_offer(config), code_copy))
 
 
 class ProfileRevisionStore:
@@ -256,20 +333,31 @@ class ServerProfileSource:
 
     review: ReviewEgress | None
     revision: ServerProfileRevision | None
+    code_copy: CodeCopyOffer | None = None
 
     @classmethod
-    def load(cls, config: FinishUpConfig, state_dir: Path) -> ServerProfileSource:
-        """Decide the offer from ``config`` and issue its revision (once, at service start)."""
+    def load(
+        cls, config: FinishUpConfig, state_dir: Path, code_copy: CodeCopyOffer | None = None
+    ) -> ServerProfileSource:
+        """Decide the offer from ``config`` (and ``code_copy``, honoured only while L2 is
+        released) and issue its revision (once, at service start)."""
 
+        offered = _copy_offered(code_copy)
         try:
             review = review_offer(config)
         except ProfileUnavailable:
             # No revision is issued or recorded for an offer that cannot be stated: the record
             # keeps the last one, and the next offer that can be stated advances past it.
-            return cls(None, None)
-        digest = profile_digest(_subset(review))
+            return cls(None, None, offered)
+        digest = profile_digest(_subset(review, offered))
         revision = ProfileRevisionStore(state_dir / REVISION_FILE_NAME).advance(digest)
-        return cls(review, revision)
+        return cls(review, revision, offered)
+
+    @property
+    def keeps_copies(self) -> bool:
+        """Whether this service offers level L2 (a code-copy offer while L2 is released)."""
+
+        return self.revision is not None and _copy_offered(self.code_copy) is not None
 
     def profile(self, status: ServiceStatus, manifest_digest: str) -> ServerProfile:
         """The profile this service answers a peer-authenticated owner session with.
@@ -279,16 +367,17 @@ class ServerProfileSource:
 
         if self.review is None or self.revision is None:
             raise ProfileUnavailable("review_provider_unrepresentable")
+        offered = _copy_offered(self.code_copy)
         return ServerProfile(
             release=status.service_version,
             schema_manifest_digest=manifest_digest,
             service_instance_id=status.service_instance_id,
             key=_OWNER_KEY,
             edges=_EDGES,
-            levels=OFFERED_LEVELS,
-            code_sync=None,
-            retention=None,
-            exclusions=None,
+            levels=OFFERED_LEVELS if offered is None else COPY_LEVELS,
+            code_sync=None if offered is None else offered.code_sync(),
+            retention=None if offered is None else offered.profile_retention(),
+            exclusions=None if offered is None else offered.with_client_list(),
             review=self.review,
             official=False,
             revision=self.revision,

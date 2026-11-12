@@ -682,3 +682,22 @@ there.
   appears in argv, the environment, `target.json`, a registration, a log, hook output, an MCP
   frame or JSON output. `server login` and `server logout` move the credential generation and stop
   the helper, so nothing goes on under the old key (ADR-052 decision 23).
+
+## Amendment proposed by ADR-054 (layer 6): the keys of a server's copies of code
+
+[ADR-054](ADR-054-level-l2-the-server-copy.md) lets a server keep a copy of a client's code (level
+L2), encrypted under the vault's authority. The vault, its states, the confidential channels and
+the local ceremonies are unchanged.
+
+- **Each copy's key-encryption key comes from the installation MAC.** A copy's random data key is
+  stored only wrapped (AES key wrap, `yoetz.code-copy-wrap/1`) under a key-encryption key that the
+  vault's installation MAC derives for that copy under its own versioned domain
+  (`yoetz/code-copy-kek/v1`); the derived key is never stored. It exists only while the vault is
+  unlocked: a locked vault reads and admits no copy, and relocking makes every copy unreadable
+  (ADR-054 decision 6 and owner ruling 4).
+- **What relocking does not do.** It does not erase plaintext a server owner already copied out of
+  a running service, nor a copy's checkout, the plaintext working directory the server's reads
+  need while the copy is in use, which stays until the service starts again, the copy is forgotten
+  or it expires (ADR-054 decision 12).
+- **No new authority.** The helper that sends a copy holds no vault (layer 4 amendment above), and
+  the copy store opens only in a service whose owner's `[server.code_copy]` table offers level L2.

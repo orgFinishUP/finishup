@@ -13,6 +13,7 @@ from finishup.ports.change_capture import TaskChangeBase
 from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
 from finishup.ports.workspace_agent import (
     WORKSPACE_OPERATION_NAMES,
+    CodeSyncReadArguments,
     RunApprovedCheckArguments,
     WorkspaceAgentUnavailable,
     WorkspaceOnlyArguments,
@@ -830,6 +831,67 @@ async def test_a_helper_that_does_not_declare_the_operation_leaves_it_to_a_conne
     assert (len(helper), len(connection)) == (0, 1)
 
 
+# --- ADR-054: only the helper syncs; a call waits (bounded) for the helper's agent --------------
+
+_COPY_OPERATIONS = frozenset({"code_sync_prepare", "code_sync_read"})
+_READ = CodeSyncReadArguments(_HANDLE, "0" * 32, 0, 4)
+
+
+def _connection_agent() -> WorkspaceAgentDeclaration:
+    return _declaration(
+        *(name for name in WORKSPACE_OPERATION_NAMES if name not in _COPY_OPERATIONS)
+    )
+
+
+async def test_a_sync_waits_for_the_helpers_agent_while_only_the_connection_is_up() -> None:
+    hub = _hub(wait=5.0)
+    own: list[WorkspaceCall] = []
+    helper: list[WorkspaceCall] = []
+    await _register(hub, lambda call: _ok(call, _BASE), sent=own, declaration=_connection_agent())
+    pending = asyncio.create_task(
+        hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    )
+    for _ in range(8):  # let the call reach its wait (a refusal would finish it here)
+        await asyncio.sleep(0)
+    assert not pending.done()  # waiting for the helper's agent, not refused
+    await _register(hub, lambda call: _ok(call, b"abcd"), sent=helper, declaration=_background())
+
+    assert await asyncio.wait_for(pending, 5.0) == b"abcd"
+    assert (len(own), len(helper)) == (0, 1)
+
+
+async def test_a_helper_agent_that_does_not_declare_the_sync_is_refused_at_once() -> None:
+    hub = _hub(wait=5.0)
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=_connection_agent())
+    level_l1_helper = _background(
+        *(name for name in WORKSPACE_OPERATION_NAMES if name not in _COPY_OPERATIONS)
+    )
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=level_l1_helper)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "operation_not_declared"
+    assert loop.time() - began < 2.0
+
+
+async def test_a_helper_that_never_comes_is_not_declared_and_no_client_is_offline() -> None:
+    hub = _hub(wait=0.2)
+    channel = await _register(hub, lambda call: _ok(call, _BASE), declaration=_connection_agent())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "operation_not_declared"
+    await hub.unregister(channel)
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=2.0)
+    assert caught.value.reason == "no_agent"
+    # Every other operation keeps its exact answer: refused at once, never waited for.
+    await _register(hub, lambda call: _ok(call, _BASE), declaration=_declaration("capture"))
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=1.0)
+    assert caught.value.reason == "operation_not_declared"
+
+
 # --- a newer helper agent takes over a call an older one left unanswered (macOS dogfood) -------
 
 
@@ -914,3 +976,21 @@ async def test_only_a_newer_helper_agent_declaring_the_operation_takes_a_call_ov
         await asyncio.wait_for(pending, 5.0)
     assert caught.value.reason == "deadline_exceeded"
     assert others == []
+
+
+async def test_a_code_sync_read_is_never_taken_over_by_a_newer_helper_agent() -> None:
+    """ADR-054: a read names a snapshot only the agent that prepared it holds; a prepare is taken
+    over (``test_code_copy``), a read waits out its own deadline on the agent asked."""
+
+    hub = _hub()
+    fresh: list[WorkspaceCall] = []
+    older = await _register(hub, lambda _call: None, declaration=_background())
+    pending = asyncio.create_task(
+        hub.call(_HANDLE, WorkspaceOperation.CODE_SYNC_READ, _READ, timeout_seconds=0.3)
+    )
+    await _until(lambda: older.pending_count > 0)
+    await _register(hub, lambda call: _ok(call, b"abcd"), sent=fresh, declaration=_background())
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.wait_for(pending, 5.0)
+    assert caught.value.reason == "deadline_exceeded"
+    assert fresh == []

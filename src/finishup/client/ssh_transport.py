@@ -1302,9 +1302,11 @@ class SshControlStream:
         returncode = self._process.returncode
         if returncode is None:
             returncode = await self._wait_exit(_EXIT_WAIT_SECONDS)
-        with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(_TERMINATE_WAIT_SECONDS):
-                await asyncio.shield(self._stderr_task)
+        # Waited on, never awaited: a close may already have cancelled the stderr reader (an
+        # OpenSSH master holds a multiplexed ``ssh -W`` client's stderr past that client's exit,
+        # so the reader is still open when the close ends it), and that reader's cancellation is
+        # not this caller's: it must not leave here as one. What it read so far still counts.
+        await asyncio.wait((self._stderr_task,), timeout=_TERMINATE_WAIT_SECONDS)
         if returncode is None or returncode <= 0:
             return None
         return classify_ssh_failure(returncode, bytes(self._stderr))

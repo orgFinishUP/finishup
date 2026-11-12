@@ -19,6 +19,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from finishup import __version__
+from finishup.cli import server_code as _server_code
 from finishup.cli.agent_start import AGENT_START_HANDOFF
 from finishup.cli.ai import ai_app, register_credential_remove
 from finishup.cli.bootstrap import (
@@ -275,6 +276,8 @@ app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
 app.add_typer(project_app, name="project")
 app.add_typer(server_app, name="server")
+# Importing it registered the hidden 'server code' group on the server app (level L2, ADR-054).
+_SERVER_CODE_APP: Final = _server_code.code_app
 app.add_typer(helper_app, name="helper")
 
 
@@ -6470,6 +6473,17 @@ def main() -> None:
         lifecycle_exit = _lifecycle_exit_code(error)
         if lifecycle_exit is not None:
             raise SystemExit(lifecycle_exit) from None
+        _stderr(
+            "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
+        )
+        raise SystemExit(70) from None
+    except BaseException as error:
+        # An interrupt arrives as KeyboardInterrupt (above); a cancellation that still escapes a
+        # command's event loop is a defect, named as one and never printed as a traceback. Only
+        # a process that loaded asyncio can raise one, so it is never imported here.
+        loop_module = sys.modules.get("asyncio")
+        if loop_module is None or not isinstance(error, loop_module.CancelledError):
+            raise
         _stderr(
             "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
         )

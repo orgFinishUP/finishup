@@ -8,8 +8,9 @@ builds the server profile, its revision, the consent binding and the helper's wo
 registration API (decisions 9 to 12); layer 4 builds the unified helper, the SSH transport in its
 relay and direct styles, SSH discovery, and opens the `ssh` kind (decisions 13 to 19); layer 5
 carries this authorization over REST and opens `https` and `local_port` (decisions 20 to 23; the
-REST contract itself is [ADR-053](ADR-053-rest-v1-public-contract.md)); the level-L2 sections are
-recorded as **not built** and are filled in by the layers that build them.
+REST contract itself is [ADR-053](ADR-053-rest-v1-public-contract.md)); layer 6 builds level L2's
+server copy and releases it, in its own record ([ADR-054](ADR-054-level-l2-the-server-copy.md)),
+which completes what decision 8 lists for L2.
 Design gates: privacy/egress (what may reach a server elsewhere, and when it stops; in layer 4 the
 first network edge, in layer 5 the second) and storage (three new owner-only client records; in
 layer 4 the helper's records). Maintainer acknowledgement: the
@@ -256,9 +257,12 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
 - **O6 — stricter everywhere.** Anything incomparable or unknown, `task_close` against `days:N`
   included, asks again; L2 → L1 is a narrowing that reduces coverage, typed so receipts can show it
   in a later layer; exclusions narrow only by an exact pattern superset; key scope only by subset.
-- **O7 — an honest limit.** A held repository fenced from another repository's outside reads is
-  not counted on receipts in layer 2; the count lands with level-L2 provenance (layer 6), since it
-  needs a workspace-agent reply reason on the wire.
+- **O7 — an honest limit, counted from layer 6.** A held repository fenced from another
+  repository's outside reads is not counted on receipts in layer 2. From layer 6 the workspace
+  agent's outside-read answers carry the count (`OutsideInputsRead.fenced`,
+  `OutsideSnapshotsRead.fenced`, control 2.10.0 amended in place), and a level-L2 task's receipt
+  shows it with its evidence provenance (ADR-054 decision 14); a level-L1 task's receipt still
+  does not.
 - **O8 — owner actions only.** The credential generation bumps on `login`, `logout` and `remove`,
   never on an automatic token refresh. A credential change ends every remote connection, the
   helper's relay included, from layer 4 on (built: for an SSH target the owner's `server remove`
@@ -290,19 +294,25 @@ map to `server_profile_changed` (`remote_reconsent`) and `server_level_unavailab
   register its workspace with the helper (its own connection answers its live calls) and adds
   only a server on this computer (an SSH or HTTPS server is added in a terminal, where OpenSSH can
   ask or the API key is typed).
-- **Level L2 (layer 6):** no sync while the gate refuses (the hold is checked before a bundle is
-  built), and stopping future egress, cancelling server work and forgetting retained copies kept
-  apart (design v2 section 8.10; FR-7); the receipt count of fenced reads (O7); code sync in the
-  helper (design v2 section 4.2). From layer 3: a `[server]` configuration table offering L2 with
-  its code sync, retention options and exclusions; consent at L2 (a retention chosen among those
-  offered); the per-repository L1/L2 consents in the per-target repository map; the revision on
-  every sync upload; the receipt line for a narrowing that reduced coverage.
-- **Lifecycle (layer 7):** upgrade over running bridges, helpers and REST gateways, the WAN timing
-  gate, and the host × surface × operating system acceptance rows for the hold, the generation and
-  the helper (FR-6), and for a service restarted under a new profile revision. macOS (the helper's
-  reaping under `launchd`, `/private/tmp`, the Homebrew launcher path, the system certificate
-  store of a python.org Python) and WSL 2 have no recorded run of the helper, of SSH or of HTTPS
-  yet.
+- **Level L2 (layer 6; [ADR-054](ADR-054-level-l2-the-server-copy.md)), built and released**
+  (`protocol.server_copy.L2_RELEASED` is `True`): code sync in the helper only (design v2 section
+  4.2), with no sync while the gate refuses (the gate runs again and the hold is checked before
+  anything is read for a bundle); stopping future sends and forgetting retained copies kept apart
+  (design v2 section 8.10; FR-7), forget being the only way to remove what was sent, and it erases
+  the excerpts tasks derived from the copy too; consent at L2 with a retention chosen among those
+  offered; the revision on every sync (named by the server, checked by the helper and at the
+  server's commit); the owner's per-repository choices, in a record of their own rather than the
+  per-target repository map (ADR-054, *Owner rulings*); the `[server.code_copy]` table offering
+  L2, as config 1.4.0; reads from the copy, task pins and the `task_close` expiry; and
+  per-evidence provenance on receipts with the receipt count of fenced reads (O7). **Still open:**
+  the receipt line for a narrowing that reduced coverage (the consent records it, and `server
+  status` shows it, `coverage_reduced`).
+- **Lifecycle (layer 7, decision 24):** ran on Linux: the compatibility matrix (every cell), an
+  upgrade over a running older helper, MCP bridge and service, the WAN timing gate, and the Linux
+  host rows ([acceptance matrix](../runbooks/acceptance-matrix.md)). macOS (the helper's reaping
+  under `launchd`, `/private/tmp`, the Homebrew launcher path, the system certificate store of a
+  python.org Python) and WSL 2 still have no recorded run of the helper, of SSH or of HTTPS (owner:
+  the maintainer; see the runbook's gaps).
 
 ### 9. The server profile and its revision (layer 3)
 
@@ -320,8 +330,9 @@ counted on its own, section 2.4) and its revision.
   unknown member or value refuses the whole document, so nothing the client does not understand
   can be agreed to.
 - **Where the offer comes from (layer 3's decision).** Levels are pinned by the release: L1
-  offered and required (a server elsewhere always keeps the tasks), L2 never offered before
-  layer 6, which adds a configuration table for it. Review egress is derived from the server's own
+  offered and required (a server elsewhere always keeps the tasks); from layer 6, L2 offered
+  too when the server owner's `[server.code_copy]` table (config 1.4.0) enables an offer
+  (ADR-054 decision 16). Review egress is derived from the server's own
   `config.toml` (its semantic capability and provider), the settings that decide whether it can
   reach an AI provider at all, so the profile never understates it: an external provider states
   `server_policy` (its owner's privacy policy decides) and names, by closed tokens, every provider
@@ -412,8 +423,9 @@ counted on its own, section 2.4) and its revision.
   thread (SRV-6). Agents only ever get the `remote_reconsent` directive (or
   `remote_profile_checking`, which asks them only to repeat the request).
 - **The per-repository override map** is the per-target `repositories.json` of decision 5's hold:
-  with one remote level its only override is L0 (`keep`); layer 6 adds L1/L2 entries with their
-  own consent.
+  with one remote level its only override is L0 (`keep`); layer 6 keeps it at `/1` and records
+  the owner's per-repository L2 choices in a record of their own, `config/code-copy.json`
+  (ADR-054 decision 10 and owner ruling 4).
 
 ### 11. The helper's workspace registration API (layer 3)
 
@@ -480,8 +492,16 @@ store its client used), its stderr in `log/helper.stderr`, and resolves every pa
   exited) and never by a process name or path.
 - **Started on demand, never by `service run`.** In the relay style a connecting client that finds
   nothing answering on `<troot>/run/control.sock` spawns it and waits for it within its own
-  deadline; a holder stamped by an older release of this client is stopped through the stop epoch
-  and replaced, a newer one never. In the direct style a process that registered a workspace (the MCP
+  deadline; a holder stamped by an older release of this client, or by another build of this
+  release while this process is the build installed now, is stopped through the stop epoch and
+  replaced, a newer one never (point 4 of the layer-7 findings below). The replacement is fenced
+  to the holder decided about (`state/helper-epoch.lock`: the helper takes its lock and reads the
+  epoch under it, the replacing client checks the holder and moves the epoch under it), so a
+  helper that took the target meanwhile is decided about again, never stopped blind; a lock held
+  before its stamp is written is an unknown holder, waited for within the deadline. Every helper
+  a client starts carries the stop epoch the client read before its first dial (or the one its
+  own replacement wrote), and is started only while the client's admission still holds, so a
+  `server use`, `disconnect` or `remove` made while it dialled starts nothing. In the direct style a process that registered a workspace (the MCP
   bridge, a CLI command) starts it when none runs, as does `server connect`. A client dialling
   while the helper ends its idle exit starts its successor; any other stop (`server use`,
   `disconnect`, `remove`, zero-network) has no successor in that client's wait (A-HANDOFF).
@@ -865,6 +885,82 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
   record names now, writes the record and bumps the generation (a target removed meanwhile is left
   alone), then stops the helper, which may hold the deleted key in memory. The next request is `remote_auth_failed` before any byte is sent.
 
+### 24. Lifecycle across an upgrade and on a slow network (layer 7)
+
+Found by running the compatibility matrix, an upgrade over running processes and the WAN timing
+gate for real ([acceptance matrix](../runbooks/acceptance-matrix.md)); each holds on every surface.
+
+1. **A direct-style refusal of the consented revision starts the helper.** The direct style has no
+   helper on its path, so a `server_profile_changed` refusal also starts the target's helper
+   (client-owned, vault-less) unless one runs: it fetches the profile itself (never on the
+   request's or a hook's path), so `server status` names the change and a narrowing is adjusted.
+   The refusal the hello named stays the answer: a closed `ssh -W` stream is asked why it ended
+   only within the deadline, and the end of its own stderr reader (an OpenSSH master holds a
+   multiplexed client's stderr past that client's exit, so the close cancels the reader) names
+   nothing. Before this, that cancellation replaced the refusal on every surface: `service
+   status` printed a traceback (exit 1) and the helper was never started. A cancellation that
+   still escapes a command is `internal_error` (exit 70), never a traceback.
+2. **Every remote outage names its phase.** A direct stream (`ssh -W` or REST) that does not answer
+   within the deadline is `remote_unreachable`, as through the helper; never a phaseless outage a
+   hook or the CLI renders as this computer's service being down.
+3. **A server elsewhere of another release is `remote_incompatible`.** A schema-manifest or
+   protocol mismatch over a remote transport is the server's release (self-hosted servers keep
+   lockstep, U18: its owner upgrades it; continuation `remote_release_mismatch`), never
+   `service_incompatible` with the local `service restart` remedy, unless this process is the
+   stale one (point 4).
+4. **Two builds of one version are ordered by the installation.** A helper left by an older
+   release is replaced through its stop epoch, and one a newer release started never is (decision
+   13). Two builds of one version cannot be ordered by version, nor by when their processes
+   started: a bridge kept from before an in-place upgrade (on its retained runtime) may start its
+   older helper after a newer process started, at a helper's idle exit. The order is the package
+   manager's: the build installed now (the schema-manifest digest of the installation's files,
+   read again each time; a retained runtime reads the installation it was copied from) is the
+   newer. A process of the build installed now replaces a helper of another build of its
+   release; a process that is not (or cannot read which build is installed) never does, and gets
+   `service_incompatible`; the MCP bridge then asks to reopen the session. Before this, a newer
+   CLI and an older bridge replaced each other's helper on every use. A bridge from a build
+   without this rule still does until its session is reopened. (The first fix in this layer
+   compared the helper's start time with the process's; an independent review showed the older
+   bridge's own helper, started after the newer process, then held the target for good.)
+5. **The WAN gate (design v2 section 8.9) is met by the relay styles, not by direct HTTPS.** At a
+   100 ms round trip the startup gate's warm connect and status stays under 650 ms at p95 through
+   the helper over SSH and over HTTPS (the default for both kinds), after three rounds took out
+   round trips and work on that path: the hello leaves before the session's other envelopes are
+   parsed, the schema documents are walked once, the server resolves the computer's mount points
+   once per mount table instead of for every store a status read opens, and the one REST client
+   keeps an idle connection 25 seconds (under the edge's 30) instead of 5, so a hook after a pause
+   finds the helper's connection warm. Direct SSH meets it at p50 and is marginal at p95 with the
+   computer's load; direct HTTPS does not (four round trips in every new process: TCP, TLS, the
+   session and the status). The cold hook path ends within its budget and fails open naming
+   `remote_unreachable` in every style, timed through the hook's call and its close (re-measured
+   with the independently reviewed harness, which counts a sample only when it was measured and
+   served or failed open as an outage, and needs every next call served: no verdict changed).
+   **The owner decided (2026-11-11): accept it and tell the user.** No budget changes. Relay stays
+   the default and must pass the gate; the direct styles stay available, and for them the gate is
+   a measured, reported result (`scripts/acceptance/wan_gate.py` marks them `reported: within` or
+   `reported: over`, never pass or fail). When FinishUP meets or measures a slow direct
+   connection it says so plainly and names `finishup server set NAME --style relay` as the
+   remedy: a direct-style `remote_unreachable` carries the continuation `remote_direct_slow`
+   instead of `remote_server_test` on every surface that names it (CLI text and `--json`, MCP,
+   hooks, the terminal interface and the menu: `targets.remote_root_continuation`, attached by the
+   client that knows the style, never through a reason code); `server status` adds the line when
+   a direct probe did not answer in time (the probe now keeps the phase its connection named, and
+   its JSON carries the continuation, decided by the named target's own style); `server connect`
+   names it too; `server test` adds it when a direct new connection misses the gate's 650 ms or
+   does not answer. `remote_unreachable` is also a server that is down or a name that does not
+   resolve, so where nothing was measured the texts say it could not be reached in time and that
+   the direct style is slow on a slow network; only a measurement (`server test`) says this
+   network is slow. A refusal, a refused key or a changed identity keeps its own way back. Receipts are not
+   involved: a connection that did not answer records nothing. The owner's words: "if it has
+   issues it should bring them to the user; it's agentic, so with bad internet it won't work
+   anyway." `server test` compares what the gate times with the
+   gate's 650 ms: a new connection and one status in each of five new processes
+   (`client.connection_timing`, after the imports; never this folder's claim), the slowest of
+   them. It used to compare one warm status round trip with 200 ms, which missed the connection's
+   own round trips and a new process's schema work and said "within the hook budgets" where the
+   gate took 673 ms. What it still leaves out, and says it leaves out, is the server's extra work
+   on a task's status (about 50 to 150 ms on the test box).
+
 ## Honest limits
 
 1. Before layer 4 no server elsewhere could be used, so nothing was held; from layer 4 an SSH
@@ -901,14 +997,16 @@ lock, stops and refusals (`style_not_applicable` is now only a server on this co
     service's control socket, as they could on the server host itself (ADR-008 amendment,
     layer 4).
 13. Real OpenSSH was exercised on Linux only (the capability tests against a private `sshd`, and an
-    end-to-end run); macOS and WSL 2 have no recorded run (layer 7), and PR CI does not run the
-    capability tests.
+    end-to-end run, and every SSH cell of the layer-7 acceptance matrix); macOS and WSL 2 have no
+    recorded run (owner: the maintainer), and PR CI does not run the capability tests (the
+    real-network workflow will, once the maintainer adds it; see the acceptance-matrix runbook).
 14. In the direct style every dialing process reads the API key (decision 22); in the relay style
     only the helper does. Either way any process running as the same user can read the stored key
     (ADR-051 decision 7), and an API key is a bearer credential within its scope (ADR-053).
 15. Real HTTPS (TLS from a throwaway CA and a pin, both server edges) was exercised on Linux only:
-    the REST conformance kit and an end-to-end run of the CLI. macOS and WSL 2 have no recorded
-    run (layer 7), and PR CI does not run the conformance kit.
+    the REST conformance kit and an end-to-end run of the CLI, and every REST cell of the layer-7
+    acceptance matrix. macOS and WSL 2 have no recorded run (owner: the maintainer), and PR CI does
+    not run the conformance kit (the real-network workflow will, once the maintainer adds it).
 16. A key changed outside FinishUP (in the platform store, or the key file edited by hand) moves no
     credential generation: a running helper may keep using the key it read until the owner's next
     `login`, `logout` or `remove` moves the generation, or it restarts (decision 4).

@@ -69,6 +69,7 @@ __all__ = [
     "exclusions_to_json",
     "parse_shared_member",
     "precedes",
+    "retention_from_token",
     "retention_to_json",
     "review_to_json",
 ]
@@ -92,6 +93,7 @@ _SET_LIMIT: Final = 256
 _ORIGIN_LIMIT: Final = 512
 _MAX_ENVELOPE_BYTES: Final = 65_536
 _MAX_DAYS: Final = 36_500
+_DAYS_TOKEN: Final = re.compile(r"days:([1-9][0-9]{0,4})", re.ASCII)
 
 _TOP_FIELDS: Final = (
     "schema",
@@ -485,6 +487,24 @@ def retention_to_json(retention: Retention | None) -> JsonValue:
     if retention is None:
         return None
     return {"kind": retention.kind, "days": retention.days}
+
+
+def retention_from_token(token: object) -> Retention:
+    """The retention a written token names: ``task_close``, ``until_forgotten`` or ``days:N``.
+
+    ``N`` is a whole number of days from 1 to 36,500 written without a sign or leading zeros, the
+    bounds the envelope itself admits, so a token this accepts is always a retention a profile
+    and a consent can carry. The one parser behind ``--retention`` and ``[server.code_copy]``.
+    Raises ``EnvelopeError("retention_token_invalid")``.
+    """
+
+    if type(token) is str:
+        if token in {"task_close", "until_forgotten"}:
+            return Retention(token, None)
+        found = _DAYS_TOKEN.fullmatch(token)
+        if found is not None and int(found.group(1)) <= _MAX_DAYS:
+            return Retention("days", int(found.group(1)))
+    raise EnvelopeError("retention_token_invalid")
 
 
 def review_to_json(review: ReviewEgress) -> dict[str, JsonValue]:

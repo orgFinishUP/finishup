@@ -21,16 +21,21 @@ one spawned before such a stop never serves. Its roles:
    claim-bound connection whose agent declares ``role: background``, built through
    ``remote_workspace_binding`` under the helper's admission, so the repository hold is decided
    before the claim and the agent fences held repositories and answers nothing once its check
-   lapses. It never counts as client activity and never starts the server's service.
+   lapses. It never counts as client activity and never starts the server's service. Each agent
+   is opened under the target's record as it is then; when the owner's consent changes under
+   the same profile revision (``server use NAME --level L2``: no lapse), every agent is opened
+   again under the new record and the old one serves until its replacement is connected (at
+   most 30 seconds), so an agent opened at L1 never stays the one the server asks to sync.
 3. **Observation drain**: what this computer's hooks captured for each served workspace is
    delivered over its agent every 30 seconds, as its own task (never holding the tick or a stop),
    and once more, bounded, as the helper stops, never while this computer is zero-network.
 4. **Profile cache and re-check** (design v2 sections 2.3 and 8.9): the server's profile is
    fetched (``client.ssh_discovery``) and recorded (``client.server_profile.refresh_profile``) at
-   start, every 10 minutes while an upstream was used, when one of its own connections is refused
-   ``server_profile_changed`` and when a client left the refresh marker; at most every 30 seconds,
-   except that a refusal of the very revision this computer's cached profile still holds proves
-   the cache stale, so that fetch waits only 2 seconds after the last one.
+   start, every 10 minutes while an upstream was used, when one of its own connections or a
+   relayed one is refused ``server_profile_changed`` (over HTTPS the refusal ends the stream
+   unanswered, so the helper asks itself) and when a client left the refresh marker; at most
+   every 30 seconds, except that a refusal of the very revision this computer's cached profile
+   still holds proves the cache stale, so that fetch waits only 2 seconds after the last one.
 
 **Admission (FR-3).** Everything above runs only under the helper's own admission through the
 shared gate (``authorization.authorize_target``: pinned to its root, steps 2 to 5 and the
@@ -40,7 +45,8 @@ admitted again. While this computer last reported a zero-network policy the help
 records ``zero_network_remote_selected``, asks its OpenSSH master to exit and stops at once.
 
 Its status record (``client.helper_status``) names every outage with a closed phase, so a client
-whose connection closed can say why. Nothing here logs or raises a path, host or name.
+whose connection closed can say why; a client's own relay refused is recorded again for that
+client even when the phase stands already (a background agent's earlier refusal). Nothing here logs or raises a path, host or name.
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ from finishup.client.helper_status import (
     HelperLockBusy,
     HelperPhase,
     HelperStatus,
+    helper_start_fence,
     new_status,
     now_stamp,
     read_connection_style,
@@ -138,6 +145,10 @@ _REFRESH_MIN_SECONDS: Final = 30.0
 _STALE_REFRESH_MIN_SECONDS: Final = 2.0
 # How often the registrations are read again even when their folder did not change.
 _AGENT_SYNC_SECONDS: Final = 30.0
+# How long an agent opened under an earlier consent keeps serving while its replacement connects.
+_RETIRE_SECONDS: Final = 30.0
+# The bound on closing the agents a new level replaces at once (``_replace_agents``).
+_CLOSE_SECONDS: Final = 3.0
 _HELLO_SECONDS: Final = 10.0
 # One upstream attempt, from the master's start to the server's first answer to the hello: a
 # server that accepts the channel and never answers ends the relay here, its stream closed.
@@ -634,6 +645,7 @@ async def open_helper_agent(
             target=record,
             authorization=admission,
             role="background",
+            code_sync=True,
         )
     except (RepositoryIdentityError, TargetError, ValueError, OSError):
         return None
@@ -747,6 +759,16 @@ async def _refresh_over_rest(
 _REST_KINDS: Final = frozenset({"https", "local_port"})
 
 
+def _declares_code_sync(record: ServerTarget) -> bool:
+    """Whether a background agent opened under ``record`` declares the code-sync operations
+    (``remote_binding.remote_workspace_binding``: level L2 consented, L2 released)."""
+
+    from finishup.protocol.server_copy import l2_released
+
+    consent = record.consent
+    return l2_released() and consent is not None and consent.level == "L2"
+
+
 class _ClosingStream:
     """A background agent's upstream stream whose ``aclose`` runs as its own task.
 
@@ -845,12 +867,17 @@ class Helper:
         self._last_sync: float | None = None
         self._registrations_stamp: object = None
         self._agents: dict[tuple[object, ...], HelperAgent] = {}
+        # Agents opened under an earlier consent, each with when it was replaced: they keep serving
+        # until their replacement is connected, at most ``_RETIRE_SECONDS`` (defect A).
+        self._retiring: dict[tuple[object, ...], tuple[HelperAgent, float]] = {}
+        # The identity stamp of ``target.json`` when the record agents open under was last read.
+        self._record_stamp: object = None
         self._served_count = 0
         self._delivery: asyncio.Task[None] | None = None
         self._refresh = _Refresh()
         self._relays: set[asyncio.Task[None]] = set()
         # The relays of the helper's own background agents (relay style), and the closes of the
-        # streams they dial themselves (direct style): what a stop waits for (``_STOP_AGENT_SECONDS``).
+        # streams they dial themselves (direct style): what a stop and a new level wait for.
         self._own_relays: set[asyncio.Task[None]] = set()
         self._agent_closes: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -1035,6 +1062,8 @@ class Helper:
         self._relays.add(task)
         task.add_done_callback(self._relays.discard)
         if own:
+            # A background agent's relay: its end is where a REST stream's agent is unregistered
+            # (``RestControlStream.aclose``), which a new level waits for (``_replace_agents``).
             self._own_relays.add(task)
             task.add_done_callback(self._own_relays.discard)
 
@@ -1315,9 +1344,9 @@ class Helper:
 
         return _ClosingStream(await self._upstream.open_stream(), self._agent_closes)
 
-    async def _await_agent_ends(self, seconds: float) -> bool:
-        """Wait, at most ``seconds``, for the background agents' relays and stream closes to end on
-        their own; whether they all did."""
+    async def _await_agent_ends(self, seconds: float | None) -> bool:
+        """Wait, at most ``seconds`` (None: the caller bounds it), for the background agents'
+        relays and stream closes to end on their own; whether they all did."""
 
         pending = {task for task in (*self._own_relays, *self._agent_closes) if not task.done()}
         if not pending:
@@ -1346,7 +1375,15 @@ class Helper:
             self._refresh.named.append(named)
 
     async def _sync_agents(self) -> None:
-        """Open an agent for each registration served now; close every other one."""
+        """Open one agent for each workspace a registration serves now; close every other one.
+
+        Every client process registers the workspace it worked in (each command its own
+        registrant, with a lease), so a busy worktree has many registrations at once. They
+        all name the same claim and worktree and are served under the same admission, so the
+        helper keeps one background agent per workspace, not one per registration: a server
+        bounds the agents one key may hold, and a client's own connections need room too.
+        The registration that holds the workspace longest is the one served.
+        """
 
         from finishup.client.helper_registrations import served_workspaces
 
@@ -1359,14 +1396,12 @@ class Helper:
             except Exception:  # noqa: BLE001 - a read that fails serves nothing this round
                 served = ()
         self._served_count = len(served)
-        wanted = {
-            (
-                item.registration.claim,
-                item.registration.worktree,
-                item.registration.registrant,
-            ): item.registration
-            for item in served
-        }
+        wanted: dict[tuple[object, str], Registration] = {}
+        for item in served:
+            key = (item.registration.claim, item.registration.worktree)
+            held = wanted.get(key)
+            if held is None or item.registration.expires_at > held.expires_at:
+                wanted[key] = item.registration
         for key in tuple(self._agents):
             agent = self._agents[key]
             if key not in wanted or not agent.alive:
@@ -1397,12 +1432,132 @@ class Helper:
                 if self._last_upstream_use is None:
                     self._last_upstream_use = self._clock()
 
-    async def _close_agents(self, seconds: float | None = None) -> None:
-        """Close every background agent, together; within ``seconds`` when given (a stop's shared
-        deadline), cancelling a close still running then."""
+    def _follow_consent(self) -> tuple[ServerTarget | None, bool]:
+        """Take the target's record as it is now: the record before it when the owner's consent
+        changed (else ``None``), and whether the record was read now.
 
-        agents = tuple(self._agents.values())
+        Every background agent is opened under the record (its consent decides, among others,
+        whether it answers the server's code-sync calls, ADR-054). A consent the owner changed
+        under the same profile revision (``finishup server use NAME --level L2``, another
+        retention, the same level confirmed again) ends no connection, so the agents opened
+        before it would go on under the old one: an L1 agent declares no code-sync operation and
+        every sync is refused until the helper restarts (defect A of the 2026-11-11 dogfood).
+        ``target.json`` is read again only when its identity stamp moved (one ``lstat`` a tick).
+        """
+
+        from finishup.client.authorization import consent_digest
+        from finishup.client.targets import read_target
+        from finishup.config.paths import SERVER_TARGET_FILE_NAME
+
+        try:
+            facts = os.lstat(self._root / SERVER_TARGET_FILE_NAME)
+        except OSError:
+            return None, False
+        stamp = (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+        if stamp == self._record_stamp:
+            return None, False
+        self._record_stamp = stamp
+        try:
+            current = read_target(self._root)
+        except TargetError:
+            return None, False
+        if current is None or current.target_id != self._record.target_id:
+            return None, False
+        previous = self._record
+        self._record = current
+        changed = consent_digest(current) != consent_digest(previous)
+        return (previous if changed else None), True
+
+    async def _follow(self) -> None:
+        """Follow the owner's consent (``_follow_consent``, ``_replace_agents``), then say which
+        consent the agents follow now (``helper_status.write_followed_consent``), once each
+        agent that declared less than it is closed: ``server use`` waits for that after a new
+        level, so its command ends only once no such agent is left for the server to ask."""
+
+        from finishup.client.authorization import consent_digest
+        from finishup.client.helper_status import write_followed_consent
+
+        previous, read = self._follow_consent()
+        retired = True if previous is None else await self._replace_agents(previous)
+        if read and retired:
+            write_followed_consent(self._root, consent_digest(self._record))
+
+    async def _replace_agents(self, previous: ServerTarget) -> bool:
+        """Every agent opened under the earlier consent (``previous``'s) is replaced.
+
+        The next agent sync opens each one again under the record now, for each workspace whose
+        registration the new consent still serves (a registration made under the earlier one is
+        renewed by its registrant: a command at its next run, an MCP bridge within seconds). The
+        old agent keeps serving until its replacement is connected (``_close_replaced``), so work
+        in flight on it finishes and the server is never without one, except when the new consent
+        declares the code-sync operations the old agent does not (level L2 chosen): that agent
+        closes now, since the server would ask it, and refuse the sync at once
+        (``operation_not_declared``), while it waits for an agent when none is there. A workspace
+        replaced again before that closes its oldest agent at once.
+        """
+
+        now = self._clock()
+        widened = _declares_code_sync(self._record) and not _declares_code_sync(previous)
+        closing: list[HelperAgent] = []
+        for key, agent in self._agents.items():
+            older = self._retiring.pop(key, None)
+            if older is not None:
+                self._spawn_close(older[0])
+            if widened:
+                closing.append(agent)
+            else:
+                self._retiring[key] = (agent, now)
         self._agents.clear()
+        self._last_sync = None
+        if not closing:
+            return True
+        # Gone from the server before the helper says it follows the new consent (``_follow``):
+        # each agent closed, then every background agent's relay (relay style) or stream close
+        # (direct style, ``_ClosingStream``) ended, since a REST stream unregisters its agent as
+        # it closes (no other agent runs now: a new level closes them all, and the next sync
+        # opens their replacements). Bounded, so a close that hangs never holds the tick; one
+        # that does not finish in time is not acknowledged, and ``server use`` then stops the
+        # helper instead.
+        try:
+            async with asyncio.timeout(_CLOSE_SECONDS):
+                closed = await asyncio.gather(
+                    *(agent.aclose() for agent in closing), return_exceptions=True
+                )
+                await self._await_agent_ends(None)
+        except TimeoutError:
+            return False
+        return not any(isinstance(result, BaseException) for result in closed)
+
+    async def _close_replaced(self) -> None:
+        """Close each replaced agent whose replacement is connected, is not wanted, or that
+        waited its bound."""
+
+        now = self._clock()
+        for key, (agent, since) in tuple(self._retiring.items()):
+            replacement = self._agents.get(key)
+            if (
+                replacement is None
+                or replacement.client is not None
+                or not agent.alive
+                or now - since >= _RETIRE_SECONDS
+            ):
+                del self._retiring[key]
+                with contextlib.suppress(Exception):
+                    await agent.aclose()
+
+    def _spawn_close(self, agent: HelperAgent) -> None:
+        task = asyncio.create_task(agent.aclose())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _close_agents(self, seconds: float | None = None) -> None:
+        """Close every background agent, the replaced ones still serving included, together;
+        within ``seconds`` when given (a stop's shared deadline), cancelling a close still running
+        then."""
+
+        agents = (*self._agents.values(), *(agent for agent, _since in self._retiring.values()))
+        self._agents.clear()
+        self._retiring.clear()
         if not agents:
             return
         closes = [asyncio.ensure_future(agent.aclose()) for agent in agents]
@@ -1547,10 +1702,11 @@ class Helper:
         """One tick of the helper's watch; whether it is stopping.
 
         Zero-network first (a stop, at once); a moved stop epoch (a stop); then the admission (a
-        lapse ends every relay and
-        every agent); the registrations when their folder changed or every 30 seconds; the drain
-        and the profile refresh when due, each as its own task (the refresh under gate steps 2 to
-        4 only, so it also runs while the consent refuses the cached profile); the idle exit.
+        lapse ends every relay and every agent; a consent changed without a lapse opens every
+        agent again under it, make before break); the registrations when their folder changed or
+        every 30 seconds; the drain and the profile refresh when due, each as its own task (the
+        refresh under gate steps 2 to 4 only, so it also runs while the consent refuses the
+        cached profile); the idle exit.
         """
 
         if self._stop.is_set() or self._refuse_zero_network():
@@ -1565,11 +1721,15 @@ class Helper:
             return True
         if admission is None:
             await self._close_agents()
+        else:
+            await self._follow()
         now = self._clock()
         if self._registrations_changed() or (
             self._last_sync is None or now - self._last_sync >= _AGENT_SYNC_SECONDS
         ):
             await self._sync_agents()
+        if self._retiring:
+            await self._close_replaced()
         if self._agents or self._served_count:
             # A served registration is a client: the helper stays while one is live.
             self._last_activity = now
@@ -1677,16 +1837,22 @@ async def run_helper_process(
     from finishup.protocol.schemas import schema_manifest_digest
 
     lock = HelperLock(root)
+    digest = schema_manifest_digest()
     try:
-        lock.acquire(version=__version__, schema_manifest_digest=schema_manifest_digest())
+        # Under the epoch fence: a client replacing the helper it saw (``supersede_helper``)
+        # either sees this one holding the target and decides again, or moved the epoch first,
+        # which fences this start below.
+        with helper_start_fence(root):
+            lock.acquire(version=__version__, schema_manifest_digest=digest)
+            # Read once, right after the lock: a stop before this read fences this start, one
+            # after it is seen on the first tick.
+            current = read_helper_epoch(root)
     except HelperLockBusy:
         return 0
     except OSError:
+        lock.release()
         return 20
     try:
-        # Read once, right after the lock: a stop before this read fences this start, one after
-        # it is seen on the first tick.
-        current = read_helper_epoch(root)
         if epoch is not None and current != epoch:
             with contextlib.suppress(OSError):
                 write_helper_status(

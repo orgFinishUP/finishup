@@ -970,8 +970,23 @@ def _decode_mount_field(value: str) -> str:
     return result
 
 
-def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
-    matches: list[tuple[int, str]] = []
+type _MountPoints = tuple[tuple[Path, str], ...]
+
+# The last mount table read and its mount points, each resolved once. Every store opened, and
+# every connection to an isolated root's service, verifies its folder, and resolving each of the
+# computer's mount points again for each folder was most of a warm status read's time (a lstat
+# chain per mount point, dozens of them). The table's own text is the key: a mount or unmount is
+# another text and is resolved afresh. The kernel names each mount point by its current path, so
+# the same text resolves the same way.
+_resolved_mount_table: tuple[str, _MountPoints] | None = None
+
+
+def _resolved_mount_points(mount_table: str) -> _MountPoints:
+    global _resolved_mount_table
+    remembered = _resolved_mount_table
+    if remembered is not None and remembered[0] == mount_table:
+        return remembered[1]
+    points: list[tuple[Path, str]] = []
     for line in mount_table.splitlines():
         fields = line.split()
         if len(fields) < 3:
@@ -981,8 +996,20 @@ def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
             resolved_mount = mount_point.resolve(strict=False)
         except OSError:
             resolved_mount = mount_point
-        if _is_beneath(path, resolved_mount):
-            matches.append((len(resolved_mount.parts), fields[2]))
+        points.append((resolved_mount, fields[2]))
+    resolved = tuple(points)
+    _resolved_mount_table = (mount_table, resolved)
+    return resolved
+
+
+def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
+    # ``_is_beneath`` without a raised error per mount point: the path or one of its parents.
+    beneath = {path, *path.parents}
+    matches = [
+        (len(mount_point.parts), filesystem)
+        for mount_point, filesystem in _resolved_mount_points(mount_table)
+        if mount_point in beneath
+    ]
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]

@@ -190,6 +190,7 @@ from finishup.kernel.finding_resolution import current_finding_records
 from finishup.kernel.projections import ProjectionRecord, ProjectionState
 from finishup.observability.logging import record_unexpected_exception_without_raising
 from finishup.observability.privacy import prepare_persisted_plaintext
+from finishup.ports.change_capture import evidence_task_of, evidence_task_scope
 from finishup.ports.clock import ClockPort
 from finishup.ports.host_lineage import (
     HostLineageRegistryError,
@@ -6530,6 +6531,23 @@ class ObservationCoordinator:
             pass
 
     async def _prepare_verification_worker(
+        self, runtime: TaskRuntime, *args: Any, **kwargs: Any
+    ) -> ObservationVerificationWorker | None:
+        """``_prepare_verification_worker_unscoped`` with the task's evidence scope (ADR-054):
+        the workspace's changed paths, inspection and approved checks are the task's evidence."""
+
+        with evidence_task_scope(evidence_task_of(runtime)):
+            return await self._prepare_verification_worker_unscoped(runtime, *args, **kwargs)
+
+    async def _rebuild_verification_worker(
+        self, runtime: TaskRuntime, *args: Any, **kwargs: Any
+    ) -> ObservationVerificationWorker | None:
+        """``_rebuild_verification_worker_unscoped`` with the task's evidence scope (ADR-054)."""
+
+        with evidence_task_scope(evidence_task_of(runtime)):
+            return await self._rebuild_verification_worker_unscoped(runtime, *args, **kwargs)
+
+    async def _prepare_verification_worker_unscoped(
         self,
         runtime: TaskRuntime,
         workspace: str,
@@ -6698,6 +6716,11 @@ class ObservationCoordinator:
         runner = await asyncio.to_thread(
             access.runner, {item.approval_commitment: item for item in policy.checks}
         )
+        # Level L2 (ADR-054): a claim-bound task's approved checks are its evidence, compared with
+        # the snapshot of the server's copy its other reads were pinned to.
+        bind_task = getattr(runner, "bind_evidence_task", None)
+        if callable(bind_task):
+            bind_task(runtime.task_id)
         repository = cast(ObservationVerificationRepository, store.verification_repository())
 
         async def persist_output(
@@ -6872,7 +6895,7 @@ class ObservationCoordinator:
                 )
         return worker
 
-    async def _rebuild_verification_worker(
+    async def _rebuild_verification_worker_unscoped(
         self,
         runtime: TaskRuntime,
         workspace: str,
@@ -6949,6 +6972,11 @@ class ObservationCoordinator:
         runner = await asyncio.to_thread(
             access.runner, {item.approval_commitment: item for item in policy.checks}
         )
+        # Level L2 (ADR-054): a claim-bound task's approved checks are its evidence, compared with
+        # the snapshot of the server's copy its other reads were pinned to.
+        bind_task = getattr(runner, "bind_evidence_task", None)
+        if callable(bind_task):
+            bind_task(runtime.task_id)
         repository = cast(ObservationVerificationRepository, store.verification_repository())
 
         async def persist_output(

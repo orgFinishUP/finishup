@@ -16,7 +16,9 @@ connection styles, SSH discovery and the host key OpenSSH verified as the endpoi
 (*Built in layer 4* below; ADR-052 decisions 13 to 19); `https` and `local_port` stay closed until
 layer 5. **Layer 5** opens them over REST v1, the public network contract recorded in
 [ADR-053](ADR-053-rest-v1-public-contract.md), with the gateway and native server edges, API keys
-and the compatibility window (*Built in layer 5* below; ADR-052 decisions 20 to 23). Design
+and the compatibility window (*Built in layer 5* below; ADR-052 decisions 20 to 23). **Layer 6**
+builds level L2's server copy and releases it, recorded in
+[ADR-054](ADR-054-level-l2-the-server-copy.md) (*Built in layer 6* below). Design
 gates: protocol (control
 envelopes 2.10.0 and the workspace frames), privacy/egress (the FinishUP server hop), storage
 layout (target roots and the selection file), release/packaging (client and server-edge
@@ -40,8 +42,8 @@ crossing ledger and the AST boundary test), `src/finishup/cli/command_scope.py`,
 `src/finishup/service/control_protocol.py` and `src/finishup/service/daemon.py`, the
 control-envelope 2.10.0 schemas and fixtures, and the closed tokens in
 `src/finishup/protocol/errors.py` and `src/finishup/protocol/recovery.py`. Later layers add the
-modules their own amendments of this ADR name; those of layers 2 to 4 are listed in ADR-052, and
-layer 5's in ADR-053.
+modules their own amendments of this ADR name; those of layers 2 to 4 are listed in ADR-052,
+layer 5's in ADR-053, and layer 6's in ADR-054.
 **Amends:** ADR-001, ADR-008, ADR-009, ADR-018, ADR-026, ADR-028 and ADR-031; each carries a dated
 amendment note pointing here, limited to what layer 1 does. **Relates to:** ADR-002 (idempotency
 scope), ADR-010 (Cursor roots), ADR-030 (typed recovery directives), ADR-048 (frozen `yoetz`
@@ -110,7 +112,7 @@ every later layer, document and surface uses the same ones.
 
 | Axis | Values | Chosen by |
 |---|---|---|
-| **Level** — where the work happens | **L0 local**: everything on this computer (the default, unchanged). **L1 code-here**: the server keeps tasks, ledger and review; this computer's workspace agent answers the server's eighteen bounded workspace operations (decision 5). **L2 server-copy**: the server also keeps a synced copy of the repository and reads it itself; approved checks still run on this computer. | The user, per server, with a per-repository override, within what the server offers. |
+| **Level** — where the work happens | **L0 local**: everything on this computer (the default, unchanged). **L1 code-here**: the server keeps tasks, ledger and review; this computer's workspace agent answers the server's eighteen bounded workspace operations (decision 5). **L2 server-copy**: the server also keeps a synced copy of the repository, which this computer's helper sends it, and reads evidence from it itself; outside reads and approved checks are still answered on this computer (ADR-054). | The user, per server, with a per-repository override, within what the server offers. |
 | **Connection style** — how this computer reaches the server | **unix**: the owner-only Unix endpoint of a local or named-local root (today's code path). **relay**: client processes reach the server through one local background helper per server, which holds the key and a warm upstream. **direct**: each client process dials the server itself. | The client, from what the server offers; relay is the default for SSH and HTTPS, direct an advanced option. |
 | **Server edge** — how the server is reached | **ssh**: `sshd` forwards a stream-local channel into the owner-only control socket (no API key). **gateway**: a separate same-user process with no vault re-enters the service through its control socket. **native**: a listener inside the service process. | The server's owner. |
 
@@ -277,9 +279,10 @@ and `server login` for every kind. `server logout` refuses an SSH target
 
 **Not yet built:** HTTPS and port servers, `server login`, the REST client, both HTTP server
 edges, discovery with the official origin preset and API-key direct disclosure (layer 5); the
-server copy, code sync in the helper and level L2 (layer 6); the WAN timing gate, an upgrade over
-running helpers and bridges, and the host × surface × operating system acceptance rows,
-including every macOS and WSL 2 run (layer 7). The terminal interface's `/server` still adds only
+server copy, code sync in the helper and level L2 (layer 6). Layer 7 ran the compatibility matrix,
+an upgrade over running helpers and bridges, the WAN timing gate and the Linux host rows
+([acceptance matrix](../runbooks/acceptance-matrix.md)); every macOS and WSL 2 run is still
+missing (owner: the maintainer). The terminal interface's `/server` still adds only
 a server on this computer (an SSH server is added with `finishup server add NAME ssh://…` in a
 terminal, because OpenSSH's host-key question needs the raw terminal), its `use` of an SSH target
 never lets OpenSSH ask, and it does not register its workspace with the helper (its own
@@ -330,6 +333,32 @@ a terminal); fencing a task read by id per key principal (principals namespace c
 groundwork for multi-owner hosting); a PR CI job for the REST conformance kit; and an official
 FinishUP service, built in another repository. Real HTTPS ran on Linux only (the conformance kit
 against both edges over real TLS, and an end-to-end run of the CLI).
+
+### Built in layer 6, and not yet built
+
+The record is [ADR-054](ADR-054-level-l2-the-server-copy.md). **Level L2 is released**
+(`protocol.server_copy.L2_RELEASED` is `True`; `tests/unit/architecture/test_level_l2_released.py`
+names every protection it rests on), and level L1 stays the default byte for byte: a server offers
+L2 only when its owner's `[server.code_copy]` table (config 1.4.0) enables an offer, and a client
+sends a copy only after its owner consents at L2 on the trusted console.
+
+**Built:** the `git-bundle-1` wire format and its one verifier; the sanitized exporter with its
+always-excluded names and content scan; the pull sync, two workspace operations in a new `copy`
+family (decision 5's catalogue grows from eighteen operations to twenty) answered only by the
+target's helper after the gate runs again; the server's encrypted copy store with its quotas,
+forget and expiry (`days:N` and `task_close`); the claim-bound `code_copy` method; consent at L2
+with a retention; the owner's per-repository choices; reads served from a pinned snapshot of the
+copy, stale reads while the client is offline, and approved checks and outside reads still
+answered by the client's agent; the subject-state commitment and `code_snapshot_mismatch`;
+per-evidence provenance in every receipt rendering, with the count of fenced reads (O7); the
+erasure of the excerpts derived from a forgotten copy, with a "content forgotten" marker; and
+`server code forget --all`, `server code allow list|remove` and `server remove` offering to forget
+first. Both parts ran over real networks on Linux (gateway and native REST edges over real TLS,
+and a private `sshd`; ADR-054 honest limit 14 names what ran and what is covered in process only).
+
+**Not yet built:** the terminal interface's L2 flows (CLI only), any macOS or WSL 2 run, and a
+Codex, Claude Code or Cursor session against a server keeping a copy (ADR-054, *Not built*).
+Layer 7's lifecycle validation ran on Linux ([acceptance matrix](../runbooks/acceptance-matrix.md)).
 
 ## Decisions
 
@@ -656,6 +685,9 @@ remote kinds only, so they are dormant in layer 1, where the `server folders` gr
     `read_text_beneath`, `list_beneath`, `lstat_candidates`;
   - **observation:** `open_workspace` (returns an opaque remote handle), `load_check_policy`,
     `subject_state_capture`, `list_changed_paths`, `inspect`, `run_approved_check`.
+  - **copy** (layer 6, [ADR-054](ADR-054-level-l2-the-server-copy.md) decision 4):
+    `code_sync_prepare` and `code_sync_read`, level L2's pull sync, declared only by the target's
+    helper; twenty operations in all.
 - **Real adapters, existing fences.** The agent runs each operation against the same local
   adapters the service uses today, with all their fences: owner-UID checks, ignore rules, link
   refusal, object verification, size and time bounds, the approved-check sandbox. Two
@@ -1566,8 +1598,9 @@ it still refuses before the console for a kind that is closed.
    entry is dropped for its size.
 4. A request already under way may finish; open connections end within about a second. "Nothing
    more", never "never sent"; what the server received stays there.
-5. Fencing covers recorded worktrees only (at most eight per repository), and a fenced read is not
-   counted on receipts (O7; the count lands with level-L2 provenance).
+5. Fencing covers recorded worktrees only (at most eight per repository). A fenced read is
+   counted only on the receipt of a level-L2 task, whose evidence account carries it (O7;
+   ADR-054 decision 14); a level-L1 task's receipt does not count it.
 6. Connections that name no repository are not held.
 7. A same-user process can edit either record; the trusted console stops agents from using
    FinishUP's own commands, not same-user file writes. A hand edit does end open connections
@@ -1797,8 +1830,9 @@ its next tick, then a wait until its lock is seen free; no process is ever signa
 pattern; a helper spawned before the stop exits without serving; one that does not stop is
 `target_still_connected`). `server logout` does not apply to SSH. The spawner reaps its own child
 on a daemon thread; a spawner that exits first leaves it to the system, so reaping never depends
-on the short-lived starter. A helper stamped by an older release of this client is replaced
-through the stop epoch, a newer one never. A client dialling while
+on the short-lived starter. A helper stamped by an older release of this client (or by another
+build of this release, by a client of the build installed now) is replaced through the stop
+epoch, a newer one never (ADR-052). A client dialling while
 the helper ends its idle exit starts its successor; any other stop has no successor in that
 client's wait.
 
@@ -1829,7 +1863,9 @@ client's wait.
   `state/helper-status.json`, `config/connection-style.json`, `state/helper-epoch`,
   `state/ssh-master.json` and its lock, `state/profile-refresh-requested` and `log/helper.stderr`
   (INTERFACES, *SSH servers and the helper*). Socket paths may hold spaces (the default root on
-  macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. There is no code sync in the helper yet (layer 6).
+  macOS); one holding `:`, `%` or `$` is refused, at `server add` as `ssh_path_unusable`. From
+  layer 6 the helper also answers level L2's code-sync calls for a target consented at L2
+  (ADR-054).
 - **SSH edge.** `sshd` on the server must allow stream-local forwarding; it connects to the
   server's owner-only control socket as the login user, so the service's peer-UID check passes
   unchanged and the SSH login is the service owner (ADR-008 amendment, layer 4).
