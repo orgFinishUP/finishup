@@ -12,6 +12,7 @@ holds: a changed or wider profile, another issuer, a level above the consent, or
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -154,13 +155,38 @@ def _surfaces(home: Path, record: targets.ServerTarget, token: str) -> None:
     for text in (attach, mapped):
         assert f"({_PHASE})" in text
         assert f"Continuation: {token}." in text
+        # From layer 4 the server itself refuses a hello naming a revision it no longer issues:
+        # the hello was sent, so no surface says nothing was (Codex review).
+        assert "before anything was sent" not in text
+        assert "before that server did any work for it" in text
         _clean(text, home, record)
     # The terminal interface and the menu.
     failure = _connect_failure(_error())
     assert (failure.reason, failure.details) == (_PHASE, (directive.directive,))
     guidance = menu._control_guidance(_error())  # pyright: ignore[reportPrivateUsage]
     assert _PHASE in guidance and directive.directive in guidance
+    assert "before anything was sent" not in guidance
     _clean(" ".join((failure.message, *failure.details, guidance)), home, record)
+    summary = asyncio.run(_menu_summary_refused())
+    assert f"({_PHASE})" in summary and directive.directive in summary
+    assert "before anything was sent" not in summary
+    _clean(summary, home, record)
+
+
+async def _menu_summary_refused() -> str:
+    """The menu's service line when the selected server refuses with ``_PHASE``."""
+
+    import finishup.cli.app as app
+
+    async def refused() -> object:
+        raise _error()
+
+    original = app.build_service_client
+    app.build_service_client = refused  # type: ignore[assignment]
+    try:
+        return await menu._service_summary()  # pyright: ignore[reportPrivateUsage]
+    finally:
+        app.build_service_client = original
 
 
 def test_a_refusal_while_the_consent_still_admits_the_profile_continues_as_checking(
