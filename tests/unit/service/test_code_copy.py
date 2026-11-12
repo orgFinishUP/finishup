@@ -517,9 +517,9 @@ def test_a_forget_while_the_helper_prepares_fences_that_sync(tmp_path: Path) -> 
 def test_a_task_start_sync_left_on_a_stale_helper_agent_completes_at_the_newer_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """macOS dogfood: a helper stopped (or was replaced or killed) without its agent being unregistered at
-    the server; a task started at once sends the sync's prepare to that agent, which nobody
-    answers. The successor helper's agent registers a moment later: the prepare goes on there,
+    """macOS dogfood: a helper stopped (or was replaced or killed) without its agent being
+    unregistered at the server; a task started at once sends the sync's prepare to that agent,
+    which nobody answers. The successor helper's agent registers a moment later: the prepare goes on there,
     the sync completes long before the prepare's deadline, and the task reads the copy it made
     (not the copy as last synced, nor this computer)."""
 
@@ -599,3 +599,84 @@ def test_a_task_start_sync_left_on_a_stale_helper_agent_completes_at_the_newer_o
     assert view is not None and not view.stale  # type: ignore[union-attr]
     assert view.manifest.snapshot == helper.prepared.manifest.snapshot  # type: ignore[union-attr]
     assert took < 4.0
+
+
+def test_a_syncs_reads_stay_on_the_agent_that_prepared_it_when_a_newer_one_registers(
+    tmp_path: Path,
+) -> None:
+    """Codex review: a prepare answered by one helper agent, then a newer agent of the same
+    workspace registering before the reads (a helper replaced again, or one following a new
+    level), sent the reads to the newer agent, which never built that snapshot: the sync failed
+    ``code_sync_unknown``. The reads go to the agent that answered the prepare while it is
+    registered."""
+
+    import asyncio
+
+    from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
+    from finishup.ports.workspace_agent import WORKSPACE_OPERATION_NAMES, operation_spec
+    from finishup.service.workspace_hub import (
+        WorkspaceAgentChannel,
+        WorkspaceAgentHub,
+        WorkspaceCallWriter,
+    )
+
+    _copies_unused, helper, store = _copies(tmp_path)
+    declaration = WorkspaceAgentDeclaration(
+        tuple(sorted(WORKSPACE_OPERATION_NAMES, key=str.encode)), 6_291_456, role="background"
+    )
+
+    async def run() -> tuple[object, list[str], list[str]]:
+        hub = WorkspaceAgentHub(inline_wait_seconds=2.0, background_wait_seconds=2.0)
+        copies = CodeCopies(store, hub, lambda: REVISION)
+        copies.remember(HANDLE, COMMITMENT, WORKTREE)
+        prepared_by: list[str] = []
+        newer_asked: list[str] = []
+        holder: list[WorkspaceAgentChannel] = []
+        newer: list[WorkspaceAgentChannel] = []
+
+        async def register(writer: WorkspaceCallWriter) -> WorkspaceAgentChannel:
+            return await hub.register(
+                handle=HANDLE,
+                declaration=declaration,
+                service_instance_id="svc_00000000-0000-4000-8000-000000000054",
+                service_generation="7",
+                writer=writer,
+                worktree=WORKTREE,
+            )
+
+        async def another(call: WorkspaceCall) -> None:
+            # A newer helper agent: it never built the snapshot the reads name.
+            newer_asked.append(call.operation)
+            reply = WorkspaceReply(
+                "workspace_reply", "1.0", call.call_id, "refused", None, "code_sync_unknown"
+            )
+            asyncio.get_running_loop().call_soon(hub.deliver, newer[0], reply)
+
+        async def answering(call: WorkspaceCall) -> None:
+            prepared_by.append(call.operation)
+            spec = operation_spec(call.operation)
+            assert spec is not None
+            value = helper.call_blocking(
+                HANDLE,
+                WorkspaceOperation(call.operation),
+                spec.decode_arguments(call.arguments),
+                timeout_seconds=1.0,
+            )
+            if call.operation == "code_sync_prepare" and not newer:
+                newer.append(await register(another))
+            reply = WorkspaceReply(
+                "workspace_reply", "1.0", call.call_id, "ok", spec.encode_result(value), None
+            )
+            asyncio.get_running_loop().call_soon(hub.deliver, holder[0], reply)
+
+        holder.append(await register(answering))
+        view = await asyncio.to_thread(
+            copies.git_view, HANDLE, purpose="base", base=None, task_id="tsk_pinned"
+        )
+        return view, prepared_by, newer_asked
+
+    (view, _effective), prepared_by, newer_asked = asyncio.run(run())  # type: ignore[misc]
+    assert prepared_by[:1] == ["code_sync_prepare"] and set(prepared_by[1:]) == {"code_sync_read"}
+    assert newer_asked == []
+    assert view is not None and not view.stale  # type: ignore[union-attr]
+    assert view.manifest.snapshot == helper.prepared.manifest.snapshot  # type: ignore[union-attr]

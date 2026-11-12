@@ -688,9 +688,10 @@ def _slow_unregistration(
 async def test_a_stopping_helper_unregisters_its_relayed_agent_before_ending_its_relays(
     lab: _Lab, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """macOS dogfood: a stop closes the background agents, then lets their relays end on their own (bounded)
-    before cancelling the rest, so the REST stream's courtesy ``DELETE`` reaches the server and no
-    dead agent stays registered there to be asked first by the next task's workspace calls."""
+    """macOS dogfood: a stop closes the background agents, then lets their relays end on their
+    own (bounded) before cancelling the rest, so the REST stream's courtesy ``DELETE`` reaches
+    the server and no dead agent stays registered there to be asked first by the next task's
+    workspace calls."""
 
     began = _slow_unregistration(monkeypatch, seconds=0.2)
     helper = Helper(lab.root, lab.record, refresher=_no_refresh, tick=_no_tick)
@@ -721,6 +722,53 @@ async def test_a_relay_that_never_ends_holds_the_stop_no_longer_than_its_bound(
         assert await helper.serve(None) == "stop_requested"
     assert loop.time() - stopping < 3.0
     assert not lab.backend.agents[0].closed  # cancelled at the bound: the server's lease ends it
+
+
+class _SlowDrainAgent(_StoppingAgent):
+    """A background agent whose last delivery never finishes on its own."""
+
+    async def drain(self, *, may_send: object) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_a_stop_ends_within_one_shared_deadline_whatever_lingers(
+    lab: _Lab, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: the last drain (2 s), the wait for the agents' unregistration (1.5 s) and
+    the client relays' own ends (a REST courtesy close each) added up past the stopper's
+    five-second wait (``helper_runtime._STOP_SECONDS``) with the one-second tick, and the stop
+    then read ``target_still_connected``. A stop now runs within one shared deadline: here a
+    drain that never finishes, an agent whose unregistration never leaves and a client relay
+    that takes five seconds to end are all cut at it."""
+
+    from finishup.client import helper as helper_module
+
+    began = _slow_unregistration(monkeypatch, seconds=None)
+    helper = Helper(lab.root, lab.record, refresher=_no_refresh, tick=_no_tick)
+    helper._sync_agents = _no_sync  # type: ignore[method-assign]
+    stream = await _registered_agent(helper, lab)
+    helper._agents[("x",)] = _SlowDrainAgent(stream, began)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+
+    async def lingering_relay() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(5.0)  # its upstream's close, once the stop cancelled it
+
+    relay = asyncio.create_task(lingering_relay())
+    helper._relays.add(relay)  # pyright: ignore[reportPrivateUsage]
+    helper.request_stop()
+    loop = asyncio.get_running_loop()
+    stopping = loop.time()
+    try:
+        async with asyncio.timeout(15):
+            assert await helper.serve(None) == "stop_requested"
+        took = loop.time() - stopping
+    finally:
+        relay.cancel()
+        await asyncio.gather(relay, return_exceptions=True)
+    assert took <= helper_module._SHUTDOWN_SECONDS + 0.5  # pyright: ignore[reportPrivateUsage]
+    assert helper_module._SHUTDOWN_SECONDS + helper_module._TICK_SECONDS < 5.0  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_a_stopping_direct_helper_unregisters_the_agent_its_connection_stopped_waiting_for(

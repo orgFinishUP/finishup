@@ -180,6 +180,20 @@ def test_the_environment_carries_no_product_variable_or_secret(
     assert environment.get("XDG_STATE_HOME") == os.environ["XDG_STATE_HOME"]
 
 
+def test_the_helper_reads_keys_from_the_store_its_client_pinned(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """The keyring backend this process is pinned to (``PYTHON_KEYRING_BACKEND``) travels to its
+    helper: the helper reads the API key from the store the client used, and a test run's
+    fail backend (``tests/conftest.py``) keeps a helper a test spawns off the platform store
+    too (Codex review)."""
+
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    assert helper_environment()["PYTHON_KEYRING_BACKEND"] == "keyring.backends.fail.Keyring"
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND")
+    assert "PYTHON_KEYRING_BACKEND" not in helper_environment()
+
+
 def _process_state(pid: int) -> str | None:
     """The kernel's one-letter state of ``pid`` (``Z`` for a zombie), ``None`` once it is gone."""
 

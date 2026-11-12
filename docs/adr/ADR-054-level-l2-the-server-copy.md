@@ -231,9 +231,10 @@ an agent that declares it, so the server never asks them, and it never replays e
 connection. A prepare still unanswered on an older helper agent goes on, with the time it has left,
 at a newer helper agent of the same workspace that registers meanwhile (ADR-052 decision 12: a
 helper stopped, replaced or killed without its agent being unregistered at the server), which builds
-the snapshot the sync's reads then fetch from it; a read is never taken over, since its snapshot
-lives only in the agent that prepared it (macOS dogfood). The declaration is made when the agent
-opens (defect A of the 2026-11-11 dogfood), so a running helper follows the consent
+the snapshot the sync's reads then fetch from it; the reads go to the agent that answered the
+prepare while it is registered, even once a newer one is, and a read is never taken over, since its
+snapshot lives only in the agent that prepared it (macOS dogfood). The declaration is made when the
+agent opens (defect A of the 2026-11-11 dogfood), so a running helper follows the consent
 (`client.helper.Helper._follow`): it opens each background agent again under the record as it is
 now, then records which consent its agents follow (`state/helper-consent`,
 `yoetz.helper-consent/1`): after a new level, only once each old agent is closed and its relay
@@ -760,9 +761,11 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     the API key; the control-hello field that limit 15 names is not built until then. Until it is,
     one server should be used by one person, or by people who may see each other's tasks.
 17. **The server learns that an old agent is gone on a best-effort basis.** `server use NAME
-    --level` ends once the running helper says its agents follow the new level, and the helper
-    says so once each old agent's close ended (its relay in the relay style, its stream's close in
-    the direct style); a stopping helper (`server disconnect`, `server use` of another target,
+    --level` ends once the running helper says its agents follow the new level. After choosing L2
+    the helper says so once each old agent's close ended (its relay in the relay style, its
+    stream's close in the direct style); after any other change (L2 back to L1 among them) the old
+    agents keep serving until their replacements connect (at most 30 seconds), so it may say so
+    before they closed. A stopping helper (`server disconnect`, `server use` of another target,
     `server set --style`, a replacement) waits for the same, at most 1.5 seconds. The server learns
     that an agent is gone from the connection closing (SSH) or from a courtesy unregistration that
     FinishUP sends but does not confirm (REST: a failed one is not retried, a killed helper sends
