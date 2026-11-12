@@ -186,7 +186,8 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # pass and verifies a fixed point before reporting success.
     destination = source.parents[1] / entry.relative_path
     if entry.schema_version == "2.4.0" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.3.0.schema.json")
+        # 2.3.1 (main, receipt-result 1.4.1) is the last frozen report before this one.
+        document = _load_versioned_template(entry, "version/version-manifest-2.3.1.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -7985,7 +7986,8 @@ def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # #1240 D5: the closing line asking the agent to tell the user the conclusion and the open or
     # declined reviewer notes. Additive and optional on the unreleased 1.3.0 (in place), so 1.4.0
     # inherits it. Fixed words, the conclusion token and counts only. Shipped in v0.3.0 with
-    # ``re.escape``'s escaped spaces, which these published schemas keep (1.5.0 drops them).
+    # ``re.escape``'s escaped spaces, which these published schemas keep (1.4.1 and 1.5.0 drop
+    # them).
     from finishup.domain.receipt_closing import PUBLISHED_CLOSING_PROMPT_PATTERN
 
     cast(dict[str, JsonValue], success["properties"])["agent_closing_prompt"] = {
@@ -7994,6 +7996,39 @@ def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "pattern": PUBLISHED_CLOSING_PROMPT_PATTERN,
         "type": "string",
     }
+    return document
+
+
+def _receipt_result_v1_4_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """1.4.0 with the closing line's pattern as ECMA-262 reads it in unicode mode.
+
+    1.4.0 escaped each space of ``agent_closing_prompt``'s pattern (``\\ ``, Python's
+    ``re.escape``). An ECMAScript engine in unicode mode, which is how a host such as Cursor
+    compiles a JSON Schema pattern, refuses that escape, and Cursor dropped every FinishUP tool
+    over it. 1.4.0 shipped in v0.3.0 and keeps its bytes; this patch changes that one pattern and
+    nothing else, and the two patterns accept exactly the same strings. Published on ``main``
+    (#1348); this build advertises 1.5.0, which carries the same pattern.
+    """
+
+    from finishup.domain.receipt_closing import (
+        CLOSING_PROMPT_PATTERN,
+        PUBLISHED_CLOSING_PROMPT_PATTERN,
+    )
+
+    document = _load_versioned_template(entry, "operations/receipt-result-1.4.0.schema.json")
+    definitions = document.get("$defs")
+    success = definitions.get("success") if isinstance(definitions, dict) else None
+    properties = success.get("properties") if isinstance(success, dict) else None
+    closing = properties.get("agent_closing_prompt") if isinstance(properties, dict) else None
+    if (
+        not isinstance(closing, dict)
+        or closing.get("pattern") != PUBLISHED_CLOSING_PROMPT_PATTERN
+        or PUBLISHED_CLOSING_PROMPT_PATTERN.replace("\\ ", " ") != CLOSING_PROMPT_PATTERN
+    ):
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    closing["pattern"] = CLOSING_PROMPT_PATTERN
     return document
 
 
@@ -13969,6 +14004,20 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).ReceiptResultModel
         ),
     ),
+    # 1.4.0 shipped in v0.3.0 and is frozen; 1.4.1 (main, #1348) writes its closing-line pattern
+    # without the escaped spaces a unicode-mode ECMAScript engine refuses.
+    _RegistryEntry(
+        "operations/receipt-result-1.4.1.schema.json",
+        "receipt-result",
+        "1.4.1",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "finishup.protocol.models", fromlist=["ReceiptResultModel"]
+            ).ReceiptResultModel
+        ),
+    ),
     # ADR-051 decision D4: 1.4.0 shipped in v0.3.0 and is frozen; 1.5.0 adds the optional
     # ``workspace_provenance`` member.
     _RegistryEntry(
@@ -14876,7 +14925,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("finishup.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
-    # ADR-051: the first inventory change after v0.3.0 shipped 2.3.0; that report is frozen.
+    # main (#1348): the first inventory change after v0.3.0 shipped 2.3.0 (receipt-result 1.4.1).
+    _RegistryEntry(
+        "version/version-manifest-2.3.1.schema.json",
+        "version-manifest",
+        "2.3.1",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("finishup.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    # ADR-051: the inventory of this build; 2.3.0 (v0.3.0) and 2.3.1 (main) are frozen.
     _RegistryEntry(
         "version/version-manifest-2.4.0.schema.json",
         "version-manifest",
@@ -14957,6 +15015,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
         "operations/receipt-result-1.3.0.schema.json",
+        # Rebuilt by --check too: its closing-line pattern is derived, not copied (1.4.0 is frozen).
+        "operations/receipt-result-1.4.1.schema.json",
         "operations/respond-request-1.1.0.schema.json",
         "operations/respond-result-1.1.0.schema.json",
         "operations/publish-work-result-1.1.0.schema.json",
@@ -15527,6 +15587,8 @@ def build_schema_documents(
             )
         elif entry.relative_path == "operations/receipt-result-1.3.0.schema.json":
             normalized = _receipt_result_v1_3_schema(entry)
+        elif entry.relative_path == "operations/receipt-result-1.4.1.schema.json":
+            normalized = _receipt_result_v1_4_1_schema(entry)
         elif entry.relative_path == "operations/receipt-result-1.5.0.schema.json":
             normalized = _receipt_result_v1_5_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
@@ -15596,6 +15658,7 @@ def build_schema_documents(
             "version/version-manifest-2.2.3.schema.json",
             "version/version-manifest-2.2.4.schema.json",
             "version/version-manifest-2.3.0.schema.json",
+            "version/version-manifest-2.3.1.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.4.0.schema.json":

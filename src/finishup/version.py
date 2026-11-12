@@ -147,7 +147,8 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # rest-discovery, rest-error, rest-operation and rest-session 1.0.0).
 # ADR-054: +1 schema (config 1.4.0 with the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
 # ADR-054 (U20): +1 schema (content-forgotten 1.0.0), +1 bundle migration (0020).
-REVIEWED_RESOURCE_COUNT: Final = 370
+# main (#1348): +2 schemas (receipt-result 1.4.1 and version manifest 2.3.1, frozen here).
+REVIEWED_RESOURCE_COUNT: Final = 372
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",

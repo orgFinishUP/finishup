@@ -1004,6 +1004,14 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Fixed
 
+- Cursor lists FinishUP's tools again. The `receipt` tool's result schema carried one pattern, for
+  the closing line it asks the agent to pass on, that escaped each space. A JavaScript engine in
+  unicode mode, which Cursor uses to read schema patterns, refuses that escape, and Cursor 3.27.22
+  dropped every FinishUP tool over it and showed "0 tools". The `receipt` tool now advertises
+  receipt-result 1.5.0, which writes that pattern without those escapes and accepts exactly the
+  same lines. receipt-result 1.4.1 carries the same fix as a patch of 1.4.0 and ships too; the
+  published 1.4.0 is unchanged. The version report is 2.4.0; 2.3.1, the report that first listed
+  1.4.1, ships frozen (#1347).
 - Ctrl-C at a secure prompt (a passphrase, an approve/deny decision, a recovery-set path) now
   cancels it at once and sends no answer; `finishup service unlock` and
   `finishup privacy decide-policy`, for example, print `cancelled` and exit 130. The first Ctrl-C

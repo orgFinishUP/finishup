@@ -27,12 +27,13 @@ _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
 # +1 each: the review-packet-row 2.0.0 provider contract (robust lane row contract).
 # ADR-049: +1 member, decision-recorded 1.1.0 (an event schema, not a request/result version).
 _EXPECTED_MEMBER_COUNT = (
-    264  # ADR-054 +1 config 1.4.0 (the [server] table), +1 content-forgotten 1.0.0 (U20);
+    266  # ADR-054 +1 config 1.4.0 (the [server] table), +1 content-forgotten 1.0.0 (U20);
     # ADR-053 +7 REST v1 documents; ADR-052 +1 server-profile 1.0.0;
     # ADR-051 decision 5 +2 check-recorded 1.7.0, receipt-document 1.4.0;
     # ADR-051 +1 version-manifest 2.4.0; #1239 +1 contact-expectation-declared 1.0.0;
 )
 # ADR-051 decision D4 +1 receipt-result 1.5.0 (the optional ``workspace_provenance`` member);
+# main (#1348) +1 receipt-result 1.4.1, +1 version-manifest 2.3.1 (frozen here; 2.4.0 is live);
 # #1170 +1 result-recorded 1.1.0;
 # #1139 +4 lossless result-delivery schemas;
 # #1118 +1 reviewer-reply 1.0.0, +2 check-result/-recorded 1.6.0,
@@ -246,6 +247,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.5.0.schema.json")
             else "2.4.0"
             if path.endswith("-2.4.0.schema.json")
+            else "2.3.1"
+            if path.endswith("-2.3.1.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
             else "2.2.3"
@@ -272,6 +275,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-1.6.0.schema.json")
             else "1.5.0"
             if path.endswith("-1.5.0.schema.json")
+            else "1.4.1"
+            if path.endswith("-1.4.1.schema.json")
             else "1.4.0"
             if path.endswith("-1.4.0.schema.json")
             else "1.3.0"
@@ -543,13 +548,26 @@ def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
 
 
 def test_released_version_manifest_2_3_retains_the_0_3_0_inventory() -> None:
-    """v0.3.0 shipped 2.3.0; the ADR-051 inventory is reported by 2.4.0 instead."""
+    """v0.3.0 shipped 2.3.0; main reported receipt-result 1.4.1 in 2.3.1, and this build's
+    inventory is reported by 2.4.0."""
 
     document = _version_manifest_document("2.3.0")
     assert document["properties"]["schema_version"]["const"] == "2.3.0"
     assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 342
     requests = _version_manifest_consts(document, "request_result_schema_versions")
     assert requests["control-hello"] == "2.9.0"
+    assert "server-target-status" not in requests
+    assert requests["receipt-result"] == "1.4.0"
+
+
+def test_released_version_manifest_2_3_1_retains_main_s_receipt_result_1_4_1_inventory() -> None:
+    """main (#1348) reported its inventory with receipt-result 1.4.1 in 2.3.1, frozen here."""
+
+    document = _version_manifest_document("2.3.1")
+    assert document["properties"]["schema_version"]["const"] == "2.3.1"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 344
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["receipt-result"] == "1.4.1"
     assert "server-target-status" not in requests
 
 
@@ -575,6 +593,9 @@ def test_live_version_manifest_2_4_tracks_the_current_inventory() -> None:
     assert requests["start-request"] == "1.1.0"
     # The sized reviewer exchange bound (#1118).
     assert requests["privacy-policy"] == "1.3.0"
+    # The closing-line pattern a unicode-mode ECMAScript engine compiles: 1.4.1 on main, and
+    # 1.5.0 here, which carries it too.
+    assert requests["receipt-result"] == "1.5.0"
     assert events["session_opened"] == "1.2.0"
 
 
