@@ -892,7 +892,7 @@ async def test_a_helper_that_never_comes_is_not_declared_and_no_client_is_offlin
     assert caught.value.reason == "operation_not_declared"
 
 
-# --- u5: a newer helper agent takes over a call an older one left unanswered -------------------
+# --- a newer helper agent takes over a call an older one left unanswered (macOS dogfood) -------
 
 
 async def test_a_call_left_on_a_silent_helper_agent_goes_on_at_a_newer_one() -> None:

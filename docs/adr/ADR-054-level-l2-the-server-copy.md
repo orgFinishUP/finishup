@@ -230,24 +230,25 @@ at L2. The MCP bridge, CLI commands and hooks never declare them; the hub sends 
 an agent that declares it, so the server never asks them, and it never replays either to another
 connection. A prepare still unanswered on an older helper agent goes on, with the time it has left,
 at a newer helper agent of the same workspace that registers meanwhile (ADR-052 decision 12: a
-helper stopped, replaced or killed without its agent being unregistered at the server), which
-builds the snapshot the sync's reads then fetch from it; a read is never taken over, since its
-snapshot lives only in the agent that prepared it (u5). The declaration is made when the agent opens (defect A of the 2026-11-11 dogfood), so
-a running helper follows the consent (`client.helper.Helper._follow`): it opens each background
-agent again under the record as it is now, then records which consent its agents follow
-(`state/helper-consent`, `yoetz.helper-consent/1`): after a new level, only once each old agent is
-closed and its relay (relay style) or its stream's close (direct style) ended (a REST stream
-unregisters its agent at the server as it closes), within 3 seconds, or not at all. `server use NAME --level` that changes the
+helper stopped, replaced or killed without its agent being unregistered at the server), which builds
+the snapshot the sync's reads then fetch from it; a read is never taken over, since its snapshot
+lives only in the agent that prepared it (macOS dogfood). The declaration is made when the agent
+opens (defect A of the 2026-11-11 dogfood), so a running helper follows the consent
+(`client.helper.Helper._follow`): it opens each background agent again under the record as it is
+now, then records which consent its agents follow (`state/helper-consent`,
+`yoetz.helper-consent/1`): after a new level, only once each old agent is closed and its relay
+(relay style) or its stream's close (direct style) ended (a REST stream unregisters its agent at the
+server as it closes), within 3 seconds, or not at all. `server use NAME --level` that changes the
 level ends only once that server's running helper has recorded the new consent, a few seconds at
 most; a helper that does not is stopped instead (its agents closed, as `server set --style` does),
-and with none running the next client starts one under the new level. A workspace
-registration made under the earlier consent is not served until its registrant renews it under the
-new one: a command registers at its next run, and an MCP bridge looks at the consent every two
-seconds and renews at once. Choosing L2 closes an old agent at once, since the server would ask it
-and refuse the sync (`operation_not_declared`), while with no agent there it waits for the new one
-within the call's bound; any other change keeps the old agent serving until its replacement is
-connected (at most 30 seconds), so work in flight on it finishes. Each call is still checked
-against the consent as it is when the call arrives (below).
+and with none running the next client starts one under the new level. A workspace registration made
+under the earlier consent is not served until its registrant renews it under the new one: a command
+registers at its next run, and an MCP bridge looks at the consent every two seconds and renews at
+once. Choosing L2 closes an old agent at once, since the server would ask it and refuse the sync
+(`operation_not_declared`), while with no agent there it waits for the new one within the call's
+bound; any other change keeps the old agent serving until its replacement is connected (at most 30
+seconds), so work in flight on it finishes. Each call is still checked against the consent as it is
+when the call arrives (below).
 
 `code_sync_prepare` checks, in this order and before anything is read for the export (FR-7):
 
@@ -737,8 +738,11 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
     each is covered in process. That run found that over REST a helper stopped without its agent
     being unregistered left the agent registered until its lease ended, and a sync's prepare sent
     to it waited out its 60 seconds (`deadline_exceeded`; that check returned `operation_pending`
-    while the server finished it); since u5 the stop waits for the unregistration and a newer
-    helper agent takes such a prepare over (limit 17).
+    while the server finished it). Since then a stopping helper waits, bounded, for that
+    unregistration and a newer helper agent takes such a prepare over (limit 17); the matrix's
+    stopped-helper steps (`server disconnect`, `server set --style direct`, `server use local`
+    and back, the helper killed, each followed by a task at once) check both on every HTTPS and
+    port L2 cell.
 15. The authenticated principal does not reach the service over the control channel yet (the REST
     edges namespace the claim by the key's principal but send only the namespaced claim), so the
     service remembers every claim without an account and charges all uploads to one shared
