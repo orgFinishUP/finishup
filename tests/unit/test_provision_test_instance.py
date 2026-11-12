@@ -972,3 +972,26 @@ def test_finishing_an_unmarked_remainder_says_when_users_cannot_be_listed(
         _dispose(layout)
     assert "withdrawn" in str(raised.value)
     assert layout["state"].is_dir()
+
+
+def test_a_runtime_with_no_launcher_at_all_is_still_checked_before_its_state_goes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both launcher folders gone (removed by hand, or an older layout) but the state still
+    there: the log destination and the users are checked before the fallback disposer runs."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    shutil.rmtree(layout["runtime"] / "bin")
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with pytest.raises(_MODULE.ProvisionError, match="^retain_logs_invalid: "):
+        _dispose(layout, retain_logs=str(layout["root"] / "retained"))
+    with (
+        _other_process(_lease(layout)),
+        pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use: "),
+    ):
+        _dispose(layout)
+    assert runner.calls == []
+    assert (layout["state"] / "state" / "instance-identity.json").is_file()
+    assert _dispose(layout)["state"] == "removed"

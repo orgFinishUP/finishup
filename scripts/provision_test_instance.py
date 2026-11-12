@@ -894,6 +894,14 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
                     "identity": list(_directory_identity(state) or ()),
                 },
             )
+    elif not resumed and state.exists() and marker.is_file():
+        # No launcher at all, withdrawn or not (removed by hand, or an older layout): nothing can
+        # run ambient, but the state is still checked before anything is stopped or removed.
+        identity = _read_progress(marker)
+        installation = None if identity is None else identity.get("installation_id")
+        if logs is not None:
+            _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
+        _checked(layout["root"], releases, {}, withdrawn=True)
     elif resumed and _held_leases(releases) and not state.exists():
         raise _fail(_STILL_RUNNING)
     ran = _runtime_launcher(runtime, _WITHDRAWN_BIN)
