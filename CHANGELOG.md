@@ -767,7 +767,7 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
   dropped every FinishUP tool over it and showed "0 tools". The `receipt` tool now advertises
   receipt-result 1.4.1, which writes the same pattern without those escapes and accepts exactly
   the same lines; the published 1.4.0 is unchanged. The version report moves to 2.3.1 to list the
-  new schema.
+  new schema (#1347).
 - Ctrl-C at a secure prompt (a passphrase, an approve/deny decision, a recovery-set path) now
   cancels it at once and sends no answer; `finishup service unlock` and
   `finishup privacy decide-policy`, for example, print `cancelled` and exit 130. The first Ctrl-C
