@@ -7984,13 +7984,14 @@ def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     # #1240 D5: the closing line asking the agent to tell the user the conclusion and the open or
     # declined reviewer notes. Additive and optional on the unreleased 1.3.0 (in place), so 1.4.0
-    # inherits it. Fixed words, the conclusion token and counts only.
-    from finishup.domain.receipt_closing import CLOSING_PROMPT_PATTERN
+    # inherits it. Fixed words, the conclusion token and counts only. Shipped in v0.3.0 with
+    # ``re.escape``'s escaped spaces, which these published schemas keep (1.5.0 drops them).
+    from finishup.domain.receipt_closing import PUBLISHED_CLOSING_PROMPT_PATTERN
 
     cast(dict[str, JsonValue], success["properties"])["agent_closing_prompt"] = {
         "maxLength": 512,
         "minLength": 1,
-        "pattern": CLOSING_PROMPT_PATTERN,
+        "pattern": PUBLISHED_CLOSING_PROMPT_PATTERN,
         "type": "string",
     }
     return document
@@ -8063,6 +8064,24 @@ def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         raise SchemaGenerationError(
             "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
         )
+    # The closing line's pattern as ECMA-262 reads it in unicode mode: 1.4.0 escaped each space
+    # (``\ ``, Python's ``re.escape``), which such an engine refuses, and Cursor dropped every
+    # FinishUP tool over it. 1.5.0 is unreleased, so it is amended in place to the same language
+    # without those escapes; 1.4.0 keeps its shipped bytes.
+    from finishup.domain.receipt_closing import (
+        CLOSING_PROMPT_PATTERN,
+        PUBLISHED_CLOSING_PROMPT_PATTERN,
+    )
+
+    closing = cast(dict[str, JsonValue], properties["agent_closing_prompt"])
+    if (
+        closing.get("pattern") != PUBLISHED_CLOSING_PROMPT_PATTERN
+        or PUBLISHED_CLOSING_PROMPT_PATTERN.replace("\\ ", " ") != CLOSING_PROMPT_PATTERN
+    ):
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    closing["pattern"] = CLOSING_PROMPT_PATTERN
     notices = [
         workspace_provenance_unknown_notice(reason) for reason in WORKSPACE_PROVENANCE_REASONS
     ]
