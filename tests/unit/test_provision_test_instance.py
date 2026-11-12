@@ -141,7 +141,9 @@ def _instance(tmp_path: Path, launcher: str = "finishup") -> dict[str, Path]:
     (runtime / "lib").mkdir()
     (runtime / "lib" / "module.so").write_bytes(b"")
     (layout["state"] / "state").mkdir(parents=True)
-    (layout["state"] / "state" / "instance-identity.json").write_text("{}", encoding="utf-8")
+    (layout["state"] / "state" / "instance-identity.json").write_text(
+        json.dumps({"installation_id": _INSTALLATION}), encoding="utf-8"
+    )
     (runtime.parent / f".{runtime.name}-releases" / _GEN).mkdir(parents=True)
     (runtime.parent / f".{runtime.name}-releases" / _GEN / ".in-use").write_bytes(b"")
     return {**layout, "base": base}
@@ -851,6 +853,26 @@ def test_an_unpinned_launcher_beside_a_live_state_is_withdrawn_and_checked_befor
         _dispose(layout)
     assert runner.calls == []
     assert not (layout["runtime"] / "bin").exists()
+    assert (layout["state"] / "state" / "instance-identity.json").is_file()
+    # Once the process is gone, disposing again finishes, the launchers still withdrawn.
+    finisher = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", finisher)
+    assert _dispose(layout)["state"] == "removed"
+    assert "status" not in finisher.calls
+    assert not layout["root"].exists()
+
+
+def test_an_unpinned_launcher_beside_a_live_state_still_refuses_logs_inside_the_tag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    (layout["runtime"] / _MODULE._PIN_NAME).unlink()
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with pytest.raises(_MODULE.ProvisionError, match="^retain_logs_invalid: "):
+        _dispose(layout, retain_logs=str(layout["root"] / "retained"))
+    assert runner.calls == []
     assert (layout["state"] / "state" / "instance-identity.json").is_file()
 
 

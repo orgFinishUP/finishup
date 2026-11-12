@@ -530,7 +530,8 @@ _IN_USE_WITHDRAWN: Final = (
 _UNVERIFIABLE_WITHDRAWN: Final = (
     "runtime_in_use_unverifiable: this computer cannot show which programs use this instance's "
     "runtime. Its launchers are withdrawn, so nothing can start it, and nothing was stopped or "
-    "removed. Make /proc readable or lsof available, then dispose again"
+    "removed. Make /proc readable or lsof available, then dispose again (the test-instances "
+    "runbook, Dispose, says how)"
 )
 # After the launchers were withdrawn: the state is gone (or going), so a copy still running fails
 # closed (its own pin names the removed root), and nothing can start the instance again.
@@ -816,8 +817,22 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
         # 2. Withdraw the launchers in one rename; the pin stays until the runtime goes.
         os.rename(bin_dir, withdrawn)
         if not status and state.exists():
-            # An unpinned launcher beside a live state: withdrawn at once (it would run ambient),
-            # then nothing is stopped or removed while any process uses the runtime.
+            # An unpinned launcher beside a live state: withdrawn at once (it would run ambient).
+            # The identity marker names the installation; a record bound to this folder lets a
+            # retry finish once nothing uses the runtime; nothing is stopped or removed before.
+            identity = _read_progress(marker)
+            installation = None if identity is None else identity.get("installation_id")
+            if logs is not None:
+                _check_logs_destination(logs, layout["root"], installation)
+            if type(installation) is str and not _progress_valid(_read_progress(progress), state):
+                _write_progress(
+                    progress,
+                    {
+                        "state": str(state),
+                        "installation_id": installation,
+                        "identity": list(_directory_identity(state) or ()),
+                    },
+                )
             _checked(layout["root"], releases, {}, withdrawn=True)
         if status:
             try:
