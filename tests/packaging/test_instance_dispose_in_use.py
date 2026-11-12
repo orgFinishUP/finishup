@@ -21,6 +21,7 @@ import json
 import os
 import platform
 import secrets
+import selectors
 import shutil
 import subprocess
 import sys
@@ -119,8 +120,20 @@ def _start_service(launcher: Path, env: dict[str, str]) -> subprocess.Popen[byte
     raise AssertionError("service did not become reachable in time")
 
 
-def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.Popen[bytes]:
-    """``mcp serve`` held open as a connected host holds it, once it has answered ``initialize``."""
+_BRIDGE_ANSWER_SECONDS = 120.0
+
+
+def _open_bridge(
+    launcher: Path,
+    env: dict[str, str],
+    cwd: Path,
+    processes: list[subprocess.Popen[bytes]],
+) -> subprocess.Popen[bytes]:
+    """``mcp serve`` held open as a connected host holds it, once it has answered ``initialize``.
+
+    The bridge joins ``processes`` before anything is read from it, so the test's cleanup stops
+    it whatever happens next, and its answer is awaited to a bounded deadline.
+    """
 
     proc = subprocess.Popen(
         [str(launcher), "mcp", "serve", "--host", "codex"],
@@ -131,6 +144,7 @@ def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.P
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    processes.append(proc)
     assert proc.stdin is not None and proc.stdout is not None
     message = {
         "jsonrpc": "2.0",
@@ -144,6 +158,10 @@ def _open_bridge(launcher: Path, env: dict[str, str], cwd: Path) -> subprocess.P
     }
     proc.stdin.write((json.dumps(message) + "\n").encode())
     proc.stdin.flush()
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        ready = selector.select(timeout=_BRIDGE_ANSWER_SECONDS)
+    assert ready, "the bridge did not answer initialize in time"
     line = proc.stdout.readline()
     assert b'"result"' in line, line[:400]
     return proc
@@ -199,8 +217,7 @@ def test_a_disposal_refused_by_a_live_host_session_changes_nothing() -> None:
 
         service = _start_service(launcher, env)
         processes.append(service)
-        bridge = _open_bridge(launcher, env, workdir)
-        processes.append(bridge)
+        bridge = _open_bridge(launcher, env, workdir, processes)
         before = _json(launcher, ["instance", "status"], env)
         assert (before["mode"], before["binding"]) == ("isolated", "runtime_pin")
         serving = _json(launcher, ["service", "status"], env)["service_instance_id"]

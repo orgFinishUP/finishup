@@ -376,7 +376,9 @@ def test_a_process_seen_only_after_the_withdrawal_puts_the_launchers_back(
     monkeypatch.setattr(_MODULE, "_run", runner)
     checks: list[bool] = []
 
-    def refuse_second(_root: Path, _releases: Path, _status: dict[str, object]) -> None:
+    def refuse_second(
+        _root: Path, _releases: Path, _status: dict[str, object], **_kwargs: object
+    ) -> None:
         checks.append((layout["runtime"] / _MODULE._WITHDRAWN_BIN).exists())
         if len(checks) == 2:
             raise _MODULE.ProvisionError("runtime_in_use: late")
@@ -810,3 +812,118 @@ def test_a_rollback_before_any_deletion_also_drops_this_run_s_progress_record(
     with pytest.raises(OSError, match="fsync"):
         _dispose(layout)
     _unchanged(layout)
+
+
+# --- CodeRabbit review of #1351 ------------------------------------------------------------------
+
+
+def test_status_reports_a_tag_with_no_launcher_left_as_disposing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A disposal that removed the last withdrawn launcher and then stopped leaves a tag folder
+    that ``create`` refuses: ``status`` must not call it absent."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    withdrawn = layout["runtime"] / _MODULE._WITHDRAWN_BIN
+    os.rename(layout["runtime"] / "bin", withdrawn)
+    shutil.rmtree(withdrawn)
+    status = _MODULE.command_status(argparse.Namespace(base=str(layout["base"]), tag="inst"))
+    assert status["state"] == "disposing"
+
+
+def test_an_unpinned_launcher_beside_a_live_state_is_withdrawn_and_checked_before_any_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launcher has no pin, yet the instance's state is still there: the launcher is
+    withdrawn at once (it would run ambient), and while a process still uses the runtime
+    nothing is stopped or removed."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    (layout["runtime"] / _MODULE._PIN_NAME).unlink()
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with (
+        _other_process(_lease(layout)),
+        pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use: "),
+    ):
+        _dispose(layout)
+    assert runner.calls == []
+    assert not (layout["runtime"] / "bin").exists()
+    assert (layout["state"] / "state" / "instance-identity.json").is_file()
+
+
+def _damage_pin(layout: dict[str, Path]) -> None:
+    (layout["runtime"] / _MODULE._PIN_NAME).write_text("{damaged", encoding="utf-8")
+
+
+def test_a_resumed_disposal_that_cannot_ask_the_runtime_still_checks_for_users(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    _damage_pin(layout)
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with (
+        _other_process(_lease(layout)),
+        pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use: "),
+    ):
+        _dispose(layout)
+    assert "dispose" not in runner.calls
+    assert (layout["state"] / "state" / "instance-identity.json").is_file()
+
+
+def test_a_resumed_disposal_with_no_record_and_no_runtime_to_ask_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    _damage_pin(layout)
+    (layout["root"] / _MODULE._PROGRESS).unlink()
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    with pytest.raises(_MODULE.ProvisionError, match="^instance_not_pinned: "):
+        _dispose(layout)
+    assert runner.calls == []
+
+
+def test_a_resumed_disposal_that_cannot_ask_the_runtime_finishes_when_nothing_uses_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    _damage_pin(layout)
+    runner = _Runner(layout, _status())
+    monkeypatch.setattr(_MODULE, "_run", runner)
+    assert _dispose(layout)["state"] == "removed"
+    assert "status" not in runner.calls
+
+
+@pytest.mark.parametrize("failure", ["none", "timeout"])
+def test_finishing_an_unmarked_remainder_says_when_users_cannot_be_listed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    """No process was seen, so the answer is unverifiable, not "a process still runs a copy";
+    a listing that times out is that refusal too, never a traceback."""
+
+    _accept_base(monkeypatch)
+    layout = _instance(tmp_path)
+    _withdrawn_midway(layout)
+    (layout["state"] / "state" / "instance-identity.json").unlink()
+    monkeypatch.setattr(_MODULE, "_run", _Runner(layout, _status()))
+
+    def unavailable(_root: Path) -> dict[int, set[str]] | None:
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(["lsof"], 180)
+        return None
+
+    monkeypatch.setattr(_MODULE, "_processes_using", unavailable)
+    with pytest.raises(_MODULE.ProvisionError, match="^runtime_in_use_unverifiable: ") as raised:
+        _dispose(layout)
+    assert "withdrawn" in str(raised.value)
+    assert layout["state"].is_dir()

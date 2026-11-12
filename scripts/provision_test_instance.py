@@ -385,11 +385,11 @@ def command_create(args: argparse.Namespace) -> dict[str, object]:
 def command_status(args: argparse.Namespace) -> dict[str, object]:
     layout = _layout(_validate_base(Path(args.base).expanduser()), _validate_tag(args.tag))
     provenance = _read_provenance(layout["provenance"])
-    if layout["root"].exists() and _runtime_launcher(layout["runtime"], _WITHDRAWN_BIN):
-        # An earlier dispose withdrew the launchers and stopped part way: nothing can start this
-        # instance; dispose again to finish. No launcher is run here.
-        return {"tag": args.tag, "state": "disposing", "provenance": provenance}
     found = _runtime_launcher(layout["runtime"])
+    if layout["root"].exists() and found is None:
+        # An earlier dispose withdrew the launchers (or already removed them) and stopped part
+        # way: nothing can start this instance; dispose again to finish. No launcher is run here.
+        return {"tag": args.tag, "state": "disposing", "provenance": provenance}
     if found is not None and not (layout["runtime"] / _PIN_NAME).is_file():
         # Its launcher lost its pin (left by a dispose before issue #1350's fix) and would run
         # ambient: never run it, dispose to remove it.
@@ -515,8 +515,22 @@ _IN_USE: Final = (
 )
 _UNVERIFIABLE: Final = (
     "runtime_in_use_unverifiable: this computer cannot show which programs use this instance's "
-    "runtime; nothing was stopped or removed. Stop its service with the instance's launcher "
-    "(service stop), close its host sessions, then dispose again"
+    "runtime (no readable /proc, no lsof, a listing that timed out, or a held lease no visible "
+    "process accounts for); nothing was stopped or removed. Make /proc readable or lsof "
+    "available, close the instance's host sessions, stop its service with the instance's "
+    "launcher (service stop), then dispose again"
+)
+# After the launchers were withdrawn by this run or an earlier one: nothing can start the instance.
+_IN_USE_WITHDRAWN: Final = (
+    "runtime_in_use: a process still uses this instance's runtime (an MCP bridge, a hook, or "
+    "another FinishUP process). Its launchers are withdrawn, so nothing can start it, and nothing "
+    "was stopped or removed. Close that process (stop the instance's service as the "
+    "test-instances runbook says for withdrawn launchers), then dispose again"
+)
+_UNVERIFIABLE_WITHDRAWN: Final = (
+    "runtime_in_use_unverifiable: this computer cannot show which programs use this instance's "
+    "runtime. Its launchers are withdrawn, so nothing can start it, and nothing was stopped or "
+    "removed. Make /proc readable or lsof available, then dispose again"
 )
 # After the launchers were withdrawn: the state is gone (or going), so a copy still running fails
 # closed (its own pin names the removed root), and nothing can start the instance again.
@@ -533,7 +547,9 @@ def _service_pid(status: dict[str, object]) -> int | None:
     return pid if type(pid) is int else None
 
 
-def _refuse_in_use(tag_root: Path, releases: Path, status: dict[str, object]) -> None:
+def _refuse_in_use(
+    tag_root: Path, releases: Path, status: dict[str, object], *, withdrawn: bool = False
+) -> None:
     """Refuse while any process but the instance's own service uses the runtime.
 
     In use: any process with a file of the instance (its runtime or a retained copy) open or
@@ -545,24 +561,27 @@ def _refuse_in_use(tag_root: Path, releases: Path, status: dict[str, object]) ->
     next, then this check runs again).
     """
 
+    in_use, unverifiable = (
+        (_IN_USE_WITHDRAWN, _UNVERIFIABLE_WITHDRAWN) if withdrawn else (_IN_USE, _UNVERIFIABLE)
+    )
     pid = _service_pid(status)
     users = _processes_using(tag_root)
     held = _held_leases(releases)
     if users is None:
         # Without a way to enumerate, nothing can be shown to be unused.
-        raise _fail(_IN_USE if held and pid is None else _UNVERIFIABLE)
+        raise _fail(in_use if held and pid is None else unverifiable)
     allowed = {os.getpid()}
     if pid is not None:
         tree = _process_tree(pid)
         if tree is None:
-            raise _fail(_UNVERIFIABLE)
+            raise _fail(unverifiable)
         allowed |= tree
     if set(users) - allowed:
-        raise _fail(_IN_USE)
+        raise _fail(in_use)
     seen = {path for paths in users.values() for path in paths}
     unaccounted = [lease for lease in held if os.path.realpath(lease) not in seen]
     if unaccounted and set(_held_leases(releases)) & set(unaccounted):
-        raise _fail(_UNVERIFIABLE)
+        raise _fail(unverifiable)
 
 
 def _pinned_to(runtime: Path) -> tuple[str, str] | None:
@@ -732,13 +751,15 @@ def _status_of(command: list[str]) -> dict[str, object]:
         raise _fail(_UNVERIFIABLE) from None
 
 
-def _checked(tag_root: Path, releases: Path, status: dict[str, object]) -> None:
+def _checked(
+    tag_root: Path, releases: Path, status: dict[str, object], *, withdrawn: bool = False
+) -> None:
     """``_refuse_in_use``, with an enumeration that times out read as unverifiable."""
 
     try:
-        _refuse_in_use(tag_root, releases, status)
+        _refuse_in_use(tag_root, releases, status, withdrawn=withdrawn)
     except subprocess.TimeoutExpired:
-        raise _fail(_UNVERIFIABLE) from None
+        raise _fail(_UNVERIFIABLE_WITHDRAWN if withdrawn else _UNVERIFIABLE) from None
 
 
 def _verify_status(status: dict[str, object], runtime: Path, state: Path) -> None:
@@ -794,6 +815,10 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
         # it is never run, only withdrawn.
         # 2. Withdraw the launchers in one rename; the pin stays until the runtime goes.
         os.rename(bin_dir, withdrawn)
+        if not status and state.exists():
+            # An unpinned launcher beside a live state: withdrawn at once (it would run ambient),
+            # then nothing is stopped or removed while any process uses the runtime.
+            _checked(layout["root"], releases, {}, withdrawn=True)
         if status:
             try:
                 # A process that started before the rename is seen now; nothing is stopped yet.
@@ -811,27 +836,43 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
                 progress.unlink(missing_ok=True)
                 os.rename(withdrawn, bin_dir)
                 raise
-    elif resumed and state.exists() and marker.is_file() and _pinned_to(runtime) is not None:
+    elif resumed and state.exists() and marker.is_file():
         # A disposal an earlier run began: check again before anything is stopped or removed.
         # The launchers stay withdrawn, as the earlier run left them.
         ran_before = _runtime_launcher(runtime, _WITHDRAWN_BIN)
-        if ran_before is not None and (withdrawn / "python").exists():
+        recorded = _read_progress(progress)
+        if (
+            _pinned_to(runtime) is not None
+            and ran_before is not None
+            and (withdrawn / "python").exists()
+        ):
             status = _status_of([str(withdrawn / "python"), "-I", "-m", ran_before[1]])
             _verify_status(status, runtime, state)
-            if logs is not None:
-                _check_logs_destination(logs, layout["root"], status.get("installation_id"))
-            _checked(layout["root"], releases, status)
-            if not _progress_valid(_read_progress(progress), state):
-                # An earlier run stopped before its record was complete, or it is damaged: write
-                # it before any deletion, so another interruption can still be finished.
-                _write_progress(
-                    progress,
-                    {
-                        "state": str(state),
-                        "installation_id": status.get("installation_id"),
-                        "identity": list(_directory_identity(state) or ()),
-                    },
-                )
+            installation: object = status.get("installation_id")
+        elif _progress_valid(recorded, state):
+            # The runtime cannot be asked (its pin or interpreter is damaged), but the run that
+            # began this disposal verified it and recorded so; the users check still applies.
+            assert recorded is not None
+            installation = recorded.get("installation_id")
+        else:
+            raise _fail(
+                "instance_not_pinned: the withdrawn runtime cannot be checked, and no earlier "
+                "run recorded that it was; nothing was stopped or removed"
+            )
+        if logs is not None:
+            _check_logs_destination(logs, layout["root"], installation)
+        _checked(layout["root"], releases, status, withdrawn=True)
+        if not _progress_valid(recorded, state):
+            # An earlier run stopped before its record was complete, or it is damaged: write
+            # it before any deletion, so another interruption can still be finished.
+            _write_progress(
+                progress,
+                {
+                    "state": str(state),
+                    "installation_id": installation,
+                    "identity": list(_directory_identity(state) or ()),
+                },
+            )
     elif resumed and _held_leases(releases) and not state.exists():
         raise _fail(_STILL_RUNNING)
     ran = _runtime_launcher(runtime, _WITHDRAWN_BIN)
@@ -847,8 +888,13 @@ def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[s
             )
         if _lock_held(state / "state" / "service.lock"):
             raise _fail("instance_service_running: a service still holds the remaining root")
-        users = _processes_using(layout["root"])
-        if users is None or set(users) - {os.getpid()} or _held_leases(releases):
+        try:
+            users = _processes_using(layout["root"])
+        except subprocess.TimeoutExpired:
+            raise _fail(_UNVERIFIABLE_WITHDRAWN) from None
+        if users is None:
+            raise _fail(_UNVERIFIABLE_WITHDRAWN)
+        if set(users) - {os.getpid()} or _held_leases(releases):
             raise _fail(_STILL_RUNNING)
         shutil.rmtree(state)
         outcome = {"disposed": True, "state": "removed", "resumed": True}
@@ -973,6 +1019,12 @@ def main(argv: list[str] | None = None) -> int:
         result = handlers[args.command](args)
     except ProvisionError as error:
         sys.stderr.write(f"{error}\n")
+        return 2
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            "timeout: a step of this command did not finish in time; dispose again to finish "
+            "or check what is left\n"
+        )
         return 2
     sys.stdout.write(
         (json.dumps(result, indent=2, sort_keys=True) if args.json else _render(result)) + "\n"
