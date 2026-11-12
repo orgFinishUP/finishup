@@ -148,7 +148,10 @@ The snapshot manifest, `yoetz.code-snapshot/1`, travels with the bundle: the sna
 commits and their trees, the original base commit and object format (provenance), the export id,
 the worktree identity, the exclusion-policy digest, the completeness lists (`excluded`,
 `held_for_content`, `too_large`, `lfs_content`, `case_collision`, `nested_repository`: paths only,
-at most 256 each plus an overflow count) and counts (`links`, `gitlinks`, `lfs_pointers`,
+at most 256 each plus an overflow count; `case_collision` names a later name that differs from an
+earlier one only by case, the first being chosen among the names nothing else holds, and any other
+spelling of a worktree name held for its bytes, since on a case-insensitive file system such as APFS
+two spellings are one file) and counts (`links`, `gitlinks`, `lfs_pointers`,
 `special`, `unrepresentable`), the subject-state commitment (decision 13), the profile-revision
 triple, the purpose (`base` or `check`), `synced_at`, `files` and `bytes`. The module also defines
 the per-evidence provenance tokens (`EVIDENCE_PROVENANCE`: `server_copy_read`,
