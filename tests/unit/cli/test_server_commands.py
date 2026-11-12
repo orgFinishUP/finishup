@@ -2207,6 +2207,8 @@ def test_a_remote_probe_keeps_the_phase_its_connection_named(
         ("direct", "remote_auth_failed", "remote_credential_repair"),
         ("relay", "remote_unreachable", "remote_server_test"),
         ("relay", "timeout", None),
+        # No consent here: only the owner agrees again.
+        ("relay", "server_profile_changed", "remote_reconsent"),
     ],
 )
 def test_server_status_json_names_the_continuation_of_a_probe_that_failed(
@@ -2228,6 +2230,26 @@ def test_server_status_json_names_the_continuation_of_a_probe_that_failed(
         "ready", service_state="ready", service_version="0.3.0", round_trip_p95_ms=40, samples=10
     )
     assert cast(dict[str, JsonValue], _status_json("lab")["probe"])["continuation"] is None
+
+
+def test_server_status_json_asks_to_repeat_a_probe_refused_while_the_consent_admits_the_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server refused a revision this computer has not fetched while the consent here still
+    admits the cached profile: what changed is not known yet and may be a narrowing FinishUP
+    adjusts to by itself, so the probe continues as ``remote_profile_checking``, not
+    ``remote_reconsent`` (ADR-052 decision 10)."""
+
+    from builders.server_profiles import consent_to
+    from finishup.client.target_runtime import ProbeResult
+
+    runtime = _ready_lab(monkeypatch, round_trip_ms=40)
+    consent_to(targets.find_target("lab"))
+    runtime.probe_result = ProbeResult(
+        "unavailable", reason="service_unavailable", phase="server_profile_changed"
+    )
+    probe = cast(dict[str, JsonValue], _status_json("lab")["probe"])
+    assert probe["continuation"] == "remote_profile_checking"
 
 
 @pytest.mark.parametrize("style", ["direct", "relay"])

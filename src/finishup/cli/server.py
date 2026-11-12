@@ -2326,7 +2326,9 @@ def build_status_document(
         "target": target,
         # Nothing is sent to probe it while this computer is zero-network (ADR-051 decision 8).
         "probe": _with_continuation(
-            _probe_document(result, failure) if refused is None else _not_probed(refused), target
+            _probe_document(result, failure) if refused is None else _not_probed(refused),
+            target,
+            record,
         ),
         "zero_network_selection": zero_network_item,
         "observed_at": format_rfc3339_ms(stamp),
@@ -2337,12 +2339,17 @@ def build_status_document(
     return document
 
 
-def _with_continuation(probe: JsonValue, target: Mapping[str, JsonValue]) -> JsonValue:
+def _with_continuation(
+    probe: JsonValue, target: Mapping[str, JsonValue], record: ServerTarget | None
+) -> JsonValue:
     """``probe`` with the registered continuation of its failure, for a server elsewhere.
 
-    The target's own style decides it, never the selected one's: a probe of a target reached in
-    the direct style that did not answer in time is ``remote_direct_slow`` (the owner's WAN-gate
-    decision); any other remote phase is its own continuation; anything else has none.
+    The target's own style and consent decide it, never the selected one's: a probe of a target
+    reached in the direct style that did not answer in time is ``remote_direct_slow`` (the
+    owner's WAN-gate decision); ``server_profile_changed`` is ``remote_profile_checking`` while
+    the consent here still admits the cached profile and ``remote_reconsent`` otherwise
+    (``targets.profile_change_continuation``); any other remote phase is its own continuation;
+    anything else has none.
     """
 
     from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
@@ -2354,6 +2361,8 @@ def _with_continuation(probe: JsonValue, target: Mapping[str, JsonValue]) -> Jso
     if document.get("outcome") in {"not_running", "unavailable"} and type(phase) is str:
         if _direct_style(target) and phase in _DIRECT_TIMEOUT_PHASES:
             continuation = "remote_direct_slow"
+        elif phase == "server_profile_changed":
+            continuation = profile_change_continuation(record)
         elif phase in REMOTE_CONNECTION_PHASES:
             continuation = continuation_for_reason(phase)
     return {**document, "continuation": continuation}
