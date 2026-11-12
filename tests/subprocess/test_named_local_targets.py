@@ -131,7 +131,9 @@ def _logs_kept_on_failure(environment: dict[str, str], keep: Path) -> Generator[
         yield
     except BaseException:
         base = Path(environment["HOME"])
-        for log in sorted(base.rglob("log/*")):
+        # A target root's ``log`` folder; on macOS the everyday service logs under Library/Logs.
+        found = {*base.rglob("log/*"), *base.rglob("Library/Logs/**/*")}
+        for log in sorted(found):
             if not log.is_file() or log.is_symlink():
                 continue
             target = keep / log.relative_to(base)
@@ -287,9 +289,13 @@ def test_service_logs_are_kept_when_the_test_fails(tmp_path: Path) -> None:
     log = home / "s" / "finishup" / "log" / "service.stderr.jsonl"
     log.parent.mkdir(parents=True)
     log.write_text('{"event":"started"}\n', encoding="utf-8")
+    mac = home / "Library" / "Logs" / "finishup" / "service.stderr.jsonl"
+    mac.parent.mkdir(parents=True)
+    mac.write_text('{"event":"everyday"}\n', encoding="utf-8")
     keep = tmp_path / "kept"
     with pytest.raises(RuntimeError), _logs_kept_on_failure({"HOME": str(home)}, keep):
         raise RuntimeError("failed")
     assert (keep / "s" / "finishup" / "log" / "service.stderr.jsonl").read_text(
         encoding="utf-8"
     ) == '{"event":"started"}\n'
+    assert (keep / "Library" / "Logs" / "finishup" / "service.stderr.jsonl").is_file()

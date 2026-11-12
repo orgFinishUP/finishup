@@ -15017,6 +15017,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/receipt-result-1.3.0.schema.json",
         # Rebuilt by --check too: its closing-line pattern is derived, not copied (1.4.0 is frozen).
         "operations/receipt-result-1.4.1.schema.json",
+        # The same for the version this build advertises (Codex review of the main merge).
+        "operations/receipt-result-1.5.0.schema.json",
         "operations/respond-request-1.1.0.schema.json",
         "operations/respond-result-1.1.0.schema.json",
         "operations/publish-work-result-1.1.0.schema.json",

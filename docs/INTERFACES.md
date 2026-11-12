@@ -14643,7 +14643,8 @@ effect on findings, closure readiness or AI-review requirements.
 
 The unreleased `status-request/1.2.0` / `status-result/1.4.0` admit `view=coverage`, and their
 #1139 delivery successors `status-request/1.3.0` / `status-result/1.5.0` inherit it; receipt-document
-`1.3.0`, carried by receipt-result `1.3.0`, `1.4.0` and `1.4.1`, optionally carries `verification_coverage`. CLI status, TUI `/coverage`
+`1.3.0`, carried by receipt-result `1.3.0`, `1.4.0` and `1.4.1`, and its successor `1.4.0`, carried by
+receipt-result `1.5.0` (what this build writes), optionally carry `verification_coverage`. CLI status, TUI `/coverage`
 and receipt JSON/markdown/text share the projection. Wire quote leaves are separated into
 `task_criterion_quote` (`task_description`) and `obligation_criterion_quote` (`obligation_text`);
 `worst` and `checks` use command metadata; `expected_from` is a closed structural label shown on
