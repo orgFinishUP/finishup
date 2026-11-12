@@ -14650,7 +14650,12 @@ optional `agent_closing_prompt` (D5): "Tell the user in your final message: rece
 declined]." It is derived from the stored document alone (conclusion, `correctness_advisory_counts`
 and the Summary tally for `declined`, left out when unreadable), so a replay reads the same; the
 model admits it only in that closed shape for its own conclusion, and the MCP summary and CLI
-receipt text re-gate and append it. `respond` advisory dispositions are `addressed`,
+receipt text re-gate and append it. Its schema `pattern` is ECMA-262 as a host's unicode-mode
+engine reads it (no escaped spaces) in 1.5.0, amended in place while unreleased; 1.3.0 and 1.4.0
+keep their shipped pattern, which escapes each space (`\ `, Python's `re.escape`), accepts the
+same strings, and fails to compile in such an engine (Cursor 3.27.22 dropped every tool over it).
+Every pattern the MCP bridge advertises is checked in unicode mode
+(`tests/unit/mcp/test_advertised_schema_patterns.py`). `respond` advisory dispositions are `addressed`,
 `kept_choice` (reason only; label "checked, kept my choice") and `declined`; history and receipt
 rows add `kept_choice` and `response_unavailable`. The `default_local_export` receipt row carries
 the agent's reason as one bounded line. The MCP status line reads "unanswered findings: N;
