@@ -364,6 +364,19 @@ root = asyncio.run(canonical_workspace_root(WorkspaceLocator(sys.argv[1])))
 print(record_repository_report(repository_key(root), sys.argv[1], no_network=sys.argv[2] == "1"))
 """
 
+HELD_PHASE_CODE = r"""
+import asyncio, sys
+from pathlib import Path
+from finishup.adapters.workspace_root import canonical_workspace_root
+from finishup.client.repository_hold import decide, repository_key
+from finishup.client.targets import read_target
+from finishup.ports.control import WorkspaceLocator
+root = Path(sys.argv[2])
+record = read_target(root)
+key = repository_key(asyncio.run(canonical_workspace_root(WorkspaceLocator(sys.argv[1]))))
+print(decide(root, record.target_id, key).phase if record is not None else None)
+"""
+
 ZERO_CODE = r"""
 import sys
 from finishup.client.everyday_policy import record_reported_policy, remove_marker
@@ -991,6 +1004,57 @@ def forget(world: World, report: Report, cell: Cell, task: Task) -> None:
     )
 
 
+def held_copy(world: World, report: Report, cell: Cell) -> None:
+    """A held repository's copy is listed and forgotten (#1357). Allowed (its policy permits
+    network use) and copied by a task, then held again; ``server code list`` names the copy and
+    ``server code forget`` deletes it there, and again with ``forget --all``. Copy control is
+    made directly: neither starts the target's helper or serves the repository."""
+
+    client, server = world.client, world.server(cell)
+    root = client.target_root(cell.target)
+    for label, command in (("forget", ("forget",)), ("forget --all", ("forget", "--all"))):
+        ok, detail, transcript = copy_task(world, cell, f"held copy {label}")
+        if not report.add(f"held copy: allow and copy ({label})", ok, detail, transcript):
+            return
+        client.fu("server", "disconnect", cell.target)
+        wait_until(lambda: helper_pid(root) is None, seconds=15)
+        armed = client.py(HOLD_CODE, str(client.work), "1")
+        phase = client.py(HELD_PHASE_CODE, str(client.work), str(root)).stdout.strip()
+        try:
+            # Copy control is proven under a hold only while one is in force.
+            if not report.add(
+                f"held copy: held ({label})",
+                armed.returncode == 0 and phase == "repository_egress_held",
+                f"arming exit {armed.returncode} ({armed.stdout.strip()}); phase {phase}",
+                world.run.redact(armed.stderr.strip()[-400:]),
+            ):
+                return
+            before = server.copy_records()
+            listed = client.fu("server", "code", "list", timeout=180)
+            text = listed.stdout + listed.stderr
+            report.add(
+                f"held copy: list ({label})",
+                listed.returncode == 0
+                and "keeps a copy of this repository" in text
+                and "repository_egress" not in text
+                and helper_pid(root) is None,
+                f"held phase {phase}; exit {listed.returncode}; server copy records "
+                f"{before}; helper started: {helper_pid(root) is not None}",
+                shown(world, listed),
+            )
+            result = client.fu("server", "code", *command, timeout=180)
+            after = server.copy_records()
+            report.add(
+                f"held copy: {label}",
+                result.returncode == 0 and before >= 1 and after == 0 and helper_pid(root) is None,
+                f"exit {result.returncode}; server copy records {before} → {after}; helper "
+                f"started: {helper_pid(root) is not None}",
+                shown(world, result),
+            )
+        finally:
+            client.py(HOLD_CODE, str(client.work), "0")
+
+
 def effective_style(client: Client, name: str) -> str | None:
     """The connection style ``server status NAME --json`` reports for a target (what its next
     connection uses), ``None`` when it names none."""
@@ -1126,6 +1190,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
         logout_login(world, report, cell)
     if cell.level == "L2" and task is not None:
         forget(world, report, cell, task)
+        held_copy(world, report, cell)
     result = client.fu("server", "disconnect", name)
     gone = wait_until(lambda: helper_pid(root) is None, seconds=15)
     report.add(
@@ -1364,6 +1429,19 @@ STEP_COLUMNS = (
     ("re-consent", ("profile changed → refused", "re-consent")),
     ("logout", ("logout → refused", "login")),
     ("L2 sync/forget", ("sync", "forget", "content forgotten marker")),
+    (
+        "held copy",
+        (
+            "held copy: allow and copy (forget)",
+            "held copy: held (forget)",
+            "held copy: list (forget)",
+            "held copy: forget",
+            "held copy: allow and copy (forget --all)",
+            "held copy: held (forget --all)",
+            "held copy: list (forget --all)",
+            "held copy: forget --all",
+        ),
+    ),
     ("out", ("disconnect", "remove", "service stop")),
 )
 

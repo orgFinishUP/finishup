@@ -350,11 +350,15 @@ port of this computer.
   current choice.
 - **No network while this computer's policy forbids it.** While this computer's privacy policy
   allows no network use, FinishUP refuses to add, choose or reach a server elsewhere, and the
-  helper stops.
+  helper stops. That includes listing or deleting a copy of your code a server already keeps: it
+  stays there as its retention says (a copy kept until forgotten stays until it is forgotten), until
+  this computer's policy allows network use again and you run `finishup server code forget`.
 - **Honest limits.** A project FinishUP has not yet heard about is not held. The hold covers what
   FinishUP itself reads and claims for the project, not what an agent working in another folder
   reads and its hooks capture. A project inside another project follows the outer project's
-  policy.
+  policy. One thing is still sent for a held or kept project: when you list or delete a copy of
+  its code that this computer already sent to a server (level L2), FinishUP sends that server the
+  copy's id and nothing else (see [See and forget](#see-and-forget)).
 
 ## Keeping a copy of your code on a server (level L2)
 
@@ -494,6 +498,7 @@ files were read.
 
 ```text
 finishup server code list
+finishup server code list --all
 finishup server code forget
 finishup server code forget --repository /path/to/project
 finishup server code forget --all
@@ -505,7 +510,29 @@ goes too. The tasks that read the copy lose the captured changes and review exce
 from it, and their receipts say the copy and the excerpts derived from it were deleted, when, and
 whether you forgot it or its time ran out; their findings and checks stay. `forget --all` forgets
 every project this computer sent a copy to that server and names any it could not, with what to
-do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten.
+do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten. `list
+--all` shows each of them the same way (`code_copy_list_incomplete` unless every one was listed).
+
+These commands send the server only the copy's id: a keyed label for the project that names no
+folder, the same one that server already received when it asked this computer for that copy.
+They send nothing of the project and let the server read nothing from it, so they work in every
+state the project can be in:
+
+- **Held from that server, or kept on this computer.** The copy it already has can still be listed
+  and deleted. If this computer has no record of sending that project a copy, FinishUP answers
+  on this computer and asks the server nothing. If its record no longer names a folder of the
+  project (a copy sent by an earlier FinishUP, from a folder since removed), FinishUP sends
+  nothing and says what to do: run the command in that folder, or allow the project first.
+- **At level L1** (`finishup server code level L1`). New copies stop; the one already there can be
+  listed and deleted.
+- **Its folder deleted or moved.** `list --all` and `forget --all` name the copy by the id this
+  computer recorded when it sent it. A copy sent by an earlier FinishUP, which recorded no id,
+  still needs a folder of that project (`--repository FOLDER`).
+- **This computer's policy allows no network use.** Nothing reaches any server elsewhere, so a
+  copy there can be neither listed nor deleted from this computer. It stays there as its retention
+  says: a copy kept for a number of days or until its tasks close goes then, and one kept until
+  forgotten stays until this computer's policy allows network use again (`finishup privacy setup`)
+  and you run the command again.
 
 Forget does not reach copies of the server's folder in backups its owner made, receipts you
 already received, the reviewer's own words about its findings, files from outside the project
@@ -675,6 +702,7 @@ now).
 | `server_profile_changed` | What that server offers or needs (for example whether its AI-powered review sends what it reads to a model provider) changed since you agreed to use it, you logged in with a new API key, or FinishUP could not confirm it, so that server did no work for this request. Another request already on its way over the same connection ends with `server_authorization_changed`: it may or may not have been recorded there. | Agree again in your own terminal with `finishup server use NAME`, or go back with `finishup server use local`. |
 | `server_level_unavailable` | That server requires more of this computer than you agreed to, or you asked for a level it does not offer: `--level L2` of a server that keeps no copies, `finishup server use NAME` of a server you agreed to at level L2 that no longer offers it, or a `finishup server code` command sent to a server that keeps no copies. Nothing was sent for this project. | `finishup server use NAME` shows what it offers and requires; choose `--level L1`, or use another server. |
 | `code_copy_forget_incomplete` | `finishup server code forget --all`, or `finishup server remove` after you chose to forget first, could not forget every copy this computer sent; each line above it says which and why. `remove` then removed nothing. | Do what each line says, then run the same command again; or `finishup server remove NAME --keep-copies` to remove the server and leave the copies there. |
+| `code_copy_list_incomplete` | `finishup server code list --all` could not list every copy this computer sent; each line above it says which and why. | Do what each line says, then run the same command again. |
 | `code_copy_fence_unavailable` | `finishup server remove --forget-copies` (or `yes`) could not stop this computer from sending that server more code while it forgets the copies, because its folder for that server could not be written. The server was not removed and nothing more was forgotten. | Check that the folder belongs to you and only you can write it, then run the same command again. |
 | `code_export_unsafe` | This computer's record of the copies it sent that server can be read by others or is a link, so FinishUP does not know which projects they came from. | Fix its permissions, or run `finishup server code forget` in each project. |
 | `target_root_is_remote` | Something tried to start or reach a FinishUP service for a server whose record on this computer cannot be read; or a command that runs only where the server lives (setup, for example) ran while a server elsewhere is in use. FinishUP refuses, starts nothing and sends nothing; setup stops before it looks for agents, asks anything or changes any agent's settings. | Run `finishup server use local` to use this computer's FinishUP, then start a new agent session: an open one keeps the server it started with. If `FINISHUP_ISOLATED_ROOT` or a pinned test copy names that server, `server use` cannot change it: unset the variable or run your everyday installation instead, then start a new agent session. |

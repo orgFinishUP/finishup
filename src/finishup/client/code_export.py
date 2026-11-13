@@ -62,6 +62,7 @@ from finishup.client.code_copy_settings import RepositoryCodeSettings
 from finishup.client.code_secrets import ALWAYS_EXCLUDED, excluded_by, holds_known_secret
 from finishup.config.installation import format_rfc3339_ms
 from finishup.config.paths import PathSafetyError, ensure_owner_only_dir
+from finishup.ports.control import WorkspaceClaim
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.server_copy import (
     COMPLETENESS_COUNTS,
@@ -168,13 +169,39 @@ def _recordable_root(value: object) -> bool:
     return len(encoded) <= _MAX_ROOT_BYTES and value.isprintable()
 
 
-type _Record = tuple[str, int, tuple[str, ...], str | None, tuple[str, ...]]
+type _Record = tuple[str, int, tuple[str, ...], str | None, tuple[str, ...], WorkspaceClaim | None]
 _RECORD_MEMBERS: Final = frozenset({"schema", "export_id", "next_ref", "sent", "root"})
+# ``bases`` and ``claim`` came later; a record written before either reads as having none, and
+# ``claim`` is written only once known, so a record without one keeps its earlier shape.
+_RECORD_SHAPES: Final = frozenset(
+    {
+        _RECORD_MEMBERS,
+        _RECORD_MEMBERS | {"bases"},
+        _RECORD_MEMBERS | {"claim"},
+        _RECORD_MEMBERS | {"bases", "claim"},
+    }
+)
+_CLAIM_MEMBERS: Final = frozenset({"identity_kind", "digest", "worktree"})
+
+
+def _claim_from(value: object) -> WorkspaceClaim:
+    """The claim a record keeps; ``ValueError`` for anything out of shape."""
+
+    if not isinstance(value, dict):
+        raise ValueError("claim")
+    members = cast(dict[str, JsonValue], value)
+    if frozenset(members) != _CLAIM_MEMBERS:
+        raise ValueError("claim")
+    return WorkspaceClaim(
+        identity_kind=cast(Literal["git_common_root", "directory"], members["identity_kind"]),
+        digest=cast(str, members["digest"]),
+        worktree=cast(str, members["worktree"]),
+    )
 
 
 def _read_export_record(path: Path) -> _Record | None:
-    """``(export id, next ref, sent, root, bases)`` from ``export.json``; None when there is none
-    (a record written before ``bases`` was kept reads as having chosen none).
+    """``(export id, next ref, sent, root, bases, claim)`` from ``export.json``; None when there
+    is none (a record written before ``bases`` or ``claim`` was kept reads as having none).
 
     Raises ``ExportRefused("code_export_unsafe")`` for a record that is not an owner-only regular
     file; a record that cannot be parsed or names a value out of shape is None too: nothing it
@@ -205,7 +232,7 @@ def _read_export_record(path: Path) -> _Record | None:
     try:
         value = strict_json_parse(encoded.rstrip(b"\n"))
         source = cast(dict[str, JsonValue], value)
-        if frozenset(source) not in (_RECORD_MEMBERS, _RECORD_MEMBERS | {"bases"}):
+        if frozenset(source) not in _RECORD_SHAPES:
             raise ValueError("members")
         if source["schema"] != EXPORT_SCHEMA:
             raise ValueError("schema")
@@ -225,9 +252,10 @@ def _read_export_record(path: Path) -> _Record | None:
         bases = tuple(cast(list[str], listed))
         if any(not _HEX.match(item.encode()) for item in bases):
             raise ValueError("bases")
-    except (ValueError, TypeError, AttributeError):
+        claim = _claim_from(source["claim"]) if "claim" in source else None
+    except (ValueError, TypeError, AttributeError, KeyError):
         return None
-    return export_id, next_ref, sent, cast(str | None, root), bases
+    return export_id, next_ref, sent, cast(str | None, root), bases, claim
 
 
 class ExportDatabase:
@@ -240,12 +268,23 @@ class ExportDatabase:
     an absolute path; ``null`` before a sync read one, or for a path that cannot be shown), which
     ``server code forget --all`` claims to forget that repository's copy, and ``bases``: the
     original commits this database chose itself from ``HEAD`` as a snapshot's base (newest last,
-    bounded), the only ones a server may name as a later snapshot's base besides ``HEAD`` now.
+    bounded), the only ones a server may name as a later snapshot's base besides ``HEAD`` now, and
+    ``claim``: the claim the copy was sent under (absent before a sync recorded one), what names
+    that copy there once the folder is gone (``server code list --all``/``forget --all``, #1357).
     Everything owner-only; never the repository's own object store, and this computer's own record:
-    never sent.
+    never sent (the claim is sent only as every connection of that repository sends it).
     """
 
-    __slots__ = ("_bases", "_export_id", "_folder", "_next_ref", "_root", "_scanned", "_sent")
+    __slots__ = (
+        "_bases",
+        "_claim",
+        "_export_id",
+        "_folder",
+        "_next_ref",
+        "_root",
+        "_scanned",
+        "_sent",
+    )
 
     def __init__(self, folder: Path) -> None:
         self._folder = folder
@@ -263,9 +302,17 @@ class ExportDatabase:
             self._sent: tuple[str, ...] = ()
             self._root: str | None = None
             self._bases: tuple[str, ...] = ()
+            self._claim: WorkspaceClaim | None = None
             self._write_record()
         else:
-            self._export_id, self._next_ref, self._sent, self._root, self._bases = record
+            (
+                self._export_id,
+                self._next_ref,
+                self._sent,
+                self._root,
+                self._bases,
+                self._claim,
+            ) = record
 
     @property
     def export_id(self) -> str:
@@ -315,7 +362,33 @@ class ExportDatabase:
             "root": self._root,
             "bases": list(self._bases),
         }
+        if self._claim is not None:
+            document["claim"] = {
+                "identity_kind": self._claim.identity_kind,
+                "digest": self._claim.digest,
+                "worktree": self._claim.worktree,
+            }
         self._write_file(self._record_path(), canonical_encode(document) + b"\n")
+
+    @property
+    def claim(self) -> WorkspaceClaim | None:
+        """The claim the copy was sent under, or None (see the class text)."""
+
+        return self._claim
+
+    def remember_claim(self, claim: WorkspaceClaim) -> None:
+        """Record the claim a sync sends the copy under (written only when it changes)."""
+
+        if type(claim) is not WorkspaceClaim:
+            raise TypeError("workspace_claim_invalid")
+        if claim != self._claim:
+            # Kept in memory only once written: a failed write is tried again next time.
+            previous, self._claim = self._claim, claim
+            try:
+                self._write_record()
+            except BaseException:
+                self._claim = previous
+                raise
 
     def remember_root(self, root: Path) -> None:
         """Record the repository's folder a sync read (written only when it changes).
@@ -435,13 +508,18 @@ class ExportRecord:
     ``short_id`` names it on owner displays: the folder name's first 8 hex digits, or for an
     entry FinishUP did not name, the first 8 of its name's digest (the name itself is never
     shown). ``root`` is the repository's folder its record names, or None. ``readable`` is False
-    for an entry whose record is missing, unsafe or malformed, or that is not a folder.
+    for an entry whose record is missing, unsafe or malformed, or that is not a folder. ``claim``
+    is the claim its copy was sent under, when a sync recorded one (never shown).
     """
 
     folder: Path
     short_id: str
     root: str | None
     readable: bool
+    claim: WorkspaceClaim | None = field(default=None, repr=False)
+    # Whether its record names a snapshot sent there or a claim a sync recorded: the evidence
+    # that the server asked for a copy and was given one to read (#1357).
+    sent: bool = False
 
 
 def export_records(directory: Path) -> tuple[ExportRecord, ...]:
@@ -464,24 +542,38 @@ def export_records(directory: Path) -> tuple[ExportRecord, ...]:
         names = sorted(os.listdir(directory))
     except OSError:
         raise ExportRefused("code_export_unsafe") from None
-    records: list[ExportRecord] = []
-    for name in names:
-        folder = directory / name
-        if not _FOLDER_NAME.match(name):
-            digest = hashlib.sha256(os.fsencode(name)).hexdigest()
-            records.append(ExportRecord(folder, digest[:8], None, False))
-            continue
-        record: _Record | None = None
-        try:
-            if stat.S_ISDIR(os.lstat(folder).st_mode):
-                record = _read_export_record(folder / _EXPORT_NAME)
-        except (OSError, ExportRefused):
-            record = None
-        if record is None:
-            records.append(ExportRecord(folder, name[:8], None, False))
-        else:
-            records.append(ExportRecord(folder, name[:8], record[3], True))
-    return tuple(records)
+    return tuple(_record_of(directory / name) for name in names)
+
+
+def _record_of(folder: Path) -> ExportRecord:
+    name = folder.name
+    if not _FOLDER_NAME.match(name):
+        digest = hashlib.sha256(os.fsencode(name)).hexdigest()
+        return ExportRecord(folder, digest[:8], None, False)
+    record: _Record | None = None
+    try:
+        if stat.S_ISDIR(os.lstat(folder).st_mode):
+            record = _read_export_record(folder / _EXPORT_NAME)
+    except (OSError, ExportRefused):
+        record = None
+    if record is None:
+        return ExportRecord(folder, name[:8], None, False)
+    return ExportRecord(
+        folder, name[:8], record[3], True, record[5], bool(record[2]) or record[5] is not None
+    )
+
+
+def export_record(folder: Path) -> ExportRecord | None:
+    """The export record of one export folder (as ``export_records`` reads it), or None when
+    there is no such folder. Nothing is created, changed or followed."""
+
+    try:
+        os.lstat(folder)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return ExportRecord(folder, folder.name[:8], None, False)
+    return _record_of(folder)
 
 
 # --- policy and request ---------------------------------------------------------------------------

@@ -259,6 +259,32 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "so nothing was sent to the selected server elsewhere; run 'finishup server use local'",
         _USAGE,
     ),
+    # A connection the repository hold refused (ADR-051 decision 8), on any command that is not
+    # a task: what holds it and what to run, never a server fault (#1357).
+    "repository_egress_held": (
+        "this repository is held from that server: its privacy policy on this computer allows "
+        "no network use, so FinishUP sent nothing from it; to send it anyway, run 'finishup "
+        "server repositories add' in it (it asks you to confirm in your terminal), or 'finishup "
+        "server repositories keep' to keep it here without being asked again",
+        _USAGE,
+    ),
+    "repository_egress_kept": (
+        "this repository is kept on this computer, as you chose, so FinishUP sent nothing from "
+        "it to that server; to send it anyway, run 'finishup server repositories add' in it (it "
+        "asks you to confirm in your terminal)",
+        _USAGE,
+    ),
+    "server_authorization_changed": (
+        "what this connection to that server was authorized under changed (its record was "
+        "replaced, removed or authorized again, or its consent changed), so FinishUP stopped "
+        "sending over it; run the command again",
+        _UNAVAILABLE,
+    ),
+    "target_root_is_remote": (
+        "FinishUP refused the server's connection before anything was sent: its record could not "
+        "be read as a server this computer may use; 'finishup server list' shows the targets",
+        _UNAVAILABLE,
+    ),
     "network_policy_unreadable": (
         "this computer's FinishUP has its own privacy policy, which could not be read (its "
         "service is stopped, locked, or did not answer), so a server on another machine is "
@@ -417,6 +443,10 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     "code_copy_forget_incomplete": (
         "not every copy on that server was forgotten; each line above says why and what to do, "
         "and each stays there until it expires or is forgotten",
+        _UNAVAILABLE,
+    ),
+    "code_copy_list_incomplete": (
+        "not every copy on that server could be listed; each line above says why and what to do",
         _UNAVAILABLE,
     ),
     "code_copy_deletion_unfinished": (

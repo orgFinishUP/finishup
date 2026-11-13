@@ -96,6 +96,7 @@ __all__ = [
     "CREDENTIAL_GENERATION_SCHEMA",
     "OPEN_REMOTE_KINDS",
     "AuthorizationGeneration",
+    "CapturedTarget",
     "ConnectionAuthorization",
     "Grant",
     "authorize_active_root",
@@ -528,12 +529,47 @@ class _Check(Protocol):
     def refusal(self) -> str | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedTarget:
+    """That a target's record is still the one a command read (copy control, #1357).
+
+    ``server code list``/``forget`` read the target record, then name its copy with that
+    record's claim. Bound to the copy-control binding (``bind_prebuilt_check``), it is asked
+    before the dial, before the hello and before every frame, so a record replaced, removed,
+    authorized again or consented to anew since the command read it is
+    ``server_authorization_changed`` before the claim leaves. Reads one small owner-only file;
+    never raises (a record that cannot be read refuses).
+    """
+
+    target_id: str
+    identity: str
+    consent: str
+
+    @classmethod
+    def of(cls, record: ServerTarget) -> CapturedTarget:
+        return cls(record.target_id, identity_digest(record), consent_digest(record))
+
+    def refusal(self) -> str | None:
+        try:
+            record = read_target(target_root(self.target_id))
+            if (
+                record is None
+                or record.target_id != self.target_id
+                or identity_digest(record) != self.identity
+                or consent_digest(record) != self.consent
+            ):
+                return CHANGED
+        except Exception:  # noqa: BLE001 - a record that cannot be read is not the one read
+            return CHANGED
+        return None
+
+
 def _checked_target(check: object) -> str | None:
     """The target a binding's check was made for, when it names one."""
 
     from finishup.client.repository_hold import SendHold
 
-    if isinstance(check, SendHold):
+    if isinstance(check, (SendHold, CapturedTarget)):
         return check.target_id
     if isinstance(check, (ConnectionAuthorization, _BoundCheck)):
         return check.grant.target_id

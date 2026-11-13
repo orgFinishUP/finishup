@@ -478,6 +478,13 @@ class ClientWorkspaceBinding:
     check the connection was admitted under (ADR-052), bound to this repository's hold: the
     binding was made while it passed, and the connection re-checks it before every frame and on
     its watch.
+
+    ``copy_control`` (``server code list``/``forget``, #1357) names only the copy a server keeps
+    of the claimed repository (ADR-054): no agent and no worktree, and as its check only that the
+    target record is still the one the command read (``client.authorization.CapturedTarget``),
+    never the repository's hold, so the shared gate and that check admit it; it is made directly
+    (never relayed by the target's helper, whose relay binds a claim to that hold) and sends no
+    request but ``code_copy`` (``ServiceClient.copy_only``).
     """
 
     claim: WorkspaceClaim
@@ -490,12 +497,20 @@ class ClientWorkspaceBinding:
     # computer only: the target's helper binds a relayed connection to it (``helper_status``'s
     # relay binding), never sent anywhere else.
     repository_key: str | None = field(default=None, repr=False)
+    copy_control: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.claim) is not WorkspaceClaim:
             raise TypeError("workspace_claim_invalid")
         if self.agent is not None and type(self.agent.declaration) is not WorkspaceAgentDeclaration:
             raise TypeError("workspace_agent_invalid")
+        if type(self.copy_control) is not bool:
+            raise TypeError("workspace_binding_invalid")
+        if self.copy_control and (
+            self.agent is not None or self.worktree is not None or self.repository_key is not None
+        ):
+            # Copy control names the copy and nothing else (no workspace served, no hold bound).
+            raise ValueError("workspace_binding_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1218,6 +1233,7 @@ class ServiceClient(ControlClientPort):
         "_client_kind",
         "_closed",
         "_consent_level",
+        "_copy_only",
         "_failure",
         "_last_project_request",
         "_pending",
@@ -1242,6 +1258,7 @@ class ServiceClient(ControlClientPort):
         transport: ConnectionTransport = "unix",
         authorization: AuthorizationCheck | None = None,
         recheck: Callable[[], Awaitable[None]] | None = None,
+        copy_only: bool = False,
     ) -> None:
         if _token is not _PRIVATE_CONSTRUCTOR_TOKEN:
             raise TypeError("service_client_constructor_private")
@@ -1265,6 +1282,9 @@ class ServiceClient(ControlClientPort):
         # when the target records no consent. Set once the connection is admitted and made.
         self._consent_level: ConnectionLevel | None = None
         self._client_kind = client_kind
+        # A copy-control connection (``ClientWorkspaceBinding.copy_control``) sends no request
+        # but ``code_copy``.
+        self._copy_only = copy_only is True
         self._pid = os.getpid()
         self._closed = False
         self._last_project_request: PreparedProjectRequest | None = None
@@ -1292,6 +1312,12 @@ class ServiceClient(ControlClientPort):
         """What a connection to a server elsewhere was admitted under; ``None`` when local."""
 
         return self._authorization
+
+    @property
+    def copy_only(self) -> bool:
+        """Whether this connection sends no request but ``code_copy`` (copy control, #1357)."""
+
+        return self._copy_only
 
     @property
     def remote_workspace(self) -> tuple[WorkspaceClaim, str] | None:
@@ -1371,6 +1397,9 @@ class ServiceClient(ControlClientPort):
             return
 
     def _admit(self, method: ControlMethod) -> None:
+        if self._copy_only and method is not ControlMethod.CODE_COPY:
+            # Copy control names a copy so it can be listed or forgotten, nothing more.
+            raise ControlError("method_forbidden")
         if self._client_kind is ControlClientKind.MCP_BRIDGE and method not in _WORKFLOW_METHODS:
             raise ControlError("method_forbidden")
         if method in _LIFECYCLE_METHODS and self._client_kind is ControlClientKind.MCP_BRIDGE:
@@ -2187,6 +2216,7 @@ def _connected_client(
     transport: ConnectionTransport = "unix",
     authorization: AuthorizationCheck | None = None,
     recheck: Callable[[], Awaitable[None]] | None = None,
+    copy_only: bool = False,
 ) -> ServiceClient:
     return ServiceClient(
         stream,
@@ -2197,6 +2227,7 @@ def _connected_client(
         transport=transport,
         authorization=authorization,
         recheck=recheck,
+        copy_only=copy_only,
     )
 
 
@@ -2389,7 +2420,13 @@ async def _connect_service_attempt(
             raise TimeoutError
         session = handshake.result()
         client = _connected_client(
-            stream, session, client_kind, agent, transport=transport, authorization=authorization
+            stream,
+            session,
+            client_kind,
+            agent,
+            transport=transport,
+            authorization=authorization,
+            copy_only=workspace_binding is not None and workspace_binding.copy_control,
         )
         if workspace_binding is not None and workspace_binding.worktree is not None:
             client._remote_workspace = (  # pyright: ignore[reportPrivateUsage]
@@ -2712,6 +2749,11 @@ async def _reach_remote(
 
     root = target_root(admission.target_id)
     style = read_connection_style(root)
+    binding = admission.workspace_binding
+    if binding is not None and binding.copy_control:
+        # Copy control is made directly: the helper's relay binds a claim to the repository's
+        # hold, and copy control is admitted by the shared gate alone (#1357).
+        style = "direct"
     # The target's stop epoch before any dial: every helper this attempt starts carries it, so a
     # stop made meanwhile (``server use``, ``disconnect``, ``remove``, a zero-network policy)
     # fences it before it serves anything or reaches the server (``helper_status.start_fenced``).

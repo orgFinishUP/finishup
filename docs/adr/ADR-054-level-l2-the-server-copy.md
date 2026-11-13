@@ -203,7 +203,9 @@ The **export object database** is FinishUP-owned git loose objects under
 `<target root>/state/code-export/<digest of the repository key>/`, never the repository's own
 `.git`, with `export.json` (`yoetz.code-export/1`: the export id, the next ref number, the
 snapshots sent and, once the gate passed, `root`, the repository's folder, so that `server code
-forget --all` can claim it again; decision 7). Every admitted object is made again there from the
+forget --all` can claim it again; decision 7; and, once a sync recorded it, `claim`, the claim the
+copy was sent under, which names the copy once the folder is gone, #1357; it is written only once
+known, so a record without it keeps its earlier shape). Every admitted object is made again there from the
 bytes read. A bundle carries only what the server's have-set does not reach (incremental). Before
 it is offered, the **object-closure audit** parses it back with the server's verifier and requires
 that every object in it was admitted in this run; any difference refuses the export
@@ -308,6 +310,24 @@ the REST contract 1.0.0 (unreleased) entry in `fixtures/service/rest-api-manifes
 second part does not change it: a forget's erasure of task content (decision 15) runs on the
 server after the answer's own deletes.
 
+**Copy control** (amended 2026-11-13, issue #1357). The CLI reaches `code_copy` over a connection
+that names the copy and nothing else, so a copy can be listed and forgotten whatever became of its
+repository: held from that server or kept on this computer, at level L1, or gone from disk. Its
+binding (`ClientWorkspaceBinding(copy_control=True)`) carries the copy's claim and, as its only
+check, `authorization.CapturedTarget` (the target record is still the one the command read, asked
+before the hello); never a workspace agent, a worktree or a repository key. The shared gate and
+that check admit it (the target record, zero-network, the reauthorization and the consent; never
+the repository hold of ADR-051 decision 8, as amended there), it is made directly (the helper's
+relay binds a claim to that hold, so it is never relayed and nothing registers with the helper),
+and the client refuses every method on it but `code_copy` (`method_forbidden`) before anything is
+sent. Where this computer has an export record for the repository, the copy is named by it (the
+claim decision 2 kept, else `remote_binding.copy_claim` on the record's `root`), which is the
+claim that server already received; a held or kept repository is never named otherwise. Without
+a record, a repository that is not held is named by the worktree the command runs in. The server is unchanged: it already keys the
+copy by the claim's commitment, and it names no other repository. Ownership is what it was: the
+claim is keyed under the target's salt, which only this computer holds, and over REST it is
+namespaced by the authenticated principal.
+
 ### 6. The server's encrypted store: keys under the vault's authority, admission, quotas, ownership
 
 `service.code_store` keeps copies under `<state>/code-copies/`, one copy per (principal,
@@ -378,7 +398,10 @@ reason.
 
 `finishup server code forget --all [--json]` forgets every repository this computer's export
 records name for the selected server: since `code_copy` acts on the claimed repository only, each
-record's `root` is claimed and forgotten in turn, as `server code forget` does. One that cannot be
+record's copy is named in turn by the claim the record kept (#1357), or for a record from before
+claims were kept by the claim on its `root`, as `server code forget` does. `server code list --all
+[--json]` lists them the same way (`code_copy_list_incomplete` unless every one was listed). A held
+or kept repository with no export record is answered on this computer: nothing is sent. One that cannot be
 forgotten is named by its position and short id with its closed reason and what to do
 (`export_record_unreadable`, `repository_folder_unknown`, `repository_folder_missing`,
 `repository_invalid`, `repository_changed`, or the server's refusal), never skipped; the command
@@ -699,7 +722,10 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
    forget removes what was sent.
 6. Forget from one computer reaches the copy of the repository it names; `forget --all` reaches
    only the repositories this computer's export records name, and one whose record predates `root`
-   needs `server code forget` in that repository. Once a target is removed this computer cannot
+   needs `server code forget` in that repository; one whose record predates the kept claim and
+   whose folder is gone needs a worktree of that repository. While this computer's policy allows
+   no network use, no copy can be listed or forgotten from it: the copy stays as its retention
+   says (an `until_forgotten` one until that policy changes and it is forgotten). Once a target is removed this computer cannot
    forget its copies at all: a `days:N` or `task_close` copy waits for its expiry, an
    `until_forgotten` one for the server's owner.
 7. Expiry runs at service start and every 10 minutes, so a copy past its retention stays until the
