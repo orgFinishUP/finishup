@@ -761,6 +761,14 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Fixed
 
+- Disposing a test instance (`scripts/provision_test_instance.py dispose`) while a host session still
+  ran it refused, but only after it had already removed the instance's state and runtime pin. The
+  launcher was left at its path, unpinned, and its next command reached the everyday install
+  (#1350). Disposal now checks first, and a refusal at that check changes nothing. It withdraws
+  the launchers before anything is removed, and the pin goes only with the runtime itself, so a
+  launcher of a test instance never runs against the everyday install. A process that starts
+  after the check can still stop a disposal part way; the launchers then stay withdrawn, and
+  disposing again finishes it.
 - Cursor lists FinishUP's tools again. The `receipt` tool's result schema carried one pattern, for
   the closing line it asks the agent to pass on, that escaped each space. A JavaScript engine in
   unicode mode, which Cursor uses to read schema patterns, refuses that escape, and Cursor 3.27.22

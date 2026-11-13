@@ -168,3 +168,67 @@ still sits next to whichever interpreter a hook command resolves; this amendment
 choose that interpreter for hooks, so a bare `finishup` hook command still resolves through
 `PATH` (issue #604). This amendment does not rewrite Claude Code or Cursor
 registrations. The project plugin source and the committed repository tree stay portable.
+
+## Amendment — a refused disposal changes nothing, and no launcher is left unpinned (2026-11-12, issue #1350, owner request)
+
+`scripts/provision_test_instance.py dispose` ran `finishup instance dispose` first. That stopped the
+service and removed the root and the runtime pin, as decision 4 says. Only after that did the script
+find a host session still holding a retained runtime and refuse with `runtime_in_use`. The launcher
+stayed at its absolute path, unpinned, so it resolved the ambient directories. On the maintainer's
+Mac its next command (`service start`) superseded the everyday service: the hazard this ADR exists to
+prevent, reached through the documented disposal path. Decisions 1–6 are unchanged. The script,
+contributor tooling under decision 5, now disposes in this order:
+
+1. **Check, changing nothing.**
+   - One disposal of a tag runs at a time.
+   - The launcher must be pinned to this root and installation, the root marked persistent or
+     disposable, and a `--retain-logs` destination usable and outside the instance.
+   - No process other than the instance's own service tree may have a file of the instance open or
+     mapped. The script reads `/proc` on Linux and `lsof` elsewhere.
+   - That reliably covers every serving process (bridges, hooks, upgrades and the service hold a
+     retained runtime lease for life). It covers lease-free commands only while they keep a
+     runtime file open or mapped, which is best effort.
+   - An unaccounted held lease, or an enumeration that fails, refuses as
+     `runtime_in_use_unverifiable`.
+   - Not seen: processes of another account or that cannot be inspected, and hosts registered but
+     not running.
+2. **Withdraw the launchers.** `runtime/bin` is renamed in one step, so no registration can start
+   the runtime. The pin stays. The check runs again before anything is stopped; on a refusal the
+   launchers are put back.
+3. **Remove the root** through the runtime's own `dispose_instance`, keeping the pin. A runtime
+   whose pin names a removed root fails closed (decision 2).
+   - A typed refusal, raised before any deletion, puts the launchers back, but only in the run
+     that withdrew them and only if no earlier run began.
+   - Any other failure leaves them withdrawn. A rerun checks for hosts again before it touches
+     anything.
+   - The rerun finishes from a progress record written atomically before this step, even after
+     the identity marker is gone. The record binds the root folder's device and inode, so it never
+     authorizes removing a replacement at the same path.
+4. **Prune** the retained runtimes, then **remove** the withdrawn launchers and the runtime with its
+   pin, last.
+
+So no path that was a pinned test launcher runs ambient: not on a refusal, a failure between steps,
+a crash, a rerun or two disposals at once. The script never runs a launcher it finds unpinned (the
+state the defect left behind); it withdraws and removes it.
+
+**Not changed, open for the owner.** Two paths remain, both changes to decisions 2 and 4 that
+this amendment does not make.
+- `finishup instance dispose` run directly still removes the pin from the runtime that ran it
+  (decision 4, "Reverse states"), and that runtime then resolves ambient.
+- A process already running from a pinned runtime reads the pin each time it resolves its root,
+  so it would resolve ambient once the pin is gone. The script refuses while one runs. In the
+  product, the process would have to keep the root it started with.
+
+Three ways to make a disposed instance runtime fail closed instead:
+- keep the pin naming the removed root (`isolation_root_invalid` until the runtime is removed or
+  rebound);
+- a separate never-removed "instance runtime" marker that makes an unpinned runtime refuse with a
+  typed "provision again";
+- a process that resolved a pin at start fails closed if that pin later disappears, instead of
+  falling back to ambient.
+
+Verification:
+- `tests/packaging/test_instance_dispose_in_use.py`: a real snapshot with its service running and
+  a held `mcp serve`. It fails on the earlier script, where the identity is gone after the refusal.
+- The lifecycle regression, updated: the pin goes with the runtime.
+- The unit cases in `tests/unit/test_provision_test_instance.py`.
