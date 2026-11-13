@@ -15395,12 +15395,13 @@ copies asks on the trusted console (`yes` forgets first, `no` keeps them, anythi
 short id with `export_record_unreadable`, `repository_folder_unknown`, `repository_folder_missing`,
 `repository_invalid`, `repository_changed` or the server's refusal, and exits 20 with
 `code_copy_forget_incomplete` unless every one was forgotten; its JSON is `{action: forget_all,
-repositories: [{position, copy, folder, outcome: forgotten|not_forgotten, reason, answer}],
-forgotten, not_forgotten}`. A record that kept its `claim` is named by it, whatever became of its
-folder (#1357). `list --all` reads the same records the same way and exits 20 with
-`code_copy_list_incomplete` unless every one was listed; its JSON is `{action: status_all,
-repositories: [{position, copy, folder, outcome: listed|not_listed, reason, answer}], listed,
-not_listed}`. `list` and `forget` of a held or kept repository with no export record print
+repositories: [{position, copy, folder, outcome: forgotten|not_forgotten|never_sent, reason,
+answer}], forgotten, not_forgotten}`. A record that kept its `claim` is named by it, whatever became of its
+folder (#1357); a held or kept repository whose record names nothing sent there (no snapshot, no
+claim) is asked nothing and reported `outcome: never_sent` (no miss, not counted as forgotten).
+`list --all` reads the same records the same way and exits 20 with `code_copy_list_incomplete`
+unless every one was listed; its JSON is `{action: status_all, repositories: [{position, copy,
+folder, outcome: listed|not_listed|never_sent, reason, answer}], listed, not_listed}`. `list` and `forget` of a held or kept repository with no export record print
 `{action, copy: null, forgot: null, hold, server_asked: false}` and exit 0. `code_export_unsafe`: the export records are not owner-only or are
 links. `server remove --forget-copies` (or `yes`) raises the target's L2 sync fence
 (`<target root>/state/code-sync-fence`, a 10-minute lease) before it lists the repositories and

@@ -1491,3 +1491,31 @@ def test_a_held_repository_whose_record_names_nothing_sent_is_answered_here(
         assert result.exit_code == 0, result.output
         assert "This computer has no record of sending lab a copy" in result.stdout
     assert _Connection.made == [] and connection == []
+
+
+def test_forget_all_and_list_all_ask_nothing_for_a_held_record_naming_nothing_sent(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+) -> None:
+    """As for one repository: a held repository whose record names nothing sent there is never
+    named to that server by ``--all`` either; it is reported ``never_sent`` and is no miss."""
+
+    from finishup.cli.server import repository_here
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import export_folder
+
+    folder = export_folder(remote.target_id, repository_here(str(repository)).key)
+    ExportDatabase(folder).remember_root(Path(os.path.realpath(repository)))
+    _hold(remote, repository)
+    for action, done in (("list", "status_all"), ("forget", "forget_all")):
+        result = _RUNNER.invoke(app, ["server", "code", action, "--all", "--json"])
+        assert result.exit_code == 0, result.output
+        document = json.loads(result.stdout)
+        assert document["action"] == done
+        (entry,) = document["repositories"]
+        assert (entry["outcome"], entry["reason"], entry["answer"]) == ("never_sent", None, None)
+        text = _RUNNER.invoke(app, ["server", "code", action, "--all"])
+        assert text.exit_code == 0, text.output
+        assert "never sent; this computer's record of it names nothing sent there" in text.stdout
+    assert _Connection.made == [] and connection == [] and folder.exists()

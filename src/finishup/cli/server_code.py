@@ -477,17 +477,21 @@ class ForgetOutcome:
     folder: str | None
     reason: str | None
     answer: dict[str, object] | None = None
+    # False for a held or kept repository whose record names nothing sent there: nothing was
+    # asked of that server (outcome ``never_sent``), and nothing is left to forget (#1357).
+    sent: bool = True
 
     @property
     def forgotten(self) -> bool:
         return self.reason is None
 
     def to_json(self) -> dict[str, object]:
+        outcome = "forgotten" if self.forgotten else "not_forgotten"
         return {
             "position": self.position,
             "copy": self.copy,
             "folder": self.folder,
-            "outcome": "forgotten" if self.forgotten else "not_forgotten",
+            "outcome": outcome if self.sent else "never_sent",
             "reason": self.reason,
             "answer": self.answer,
         }
@@ -531,6 +535,21 @@ class _Named:
     worktree: str | None = None
     claim: WorkspaceClaim | None = None
     reason: str | None = None
+    # The repository key of the folder that names it (when named by its folder).
+    key: str | None = None
+
+
+def _never_sent(record: ServerTarget, item: ExportRecord, named: _Named) -> bool:
+    """Whether ``item`` names nothing sent there for a repository now held from ``record`` or
+    kept on this computer (an export refused or interrupted before anything was offered): then
+    nothing is asked of that server, as ``_copy_here`` answers for one repository."""
+
+    if item.sent or named.key is None:
+        return False
+    from finishup.client.repository_hold import decide
+    from finishup.client.targets import target_root
+
+    return decide(target_root(record.target_id), record.target_id, named.key).phase is not None
 
 
 def _named(record: ServerTarget, item: ExportRecord) -> _Named:
@@ -554,7 +573,7 @@ def _named(record: ServerTarget, item: ExportRecord) -> _Named:
         return _Named(reason=error.reason)
     if export_folder(record.target_id, here.key) != item.folder:
         return _Named(reason="repository_changed")
-    return _Named(worktree=here.worktree)
+    return _Named(worktree=here.worktree, key=here.key)
 
 
 def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> ForgetOutcome:
@@ -566,6 +585,8 @@ def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> Forg
     named = _named(record, item)
     if named.reason is not None:
         return refused(named.reason)
+    if _never_sent(record, item, named):
+        return ForgetOutcome(position, item.short_id, item.root, None, sent=False)
     try:
         # Through ``record``'s own root, whether or not it is the selected one.
         answer = _server_answer(record, named.worktree, "forget", claim=named.claim)
@@ -602,6 +623,9 @@ def forget_lines(record: ServerTarget, outcomes: tuple[ForgetOutcome, ...]) -> t
     for outcome in outcomes:
         folder = "a folder this computer cannot name" if outcome.folder is None else outcome.folder
         named = f"  {outcome.position}. {folder} (copy {outcome.copy}): "
+        if not outcome.sent:
+            lines.append(named + _NEVER_SENT_LINE)
+            continue
         if outcome.reason is None:
             lines.append(named + f"forgotten; {_forgot_line(record, outcome.answer)}.")
             continue
@@ -636,7 +660,7 @@ def _forget_all(record: ServerTarget, *, json_output: bool) -> None:
                 {
                     "action": "forget_all",
                     "repositories": [outcome.to_json() for outcome in outcomes],
-                    "forgotten": len(outcomes) - missed,
+                    "forgotten": sum(1 for item in outcomes if item.forgotten and item.sent),
                     "not_forgotten": missed,
                 },
                 sort_keys=True,
@@ -650,6 +674,13 @@ def _forget_all(record: ServerTarget, *, json_output: bool) -> None:
 
 
 # --- list every repository at once --------------------------------------------------------------
+
+
+# A held or kept repository whose record names nothing sent there, in ``--all``'s lines.
+_NEVER_SENT_LINE: Final = (
+    "never sent; this computer's record of it names nothing sent there, and it is held from that "
+    "server or kept here, so FinishUP asked that server nothing."
+)
 
 
 # Why ``list --all`` could not list one repository's copy, and what the owner can do.
@@ -689,13 +720,15 @@ class ListOutcome:
     folder: str | None
     reason: str | None
     answer: dict[str, object] | None = None
+    sent: bool = True
 
     def to_json(self) -> dict[str, object]:
+        outcome = "listed" if self.reason is None else "not_listed"
         return {
             "position": self.position,
             "copy": self.copy,
             "folder": self.folder,
-            "outcome": "listed" if self.reason is None else "not_listed",
+            "outcome": outcome if self.sent else "never_sent",
             "reason": self.reason,
             "answer": self.answer,
         }
@@ -718,6 +751,9 @@ def list_every_copy(record: ServerTarget) -> tuple[ListOutcome, ...]:
         named = _named(record, item)
         reason = named.reason
         answer: dict[str, object] | None = None
+        if reason is None and _never_sent(record, item, named):
+            outcomes.append(ListOutcome(position, item.short_id, item.root, None, sent=False))
+            continue
         if reason is None:
             try:
                 answer = _server_answer(record, named.worktree, "status", claim=named.claim)
@@ -740,7 +776,7 @@ def _list_all(record: ServerTarget, *, json_output: bool) -> None:
                 {
                     "action": "status_all",
                     "repositories": [outcome.to_json() for outcome in outcomes],
-                    "listed": len(outcomes) - missed,
+                    "listed": sum(1 for item in outcomes if item.reason is None and item.sent),
                     "not_listed": missed,
                 },
                 sort_keys=True,
@@ -759,6 +795,9 @@ def _list_all(record: ServerTarget, *, json_output: bool) -> None:
                 "a folder this computer cannot name" if outcome.folder is None else outcome.folder
             )
             named = f"  {outcome.position}. {folder} (copy {outcome.copy}): "
+            if not outcome.sent:
+                typer.echo(named + _NEVER_SENT_LINE)
+                continue
             if outcome.reason is None:
                 typer.echo(named + _copy_line(record, _field(outcome.answer, "copy"), "it"))
                 continue
