@@ -488,7 +488,15 @@ def test_privacy_options_explain_tradeoffs_and_change_command(
     )
 
     output = capsys.readouterr().out
-    assert "Private — maximum confidentiality" in output
+    # Private permits the optional structural package update check, so it must not claim
+    # "no network egress"; the summary names the one network use instead (#1358).
+    assert "no network egress" not in output
+    assert "Private — strongest confidentiality" in output
+    # Private's own words name what this computer does, and say a server elsewhere you select
+    # applies its own review policy: "no external AI-powered review" is never unqualified.
+    assert "no external AI-powered review from this computer" in output
+    assert "a server elsewhere you select applies its own review policy" in output
+    assert "structural package update check" in output
     assert "Metadata only (recommended)" in output
     assert "Assisted review — better problem-specific feedback" in output
     assert "Expanded review — most reviewer context" in output
@@ -1437,3 +1445,148 @@ def test_the_ai_listing_on_an_unreviewed_route_words_assisted_for_that_route(
     assert "  4. Expanded review —" in output
     module._render_recipe_options()  # pyright: ignore[reportPrivateUsage]
     assert "requires eligible provider data-use evidence" in capsys.readouterr().out
+
+
+def _draft_for(recipe: PrivacyRecipe, *, updates: bool | None = None) -> PrivacyPolicy:
+    """Build one preset's draft policy, optionally overriding the update-check answer (#1358)."""
+
+    import finishup.cli.privacy_setup as module
+
+    current = local_only_policy()
+    external = None if recipe == "private" else _answers().external_provider
+    answers = module._recipe_answers(recipe, current, external)  # pyright: ignore[reportPrivateUsage]
+    if updates is not None:
+        answers = replace(answers, updates=updates)
+    return build_candidate_policy(current, answers, now=_EVIDENCE_NOW)
+
+
+@pytest.mark.parametrize(
+    "recipe", ["private", "metadata_only", "assisted_review", "expanded_review"]
+)
+def test_no_draft_line_claims_no_egress_when_egress_is_permitted(
+    recipe: PrivacyRecipe, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every preset whose draft permits network egress must not be shown with a 'no egress' claim.
+
+    Issue #1358: ``network_egress_permitted`` is true whenever a network channel (external review
+    and/or the structural package update check) is on, and that same flag decides the repository
+    egress hold. A draft that permits egress must never read as if nothing can leave.
+    """
+
+    from finishup.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = _draft_for(recipe)
+    assert candidate.network_egress_permitted is True
+
+    _render_review(candidate)
+    out = capsys.readouterr().out.casefold()
+    for phrase in ("no network egress", "network egress: off", "nothing is sent", "nothing leaves"):
+        assert phrase not in out, (recipe, phrase)
+
+
+def test_private_with_update_checks_on_is_shown_permitting_egress_and_not_held(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Private with the default update check on permits network use and is not held (#1358)."""
+
+    from finishup.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = _draft_for("private", updates=True)
+    assert candidate.network_egress_permitted is True
+
+    _render_review(candidate)
+    out = capsys.readouterr().out
+    low = out.casefold()
+    # The egress line must say egress is permitted, and name the channel that allowed it without
+    # claiming it is the only traffic (a selected server still receives the project).
+    assert "network egress: off" not in low
+    assert "package update check" in low
+    assert "no external ai-powered review" in low
+    assert "only" not in low.split("network egress:", 1)[1].split("\n", 1)[0]
+    # The server-hold consequence must be explicit: not held, sent, L2 copy.
+    assert "not held" in low
+    assert "level l2" in low
+    # A selected server reviews under its own policy: the draft never implies otherwise (#1358).
+    assert "that server's own ai-powered review policy" in low
+
+
+def test_private_with_update_checks_off_is_shown_no_egress_and_held(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Private with update checks off permits no network use, so it is held (#1358)."""
+
+    from finishup.cli.privacy_setup import _render_review  # pyright: ignore[reportPrivateUsage]
+
+    candidate = _draft_for("private", updates=False)
+    assert candidate.network_egress_permitted is False
+
+    _render_review(candidate)
+    low = capsys.readouterr().out.casefold()
+    assert "network egress: off" in low
+    assert "is held" in low
+
+
+def test_custom_section_one_question_does_not_say_at_all(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first Custom question must not say 'at all' while section 5 can still permit egress."""
+
+    import finishup.cli.privacy_setup as module
+
+    prompts: list[str] = []
+
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        prompts.append(prompt)
+        return False
+
+    def prompt(_label: str, *, default: str = "") -> str:
+        return default
+
+    monkeypatch.setattr(module.typer, "confirm", confirm)
+    monkeypatch.setattr(module.typer, "prompt", prompt)
+
+    module._ask_custom_answers(  # pyright: ignore[reportPrivateUsage]
+        local_only_policy(), _answers().external_provider, None
+    )
+
+    assert not any("at all" in text for text in prompts), prompts
+    assert any("external AI-powered review" in text for text in prompts)
+
+
+def test_custom_external_off_updates_on_permits_egress_and_is_not_held(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exact #1358 case: answer no to external egress, leave update checks on.
+
+    Building the Custom answers end to end, the policy still permits network egress (the update
+    check), so the project is not held from a server elsewhere and the draft must say so.
+    """
+
+    import finishup.cli.privacy_setup as module
+
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        # No to external review (the section-1 question); yes to the PyPI update check only.
+        return "Check PyPI" in prompt
+
+    def prompt(_label: str, *, default: str = "") -> str:
+        return default
+
+    monkeypatch.setattr(module.typer, "confirm", confirm)
+    monkeypatch.setattr(module.typer, "prompt", prompt)
+
+    answers = module._ask_custom_answers(  # pyright: ignore[reportPrivateUsage]
+        local_only_policy(), _answers().external_provider, None
+    )
+    assert answers.network_egress is False
+    assert answers.updates is True
+
+    candidate = build_candidate_policy(local_only_policy(), answers, now=_EVIDENCE_NOW)
+    assert candidate.profile.value == "local_only"
+    assert candidate.network_egress_permitted is True
+
+    capsys.readouterr()  # drop the section echoes
+    module._render_review(candidate)  # pyright: ignore[reportPrivateUsage]
+    low = capsys.readouterr().out.casefold()
+    assert "no network egress" not in low
+    assert "not held" in low
+    assert "level l2" in low

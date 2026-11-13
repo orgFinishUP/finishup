@@ -363,9 +363,12 @@ trusted locator next arrives; when no route existed, one first-repository carry-
 Neither case asks again because no new repository gains authority. Every later repository remains
 Private until approved.
 
-**Network honesty:** zero-egress for task content remains the product promise. Structural package
-version checks are opt-out network (disable `update_checks` in privacy setup). Non-interactive CLI,
-MCP, CI, and pipes do not open that path as a surprise.
+**Network honesty:** a Private policy sends no task content to an external AI-powered reviewer.
+Structural package version checks are opt-out network (disable `update_checks` in privacy setup).
+Non-interactive CLI, MCP, CI, and pipes do not open that path as a surprise. A policy with update
+checks on permits network use, so a FinishUP server elsewhere that you select receives that
+project's tasks, and at level L2 a copy of it; only a project whose policy allows no network use at
+all is held from such a server (see [FinishUP servers](servers.md)).
 
 Credential status is presence-only. Human output shows the fixed mask `********` when the trusted
 service confirms that the configured provider has a stored credential, `not stored` when absence

@@ -131,9 +131,14 @@ Enabling one channel authorizes no other. Telemetry, crash diagnostics, update c
 capability testing have their own separate policies. `local_only` governs LLM disclosure and can
 coexist with a separately consented bounded structural non-LLM channel.
 
-A project's own privacy policy also governs FinishUP servers elsewhere (over SSH or HTTPS): a
-project whose policy on this computer allows no network use is held from such a server until you
-allow it from your own terminal or keep it on this computer (see [FinishUP servers](servers.md)).
+A project's own privacy policy also governs FinishUP servers elsewhere (over SSH or HTTPS). Only a
+project whose policy on this computer allows no network use **at all** is held from such a server:
+nothing FinishUP reads or claims for it is sent until you allow it from your own terminal or keep it
+on this computer (see [FinishUP servers](servers.md)). **Private** does not by itself hold a project:
+its package update checks are on by default, which permits network use, so a Private project with
+them on is not held — once you select a server elsewhere it is sent to that server and, at level L2,
+a copy of it is kept there, with no separate question for the project. To hold a project, turn its
+package update checks off (and add no AI-powered review) so its policy permits no network use.
 A server elsewhere reads your project only through FinishUP on this computer, while it works,
 unless its owner offers to keep a copy of your code (level L2) and you agree on your own terminal.
 A copy holds the files git can see, never the project's history, minus credential file names, the
