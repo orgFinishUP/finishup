@@ -492,6 +492,10 @@ def test_privacy_options_explain_tradeoffs_and_change_command(
     # "no network egress"; the summary names the one network use instead (#1358).
     assert "no network egress" not in output
     assert "Private — strongest confidentiality" in output
+    # Private's own words name what this computer does, and say a server elsewhere you select
+    # applies its own review policy: "no external AI-powered review" is never unqualified.
+    assert "no external AI-powered review from this computer" in output
+    assert "a server elsewhere you select applies its own review policy" in output
     assert "structural package update check" in output
     assert "Metadata only (recommended)" in output
     assert "Assisted review — better problem-specific feedback" in output
@@ -1502,6 +1506,8 @@ def test_private_with_update_checks_on_is_shown_permitting_egress_and_not_held(
     # The server-hold consequence must be explicit: not held, sent, L2 copy.
     assert "not held" in low
     assert "level l2" in low
+    # A selected server reviews under its own policy: the draft never implies otherwise (#1358).
+    assert "that server's own ai-powered review policy" in low
 
 
 def test_private_with_update_checks_off_is_shown_no_egress_and_held(

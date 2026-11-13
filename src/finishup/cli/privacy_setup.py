@@ -464,8 +464,9 @@ def _output_is_controlling_tty() -> bool:
 
 _RECIPE_SUMMARIES: Final[dict[PrivacyRecipe, str]] = {
     "private": (
-        "strongest confidentiality; no external AI-powered review, only local checks, apart from "
-        "the optional structural package update check"
+        "strongest confidentiality; local checks only and no external AI-powered review from this "
+        "computer, apart from the optional structural package update check; a server elsewhere "
+        "you select applies its own review policy"
     ),
     "metadata_only": (
         "strongest AI-powered review privacy; structural metadata only and approval every request"
@@ -497,7 +498,8 @@ _RECOMMENDATION_TRADEOFF: Final[
     dict[Literal["private", "metadata_only", "assisted_review"], tuple[str, str]]
 ] = {
     "private": (
-        "FinishUP runs its local checks and sends no work for AI-powered review. You can add "
+        "FinishUP on this computer runs its local checks and sends no work for AI-powered review. "
+        "You can add "
         "AI-powered review later, and your agent can then turn it on for a task.",
         "Trade-off: no AI-powered review until you add it; only local checks run.",
     ),
@@ -1405,7 +1407,8 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         typer.echo(
             "  Servers elsewhere: this policy permits network use, so this project is not held "
             "from a FinishUP server you select — it is sent to that server and, at level L2, a "
-            "copy of it is kept there."
+            "copy of it is kept there, under that server's own AI-powered review policy, which "
+            "it shows when you choose it."
         )
     else:
         typer.echo(
