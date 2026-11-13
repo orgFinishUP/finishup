@@ -364,6 +364,19 @@ root = asyncio.run(canonical_workspace_root(WorkspaceLocator(sys.argv[1])))
 print(record_repository_report(repository_key(root), sys.argv[1], no_network=sys.argv[2] == "1"))
 """
 
+HELD_PHASE_CODE = r"""
+import asyncio, sys
+from pathlib import Path
+from finishup.adapters.workspace_root import canonical_workspace_root
+from finishup.client.repository_hold import decide, repository_key
+from finishup.client.targets import read_target
+from finishup.ports.control import WorkspaceLocator
+root = Path(sys.argv[2])
+record = read_target(root)
+key = repository_key(asyncio.run(canonical_workspace_root(WorkspaceLocator(sys.argv[1]))))
+print(decide(root, record.target_id, key).phase if record is not None else None)
+"""
+
 ZERO_CODE = r"""
 import sys
 from finishup.client.everyday_policy import record_reported_policy, remove_marker
@@ -1006,7 +1019,16 @@ def held_copy(world: World, report: Report, cell: Cell) -> None:
         client.fu("server", "disconnect", cell.target)
         wait_until(lambda: helper_pid(root) is None, seconds=15)
         armed = client.py(HOLD_CODE, str(client.work), "1")
+        phase = client.py(HELD_PHASE_CODE, str(client.work), str(root)).stdout.strip()
         try:
+            # Copy control is proven under a hold only while one is in force.
+            if not report.add(
+                f"held copy: held ({label})",
+                armed.returncode == 0 and phase == "repository_egress_held",
+                f"arming exit {armed.returncode} ({armed.stdout.strip()}); phase {phase}",
+                world.run.redact(armed.stderr.strip()[-400:]),
+            ):
+                return
             before = server.copy_records()
             listed = client.fu("server", "code", "list", timeout=180)
             text = listed.stdout + listed.stderr
@@ -1016,7 +1038,7 @@ def held_copy(world: World, report: Report, cell: Cell) -> None:
                 and "keeps a copy of this repository" in text
                 and "repository_egress" not in text
                 and helper_pid(root) is None,
-                f"held {armed.stdout.strip()}; exit {listed.returncode}; server copy records "
+                f"held phase {phase}; exit {listed.returncode}; server copy records "
                 f"{before}; helper started: {helper_pid(root) is not None}",
                 shown(world, listed),
             )
@@ -1411,9 +1433,11 @@ STEP_COLUMNS = (
         "held copy",
         (
             "held copy: allow and copy (forget)",
+            "held copy: held (forget)",
             "held copy: list (forget)",
             "held copy: forget",
             "held copy: allow and copy (forget --all)",
+            "held copy: held (forget --all)",
             "held copy: list (forget --all)",
             "held copy: forget --all",
         ),

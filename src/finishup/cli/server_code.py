@@ -176,9 +176,9 @@ async def _ask_server(
 # weakened, so the owner reads what that means for the copy there and what would let them act.
 ZERO_NETWORK_COPY: Final = (
     "this computer's FinishUP is set to make no network connections, so FinishUP cannot reach "
-    "that server to list or delete its copy and sent nothing to it; the copy stays there until "
-    "it expires there, or until this computer allows network use again ('finishup privacy "
-    "setup') and you run this command again"
+    "that server to list or delete its copy and sent nothing to it; the copy stays there as its "
+    "retention says (one kept until forgotten stays until it is forgotten), until this computer "
+    "allows network use again ('finishup privacy setup') and you run this command again"
 )
 _ZERO_NETWORK_PHASES: Final = frozenset({"zero_network_remote_selected"})
 
@@ -251,7 +251,9 @@ def _copy_here(
 
     phase = decide(target_root(record.target_id), record.target_id, here.key).phase
     item = export_record(export_folder(record.target_id, here.key))
-    if item is None:
+    if item is None or (phase is not None and item.readable and not item.sent):
+        # No record, or one that names nothing sent there (an export refused or interrupted
+        # before anything was offered): a held or kept repository is answered here.
         if phase is not None:
             _answer_never_sent(record, action, phase, json_output=json_output)
             return None

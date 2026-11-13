@@ -342,3 +342,27 @@ def test_a_claim_out_of_shape_makes_the_record_unreadable(tmp_path: Path) -> Non
     path.write_text(json.dumps(document))
     (record,) = export_records(folder.parent)
     assert not record.readable and record.claim is None
+
+
+def test_a_claim_whose_write_failed_is_written_on_the_next_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.code_export import ExportDatabase, export_records
+
+    folder = tmp_path / "exports" / ("2" * 32)
+    database = ExportDatabase(folder)
+    real = ExportDatabase._write_file  # pyright: ignore[reportPrivateUsage]
+    failures = [OSError("disk full")]
+
+    def write(path: Path, data: bytes) -> None:
+        if failures:
+            raise failures.pop()
+        real(path, data)
+
+    monkeypatch.setattr(ExportDatabase, "_write_file", staticmethod(write))
+    with pytest.raises(OSError, match="disk full"):
+        database.remember_claim(_CLAIM)
+    assert database.claim is None
+    database.remember_claim(_CLAIM)
+    (record,) = export_records(folder.parent)
+    assert record.claim == _CLAIM and record.sent

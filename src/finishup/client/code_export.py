@@ -382,8 +382,13 @@ class ExportDatabase:
         if type(claim) is not WorkspaceClaim:
             raise TypeError("workspace_claim_invalid")
         if claim != self._claim:
-            self._claim = claim
-            self._write_record()
+            # Kept in memory only once written: a failed write is tried again next time.
+            previous, self._claim = self._claim, claim
+            try:
+                self._write_record()
+            except BaseException:
+                self._claim = previous
+                raise
 
     def remember_root(self, root: Path) -> None:
         """Record the repository's folder a sync read (written only when it changes).
@@ -512,6 +517,9 @@ class ExportRecord:
     root: str | None
     readable: bool
     claim: WorkspaceClaim | None = field(default=None, repr=False)
+    # Whether its record names a snapshot sent there or a claim a sync recorded: the evidence
+    # that the server asked for a copy and was given one to read (#1357).
+    sent: bool = False
 
 
 def export_records(directory: Path) -> tuple[ExportRecord, ...]:
@@ -550,7 +558,9 @@ def _record_of(folder: Path) -> ExportRecord:
         record = None
     if record is None:
         return ExportRecord(folder, name[:8], None, False)
-    return ExportRecord(folder, name[:8], record[3], True, record[5])
+    return ExportRecord(
+        folder, name[:8], record[3], True, record[5], bool(record[2]) or record[5] is not None
+    )
 
 
 def export_record(folder: Path) -> ExportRecord | None:

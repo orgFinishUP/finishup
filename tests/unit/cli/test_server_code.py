@@ -415,7 +415,9 @@ def _sent_from(record: targets.ServerTarget, folder: Path) -> Path:
     from finishup.client.code_sync import export_folder
 
     path = export_folder(record.target_id, repository_here(str(folder)).key)
-    ExportDatabase(path).remember_root(Path(os.path.realpath(folder)))
+    database = ExportDatabase(path)
+    database.remember_root(Path(os.path.realpath(folder)))
+    database.remember_sent("a" * 40, 1)
     return path
 
 
@@ -1467,3 +1469,25 @@ def test_a_target_changed_after_the_command_read_it_never_receives_the_claim(
     binding = options["workspace_binding"]
     assert binding.authorization.refusal() == "server_authorization_changed"  # type: ignore[union-attr]
     assert connection == [] and exported.exists()
+
+
+def test_a_held_repository_whose_record_names_nothing_sent_is_answered_here(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+) -> None:
+    """An export refused or interrupted before anything was offered leaves a record naming no
+    snapshot and no claim: for a held repository that is no copy sent, so nothing is asked."""
+
+    from finishup.cli.server import repository_here
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import export_folder
+
+    folder = export_folder(remote.target_id, repository_here(str(repository)).key)
+    ExportDatabase(folder).remember_root(Path(os.path.realpath(repository)))
+    _hold(remote, repository)
+    for action in ("list", "forget"):
+        result = _RUNNER.invoke(app, ["server", "code", action])
+        assert result.exit_code == 0, result.output
+        assert "This computer has no record of sending lab a copy" in result.stdout
+    assert _Connection.made == [] and connection == []

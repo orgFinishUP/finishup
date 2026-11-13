@@ -345,8 +345,8 @@ port of this computer.
 - **No network while this computer's policy forbids it.** While this computer's privacy policy
   allows no network use, FinishUP refuses to add, choose or reach a server elsewhere, and the
   helper stops. That includes listing or deleting a copy of your code a server already keeps: it
-  stays there until it expires there, or until this computer's policy allows network use again
-  and you run `finishup server code forget`.
+  stays there as its retention says (a copy kept until forgotten stays until it is forgotten), until
+  this computer's policy allows network use again and you run `finishup server code forget`.
 - **Honest limits.** A project FinishUP has not yet heard about is not held. The hold covers what
   FinishUP itself reads and claims for the project, not what an agent working in another folder
   reads and its hooks capture. A project inside another project follows the outer project's
@@ -516,9 +516,10 @@ state the project can be in:
   computer recorded when it sent it. A copy sent by an earlier FinishUP, which recorded no id,
   still needs a folder of that project (`--repository FOLDER`).
 - **This computer's policy allows no network use.** Nothing reaches any server elsewhere, so a
-  copy there can be neither listed nor deleted from this computer. It stays there until it expires
-  there, or until this computer's policy allows network use again (`finishup privacy setup`) and
-  you run the command again.
+  copy there can be neither listed nor deleted from this computer. It stays there as its retention
+  says: a copy kept for a number of days or until its tasks close goes then, and one kept until
+  forgotten stays until this computer's policy allows network use again (`finishup privacy setup`)
+  and you run the command again.
 
 Forget does not reach copies of the server's folder in backups its owner made, receipts you
 already received, the reviewer's own words about its findings, files from outside the project

@@ -724,8 +724,8 @@ revision, so clients are asked to consent again. The daemon builds `CodeCopyOffe
    only the repositories this computer's export records name, and one whose record predates `root`
    needs `server code forget` in that repository; one whose record predates the kept claim and
    whose folder is gone needs a worktree of that repository. While this computer's policy allows
-   no network use, no copy can be listed or forgotten from it: the copy waits for its expiry or
-   for that policy to change. Once a target is removed this computer cannot
+   no network use, no copy can be listed or forgotten from it: the copy stays as its retention
+   says (an `until_forgotten` one until that policy changes and it is forgotten). Once a target is removed this computer cannot
    forget its copies at all: a `days:N` or `task_close` copy waits for its expiry, an
    `until_forgotten` one for the server's owner.
 7. Expiry runs at service start and every 10 minutes, so a copy past its retention stays until the

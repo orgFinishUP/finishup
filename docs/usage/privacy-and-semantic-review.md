@@ -146,8 +146,8 @@ only way to delete what was sent, and it also deletes the excerpts tasks kept fr
 Listing and forgetting a copy still work while the project is held or kept on this computer, at
 level L1, or after its folder is gone: they send the server only the copy's id, the one it
 already received when it asked for that copy, never anything of the project. While this computer's own policy allows no network use, nothing reaches a server, so
-a copy there can be neither listed nor deleted until that policy allows network use again; it stays
-until it expires there.
+a copy there can be neither listed nor deleted until that policy allows network use again; until
+then it stays as its retention says, and one kept until forgotten stays until it is forgotten.
 
 **True zero-network mode** is the composite of `local_only`, the global ceiling off, and all five
 network channels disabled. Even then, exact release-profiled local IPC is permitted for the FinishUP
