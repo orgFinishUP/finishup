@@ -457,6 +457,9 @@ DISCLOSURE_LINES: Final = (
     "Your project folder is named by a keyed label, not its path.",
     "A project whose privacy policy on this computer allows no network use is held: nothing from it",
     "is sent until you allow it with 'finishup server repositories add'.",
+    "A project whose policy here permits network use — Private with package update checks on, the",
+    "default, among them — is not held: it is used with that server, and at level L2 a copy of it",
+    "is kept there.",
     "This is your decision on this terminal, not a vault re-authentication. Undo it with",
     "'finishup server use local' or 'finishup server remove'.",
     "",
@@ -855,6 +858,10 @@ def profile_disclosure_lines(envelope: ConsentEnvelope) -> tuple[str, ...]:
             else _RETENTION_LINES[retention.kind]
         )
         copy_lines = (
+            "A copy is sent only of a project your privacy policy here does not hold: a project",
+            "that permits network use (Private with package update checks on, the default, among",
+            "them) is copied; a project whose policy here allows no network use is held until you",
+            "allow it with 'finishup server repositories add'.",
             kept,
             "'finishup server code forget' deletes a copy there; 'finishup server code level L1'",
             "keeps one repository at level L1. Stopping or holding a repository later does not",

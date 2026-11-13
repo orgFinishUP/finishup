@@ -327,12 +327,18 @@ Removing a server, and logging in or out, happen in your shell.
 These rules apply to every server elsewhere: an SSH server, or an HTTPS server on the web or on a
 port of this computer.
 
-- **A project whose privacy policy here allows no network use is held.** While a server elsewhere
-  is selected, FinishUP sends nothing it reads or claims for such a project to that server until
-  you decide. Your agent asks you once; only you can allow it, from your own terminal, and you can
-  instead keep the project on this computer so FinishUP does not ask again. Observations captured
-  while it was held wait on this computer; after you allow it they are sent, without the content
-  captured while it was held.
+- **A project whose privacy policy here allows no network use is held.** Only a project whose
+  policy allows no network use at all is held: while a server elsewhere is selected, FinishUP sends
+  nothing it reads or claims for such a project to that server until you decide. Your agent asks you
+  once; only you can allow it, from your own terminal, and you can instead keep the project on this
+  computer so FinishUP does not ask again. Observations captured while it was held wait on this
+  computer; after you allow it they are sent, without the content captured while it was held.
+- **A project whose policy here permits network use is not held.** Choosing **Private** does not by
+  itself hold a project: its package update checks are on by default, which permits network use, so
+  a Private project with them on is not held. Once you select a server elsewhere it is sent to that
+  server — and, at level L2, a copy of it is kept there — with no separate question for the project.
+  To hold a project, turn its package update checks off (and add no AI-powered review), so its
+  policy permits no network use.
 - **What this computer records for it.** FinishUP keeps, in a file only you can read beside its
   server list, what its own privacy policy said of each project (whether it allows network use,
   since when, and up to eight folders of each project). It starts keeping this only when you first
@@ -413,6 +419,13 @@ its own. `--level L1` stops future updates; the copy already sent stays until yo
 time runs out.
 
 ### What is sent, scanned and kept
+
+A copy is sent only of a project your privacy policy here does not hold. A project that permits
+network use — **Private** with package update checks on (the default) among them — is copied; a
+project whose policy here allows no network use is held until you allow it (see [Servers elsewhere
+and your privacy policy](#servers-elsewhere-and-your-privacy-policy)). Holding a project later stops
+new copies and updates but does not delete one already sent; only `finishup server code forget`
+does.
 
 - **What is sent.** A copy of each project you use with that server: the files git can see
   (tracked, and untracked but not ignored), never the project's history. Files with names that are

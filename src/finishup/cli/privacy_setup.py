@@ -463,7 +463,10 @@ def _output_is_controlling_tty() -> bool:
 
 
 _RECIPE_SUMMARIES: Final[dict[PrivacyRecipe, str]] = {
-    "private": "maximum confidentiality; no network egress or external AI-powered review",
+    "private": (
+        "strongest confidentiality; no external AI-powered review, only local checks, apart from "
+        "the optional structural package update check"
+    ),
     "metadata_only": (
         "strongest AI-powered review privacy; structural metadata only and approval every request"
     ),
@@ -1012,7 +1015,10 @@ def _ask_custom_answers(
     """
 
     _section(1, "External and local destinations")
-    network = typer.confirm("Permit network egress at all?", default=False)
+    # This gates only the external AI-powered review channel. The structural package update
+    # check in section 5 is a separate network use, so this question never says "at all": a
+    # draft can still permit network egress for the update check after it is answered no (#1358).
+    network = typer.confirm("Permit network egress for external AI-powered review?", default=False)
     use_provider = False
     require_evidence = False
     use_fallback = False
@@ -1033,7 +1039,10 @@ def _ask_custom_answers(
                 "Require a current eligible provider data-use record?", default=True
             )
     else:
-        typer.echo("Network egress stays off, so no external destination is configurable.")
+        typer.echo(
+            "External AI-powered review stays off, so no external destination is configurable. "
+            "The structural package update check in section 5 is a separate network use."
+        )
     local_models = typer.confirm(
         "Permit configured local-model processing?",
         default=local is not None and current.local_model_enabled,
@@ -1317,7 +1326,20 @@ def _render_review(candidate: PrivacyPolicy) -> None:
     typer.echo("")
     typer.echo("Exact privacy draft:")
     typer.echo(f"  Profile: {candidate.profile.value}")
-    typer.echo(f"  Network egress: {'allowed' if candidate.network_egress_permitted else 'off'}")
+    # ``network_egress_permitted`` is true when any network channel is on — the external reviewer
+    # and/or the structural package update check — and that same flag un-holds the project from a
+    # server you select. When the update check alone raised it (Private with it left on, the
+    # default), name the channel that turned it on without implying it is the only traffic: a
+    # selected server still receives this project and, at level L2, a copy (see below) (#1358).
+    if not candidate.network_egress_permitted:
+        egress_state = "off"
+    elif llm.enabled:
+        egress_state = "allowed"
+    else:
+        egress_state = (
+            "allowed — the structural package update check is on; no external AI-powered review"
+        )
+    typer.echo(f"  Network egress: {egress_state}")
     typer.echo(f"  LLM inference: {'enabled' if llm.enabled else 'off'}")
     if llm.provider_binding is not None:
         typer.echo(
@@ -1376,6 +1398,21 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         + ("on (structural PyPI version only)" if updates_row.enabled else "off")
     )
     typer.echo("  Telemetry, crash diagnostics, capability testing: off")
+    # The repository egress hold keys on ``network_egress_permitted`` (ADR-051 decision 8): only a
+    # project that permits no network use at all is held from a FinishUP server elsewhere. A
+    # Private project with update checks on permits network use, so it is not held (#1358).
+    if candidate.network_egress_permitted:
+        typer.echo(
+            "  Servers elsewhere: this policy permits network use, so this project is not held "
+            "from a FinishUP server you select — it is sent to that server and, at level L2, a "
+            "copy of it is kept there."
+        )
+    else:
+        typer.echo(
+            "  Servers elsewhere: this policy allows no network use, so this project is held "
+            "from a FinishUP server you select — nothing of it is sent there until you allow it "
+            "with 'finishup server repositories add'."
+        )
 
 
 def _setup_snapshot_from_wire(raw: object) -> PrivacySetupSnapshot:

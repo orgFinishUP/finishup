@@ -451,6 +451,27 @@ def test_the_disclosure_names_hook_observations_and_the_content_they_carry(home:
     assert replace(record, disclosure_version=1).needs_reauthorization
 
 
+def test_the_disclosure_links_the_hold_to_the_project_policy(home: Path) -> None:
+    """Issue #1358: the add/use banner must link the hold to the project's own privacy policy.
+
+    The hold keys on whether the project's policy permits network use. A project that permits it
+    (Private with package update checks on, the default, among them) is not held: it is used with
+    the server and, at level L2, a copy is kept. The banner must say so beside the held case, and
+    this wording clarification does not bump ``DISCLOSURE_VERSION`` (no new data is disclosed, so
+    existing consents are not forced to re-confirm)."""
+
+    shown = " ".join(" ".join(server_cli.DISCLOSURE_LINES).split())
+    for words in (
+        "A project whose privacy policy on this computer allows no network use is held: nothing "
+        "from it is sent until you allow it with 'finishup server repositories add'.",
+        "A project whose policy here permits network use — Private with package update checks on, "
+        "the default, among them — is not held: it is used with that server, and at level L2 a "
+        "copy of it is kept there.",
+    ):
+        assert words in shown
+    assert targets.DISCLOSURE_VERSION == 3
+
+
 def test_a_named_local_server_has_no_outside_read_mode(home: Path) -> None:
     result = _invoke("add", "work", "--local")
     assert result.exit_code == 0, result.output
