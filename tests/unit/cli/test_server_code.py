@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
 import pytest
 from tests.builders.server_copy import git, release_l2
@@ -23,7 +23,7 @@ from finishup.cli import zero_network_selection as zero_network
 from finishup.cli.app import app
 from finishup.cli.server import LevelChoice, ServerCommandRefused
 from finishup.client import targets
-from finishup.client.code_copy_settings import read_settings
+from finishup.client.code_copy_settings import RepositoryCodeSettings, read_settings
 from finishup.protocol.consent_envelope import Retention
 from finishup.protocol.server_profile import ProfileLevels
 
@@ -436,19 +436,25 @@ class _Server:
     def __init__(
         self, refuse: dict[str, str] | None = None, unfinished: frozenset[str] = frozenset()
     ) -> None:
-        self.asked: list[tuple[str, str, Path | None]] = []
+        self.asked: list[tuple[str | None, str, Path | None]] = []
         self.refuse = refuse or {}
         self.unfinished = unfinished
 
     def __call__(
-        self, record: targets.ServerTarget, worktree: str, action: str
+        self,
+        record: targets.ServerTarget,
+        worktree: str | None,
+        action: str,
+        *,
+        claim: object | None = None,
     ) -> dict[str, object]:
-        self.asked.append((worktree, action, targets.target_root(record.target_id)))
-        reason = self.refuse.get(worktree)
+        del claim
+        self.asked.append((worktree, action, targets.target_root(record.target_id)))  # type: ignore[arg-type]
+        reason = self.refuse.get(worktree or "")
         if reason is not None:
             raise ServerCommandRefused(reason)
         forgot: dict[str, object] = dict(_FORGOT)
-        if worktree in self.unfinished:
+        if worktree is not None and worktree in self.unfinished:
             forgot.update(copies=0, snapshots=0, objects=0, bytes=0, complete=False)
         return {"action": action, "copy": None, "forgot": forgot}
 
@@ -745,10 +751,15 @@ class _FencedServer(_Server):
         self.root = root
 
     def __call__(
-        self, record: targets.ServerTarget, worktree: str, action: str
+        self,
+        record: targets.ServerTarget,
+        worktree: str | None,
+        action: str,
+        *,
+        claim: object | None = None,
     ) -> dict[str, object]:
         self.watched.steps.append(("forgot", self.watched.fenced(self.root)))
-        return super().__call__(record, worktree, action)
+        return super().__call__(record, worktree, action, claim=claim)
 
 
 def test_remove_forget_copies_fences_l2_sync_from_the_listing_through_the_removal(
@@ -877,12 +888,15 @@ def test_remove_flags_are_shown_refused_together_and_need_copies_to_ask(
 
 
 class _Connection:
-    """Stands in for ``build_service_client``: admitted for the record at the root this process
-    resolves now (as the real admission reads it), recording which root was asked what."""
+    """Stands in for ``service.client.connect_service``: admitted for the record at the root this
+    process resolves now (as the real admission reads it), recording which root was asked what
+    and how each connection was made (its options, the workspace binding among them)."""
 
     asked: list[tuple[Path | None, str]] = []
+    made: list[dict[str, object]] = []
 
-    def __init__(self) -> None:
+    def __init__(self, **options: object) -> None:
+        _Connection.made.append(options)
         from finishup.client.authorization import Grant, consent_digest, identity_digest
         from finishup.config.paths import active_root
 
@@ -909,11 +923,16 @@ class _Connection:
 
 @pytest.fixture
 def connection(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path | None, str]]:
-    async def build(*_arguments: object, **_options: object) -> _Connection:
-        return _Connection()
+    async def build(*_arguments: object, **options: object) -> _Connection:
+        return _Connection(**options)
+
+    async def ambient(*_arguments: object, **_options: object) -> _Connection:
+        raise AssertionError("a copy command never makes a connection that serves the workspace")
 
     _Connection.asked = []
-    monkeypatch.setattr("finishup.cli.app.build_service_client", build)
+    _Connection.made = []
+    monkeypatch.setattr("finishup.service.client.connect_service", build)
+    monkeypatch.setattr("finishup.cli.app.build_service_client", ambient)
     return _Connection.asked
 
 
@@ -1062,3 +1081,275 @@ def test_server_use_that_changes_the_level_ends_once_that_servers_helper_follows
     stopped = before != after and helper == "silent"
     assert runtime.stops == ([root] if stopped else [])
     assert bool(waited) is stopped
+
+
+# --- the copy of a held, kept, lowered or deleted repository (#1357) ------------------------------
+
+
+def _hold(record: targets.ServerTarget, worktree: Path, *, kept: bool = False) -> None:
+    """Hold ``worktree``'s repository from ``record`` (its policy here allows no network use), or
+    keep it on this computer, as the owner's everyday FinishUP reported and chose."""
+
+    import asyncio
+    from datetime import UTC, datetime
+
+    from finishup.adapters.workspace_root import canonical_workspace_root
+    from finishup.client.everyday_policy import record_repository_report
+    from finishup.client.repository_hold import add_kept, decide, repository_key
+    from finishup.ports.control import WorkspaceLocator
+
+    top = os.path.realpath(worktree)
+    key = repository_key(asyncio.run(canonical_workspace_root(WorkspaceLocator(top))))
+    since = datetime(2026, 11, 9, 9, 30, tzinfo=UTC)
+    assert record_repository_report(key, top, no_network=True, now=since)
+    root = targets.target_root(record.target_id)
+    if kept:
+        with targets.registry_lock():
+            assert add_kept(root, record.target_id, key, top, "2026-11-09T09:30:00.000Z")
+    assert decide(root, record.target_id, key).phase == (
+        "repository_egress_kept" if kept else "repository_egress_held"
+    )
+
+
+def _claim_of(record: targets.ServerTarget, worktree: Path) -> object:
+    """The claim every connection of this computer names ``worktree``'s repository by there."""
+
+    import asyncio
+    import base64
+
+    from finishup.adapters.workspace_root import canonical_workspace_root
+    from finishup.client.workspace_claim import workspace_claim_for_root
+    from finishup.ports.control import WorkspaceLocator
+
+    top = os.path.realpath(worktree)
+    root = asyncio.run(canonical_workspace_root(WorkspaceLocator(top)))
+    assert record.claim_salt is not None
+    return workspace_claim_for_root(root, base64.b64decode(record.claim_salt), top)
+
+
+def _copy_bindings() -> list[object]:
+    """Each connection's workspace binding: copy control, naming the copy and nothing else."""
+
+    from finishup.service.client import ClientWorkspaceBinding
+
+    bindings: list[object] = []
+    for options in _Connection.made:
+        # No locator and no workspace served: only the binding, which names the copy.
+        assert set(options) == {"workspace_binding"}, options
+        binding = options["workspace_binding"]
+        assert type(binding) is ClientWorkspaceBinding
+        assert binding.copy_control is True
+        assert binding.agent is None and binding.authorization is None
+        assert binding.worktree is None and binding.repository_key is None
+        bindings.append(binding.claim)
+    return bindings
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["held", "kept"])
+@pytest.mark.parametrize("arguments", [("list",), ("forget",), ("forget", "--all")], ids=" ".join)
+def test_a_held_or_kept_repositorys_copy_is_listed_and_forgotten_naming_only_the_copy(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+    kept: bool,
+    arguments: tuple[str, ...],
+) -> None:
+    """The hold forbids sending anything of the repository; the copy's own claim (its keyed
+    digest and its worktree's) is what names the copy the server already has, so list and forget
+    reach it with that alone: no workspace agent, no registration, no other method."""
+
+    exported = _sent_from(remote, repository)
+    _hold(remote, repository, kept=kept)
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code == 0, result.output
+    action = "status" if arguments[0] == "list" else "forget"
+    assert connection == [(targets.target_root(remote.target_id), action)]
+    assert _copy_bindings() == [_claim_of(remote, repository)]
+    assert exported.exists() == (action == "status")
+    assert "repository_egress" not in result.output
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["held", "kept"])
+@pytest.mark.parametrize("action", ["list", "forget"])
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
+def test_a_held_repository_this_computer_never_sent_is_answered_here_and_nothing_is_dialled(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+    kept: bool,
+    action: str,
+    json_output: bool,
+) -> None:
+    """With no record of a copy sent, a held repository's claim is never sent at all."""
+
+    _hold(remote, repository, kept=kept)
+    result = _RUNNER.invoke(app, ["server", "code", action, *(["--json"] if json_output else [])])
+    assert result.exit_code == 0, result.output
+    assert connection == [] and _Connection.made == []
+    phase = "repository_egress_kept" if kept else "repository_egress_held"
+    if json_output:
+        assert json.loads(result.stdout) == {
+            "action": "status" if action == "list" else "forget",
+            "copy": None,
+            "forgot": None,
+            "hold": phase,
+            "server_asked": False,
+        }
+        return
+    assert "This computer has no record of sending lab a copy of this repository" in result.stdout
+    assert ("kept on this computer" if kept else "held from lab") in result.stdout
+    assert "so FinishUP asked lab nothing" in result.stdout
+
+
+def test_the_copy_of_a_repository_at_level_l1_is_still_listed_and_forgotten(
+    remote: targets.ServerTarget, repository: Path, connection: list[tuple[Path | None, str]]
+) -> None:
+    from finishup.client.code_copy_settings import update_settings
+
+    exported = _sent_from(remote, repository)
+    here = server_cli.repository_here(str(repository))
+    with targets.registry_lock():
+        update_settings(
+            targets.target_root(remote.target_id),
+            remote.target_id,
+            here.key,
+            lambda settings: _with_level(settings, "L1"),
+        )
+    for arguments in (("list",), ("forget",)):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code == 0, result.output
+    assert [action for _root, action in connection] == ["status", "forget"]
+    assert _copy_bindings() == [_claim_of(remote, repository)] * 2
+    assert not exported.exists()
+
+
+def _with_level(
+    settings: RepositoryCodeSettings, level: Literal["L1"] | None
+) -> RepositoryCodeSettings:
+    from dataclasses import replace
+
+    return replace(settings, level=level)
+
+
+def test_a_deleted_repositorys_copy_is_listed_and_forgotten_by_the_claim_its_sync_recorded(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    connection: list[tuple[Path | None, str]],
+) -> None:
+    """The sync records the claim it sent the copy under; once the folder is gone, ``--all``
+    names the copy by it. A record from before claims were kept still says what to do."""
+
+    import shutil
+
+    from finishup.client.code_export import ExportDatabase
+
+    gone = _second_repository(tmp_path, "gone")
+    claim = _claim_of(remote, gone)
+    exported = _sent_from(remote, gone)
+    ExportDatabase(exported).remember_claim(claim)  # type: ignore[arg-type]
+    older = _second_repository(tmp_path, "older")
+    unclaimed = _sent_from(remote, older)
+    shutil.rmtree(gone)
+    shutil.rmtree(older)
+    _hold(remote, repository)
+
+    listed = _RUNNER.invoke(app, ["server", "code", "list", "--all", "--json"])
+    assert listed.exit_code == 20, listed.output
+    document = json.loads(listed.stdout)
+    assert document["action"] == "status_all"
+    outcomes = {entry["copy"]: entry for entry in document["repositories"]}
+    assert outcomes[exported.name[:8]]["outcome"] == "listed"
+    assert outcomes[exported.name[:8]]["answer"]["action"] == "status"
+    assert outcomes[unclaimed.name[:8]]["reason"] == "repository_folder_missing"
+    text = _RUNNER.invoke(app, ["server", "code", "list", "--all"])
+    assert f"(copy {exported.name[:8]}): lab keeps no copy of it" in text.stdout
+    assert "that folder is no longer there" in text.stdout
+
+    forgotten = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert forgotten.exit_code == 20, forgotten.output
+    reasons = {
+        entry["copy"]: entry["reason"] for entry in json.loads(forgotten.stdout)["repositories"]
+    }
+    assert reasons == {
+        exported.name[:8]: None,
+        unclaimed.name[:8]: "repository_folder_missing",
+    }
+    assert _copy_bindings() == [claim] * 3
+    assert not exported.exists() and unclaimed.exists()
+
+
+def test_list_all_with_no_record_asks_nothing_and_list_all_takes_no_folder(
+    remote: targets.ServerTarget, repository: Path, connection: list[tuple[Path | None, str]]
+) -> None:
+    del remote
+    result = _RUNNER.invoke(app, ["server", "code", "list", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "no record of a copy of code it sent to lab" in result.stdout
+    both = _RUNNER.invoke(app, ["server", "code", "list", "--all", "--repository", str(repository)])
+    assert both.exit_code == 2
+    assert connection == []
+
+
+@pytest.mark.parametrize("arguments", [("list",), ("forget",), ("forget", "--all")], ids=" ".join)
+def test_under_zero_network_a_copy_command_says_plainly_that_nothing_can_reach_the_server(
+    remote: targets.ServerTarget,
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, ...],
+) -> None:
+    """The zero-network rule is not weakened: nothing is sent, and the owner reads what that
+    means for the copy and what would let them delete it."""
+
+    from finishup.ports.control import ControlError
+
+    exported = _sent_from(remote, repository)
+
+    async def refused(*_arguments: object, **_options: object) -> object:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="zero_network_remote_selected"
+        )
+
+    monkeypatch.setattr("finishup.service.client.connect_service", refused)
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code != 0, result.output
+    assert "set to make no network connections" in result.output
+    assert "cannot reach lab" not in result.output  # fixed text: no name in a remedy
+    assert "cannot reach that server to list or delete its copy" in result.output
+    assert "until this computer allows network use again" in result.output
+    assert "server use local" not in result.output
+    assert exported.exists()
+
+
+@pytest.mark.parametrize(
+    ("phase", "words"),
+    [
+        ("repository_egress_held", "this repository is held from that server"),
+        ("repository_egress_kept", "this repository is kept on this computer"),
+        ("server_authorization_changed", "what this connection to that server was authorized"),
+        ("target_root_is_remote", "refused the server's connection before anything was sent"),
+    ],
+)
+def test_no_refusal_a_copy_command_can_meet_reads_as_a_server_fault(
+    remote: targets.ServerTarget,
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    words: str,
+) -> None:
+    from finishup.ports.control import ControlError
+
+    _sent_from(remote, repository)
+
+    async def refused(*_arguments: object, **_options: object) -> object:
+        raise ControlError("service_unavailable", retryable=True, phase=phase)
+
+    monkeypatch.setattr("finishup.service.client.connect_service", refused)
+    for arguments in (("list",), ("forget", "--all")):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code != 0, result.output
+        assert words in result.output, result.output
+        assert "did not respond as needed" not in result.output
+    assert server_cli._DEFAULT_REMEDY not in server_cli.refusal_message(  # pyright: ignore[reportPrivateUsage]
+        ServerCommandRefused(phase)
+    )

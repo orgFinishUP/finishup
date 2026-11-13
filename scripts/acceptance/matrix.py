@@ -991,6 +991,48 @@ def forget(world: World, report: Report, cell: Cell, task: Task) -> None:
     )
 
 
+def held_copy(world: World, report: Report, cell: Cell) -> None:
+    """A held repository's copy is listed and forgotten (#1357). Allowed (its policy permits
+    network use) and copied by a task, then held again; ``server code list`` names the copy and
+    ``server code forget`` deletes it there, and again with ``forget --all``. Copy control is
+    made directly: neither starts the target's helper or serves the repository."""
+
+    client, server = world.client, world.server(cell)
+    root = client.target_root(cell.target)
+    for label, command in (("forget", ("forget",)), ("forget --all", ("forget", "--all"))):
+        ok, detail, transcript = copy_task(world, cell, f"held copy {label}")
+        if not report.add(f"held copy: allow and copy ({label})", ok, detail, transcript):
+            return
+        client.fu("server", "disconnect", cell.target)
+        wait_until(lambda: helper_pid(root) is None, seconds=15)
+        armed = client.py(HOLD_CODE, str(client.work), "1")
+        try:
+            before = server.copy_records()
+            listed = client.fu("server", "code", "list", timeout=180)
+            text = listed.stdout + listed.stderr
+            report.add(
+                f"held copy: list ({label})",
+                listed.returncode == 0
+                and "keeps a copy of this repository" in text
+                and "repository_egress" not in text
+                and helper_pid(root) is None,
+                f"held {armed.stdout.strip()}; exit {listed.returncode}; server copy records "
+                f"{before}; helper started: {helper_pid(root) is not None}",
+                shown(world, listed),
+            )
+            result = client.fu("server", "code", *command, timeout=180)
+            after = server.copy_records()
+            report.add(
+                f"held copy: {label}",
+                result.returncode == 0 and before >= 1 and after == 0 and helper_pid(root) is None,
+                f"exit {result.returncode}; server copy records {before} → {after}; helper "
+                f"started: {helper_pid(root) is not None}",
+                shown(world, result),
+            )
+        finally:
+            client.py(HOLD_CODE, str(client.work), "0")
+
+
 def effective_style(client: Client, name: str) -> str | None:
     """The connection style ``server status NAME --json`` reports for a target (what its next
     connection uses), ``None`` when it names none."""
@@ -1126,6 +1168,7 @@ def remote_cell(world: World, cell: Cell) -> Report:
         logout_login(world, report, cell)
     if cell.level == "L2" and task is not None:
         forget(world, report, cell, task)
+        held_copy(world, report, cell)
     result = client.fu("server", "disconnect", name)
     gone = wait_until(lambda: helper_pid(root) is None, seconds=15)
     report.add(
@@ -1364,6 +1407,17 @@ STEP_COLUMNS = (
     ("re-consent", ("profile changed → refused", "re-consent")),
     ("logout", ("logout → refused", "login")),
     ("L2 sync/forget", ("sync", "forget", "content forgotten marker")),
+    (
+        "held copy",
+        (
+            "held copy: allow and copy (forget)",
+            "held copy: list (forget)",
+            "held copy: forget",
+            "held copy: allow and copy (forget --all)",
+            "held copy: list (forget --all)",
+            "held copy: forget --all",
+        ),
+    ),
     ("out", ("disconnect", "remove", "service stop")),
 )
 

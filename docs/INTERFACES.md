@@ -15258,6 +15258,16 @@ the manifest, `EVIDENCE_PROVENANCE`), `domain.code_exclusions` (`ALWAYS_EXCLUDED
   `AGENT_SCOPE_METHODS` (and so `operator`) and `CLAIM_BOUND_ONLY_METHODS`; the REST contract 1.0.0
   entry of `fixtures/service/rest-api-manifests.case.json` is amended in place. A service that
   keeps no copies refuses it `method_forbidden`.
+- Copy control (#1357): `server code list` and `forget` (with `--all`, and `server remove`'s forget)
+  reach `code_copy` over a connection whose `ClientWorkspaceBinding` has `copy_control=True`
+  (`client.remote_binding.copy_control_binding`): the hello carries the copy's claim
+  (`copy_claim`: the claim every connection of that repository sends, or the one its export record
+  kept) and no workspace agent, the binding carries no check, worktree or repository key, so the
+  shared gate alone admits it (never the repository hold: ADR-051 decision 8 as amended), the
+  connection is made directly (never through the helper's relay) and `ServiceClient.copy_only`
+  refuses every method but `code_copy` as `method_forbidden` before anything is sent. A held or kept
+  repository with no export record is answered on the client (`hold`, `server_asked: false`) and
+  sends nothing. The server is unchanged.
 - Server events (bounded, closed tokens): `code_copy_sync_<outcome>`, `code_copy_expiry` and
   `code_snapshot_mismatch`; store refusal `code_copy_forgotten` (an upload begun before a forget).
 
@@ -15342,7 +15352,7 @@ for checks of earlier work; a recovered job whose check change was erased ends w
 | Record | Location | Fields |
 |---|---|---|
 | `yoetz.server-code-copy/1` | `<target root>/config/code-copy.json` (client, remote targets) | `schema`, `target_id` and `repositories`: per repository `repository` (the hold's repository key), `level` (`L1` or `null`; never more than the consent), `exclude` (patterns) and `allow` (`[path, sha256:<hex>]` of exact bytes); at most 256 repositories and 256 entries each, 1 MiB. Owner-only canonical JSON, read fail-closed (a bad record refuses every export); written under the registry lock by `server code exclude`, `allow add`, `allow remove` and `level`; never sent to a server. |
-| `yoetz.code-export/1` | `<target root>/state/code-export/<digest of the repository key>/export.json` (client) | `schema`, `export_id`, `next_ref`, `sent` (the snapshots sent) and `root` (the repository's folder, recorded once the gate passed; a record without it is unreadable to `forget --all`); beside FinishUP-owned git loose objects, never the repository's own `.git`. Removed by `server code forget`. |
+| `yoetz.code-export/1` | `<target root>/state/code-export/<digest of the repository key>/export.json` (client) | `schema`, `export_id`, `next_ref`, `sent` (the snapshots sent), `root` (the repository's folder, recorded once the gate passed; a record without it is unreadable to `forget --all`), `bases` and, once a sync recorded it, `claim` (`{identity_kind, digest, worktree}`: the claim the copy was sent under, which names it for `list --all` and `forget --all` once the folder is gone; absent in a record written before #1357); beside FinishUP-owned git loose objects, never the repository's own `.git`. Removed by `server code forget`. |
 | `yoetz.code-copy/1` | `<state>/code-copies/copies/<copy key>/copy.json` (server) | `schema`, `copy_key`, `copy_id`, `principal` and `repository` (digests only), `created_at`, `last_sync_at`, `retention` (`{kind, days}`), `snapshots` (at most 64), `pins`, `stored_bytes`, `objects` and `wrap`; beside it `objects/`, `snapshots/<snapshot>.enc` and `index.enc`, each an AES-256-GCM frame. Written last at every commit. `pins`: per task id `{snapshot, synced_at, served, stale, reads, fenced}` (ids and counts only), buffered and written at each sync, account, forget and expiry and every 32 reads. |
 | `yoetz.code-copy-wrap/1` | the `wrap` member of `copy.json` (server) | `schema`, `algorithm` (`aes-256-kw-rfc3394`), `key_slot`, `wrapped`: the copy's data key wrapped under a key-encryption key the vault's installation MAC derives per copy (domain `yoetz/code-copy-kek/v1`), never stored; a locked vault reads and admits nothing. |
 | `yoetz.code-copy-tombstones/1` | `<state>/code-copies/tombstones.json` (server) | `schema`, `epochs`: per copy `epoch`, `forgotten_at`, `reason`; advanced before a forget deletes the folder, so an upload begun under an older epoch is refused. |
@@ -15372,7 +15382,7 @@ bounds; the loader enforces the token grammar and pattern rules.
 
 **CLI** (`client_only`, shown in help): `finishup server add|use … --level L1|L2 --retention
 task_close|until_forgotten|days:N` (`days:0` and any other bad token are usage errors); `finishup
-server code list [--repository FOLDER] [--json]`, `forget [--repository FOLDER | --all] [--json]`,
+server code list [--repository FOLDER | --all] [--json]`, `forget [--repository FOLDER | --all] [--json]`,
 `exclude add|remove|list PATTERN`, `allow add FILE`, `allow list [--json]` (paths and `sha256:` with
 12 hex), `allow remove PATH`, `level L1|default`; `finishup server remove NAME [--forget-copies |
 --keep-copies]`. `exclude add`, `level L1` and `allow remove` ask nothing; `exclude remove`, `level
@@ -15383,7 +15393,12 @@ short id with `export_record_unreadable`, `repository_folder_unknown`, `reposito
 `repository_invalid`, `repository_changed` or the server's refusal, and exits 20 with
 `code_copy_forget_incomplete` unless every one was forgotten; its JSON is `{action: forget_all,
 repositories: [{position, copy, folder, outcome: forgotten|not_forgotten, reason, answer}],
-forgotten, not_forgotten}`. `code_export_unsafe`: the export records are not owner-only or are
+forgotten, not_forgotten}`. A record that kept its `claim` is named by it, whatever became of its
+folder (#1357). `list --all` reads the same records the same way and exits 20 with
+`code_copy_list_incomplete` unless every one was listed; its JSON is `{action: status_all,
+repositories: [{position, copy, folder, outcome: listed|not_listed, reason, answer}], listed,
+not_listed}`. `list` and `forget` of a held or kept repository with no export record print
+`{action, copy: null, forgot: null, hold, server_asked: false}` and exit 0. `code_export_unsafe`: the export records are not owner-only or are
 links. `server remove --forget-copies` (or `yes`) raises the target's L2 sync fence
 (`<target root>/state/code-sync-fence`, a 10-minute lease) before it lists the repositories and
 keeps it through the removal; the helper refuses code sync under it (`server_authorization_changed`);

@@ -1535,6 +1535,18 @@ owner decides. Interpretation:
    `repository_egress_kept` (`repository_kept_on_this_computer`: continue without FinishUP for it,
    never ask again).
 4. *One decision for every remote kind.*
+5. *A copy already sent can still be listed and forgotten* (amended 2026-11-13, issue #1357, on
+   the owner's request to fix it with the disclosure put to his security review). Holding a
+   repository stops future sends, and forget is the only way to delete what a server already
+   keeps of it (ADR-054), so the hold does not decide `server code list` and `forget` (with
+   `--all`, and `server remove`'s forget): they connect over **copy control** (ADR-054 decision 5),
+   which carries the copy's claim and nothing else. That claim is the keyed digest and worktree
+   digest every connection of that repository already sent there: the copy's id on that server,
+   no path, no file name, no content, no workspace agent, so the server can read or sync nothing
+   over it. It is sent only when this computer's export record shows it sent that target a copy
+   of that repository; otherwise the command answers on this computer and sends nothing. The rest
+   of the gate still runs first (the record, zero-network, the disclosure, an open kind), so a
+   computer whose policy allows no network use reaches no server for it either.
 
 **Detection and order.** The hold is the gate's last step (ADR-052 decision 1): after the record,
 zero-network, the disclosure and an open kind, and before any claim, dial, start or sync. The

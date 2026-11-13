@@ -213,6 +213,27 @@ def test_an_admitted_sync_is_read_back_in_chunks_and_holds_the_consented_policy(
     _ = json
 
 
+def test_a_sync_records_the_claim_it_sent_the_copy_under(
+    l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
+) -> None:
+    """What names the copy there, kept here so it can be listed and forgotten once the folder is
+    gone (#1357); a responder given no claim records none."""
+
+    from finishup.client.code_export import export_records
+    from finishup.client.code_sync import exports_folder
+    from finishup.ports.control import WorkspaceClaim
+
+    record, document = l2_target
+    claim = WorkspaceClaim("git_common_root", "sha256:" + "d" * 64, _WORKTREE)
+    with release_l2():
+        _responder(record, repository, claim=claim).prepare(_arguments(document))
+    (exported,) = export_records(exports_folder(record.target_id))
+    assert exported.claim == claim and exported.root == str(repository)
+    other = WorkspaceClaim("git_common_root", "sha256:" + "e" * 64, _WORKTREE)
+    with pytest.raises(ValueError, match="code_sync_claim_invalid"):
+        _responder(record, repository, claim=other.worktree)
+
+
 def test_a_bundle_prepared_by_one_agent_is_read_through_another_of_the_same_worktree(
     l2_target: tuple[ServerTarget, dict[str, Any]], repository: Path
 ) -> None:

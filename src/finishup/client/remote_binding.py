@@ -14,6 +14,11 @@ decision of 2026-11-07, round 4; ``client.repository_hold``): a held or kept rep
 ``TargetError`` (``repository_egress_held`` or ``repository_egress_kept``), after the
 authorization checks, so nothing is claimed, dialled, started or recorded; otherwise the binding
 carries the ``SendHold`` a long-lived connection re-checks.
+
+``copy_control_binding`` is the one binding the hold does not decide (#1357): it names the copy a
+server keeps of a repository (``copy_claim``, the claim every connection of this computer names
+that repository by there) so ``server code list``/``forget`` can reach it in every state, and
+carries nothing else (``ClientWorkspaceBinding.copy_control``).
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from finishup.client.targets import (
     require_current_authorization,
 )
 from finishup.client.workspace_claim import workspace_claim_for_root
-from finishup.ports.control import WorkspaceLocator
+from finishup.ports.control import WorkspaceClaim, WorkspaceLocator
 from finishup.service.client import AuthorizationCheck, ClientWorkspaceBinding
 
 if TYPE_CHECKING:
@@ -46,7 +51,54 @@ if TYPE_CHECKING:
 # Derives the agents' opened-workspace handle key from the target's claim salt (a client secret).
 _OPENED_HANDLE_KEY_DOMAIN: Final = b"yoetz/opened-workspace-key/v1"
 
-__all__ = ["binding_for_active_root", "is_remote_active_root", "remote_workspace_binding"]
+__all__ = [
+    "binding_for_active_root",
+    "copy_claim",
+    "copy_control_binding",
+    "is_remote_active_root",
+    "remote_workspace_binding",
+]
+
+
+def target_claim_salt(record: ServerTarget) -> bytes:
+    """The claim salt ``record``'s ``target.json`` keeps; ``target_record_invalid`` otherwise."""
+
+    try:
+        return base64.b64decode(cast(str, record.claim_salt), validate=True)
+    except (TypeError, ValueError, binascii.Error):
+        raise TargetError("target_record_invalid") from None
+
+
+async def copy_claim(record: ServerTarget, worktree: str) -> WorkspaceClaim:
+    """The claim naming the copy ``record``'s server keeps of the repository at ``worktree``.
+
+    ``worktree`` is a worktree's top level (absolute, in normal form). The claim is the one every
+    connection of this computer names that repository by on that server (its keyed digest under
+    the target's salt, and the worktree's): the server keys the copy from it. Reading the root is
+    the same one Git read every connection makes; nothing is sent here, and the hold is not
+    decided (``copy_control_binding``). A root the shared rule cannot resolve raises its closed
+    ``RepositoryIdentityError``.
+    """
+
+    salt = target_claim_salt(record)
+    normal = posixpath.normpath(worktree)
+    if normal == "/":
+        raise RepositoryIdentityError("repository_locator_invalid")
+    root = await canonical_workspace_root(WorkspaceLocator(normal))
+    return workspace_claim_for_root(root, salt, normal)
+
+
+def copy_control_binding(claim: WorkspaceClaim) -> ClientWorkspaceBinding:
+    """The binding of a connection that only names ``claim``'s copy (``server code``, #1357).
+
+    No workspace agent, so the server can read or sync nothing over it; no check of its own, so
+    the shared gate alone admits it (the target record, this computer's zero-network policy, the
+    reauthorization and the consent; never the repository's hold); no worktree, so it registers
+    nothing with the target's helper. The connection is made directly and sends no request but
+    ``code_copy`` (``service.client``).
+    """
+
+    return ClientWorkspaceBinding(claim, copy_control=True)
 
 
 async def remote_workspace_binding(
@@ -139,6 +191,7 @@ async def remote_workspace_binding(
                 root=Path(worktree),
                 worktree=claim.worktree,
                 check=check,
+                claim=claim,
             )
     return ClientWorkspaceBinding(
         claim,
@@ -211,10 +264,7 @@ async def binding_for_active_root(
             raise TargetError("target_root_is_remote")
     if locator is None:
         return None
-    try:
-        salt = base64.b64decode(cast(str, record.claim_salt), validate=True)
-    except (TypeError, ValueError, binascii.Error):
-        raise TargetError("target_record_invalid") from None
+    salt = target_claim_salt(record)
     return await remote_workspace_binding(
         locator, salt, serve_workspace=serve_workspace, target=record, authorization=authorization
     )

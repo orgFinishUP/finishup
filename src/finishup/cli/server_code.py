@@ -11,10 +11,16 @@ before any lookup, prompt or write.
   computer's export folder for it) and prints exactly what the server deleted. Forget is the only
   way to remove what was already sent: stopping, holding or narrowing to L1 stops future sends.
   ``forget --all`` forgets every repository this computer sent copies from to that server: the
-  server acts on the claimed repository only, so each folder this computer's export records name
+  server acts on the claimed repository only, so each copy this computer's export records name
   is claimed and forgotten in turn; one that cannot be is named with its reason, never skipped,
-  and the exit status says whether every one was forgotten. ``server remove`` uses the same to
-  offer forgetting before it removes a target.
+  and the exit status says whether every one was forgotten. ``list --all`` lists them the same
+  way. ``server remove`` uses the same to offer forgetting before it removes a target.
+* Each of them reaches the server over copy control (#1357): a connection that carries the copy's
+  claim (its keyed digest and its worktree's, the copy's id there) and nothing else, admitted by
+  the shared gate alone, so they work for a repository held from that server or kept on this
+  computer, at level L1, or gone from disk (named by the claim its sync recorded). A held or kept
+  repository this computer has no record of sending is answered here: its claim is never sent.
+  This computer's zero-network policy still refuses them before anything is sent.
 * ``exclude add|remove|list`` keeps patterns out of this repository's copy. Adding only ever
   sends less, so any process may; removing sends more, so the owner confirms it on the trusted
   console.
@@ -53,8 +59,18 @@ if TYPE_CHECKING:
     from finishup.client.code_copy_settings import RepositoryCodeSettings
     from finishup.client.code_export import ExportRecord
     from finishup.client.targets import ServerTarget
+    from finishup.ports.control import WorkspaceClaim
 
-__all__ = ["FORGET_TRAILER", "ForgetOutcome", "code_app", "forget_every_copy", "forget_lines"]
+__all__ = [
+    "FORGET_TRAILER",
+    "ZERO_NETWORK_COPY",
+    "ForgetOutcome",
+    "ListOutcome",
+    "code_app",
+    "forget_every_copy",
+    "forget_lines",
+    "list_every_copy",
+]
 
 code_app = typer.Typer(
     help="What a server elsewhere keeps of your code (level L2), and how to make it keep less.",
@@ -120,12 +136,26 @@ def _require_captured(record: ServerTarget, authorization: object) -> None:
         raise ServerCommandRefused("server_authorization_changed", message=_AUTHORIZATION_CHANGED)
 
 
-async def _ask_server(record: ServerTarget, worktree: str, action: str) -> dict[str, object]:
-    from finishup.cli.app import build_service_client
-    from finishup.ports.control import ControlClientKind, WorkspaceLocator
+async def _ask_server(
+    record: ServerTarget, worktree: str | None, claim: WorkspaceClaim | None, action: str
+) -> dict[str, object]:
+    """Ask over copy control (``client.remote_binding.copy_control_binding``): the connection
+    carries ``claim`` (or the claim on ``worktree``'s repository) and nothing else."""
 
-    client = await build_service_client(
-        ControlClientKind.CLI, workspace_locator=WorkspaceLocator(worktree)
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.client.remote_binding import copy_claim, copy_control_binding
+    from finishup.ports.control import ControlClientKind
+    from finishup.service.client import connect_service
+
+    if claim is None:
+        if worktree is None:
+            raise ServerCommandRefused("repository_folder_unknown")
+        try:
+            claim = await copy_claim(record, worktree)
+        except (RepositoryIdentityError, OSError):
+            raise ServerCommandRefused("repository_invalid") from None
+    client = await connect_service(
+        ControlClientKind.CLI, workspace_binding=copy_control_binding(claim)
     )
     try:
         _require_captured(record, client.authorization)
@@ -134,61 +164,149 @@ async def _ask_server(record: ServerTarget, worktree: str, action: str) -> dict[
         await client.close()
 
 
-def _server_answer(record: ServerTarget, worktree: str, action: str) -> dict[str, object]:
-    """Ask ``record``'s server, the target this command read, and no other.
+# What a copy command says when this computer's zero-network policy refuses it: the rule is not
+# weakened, so the owner reads what that means for the copy there and what would let them act.
+ZERO_NETWORK_COPY: Final = (
+    "this computer's FinishUP is set to make no network connections, so FinishUP cannot reach "
+    "that server to list or delete its copy and sent nothing to it; the copy stays there until "
+    "it expires there, or until this computer allows network use again ('finishup privacy "
+    "setup') and you run this command again"
+)
+_ZERO_NETWORK_PHASES: Final = frozenset({"zero_network_remote_selected"})
 
-    The connection resolves its root as ``record``'s own (``selection_override``), whatever the
-    selection names by then, and is refused unless its admission is ``record``'s as read
-    (``_require_captured``).
+
+def _server_answer(
+    record: ServerTarget,
+    worktree: str | None,
+    action: str,
+    *,
+    claim: WorkspaceClaim | None = None,
+) -> dict[str, object]:
+    """Ask ``record``'s server, the target this command read, and no other, about one copy.
+
+    The copy is named by ``claim`` (the claim its sync recorded) or else by the claim on
+    ``worktree``'s repository, over copy control. The connection resolves its root as
+    ``record``'s own (``selection_override``), whatever the selection names by then, and is
+    refused unless its admission is ``record``'s as read (``_require_captured``).
     """
 
     from finishup.cli.app import run_async
-    from finishup.client.targets import target_root
+    from finishup.client.targets import TargetError, target_root
     from finishup.config.paths import selection_override
     from finishup.ports.control import ControlError
 
     try:
         with selection_override(target_root(record.target_id)):
-            return run_async(lambda: _ask_server(record, worktree, action))
+            return run_async(lambda: _ask_server(record, worktree, claim, action))
     except ControlError as error:
         if error.reason == "method_forbidden":
             raise ServerCommandRefused(
                 "server_level_unavailable",
                 message="that server keeps no copy of code (it does not offer level L2)",
             ) from None
-        raise ServerCommandRefused(error.phase or error.reason) from None
+        phase = error.phase or error.reason
+        if phase in _ZERO_NETWORK_PHASES:
+            raise ServerCommandRefused(phase, message=ZERO_NETWORK_COPY) from None
+        raise ServerCommandRefused(phase) from None
+    except TargetError as error:
+        raise ServerCommandRefused(error.reason) from None
 
 
-@code_app.command("list")
-@_cli
-def server_code_list(
-    repository: _REPOSITORY_OPTION = None, json_output: _JSON_OPTION = False
-) -> None:
-    """Show what the selected server keeps of this repository."""
+def _held_and_never_sent(record: ServerTarget, here: RepositoryHere) -> str | None:
+    """The hold phase when ``here``'s repository is held from ``record`` or kept on this computer
+    and this computer has no record of sending it a copy there; otherwise None.
 
-    record = _selected()
-    here = repository_here(repository)
-    answer = _server_answer(record, here.worktree, "status")
+    Then nothing is asked of the server: copy control would send a claim that names no copy it
+    could hold from this computer, and the hold forbids sending anything new of that repository.
+    """
+
+    from finishup.client.code_sync import export_folder
+    from finishup.client.repository_hold import decide
+    from finishup.client.targets import target_root
+
+    phase = decide(target_root(record.target_id), record.target_id, here.key).phase
+    if phase is None or export_folder(record.target_id, here.key).exists():
+        return None
+    return phase
+
+
+def _answer_never_sent(record: ServerTarget, action: str, phase: str, *, json_output: bool) -> None:
     if json_output:
         import json
 
-        typer.echo(json.dumps(answer, sort_keys=True))
+        typer.echo(
+            json.dumps(
+                {
+                    "action": action,
+                    "copy": None,
+                    "forgot": None,
+                    "hold": phase,
+                    "server_asked": False,
+                },
+                sort_keys=True,
+            )
+        )
         return
-    copy = _field(answer, "copy")
+    where = (
+        "kept on this computer" if phase == "repository_egress_kept" else f"held from {record.name}"
+    )
+    typer.echo(
+        f"This computer has no record of sending {record.name} a copy of this repository, and "
+        f"the repository is {where}, so FinishUP asked {record.name} nothing"
+        + ("; nothing was deleted." if action == "forget" else ".")
+    )
+
+
+def _copy_line(record: ServerTarget, copy: object, subject: str) -> str:
+    """What ``record`` keeps of ``subject`` (``this repository``, ``it``), from its answer."""
+
     if copy is None:
-        typer.echo(f"{record.name} keeps no copy of this repository.")
-        return
+        return f"{record.name} keeps no copy of {subject}."
     retention = _field(copy, "retention")
     kept = "until you forget it"
     if _field(retention, "kind") == "days":
         kept = f"for {_field(retention, 'days')} days after its last sync"
     elif _field(retention, "kind") == "task_close":
         kept = "until the tasks that read it are closed"
-    typer.echo(
-        f"{record.name} keeps a copy of this repository: {_field(copy, 'snapshots')} snapshot(s), "
+    return (
+        f"{record.name} keeps a copy of {subject}: {_field(copy, 'snapshots')} snapshot(s), "
         f"{_field(copy, 'stored_bytes')} bytes, last synced {_field(copy, 'last_sync_at') or 'never'}, "
         f"kept {kept}."
     )
+
+
+@code_app.command("list")
+@_cli
+def server_code_list(
+    repository: _REPOSITORY_OPTION = None,
+    every: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="List every repository this computer sent copies from to that server."
+        ),
+    ] = False,
+    json_output: _JSON_OPTION = False,
+) -> None:
+    """Show what the selected server keeps of this repository."""
+
+    if every and repository is not None:
+        raise ServerCommandRefused("usage", message="give --all or --repository FOLDER, not both")
+    record = _selected()
+    if every:
+        _list_all(record, json_output=json_output)
+        return
+    here = repository_here(repository)
+    held = _held_and_never_sent(record, here)
+    if held is not None:
+        _answer_never_sent(record, "status", held, json_output=json_output)
+        return
+    answer = _server_answer(record, here.worktree, "status")
+    if json_output:
+        import json
+
+        typer.echo(json.dumps(answer, sort_keys=True))
+        return
+    typer.echo(_copy_line(record, _field(answer, "copy"), "this repository"))
 
 
 # What forget says after the server answered: what FinishUP does not manage, and what stays.
@@ -213,8 +331,9 @@ _NOT_FORGOTTEN: Final[dict[str, str]] = {
         "forget --repository FOLDER' with a folder of it"
     ),
     "repository_folder_missing": (
-        "that folder is no longer there; run 'finishup server code forget --repository FOLDER' "
-        "with another worktree of that repository, or once it is back in that folder"
+        "that folder is no longer there, and its record is from before FinishUP kept the copy's "
+        "id; run 'finishup server code forget --repository FOLDER' with another worktree of that "
+        "repository, or once it is back in that folder"
     ),
     "repository_invalid": (
         "FinishUP cannot name a repository in that folder now; run 'finishup server code forget "
@@ -224,6 +343,7 @@ _NOT_FORGOTTEN: Final[dict[str, str]] = {
         "that folder now holds another repository; run 'finishup server code forget "
         "--repository FOLDER' with a worktree of the repository it came from"
     ),
+    "zero_network_remote_selected": ZERO_NETWORK_COPY,
 }
 
 
@@ -261,6 +381,10 @@ def server_code_forget(
         _forget_all(record, json_output=json_output)
         return
     here = repository_here(repository)
+    held = _held_and_never_sent(record, here)
+    if held is not None:
+        _answer_never_sent(record, "forget", held, json_output=json_output)
+        return
     answer = _server_answer(record, here.worktree, "forget")
     forgot = _field(answer, "forgot")
     if _field(forgot, "complete") is not True:
@@ -365,28 +489,52 @@ def forget_every_copy(
     return tuple(outcomes)
 
 
-def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> ForgetOutcome:
+@dataclass(frozen=True, slots=True)
+class _Named:
+    """How one export record's copy is named there: the claim its sync recorded, or the
+    worktree of the folder it names; or the closed reason it cannot be."""
+
+    worktree: str | None = None
+    claim: WorkspaceClaim | None = None
+    reason: str | None = None
+
+
+def _named(record: ServerTarget, item: ExportRecord) -> _Named:
+    """The claim a sync recorded names the copy exactly, whatever became of its folder (moved,
+    deleted, another repository now); a record from before claims were kept names its folder,
+    which must still hold that repository."""
+
     from finishup.client.code_sync import export_folder
+
+    if not item.readable:
+        return _Named(reason="export_record_unreadable")
+    if item.claim is not None:
+        return _Named(claim=item.claim)
+    if item.root is None:
+        return _Named(reason="repository_folder_unknown")
+    if not os.path.isdir(item.root):
+        return _Named(reason="repository_folder_missing")
+    try:
+        here = repository_here(item.root)
+    except ServerCommandRefused as error:
+        return _Named(reason=error.reason)
+    if export_folder(record.target_id, here.key) != item.folder:
+        return _Named(reason="repository_changed")
+    return _Named(worktree=here.worktree)
+
+
+def _forget_one(record: ServerTarget, position: int, item: ExportRecord) -> ForgetOutcome:
     from finishup.client.targets import TargetError, registry_lock
 
     def refused(reason: str) -> ForgetOutcome:
         return ForgetOutcome(position, item.short_id, item.root, reason)
 
-    if not item.readable:
-        return refused("export_record_unreadable")
-    if item.root is None:
-        return refused("repository_folder_unknown")
-    if not os.path.isdir(item.root):
-        return refused("repository_folder_missing")
-    try:
-        here = repository_here(item.root)
-    except ServerCommandRefused as error:
-        return refused(error.reason)
-    if export_folder(record.target_id, here.key) != item.folder:
-        return refused("repository_changed")
+    named = _named(record, item)
+    if named.reason is not None:
+        return refused(named.reason)
     try:
         # Through ``record``'s own root, whether or not it is the selected one.
-        answer = _server_answer(record, here.worktree, "forget")
+        answer = _server_answer(record, named.worktree, "forget", claim=named.claim)
     except ServerCommandRefused as error:
         return refused(error.reason)
     except TargetError as error:
@@ -465,6 +613,130 @@ def _forget_all(record: ServerTarget, *, json_output: bool) -> None:
             typer.echo(line)
     if missed:
         raise ServerCommandRefused("code_copy_forget_incomplete")
+
+
+# --- list every repository at once --------------------------------------------------------------
+
+
+# Why ``list --all`` could not list one repository's copy, and what the owner can do.
+_NOT_LISTED: Final[dict[str, str]] = {
+    "export_record_unreadable": (
+        "this computer's record of it cannot be read, so the repository it came from is not "
+        "known; run 'finishup server code list' in that repository"
+    ),
+    "repository_folder_unknown": (
+        "this computer has no folder of that repository it can name; run 'finishup server code "
+        "list --repository FOLDER' with a folder of it"
+    ),
+    "repository_folder_missing": (
+        "that folder is no longer there, and its record is from before FinishUP kept the copy's "
+        "id; run 'finishup server code list --repository FOLDER' with another worktree of that "
+        "repository, or once it is back in that folder"
+    ),
+    "repository_invalid": (
+        "FinishUP cannot name a repository in that folder now; run 'finishup server code list "
+        "--repository FOLDER' with a worktree of the repository it came from"
+    ),
+    "repository_changed": (
+        "that folder now holds another repository; run 'finishup server code list "
+        "--repository FOLDER' with a worktree of the repository it came from"
+    ),
+    "zero_network_remote_selected": ZERO_NETWORK_COPY,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ListOutcome:
+    """What ``list --all`` found for one repository this computer sent copies from (fields as
+    ``ForgetOutcome``): ``reason`` is None once the server answered."""
+
+    position: int
+    copy: str
+    folder: str | None
+    reason: str | None
+    answer: dict[str, object] | None = None
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "position": self.position,
+            "copy": self.copy,
+            "folder": self.folder,
+            "outcome": "listed" if self.reason is None else "not_listed",
+            "reason": self.reason,
+            "answer": self.answer,
+        }
+
+
+def list_every_copy(record: ServerTarget) -> tuple[ListOutcome, ...]:
+    """Ask ``record``'s server about every copy this computer's export records name, each named
+    as ``forget --all`` names it; one that cannot be is returned with its closed reason."""
+
+    from finishup.client.code_export import ExportRefused, export_records
+    from finishup.client.code_sync import exports_folder
+    from finishup.client.targets import TargetError
+
+    try:
+        records = export_records(exports_folder(record.target_id))
+    except ExportRefused as error:
+        raise ServerCommandRefused(error.reason) from None
+    outcomes: list[ListOutcome] = []
+    for position, item in enumerate(records, start=1):
+        named = _named(record, item)
+        reason = named.reason
+        answer: dict[str, object] | None = None
+        if reason is None:
+            try:
+                answer = _server_answer(record, named.worktree, "status", claim=named.claim)
+            except (ServerCommandRefused, TargetError) as error:
+                reason = error.reason
+        outcomes.append(ListOutcome(position, item.short_id, item.root, reason, answer))
+    return tuple(outcomes)
+
+
+def _list_all(record: ServerTarget, *, json_output: bool) -> None:
+    from finishup.cli.server import refusal_message
+
+    outcomes = list_every_copy(record)
+    missed = sum(1 for outcome in outcomes if outcome.reason is not None)
+    if json_output:
+        import json
+
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "status_all",
+                    "repositories": [outcome.to_json() for outcome in outcomes],
+                    "listed": len(outcomes) - missed,
+                    "not_listed": missed,
+                },
+                sort_keys=True,
+            )
+        )
+    elif not outcomes:
+        typer.echo(
+            f"This computer has no record of a copy of code it sent to {record.name}; nothing "
+            "was asked."
+        )
+    else:
+        count = f"{len(outcomes)} {'repository' if len(outcomes) == 1 else 'repositories'}"
+        typer.echo(f"Copies of code this computer sent to {record.name} ({count}):")
+        for outcome in outcomes:
+            folder = (
+                "a folder this computer cannot name" if outcome.folder is None else outcome.folder
+            )
+            named = f"  {outcome.position}. {folder} (copy {outcome.copy}): "
+            if outcome.reason is None:
+                typer.echo(named + _copy_line(record, _field(outcome.answer, "copy"), "it"))
+                continue
+            remedy = _NOT_LISTED.get(outcome.reason)
+            if remedy is None:
+                remedy = (
+                    refusal_message(ServerCommandRefused(outcome.reason))
+                    + "; then run this command again"
+                )
+            typer.echo(named + f"not listed ({outcome.reason}): {remedy}.")
+    if missed:
+        raise ServerCommandRefused("code_copy_list_incomplete")
 
 
 # --- the owner's per-repository choices (this computer only) ------------------------------------

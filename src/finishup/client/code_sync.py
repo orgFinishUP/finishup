@@ -59,6 +59,7 @@ from finishup.client.code_export import (
 from finishup.client.code_sync_fence import fenced
 from finishup.client.targets import ServerTarget, TargetError, read_target, target_root
 from finishup.client.workspace_agent import CodeSyncRefused
+from finishup.ports.control import WorkspaceClaim
 from finishup.ports.workspace_agent import (
     CodeSyncPrepareArguments,
     CodeSyncPrepared,
@@ -136,7 +137,16 @@ class CodeSyncResponder:
     """Answers ``code_sync_prepare``/``code_sync_read`` for one claimed worktree (see the module
     text). Thread-safe: one export runs at a time; a later prepare replaces the bundle kept."""
 
-    __slots__ = ("_check", "_clock", "_key", "_repository_key", "_root", "_target_id", "_worktree")
+    __slots__ = (
+        "_check",
+        "_claim",
+        "_clock",
+        "_key",
+        "_repository_key",
+        "_root",
+        "_target_id",
+        "_worktree",
+    )
 
     def __init__(
         self,
@@ -147,7 +157,13 @@ class CodeSyncResponder:
         worktree: str,
         check: _Check | None,
         clock: Callable[[], float] = time.monotonic,
+        claim: WorkspaceClaim | None = None,
     ) -> None:
+        # The claim the copy is sent under (its worktree's digest is ``worktree``): recorded with
+        # the export, it names the copy there once the folder is gone (#1357).
+        if claim is not None and (type(claim) is not WorkspaceClaim or claim.worktree != worktree):
+            raise ValueError("code_sync_claim_invalid")
+        self._claim = claim
         self._target_id = target_id
         self._repository_key = repository_key
         self._root = root
@@ -267,6 +283,10 @@ class CodeSyncResponder:
                 raise CodeSyncRefused(
                     refused.reason if refused.reason in _UNAVAILABLE else "code_export_failed"
                 ) from None
+            if self._claim is not None:
+                # Before the server can hold anything of it, as every sync of a record made
+                # before claims were kept (#1357).
+                database.remember_claim(self._claim)
             if prepared.unchanged:
                 with _SHARED_LOCK:
                     _PREPARED.pop(self._key, None)
