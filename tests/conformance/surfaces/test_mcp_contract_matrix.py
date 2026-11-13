@@ -309,8 +309,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:da9edb3c63e7acfe3a9e8fca472fdd0ffdc2eeaf87aa59cd7645f82c9b18b06d",
-        "strict": "sha256:bbda09e0ba167c33cce9393a09b7a2bbef85d02f0d98dc2556f2e345b7c21faa",
+        "policy": "sha256:80854cb4baecb7068ea6c9b7bc354ad6bd039ce52032da38fd2d5ee49b1a2fb3",
+        "strict": "sha256:a817a339b3b383ebb4cd4ed6d36c46f0319b004b7c5c36c464b48678820984d0",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -331,10 +331,13 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "current status frontier" in respond_description
     assert "result frontier of the check that returned it" not in respond_description
     assert "not its subject_frontier" in respond_description
-    for local_description in (descriptor_for("publish_work").description, respond_description):
-        assert "local FinishUP ledger" in local_description
-        assert "does not publish to GitHub" in local_description
-        assert "run an AI-powered evaluation" in local_description
+    # The ledger these append to is the task's on the selected FinishUP server, which may be on
+    # another machine (ADR-051), so neither calls it local.
+    for ledger_description in (descriptor_for("publish_work").description, respond_description):
+        assert "the task's FinishUP ledger" in ledger_description
+        assert "local FinishUP ledger" not in ledger_description
+        assert "does not publish to GitHub" in ledger_description
+        assert "run an AI-powered evaluation" in ledger_description
     assert descriptor_for("start").description.startswith(
         "First read finishup://guidance/agent-instructions.md."
     )
@@ -374,8 +377,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert status_descriptor.input_schema_ref.endswith("status-request-1.3.0.schema.json")
     assert status_descriptor.output_schema_ref.endswith("status-result-1.5.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    # 1.4.1: the closing-line pattern a unicode-mode ECMAScript engine compiles (1.4.0 is frozen).
-    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.4.1.schema.json")
+    # ADR-051 decision D4: 1.5.0 adds the optional ``workspace_provenance`` member, and ADR-054
+    # (in place, unreleased) the optional ``evidence_provenance`` member.
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.5.0.schema.json")
     closure_descriptor = descriptor_for("closure_prepare")
     assert closure_descriptor.input_schema_ref.endswith("closure-prepare-request-1.0.0.schema.json")
     assert closure_descriptor.output_schema_ref.endswith("closure-prepare-result-1.0.0.schema.json")

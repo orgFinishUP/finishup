@@ -8,7 +8,8 @@
 FinishUP is designed around one trusted persistent local service. The service—not the CLI, MCP,
 an agent, an LLM, or a future ordinary UI—owns encryption keys, decrypted local state, privacy
 policy, provider credentials, and outbound dispatch. Normal clients exchange only bounded control
-requests and results.
+requests and results. That service runs on your own machine; a named local server you add is a
+second such service on it, with its own keys and policy (see [FinishUP servers](#finishup-servers)).
 
 ## Planned default and disclosure path
 
@@ -62,6 +63,14 @@ composite of `local_only`, the global ceiling off, and all five network channels
 turning update checks off). That mode still permits only exact release-profiled local IPC required
 for the FinishUP service, confidential helper, approved local model, OS credential/user-presence
 service, and session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
+
+FinishUP remembers, in a small file only you can read beside its server list (outside the vault),
+whether this computer's policy last reported that mode and when; it holds no path, name or policy
+content, and it is updated whenever this computer's FinishUP reports its policy (for example
+during setup or `finishup privacy show`). Servers on another machine, which arrive in a later
+release, rely on it: that mode and such a server will never be in force together, even while this
+computer's own FinishUP service is stopped or locked. A file that cannot be read counts as no record
+and is replaced by the next report. Deleting FinishUP's folders removes it.
 
 An independent review-context profile controls which potentially useful material is selected before
 those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`. The
@@ -283,6 +292,29 @@ A claim with concrete checked-in test or fixture coverage is flagged `evidenced`
 [`docs/public-claims.json`](docs/public-claims.json), with its non-live suites exercised in per-PR
 CI. A claim whose own wording names still-missing capability or drill evidence remains explicitly
 “not yet evidenced” and is not asserted as release evidence.
+
+## FinishUP servers
+
+This release uses only FinishUP servers on this computer: the everyday one and the named local
+servers you add (`finishup server add NAME --local`). Each is its own FinishUP service on this
+machine, with its own vault, privacy policy, records and receipts, and everything in this document
+applies to each; choosing one sends nothing anywhere.
+
+FinishUP servers on another machine (over SSH), on the web (over HTTPS) or on a local port arrive
+in a later release. Until then `finishup server add` refuses them before it asks anything or
+connects anywhere, and a server that another FinishUP build recorded for one of them is never
+used. Before such a server can be used, this document will say what travels to it and what does
+not, and you will confirm each server yourself.
+
+Two protections for those servers are already built in this release. A project whose own privacy
+policy on this computer allows no network use will be held from a server elsewhere until you
+allow it from your own terminal, or keep it on this computer; the hold covers what FinishUP itself
+reads and claims for the project, not what an agent in another folder reads and its hooks capture.
+And every connection to a server elsewhere ends once the server choice, the server's record or its
+key changes. To decide the first, FinishUP keeps an owner-only record of what this computer's
+policy said of each project (whether it allows network use, since when, and up to eight of its
+folders), outside the vault; it starts only when you first add a server elsewhere, and removing
+your last such server deletes it.
 
 ## How to inspect or report a privacy problem
 

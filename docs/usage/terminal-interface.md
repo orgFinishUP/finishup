@@ -129,6 +129,7 @@ Type `/` to open the filtered command list.
 | `/privacy` | choose what may leave this computer |
 | `/provider` | configure optional deeper review |
 | `/service` | manage the protected local service |
+| `/server` | list FinishUP servers and choose which one to use |
 | `/observe` | show observation selection and change local retention capacity |
 | `/doctor` | diagnose installation problems |
 | `/help` | show what FinishUP can do here |
@@ -320,6 +321,21 @@ when the check is allowed but fails, the line is unproven with "could not check 
 FinishUP finds folders under both its current and its former name, the installation folders line
 is blocked with the [upgrade guide's remedy](upgrading.md#if-something-refuses-after-the-rename)
 and the checks that would need those folders are skipped. **It never changes anything.**
+
+### `/server`
+
+`/server` lists the FinishUP servers you added on this computer, with the one in use marked, and
+each one's kind and short id. Choosing one switches to it, as `finishup server use` does; choosing
+a server on another machine (over SSH) or over HTTPS asks you to agree to it there, as `finishup
+server use` does in your shell. Adding a server there offers a named local server on this computer
+and shows the `finishup server add NAME --local` command to run in your shell; an SSH or HTTPS
+server is added in your shell too (`finishup server add NAME ssh://…` or `https://…`), where
+OpenSSH can ask about a host key or you type an API key, and removing a server happens there as
+well. While a server other than the everyday one is in use, the header shows its kind and short
+id. `/server` also says when this project's privacy policy here holds its work from the selected
+server elsewhere (or keeps it here, as you chose), offers to send it anyway after you confirm in
+your terminal, and the header adds "this repository held" (or "kept here") while that lasts. See
+[FinishUP servers](servers.md).
 
 ### `/observe`
 

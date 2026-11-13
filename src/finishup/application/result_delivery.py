@@ -567,6 +567,13 @@ def _delivery_groups(
     for key in (
         "verdict",
         "conclusion",
+        # ADR-051 decision D4: a receipt's unknown workspace provenance leads, whole, so the
+        # first page an agent reads says it.
+        "workspace_provenance",
+        # ADR-054: so does a level-L2 receipt's evidence account (where each read was served),
+        # or why that account could not be given.
+        "evidence_provenance",
+        "evidence_provenance_unknown",
         "semantic_status",
         "semantic_reason",
         "agent_next",

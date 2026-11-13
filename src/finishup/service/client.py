@@ -3,30 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Buffer, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Final, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, TypedDict, cast
 
 from finishup import __version__
 from finishup.adapters.control.unix_socket import (
-    AuthenticatedUnixStream,
     LocalControlTransportError,
     connect_control,
+)
+from finishup.client.attribution import (
+    CONNECTION_LEVELS,
+    CONNECTION_TRANSPORTS,
+    ConnectionLevel,
+    ConnectionTransport,
 )
 from finishup.config.env import canonical_env_name
 from finishup.config.paths import (
     ISOLATED_ROOT_ENV_NAMES,
     PathSafetyError,
+    active_root,
     ensure_owner_only_dir,
-    isolated_root,
     log_dir,
 )
 from finishup.domain.privacy import (
@@ -72,7 +80,12 @@ from finishup.ports.control import (
     ProjectionRenderMode,
     ServiceStatus,
     ServiceStopResult,
+    WorkspaceAgentDeclaration,
+    WorkspaceBinding,
+    WorkspaceCall,
+    WorkspaceClaim,
     WorkspaceLocator,
+    WorkspaceReply,
 )
 from finishup.ports.privacy import (
     LocalDisclosureReceiptView,
@@ -80,8 +93,18 @@ from finishup.ports.privacy import (
     PrivacyReceiptPage,
     PrivacyReceiptView,
 )
-from finishup.protocol.canonical import parse_canonical_integer_string
-from finishup.protocol.errors import SERVICE_HANDSHAKE_PHASES, SERVICE_START_TIMEOUT_PHASE
+from finishup.ports.workspace_agent import outcome_for_reason
+from finishup.protocol.canonical import (
+    canonical_encode,
+    parse_canonical_integer_string,
+    strict_json_parse,
+)
+from finishup.protocol.errors import (
+    AUTHORIZATION_REFUSAL_PHASES,
+    REMOTE_CONNECTION_PHASES,
+    SERVICE_HANDSHAKE_PHASES,
+    SERVICE_START_TIMEOUT_PHASE,
+)
 from finishup.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
 from finishup.protocol.models import (
     CheckRequest,
@@ -98,23 +121,38 @@ from finishup.protocol.models import (
     StatusRequest,
     StatusResult,
 )
+from finishup.protocol.server_profile import (
+    ProfileError,
+    ServerProfile,
+    ServerProfileRevision,
+    profile_from_json,
+)
 from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     ControlProtocolError,
     ControlSession,
+    ControlStream,
     client_handshake,
+    encode_control_frame,
+    is_workspace_call_frame,
     parse_control_result,
+    parse_workspace_call,
     read_control_frame,
     validate_request,
     validate_result,
+    workspace_reply_frame,
     write_control_frame,
 )
 
 if TYPE_CHECKING:
+    from finishup.client.helper_status import HelperStamp
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
     from finishup.service.lifecycle import SingletonHolder
 
 __all__ = [
+    "GENERATION_RECHECK_SECONDS",
+    "AuthorizationCheck",
+    "ClientWorkspaceBinding",
     "GetPrivacyReceiptRequest",
     "ListPrivacyReceiptsRequest",
     "PreparedProjectRequest",
@@ -123,10 +161,13 @@ __all__ = [
     "PrivacyReceiptGetResult",
     "PrivacyReceiptNotFound",
     "ServiceClient",
+    "WorkspaceCallHandler",
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "connect_service_via",
     "holder_version_order",
+    "newer_helper_build_holds_selection",
     "path_refusal_reason",
     "prepare_project_request",
     "service_holder_identity",
@@ -135,6 +176,24 @@ __all__ = [
 ]
 
 _MAX_IN_FLIGHT: Final = 32
+# How often a connection admitted to a server elsewhere re-checks its authorization (ADR-052), in
+# seconds; ``finishup.client.repository_hold.HOLD_RECHECK_SECONDS``, spelled here so the service
+# package imports no client code. A connection whose authorization lapses ends within one check.
+GENERATION_RECHECK_SECONDS: Final = 1.0
+# The phase every lapse of an open connection's authorization ends it with, whatever changed: it
+# has already sent something (its hello, at least), so what FinishUP can say is that it stopped
+# sending over it, never that nothing was sent (design v2 section 8.10, ADR-052). The refusal now
+# in force is named before anything is sent, by the next connection's admission.
+_LAPSED_PHASE: Final = "server_authorization_changed"
+# The hidden ``service run`` option a spawner whose root is the everyday installation passes, so the
+# service never reads a server selection its spawner did not use (``config.paths``).
+_AMBIENT_ROOT_OPTION: Final = "--ambient-root"
+# At most this many workspace calls run at once on one connection (ADR-051). A call beyond them is
+# answered ``agent_busy`` at once, so a slow read never holds the connection's other calls back,
+# and a slot stays taken until its worker thread has actually finished.
+_MAX_WORKSPACE_CALLS: Final = 4
+# The length prefix ``encode_control_frame`` puts before a frame's canonical JSON.
+_FRAME_PREFIX_BYTES: Final = 4
 _CANCEL_SEND_TIMEOUT_SECONDS: Final = 0.05
 _STREAM_CLOSE_TIMEOUT_SECONDS: Final = 0.05
 _WORKFLOW_METHODS: Final = frozenset(
@@ -154,6 +213,8 @@ _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
 _CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
+# The packaged schema manifest's bound when the build installed now is read from its files.
+_INSTALLED_MANIFEST_MAX_BYTES: Final = 8_388_608
 # A listening service shown to be a different FinishUP installation (or generation) sharing the one
 # per-user endpoint: it answered with another manifest or protocol, or closed on this client's
 # hello while its singleton stamp names another identity (``_unanswered_hello``). Both reasons
@@ -217,9 +278,10 @@ def _service_environment() -> dict[str, str]:
     # A runtime pin resolves the root without the variable (issue #604). The detached service
     # runs the same interpreter and would resolve the same pin, but forwarding the resolved root
     # explicitly keeps the chain visible and identical to the environment-selected case. Both
-    # spellings carry it (ADR-048), so the child agrees with itself under either name.
+    # spellings carry it (ADR-048), so the child agrees with itself under either name. A server
+    # selection (ADR-051) is forwarded the same way: the spawned service is that target's own.
     try:
-        root = isolated_root()
+        root = active_root()
     except PathSafetyError:
         root = None
     if root is not None:
@@ -251,11 +313,66 @@ class _SpawnedService:
     startup_correlation_id: str
 
 
-def _spawn_service_process() -> _SpawnedService:
-    """Start one detached service that records any startup failure under a fresh id (#1040)."""
+def _refuse_remote_target_root() -> None:
+    """A remote server target's root is never connected to and never starts a service (ADR-051).
 
+    Its record names a remote kind, or cannot be read and may: every connection and spawn is
+    refused at once, before anything is sent or started, instead of trying an endpoint no service
+    of this computer serves or starting a child that refuses unseen while the caller waits out its
+    whole start budget. The shared connection check decides first
+    (``targets.require_current_authorization``): ``zero_network_remote_selected`` and
+    ``target_reauthorization_required`` keep their names (ADR-051 decision 8); every other remote
+    root is the closed phase ``target_root_is_remote``, since this release reaches no server on
+    another machine. A root that cannot be resolved at all is left to the caller's own
+    path-safety refusal.
+    """
+
+    from finishup.client.targets import (
+        TargetError,
+        TargetRecordUnreadable,
+        active_target_record,
+        require_current_authorization,
+    )
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="target_root_is_remote"
+        ) from None
+    except TargetError:
+        return
+    if record is None or not record.is_remote:
+        return
+    try:
+        require_current_authorization(record)
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
+
+
+def _remote_target_refusal(error: Exception) -> ControlError:
+    """A remote root's own ``TargetError`` as the retryable phase every surface renders.
+
+    ``zero_network_remote_selected`` and ``target_reauthorization_required`` keep their names; any
+    other reason is ``target_root_is_remote``. The reason is a closed token and names no path.
+    """
+
+    reason = getattr(error, "reason", None)
+    phase = reason if reason in REMOTE_CONNECTION_PHASES else "target_root_is_remote"
+    return ControlError("service_unavailable", retryable=True, phase=phase)
+
+
+def _spawn_service_process() -> _SpawnedService:
+    """Start one detached service that records any startup failure under a fresh id (#1040).
+
+    A remote server target's root raises ``service_unavailable`` with its closed phase
+    (``_refuse_remote_target_root``) and starts nothing.
+    """
+
+    _refuse_remote_target_root()
     startup_correlation_id = new_id(IdKind.CORRELATION)
-    command = (
+    command: tuple[str, ...] = (
         sys.executable,
         "-m",
         "finishup",
@@ -265,6 +382,12 @@ def _spawn_service_process() -> _SpawnedService:
         startup_correlation_id,
     )
     with _open_service_stderr_log() as stderr_log:
+        environment = _service_environment()
+        if not any(name in environment for name in ISOLATED_ROOT_ENV_NAMES):
+            # No variable, pin or selection decided this process's root, so it uses the everyday
+            # installation; the service it starts must too, whatever the selection file says by
+            # the time that service reads it (ADR-051). A resolved root rides in the variable.
+            command = (*command, _AMBIENT_ROOT_OPTION)
         if os.name == "nt":
             creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
                 getattr(subprocess, "DETACHED_PROCESS", 0),
@@ -273,7 +396,7 @@ def _spawn_service_process() -> _SpawnedService:
                 command,
                 close_fds=True,
                 creationflags=creationflags,
-                env=_service_environment(),
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_log,
@@ -282,7 +405,7 @@ def _spawn_service_process() -> _SpawnedService:
             process = subprocess.Popen(  # noqa: S603 - fixed interpreter/module/arguments
                 command,
                 close_fds=True,
-                env=_service_environment(),
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_log,
@@ -313,6 +436,66 @@ def _spawned_startup_failure(spawned: _SpawnedService) -> ControlError | None:
         correlation_id=failure.correlation_id,
         phase=failure.stage,
     )
+
+
+class WorkspaceCallHandler(Protocol):
+    """What answers ``workspace_call`` frames on a claim-bound connection (ADR-051).
+
+    ``finishup.client.workspace_agent.WorkspaceAgentHandler`` is the production handler. ``answer``
+    runs in a worker thread, never on the event loop; it returns the reply to the call it was given
+    and should never raise (a raise is answered ``failed`` with ``internal_error``).
+    """
+
+    @property
+    def declaration(self) -> WorkspaceAgentDeclaration: ...
+
+    def answer(self, call: WorkspaceCall, *, workspace_handle: str | None) -> WorkspaceReply: ...
+
+
+class AuthorizationCheck(Protocol):
+    """Whether a connection to a server elsewhere may go on (ADR-052).
+
+    ``finishup.client.authorization.ConnectionAuthorization`` is the production check (and
+    ``finishup.client.repository_hold.SendHold`` the hold alone); declared structurally here so
+    the service package imports no client code. ``refusal()`` is None while the connection may go
+    on, else the closed remote phase that refuses it (``server_authorization_changed``, a
+    zero-network report, the repository hold). It reads small owner-only files and never raises; a
+    long-lived holder re-checks it before every frame and at least once a second. Before anything
+    is written the phase itself refuses the connection; once it is open, any phase ends it as
+    ``server_authorization_changed``.
+    """
+
+    def refusal(self) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ClientWorkspaceBinding:
+    """How a connection to a FinishUP server on another machine names its workspace (ADR-051).
+
+    ``claim`` takes the place of the workspace locator in the hello, so no path is sent. ``agent``,
+    when set, is declared in the hello and answers the server's workspace calls on this
+    connection; without one the connection answers none. ``authorization``, when set, is the
+    check the connection was admitted under (ADR-052), bound to this repository's hold: the
+    binding was made while it passed, and the connection re-checks it before every frame and on
+    its watch.
+    """
+
+    claim: WorkspaceClaim
+    agent: WorkspaceCallHandler | None = None
+    authorization: AuthorizationCheck | None = None
+    # The worktree top level the claim was made for, on this computer only (never sent): what a
+    # registration with the target's helper names (ADR-052, ``client.helper_registrations``).
+    worktree: str | None = field(default=None, repr=False)
+    # The repository key the binding's hold is decided by (``client.repository_hold``), on this
+    # computer only: the target's helper binds a relayed connection to it (``helper_status``'s
+    # relay binding), never sent anywhere else.
+    repository_key: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.claim) is not WorkspaceClaim:
+            raise TypeError("workspace_claim_invalid")
+        if self.agent is not None and type(self.agent.declaration) is not WorkspaceAgentDeclaration:
+            raise TypeError("workspace_agent_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,7 +715,51 @@ def _transport_error(error: LocalControlTransportError) -> ControlError:
     return ControlError("service_unavailable", retryable=True)
 
 
+def _server_profile_of(authorization: AuthorizationCheck | None) -> ServerProfileRevision | None:
+    """The server-profile revision an admitted remote connection names in its hello (ADR-052)."""
+
+    revision = getattr(authorization, "server_profile", None)
+    return revision if type(revision) is ServerProfileRevision else None
+
+
+def _sent_outcome(error: ControlError) -> ControlError:
+    """What a call whose body was already sent fails with when its connection ends with ``error``.
+
+    A refusal phase says nothing was sent, or that the server did no work for that one request;
+    neither holds for another call already sent over the connection, which the server may have
+    recorded. Such a call ends as ``server_authorization_changed``: its outcome is unknown and it
+    is never sent again (ADR-052, review of layer 3: B2). Any other failure is its own.
+    """
+
+    if error.phase in AUTHORIZATION_REFUSAL_PHASES and error.phase != _LAPSED_PHASE:
+        return ControlError("service_unavailable", retryable=True, phase=_LAPSED_PHASE)
+    return error
+
+
+def _ask_helper_to_refresh(authorization: AuthorizationCheck | None) -> None:
+    """Leave the marker that asks a remote target's helper to fetch the profile again, naming
+    the profile revision this connection's hello named (the one the server no longer issues)."""
+
+    grant = getattr(authorization, "grant", None)
+    target_id = getattr(grant, "target_id", None)
+    if type(target_id) is not str:
+        return
+    try:
+        from finishup.client.helper_status import request_profile_refresh
+        from finishup.client.targets import target_root
+
+        request_profile_refresh(target_root(target_id), _server_profile_of(authorization))
+    except Exception:  # noqa: BLE001 - a marker that cannot be left asks nothing
+        return
+
+
 def _protocol_error(error: ControlProtocolError) -> ControlError:
+    if error.reason == "server_profile_changed":
+        # The service did not admit this remote client's hello: the profile revision it consented
+        # to is not the one the server issues now (ADR-052). The hello was sent, but the service
+        # did no work for it: it closed before keying the claim, registering an agent or reading a
+        # request, and nothing more was sent.
+        return ControlError("service_unavailable", retryable=True, phase="server_profile_changed")
     if error.reason == "manifest_mismatch":
         # The peer is a live FinishUP service from another installation: it answered with a
         # different schema-manifest digest. Retryable: it heals once the endpoint is owned by a
@@ -984,8 +1211,14 @@ class ServiceClient(ControlClientPort):
     """
 
     __slots__ = (
+        "_agent",
+        "_agent_busy",
+        "_agent_calls",
+        "_authorization",
         "_client_kind",
         "_closed",
+        "_consent_level",
+        "_failure",
         "_last_project_request",
         "_pending",
         "_pid",
@@ -993,23 +1226,44 @@ class ServiceClient(ControlClientPort):
         "_retired_rpc_ids",
         "_session",
         "_stream",
+        "_transport",
+        "_watch",
         "_write_lock",
     )
 
     def __init__(
         self,
-        stream: AuthenticatedUnixStream,
+        stream: ControlStream,
         session: ControlSession,
         client_kind: ControlClientKind,
         *,
         _token: object,
+        workspace_agent: WorkspaceCallHandler | None = None,
+        transport: ConnectionTransport = "unix",
+        authorization: AuthorizationCheck | None = None,
+        recheck: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if _token is not _PRIVATE_CONSTRUCTOR_TOKEN:
             raise TypeError("service_client_constructor_private")
         if type(client_kind) is not ControlClientKind:
             raise TypeError("control_client_kind_invalid")
+        if transport not in CONNECTION_TRANSPORTS:
+            raise ValueError("connection_transport_invalid")
+        if workspace_agent is not None and (
+            session.workspace_binding != "client_claim"
+            or session.workspace_agent != workspace_agent.declaration
+        ):
+            # An agent answers only on the claim-bound connection whose hello declared it.
+            raise ValueError("workspace_agent_invalid")
+        self._agent = workspace_agent
+        self._agent_busy = 0
+        self._agent_calls: dict[str, asyncio.Task[None]] = {}
         self._stream = stream
         self._session = session
+        self._transport: ConnectionTransport = transport
+        # The level the owner consented to for a server elsewhere (ADR-054); None when local or
+        # when the target records no consent. Set once the connection is admitted and made.
+        self._consent_level: ConnectionLevel | None = None
         self._client_kind = client_kind
         self._pid = os.getpid()
         self._closed = False
@@ -1017,14 +1271,104 @@ class ServiceClient(ControlClientPort):
         self._pending: dict[str, asyncio.Future[ControlResult]] = {}
         self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
+        # Why this connection ended when its authorization did: a later call is refused with that
+        # phase, not as a lost connection.
+        self._failure: ControlError | None = None
+        # What a connection to a server elsewhere was admitted under (ADR-052): re-checked before
+        # every frame it sends and on its watch. A local connection has none, and no watch (O2).
+        self._authorization = authorization
+        # The claim and worktree of a claim-bound connection to a server elsewhere, on this
+        # computer only (ADR-052): what its owner registers with the target's helper.
+        self._remote_workspace: tuple[WorkspaceClaim, str] | None = None
         self._receiver = asyncio.create_task(self._receive_results())
+        self._watch = (
+            None
+            if authorization is None
+            else asyncio.create_task(self._watch_authorization(recheck or _recheck_after_interval))
+        )
+
+    @property
+    def authorization(self) -> AuthorizationCheck | None:
+        """What a connection to a server elsewhere was admitted under; ``None`` when local."""
+
+        return self._authorization
+
+    @property
+    def remote_workspace(self) -> tuple[WorkspaceClaim, str] | None:
+        """The claim and worktree a claim-bound remote connection serves; ``None`` otherwise."""
+
+        return self._remote_workspace
+
+    @property
+    def closed(self) -> bool:
+        """Whether this connection has ended (closed, failed, or its authorization lapsed)."""
+
+        return self._closed
+
+    async def wait_closed(self) -> None:
+        """Wait until this connection has ended: its peer closed it, it failed, its authorization
+        lapsed, or it was closed. A long-lived holder (a helper's background agent) waits here."""
+
+        await asyncio.gather(asyncio.shield(self._receiver), return_exceptions=True)
 
     def _ensure_live(self) -> None:
         if os.getpid() != self._pid:
             self._closed = True
             raise ControlError("service_unavailable")
         if self._closed:
+            if self._failure is not None:
+                raise self._failure
             raise ControlError("service_unavailable", retryable=True)
+
+    def _lapsed(self) -> ControlError | None:
+        """The retryable refusal once this connection's authorization lapsed; else None.
+
+        Whatever ``AuthorizationCheck.refusal`` names, an open connection ends with
+        ``server_authorization_changed`` (``_LAPSED_PHASE``): it stopped sending over a
+        connection that already sent something (ADR-052). A check that cannot be made refuses
+        nothing new.
+        """
+
+        authorization = self._authorization
+        if authorization is None:
+            return None
+        try:
+            phase = authorization.refusal()
+        except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
+            return None
+        if phase is None:
+            return None
+        return ControlError("service_unavailable", retryable=True, phase=_LAPSED_PHASE)
+
+    async def _end_if_lapsed(self) -> None:
+        """End this connection with its authorization's phase once it lapsed, and raise it."""
+
+        failure = self._lapsed()
+        if failure is not None:
+            self._failure = self._failure or failure
+            await self._fail_connection(failure)
+            raise failure
+
+    async def _watch_authorization(self, recheck: Callable[[], Awaitable[None]]) -> None:
+        """Re-check the authorization after each ``recheck`` while the connection is open.
+
+        Once it lapses, the connection ends at once: every pending call fails with
+        ``server_authorization_changed``, the server's workspace calls go unanswered, and later
+        calls are refused with it. The check
+        runs in a worker thread (a few ``lstat`` calls). ``recheck`` waits
+        ``GENERATION_RECHECK_SECONDS`` in production; a test injects an event-driven tick.
+        """
+
+        try:
+            while not self._closed:
+                await recheck()
+                failure = await asyncio.to_thread(self._lapsed)
+                if failure is not None and not self._closed:
+                    self._failure = self._failure or failure
+                    await self._fail_connection(failure)
+                    return
+        except asyncio.CancelledError:
+            return
 
     def _admit(self, method: ControlMethod) -> None:
         if self._client_kind is ControlClientKind.MCP_BRIDGE and method not in _WORKFLOW_METHODS:
@@ -1033,15 +1377,59 @@ class ServiceClient(ControlClientPort):
             raise ControlError("method_forbidden")
 
     async def connect(self) -> None:
-        """Confirm that this already-handshaken session remains locally usable."""
+        """Confirm that this already-handshaken session remains locally usable.
+
+        A connection to a server elsewhere also re-checks its authorization here (ADR-052): the
+        MCP bridge asks before it reuses one, so a lapsed one is named before a request is sent.
+        """
 
         self._ensure_live()
+        if self._authorization is not None:
+            await self._end_if_lapsed()
 
     @property
     def hello_service_status(self) -> ServiceStatus | None:
         """The service-status snapshot this session's hello-result carried at connect time."""
 
         return self._session.service_status
+
+    @property
+    def workspace_binding(self) -> WorkspaceBinding:
+        """How the service bound this connection to a workspace at handshake (ADR-051)."""
+
+        return self._session.workspace_binding
+
+    @property
+    def workspace_handle(self) -> str | None:
+        """The ``client:`` handle a claim-bound connection's tasks name their workspace by."""
+
+        return self._session.workspace_handle
+
+    @property
+    def service_instance_id(self) -> str:
+        """The instance id of the service that answered this connection's hello."""
+
+        return self._session.service_instance_id
+
+    @property
+    def transport(self) -> ConnectionTransport:
+        """How this connection reaches its service, a closed token (``finishup.client.attribution``).
+
+        Whoever builds the connection names it; ``unix`` for the local control endpoint. Human
+        renderings of a claim-bound connection's status and receipts show it (ADR-051).
+        """
+
+        return self._transport
+
+    @property
+    def consent_level(self) -> ConnectionLevel | None:
+        """The level this connection's server target was consented at (``L1`` or ``L2``,
+        ADR-054), read from the target record the connection was admitted under; None for a
+        local connection or a target that records no consent. Human renderings of a claim-bound
+        connection say, for ``L2``, that the server reads from its copy where it has one
+        (``finishup.client.attribution``)."""
+
+        return self._consent_level
 
     @property
     def last_project_request(self) -> PreparedProjectRequest | None:
@@ -1059,6 +1447,10 @@ class ServiceClient(ControlClientPort):
         validate_request(request)
         async with self._write_lock:
             self._ensure_live()
+            # Nothing more is sent once the authorization a connection to a server elsewhere was
+            # admitted under lapsed: it is checked before every frame (ADR-052).
+            if self._authorization is not None:
+                await self._end_if_lapsed()
             try:
                 await write_control_frame(self._stream, request)
             except LocalControlTransportError as exc:
@@ -1074,6 +1466,11 @@ class ServiceClient(ControlClientPort):
         try:
             while not self._closed:
                 frame = await read_control_frame(self._stream)
+                if self._agent is not None and is_workspace_call_frame(frame):
+                    # Only a connection that declared an agent answers the server's calls; on
+                    # any other this frame fails as ``frame_invalid`` below, exactly as before.
+                    self._accept_workspace_call(parse_workspace_call(frame))
+                    continue
                 result = parse_control_result(frame)
                 validate_result(result)
                 if (
@@ -1106,14 +1503,135 @@ class ServiceClient(ControlClientPort):
             failure = ControlError("service_unavailable", retryable=True)
         await self._fail_connection(failure, from_receiver=True)
 
+    def _accept_workspace_call(self, call: WorkspaceCall) -> None:
+        """Start answering one workspace call; the receive loop never waits for the answer."""
+
+        if (
+            call.service_instance_id != self._session.service_instance_id
+            or call.service_generation != self._session.service_generation
+        ):
+            raise ControlError("service_unavailable", retryable=True)
+        if call.call_id in self._agent_calls:
+            raise ControlError("frame_invalid")
+        task = asyncio.create_task(self._answer_workspace_call(call))
+        self._agent_calls[call.call_id] = task
+        task.add_done_callback(partial(self._forget_workspace_call, call.call_id))
+
+    def _forget_workspace_call(self, call_id: str, task: asyncio.Task[None]) -> None:
+        if self._agent_calls.get(call_id) is task:
+            del self._agent_calls[call_id]
+        _consume_background_task(task)
+
+    async def _answer_workspace_call(self, call: WorkspaceCall) -> None:
+        agent = self._agent
+        if agent is None or self._closed:
+            # A closed connection's pool is gone; never start a new one for it.
+            return
+        if self._agent_busy >= _MAX_WORKSPACE_CALLS:
+            encoded = _encoded_workspace_reply(call.call_id, "agent_busy")
+        else:
+            encoded = await self._run_workspace_call(agent, call)
+        async with self._write_lock:
+            if self._closed:
+                return
+            if self._authorization is not None:
+                # A reply computed while the authorization lapsed is never sent (ADR-052).
+                try:
+                    await self._end_if_lapsed()
+                except ControlError:
+                    return
+            try:
+                await self._stream.send_all(encoded)
+            except LocalControlTransportError as exc:
+                await self._fail_connection(_transport_error(exc))
+            except Exception:
+                await self._fail_connection(ControlError("service_unavailable", retryable=True))
+
+    async def _run_workspace_call(self, agent: WorkspaceCallHandler, call: WorkspaceCall) -> bytes:
+        """The encoded reply: the agent's, or ``deadline_exceeded`` once the call's deadline passes.
+
+        The agent runs in a daemon worker thread of its own, at most ``_MAX_WORKSPACE_CALLS`` at a
+        time per connection. A call past its deadline is answered without waiting; its worker
+        keeps its slot until the adapter's own bound ends it. Being daemon threads, workers never
+        hold a finished process open (a short-lived CLI exits after its command, not after a
+        background check its connection happened to be serving); work still running at exit
+        ends with the process, and an approved check it started stays in its own process group.
+        """
+
+        loop = asyncio.get_running_loop()
+        work: asyncio.Future[bytes] = loop.create_future()
+        answer = partial(
+            _answer_in_worker,
+            agent,
+            call,
+            self._session.workspace_handle,
+            agent.declaration.max_reply_bytes,
+        )
+
+        def deliver(encoded: bytes) -> None:
+            if not work.done():
+                work.set_result(encoded)
+
+        def run() -> None:
+            # ``_answer_in_worker`` answers every exception itself; anything that escapes it still
+            # frees the slot with a closed failure.
+            encoded = _encoded_workspace_reply(call.call_id, "internal_error")
+            try:
+                encoded = answer()
+            finally:
+                try:
+                    loop.call_soon_threadsafe(deliver, encoded)
+                except RuntimeError:
+                    # The loop already closed: the connection, and its answer, are gone.
+                    pass
+
+        self._agent_busy += 1
+        work.add_done_callback(self._release_workspace_slot)
+        try:
+            # The answer runs in this connection's context, as ``asyncio.to_thread`` would: a
+            # ``selection_override`` of the root that opened it holds there too.
+            threading.Thread(
+                target=contextvars.copy_context().run,
+                args=(run,),
+                name="finishup-workspace-agent",
+                daemon=True,
+            ).start()
+        except RuntimeError:
+            # No thread could be started (a process thread limit): nothing runs, the slot frees.
+            work.set_result(_encoded_workspace_reply(call.call_id, "agent_busy"))
+        try:
+            async with asyncio.timeout(call.deadline_ms / 1_000):
+                return await asyncio.shield(work)
+        except TimeoutError:
+            return _encoded_workspace_reply(call.call_id, "deadline_exceeded")
+
+    def _release_workspace_slot(self, work: asyncio.Future[bytes]) -> None:
+        self._agent_busy -= 1
+        if not work.cancelled():
+            work.exception()
+
     async def _fail_connection(self, error: ControlError, *, from_receiver: bool = False) -> None:
         if not self._closed:
             self._closed = True
             self._session.close()
             self._retired_rpc_ids.clear()
+            # A pending call's body may have crossed the connection: it never fails with words
+            # that say nothing was sent (``_sent_outcome``). One still waiting to be written is
+            # refused by ``_ensure_live`` instead, with ``_failure`` or a lost connection.
+            sent_error = _sent_outcome(error)
             for pending in tuple(self._pending.values()):
                 if not pending.done():
-                    pending.set_exception(error)
+                    pending.set_exception(sent_error)
+            current = asyncio.current_task()
+            for task in tuple(self._agent_calls.values()):
+                # Unanswered workspace calls are the server's to fail when the connection drops.
+                # Their daemon workers finish (or end with the process) without being waited for.
+                if task is not current:
+                    task.cancel()
+            watch = self._watch
+            if watch is not None and watch is not current and not watch.done():
+                watch.cancel()
+                watch.add_done_callback(_consume_background_task)
             await _best_effort_close_stream(self._stream)
         if not from_receiver and self._receiver is not asyncio.current_task():
             self._receiver.cancel()
@@ -1218,9 +1736,30 @@ class ServiceClient(ControlClientPort):
                 settled.exception()
 
         if result.outcome == "error" and isinstance(result.body, ControlError):
-            # Only generation skew forces connection teardown. Projection errors
-            # (privacy_projection_unavailable / privacy_projection_blocked) must propagate so the
-            # agent can switch format or widen policy on the same connection.
+            # Only generation skew and a changed server profile force connection teardown.
+            # Projection errors (privacy_projection_unavailable / privacy_projection_blocked)
+            # must propagate so the agent can switch format or widen policy on the same connection.
+            if result.body.reason == "server_profile_changed":
+                # The service refused this request before doing any work for it: the profile
+                # revision this connection was admitted under is no longer the one it issues
+                # (ADR-052). The connection ends. This request and every later one, never sent,
+                # name the phase and its way back; any other call already sent over it may have
+                # been recorded, so it ends as ``server_authorization_changed`` (``_sent_outcome``).
+                refused = ControlError(
+                    "service_unavailable", retryable=True, phase="server_profile_changed"
+                )
+                _ask_helper_to_refresh(self._authorization)
+                self._failure = self._failure or refused
+                await self._fail_connection(refused)
+                return ControlResult(
+                    protocol_version=result.protocol_version,
+                    rpc_id=result.rpc_id,
+                    service_instance_id=result.service_instance_id,
+                    service_generation=result.service_generation,
+                    method=result.method,
+                    outcome="error",
+                    body=refused,
+                )
             if result.body.reason == "service_generation_changed":
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
                 return ControlResult(
@@ -1552,6 +2091,31 @@ class ServiceClient(ControlClientPort):
     async def service_status(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_STATUS, JsonObject({})))
 
+    async def server_profile(self) -> ServerProfile:
+        """What the service offers a client elsewhere (ADR-052), parsed and verified: a document
+        whose digest does not recompute is ``frame_invalid``."""
+
+        body = await self._invoke(ControlMethod.SERVER_PROFILE, JsonObject({}))
+        try:
+            return profile_from_json(canonical_encode(cast(JsonValue, body)))
+        except ProfileError:
+            raise ControlError("frame_invalid") from None
+
+    async def code_copy(self, action: Literal["status", "forget"]) -> dict[str, object]:
+        """The server's copy of this connection's claimed repository (level L2, ADR-054):
+        ``status`` (what it holds, or null) or ``forget`` (exactly what was deleted)."""
+
+        if action not in {"status", "forget"}:
+            raise ValueError("code_copy_action_invalid")
+        body = await self._invoke(ControlMethod.CODE_COPY, JsonObject({"action": action}))
+        plain = strict_json_parse(canonical_encode(cast(JsonValue, body)))
+        if type(plain) is not dict:
+            raise ControlError("frame_invalid")
+        answer = cast(dict[str, object], plain)
+        if answer.get("action") != action:
+            raise ControlError("frame_invalid")
+        return answer
+
     async def lock(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_LOCK, JsonObject({})))
 
@@ -1568,17 +2132,113 @@ class ServiceClient(ControlClientPort):
         await self._fail_connection(ControlError("service_unavailable", retryable=True))
 
 
+def _encoded_workspace_reply(call_id: str, reason: str) -> bytes:
+    """One encoded non-``ok`` workspace reply carrying a closed reason and no result."""
+
+    reply = WorkspaceReply(
+        "workspace_reply", "1.0", call_id, outcome_for_reason(reason), None, reason
+    )
+    return encode_control_frame(workspace_reply_frame(reply))
+
+
+def _answer_in_worker(
+    agent: WorkspaceCallHandler,
+    call: WorkspaceCall,
+    workspace_handle: str | None,
+    max_reply_bytes: int,
+) -> bytes:
+    """Answer one call off the event loop and encode its reply frame there too.
+
+    A reply above the declared bound, or one no frame can carry, becomes ``result_too_large``;
+    anything else that goes wrong is ``internal_error``. No exception text reaches the reply.
+    """
+
+    try:
+        reply = agent.answer(call, workspace_handle=workspace_handle)
+        if type(reply) is not WorkspaceReply or reply.call_id != call.call_id:
+            raise TypeError("workspace_reply_invalid")
+        encoded = encode_control_frame(workspace_reply_frame(reply))
+    except ControlProtocolError as exc:
+        if exc.reason != "frame_too_large":
+            return _encoded_workspace_reply(call.call_id, "internal_error")
+        return _encoded_workspace_reply(call.call_id, "result_too_large")
+    except Exception as exc:
+        from finishup.observability.logging import record_unexpected_exception_without_raising
+
+        record_unexpected_exception_without_raising(
+            exc, component="service.client", operation="workspace_call_failed"
+        )
+        return _encoded_workspace_reply(call.call_id, "internal_error")
+    if len(encoded) - _FRAME_PREFIX_BYTES > max_reply_bytes:
+        return _encoded_workspace_reply(call.call_id, "result_too_large")
+    return encoded
+
+
+async def _recheck_after_interval() -> None:
+    await asyncio.sleep(GENERATION_RECHECK_SECONDS)
+
+
 def _connected_client(
-    stream: AuthenticatedUnixStream,
+    stream: ControlStream,
     session: ControlSession,
     client_kind: ControlClientKind,
+    workspace_agent: WorkspaceCallHandler | None = None,
+    *,
+    transport: ConnectionTransport = "unix",
+    authorization: AuthorizationCheck | None = None,
+    recheck: Callable[[], Awaitable[None]] | None = None,
 ) -> ServiceClient:
     return ServiceClient(
         stream,
         session,
         client_kind,
         _token=_PRIVATE_CONSTRUCTOR_TOKEN,
+        workspace_agent=workspace_agent,
+        transport=transport,
+        authorization=authorization,
+        recheck=recheck,
     )
+
+
+class _HelloRefused(Exception):
+    """The connection's authorization lapsed before its hello was written."""
+
+
+class _CheckedHelloStream:
+    """The dialled stream while its hello is written: each write is checked first (ADR-052).
+
+    The hello carries the workspace claim and the agent declaration, so it is guarded by the same
+    authorization check as every later frame: a selection, record, key or hold change made while
+    the dial was under way refuses the connection before anything is written (``refused`` names
+    the phase), never after.
+    """
+
+    __slots__ = ("_authorization", "_stream", "refused")
+
+    def __init__(self, stream: ControlStream, authorization: AuthorizationCheck) -> None:
+        self._stream = stream
+        self._authorization = authorization
+        self.refused: str | None = None
+
+    @property
+    def peer_identity(self) -> object:
+        return self._stream.peer_identity
+
+    async def receive(self, max_bytes: int) -> bytes:
+        return await self._stream.receive(max_bytes)
+
+    async def send_all(self, data: Buffer) -> None:
+        try:
+            phase = self._authorization.refusal()
+        except Exception:  # noqa: BLE001 - a check that cannot be made refuses nothing new
+            phase = None
+        if phase is not None:
+            self.refused = phase
+            raise _HelloRefused
+        await self._stream.send_all(data)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
 
 
 class _AcceptedServiceUnresponsive(ControlError):
@@ -1637,7 +2297,7 @@ def _consume_background_task[ResultT](task: asyncio.Task[ResultT]) -> None:
         pass
 
 
-async def _best_effort_close_stream(stream: AuthenticatedUnixStream) -> None:
+async def _best_effort_close_stream(stream: ControlStream) -> None:
     """Bound cleanup even when a faulty peer stream never completes ``aclose``."""
 
     task = asyncio.create_task(stream.aclose())
@@ -1661,25 +2321,60 @@ async def _connect_service_attempt(
     projection_render_mode: ProjectionRenderMode,
     output_is_controlling_tty: bool,
     timeout_seconds: float,
+    workspace_binding: ClientWorkspaceBinding | None = None,
+    authorization: AuthorizationCheck | None = None,
+    dial: Callable[[], Awaitable[ControlStream]] | None = None,
+    transport: ConnectionTransport = "unix",
 ) -> ServiceClient:
-    """Connect and handshake within one attempt budget, preserving accepted-socket identity."""
+    """Connect and handshake within one attempt budget, preserving accepted-socket identity.
 
-    stream: AuthenticatedUnixStream | None = None
+    A ``workspace_binding`` sends its claim (and declares its agent) in place of a locator. An
+    ``authorization`` (a connection to a server elsewhere, ADR-052) is checked once more right
+    before the dial and again right before the hello is written, and the connection keeps it.
+    ``dial`` replaces the fixed endpoint for a connection to a server elsewhere (an SSH target's
+    helper or its direct ``ssh -W`` stream); a transport that names why it failed (a closed
+    remote phase) is reported with that phase.
+    """
+
+    agent = None if workspace_binding is None else workspace_binding.agent
+    if authorization is not None:
+        phase = authorization.refusal()
+        if phase is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=phase)
+    stream: ControlStream | None = None
+    guarded: _CheckedHelloStream | None = None
     deadline = time.monotonic() + timeout_seconds
     try:
         async with asyncio.timeout(timeout_seconds):
-            stream = await connect_control()
+            stream = await (connect_control() if dial is None else _remote_dial(dial))
+            if (
+                transport == "connector"
+                and workspace_binding is not None
+                and workspace_binding.repository_key is not None
+            ):
+                # Through the target's helper: the repository this connection's own admission is
+                # bound to, on this local connection only (the helper binds its relay to it and
+                # never forwards it; ``client.helper_status``).
+                from finishup.client.helper_status import relay_binding
+
+                await stream.send_all(relay_binding(workspace_binding.repository_key))
+        if authorization is not None:
+            _bind_stream(stream, authorization)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
+        guarded = None if authorization is None else _CheckedHelloStream(stream, authorization)
         handshake = asyncio.create_task(
             client_handshake(
-                stream,
+                stream if guarded is None else guarded,
                 client_kind,
                 __version__,
                 workspace_locator=workspace_locator,
+                workspace_claim=None if workspace_binding is None else workspace_binding.claim,
+                workspace_agent=None if agent is None else agent.declaration,
                 projection_render_mode=projection_render_mode,
                 output_is_controlling_tty=output_is_controlling_tty,
+                server_profile=_server_profile_of(authorization),
             )
         )
         try:
@@ -1693,7 +2388,15 @@ async def _connect_service_attempt(
             handshake.add_done_callback(_consume_background_task)
             raise TimeoutError
         session = handshake.result()
-        return _connected_client(stream, session, client_kind)
+        client = _connected_client(
+            stream, session, client_kind, agent, transport=transport, authorization=authorization
+        )
+        if workspace_binding is not None and workspace_binding.worktree is not None:
+            client._remote_workspace = (  # pyright: ignore[reportPrivateUsage]
+                workspace_binding.claim,
+                workspace_binding.worktree,
+            )
+        return client
     except TimeoutError as exc:
         accepted = stream is not None
         if stream is not None:
@@ -1705,19 +2408,819 @@ async def _connect_service_attempt(
             error = ControlError("service_unavailable", retryable=True)
         raise error from exc
     except LocalControlTransportError as exc:
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
+        if named is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=named) from exc
         raise _transport_error(exc) from exc
     except ControlProtocolError as exc:
+        named = await _remote_end_phase(stream, deadline)
         if stream is not None:
             await _best_effort_close_stream(stream)
+        if guarded is not None and guarded.refused is not None:
+            # Nothing was written: the hello was refused before it left.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase=guarded.refused
+            ) from None
+        if named is not None:
+            # The transport itself ended the stream (OpenSSH named why): the server never read
+            # the hello, so the remote phase is the answer, not a protocol fault.
+            raise ControlError("service_unavailable", retryable=True, phase=named) from exc
+        if exc.reason == "handshake_rejected" and transport != "unix":
+            # A server elsewhere's helper (or transport) closed the hello unanswered: no service
+            # of this computer is involved; the caller names the outage the helper recorded.
+            raise ControlError("service_unavailable", retryable=True) from exc
         if exc.reason == "handshake_rejected":
             raise _unanswered_hello(workspace_locator) from exc
+        if transport != "unix" and exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
+            raise _remote_release_mismatch() from exc
         raise _protocol_error(exc) from exc
     except BaseException:
         if stream is not None:
             await _best_effort_close_stream(stream)
         raise
+
+
+def _bind_stream(stream: ControlStream, authorization: AuthorizationCheck) -> None:
+    """Bind a stream that sends on its own (a REST stream's retries, polls and registration) to
+    the connection's own authorization, its repository's hold included: once it refuses, the
+    stream sends nothing more, not only when the client next writes a frame. An open connection
+    ends ``server_authorization_changed`` whatever the refusal names."""
+
+    bind = getattr(stream, "bind", None)
+    if not callable(bind):
+        return
+
+    def refusal() -> str | None:
+        return None if authorization.refusal() is None else "server_authorization_changed"
+
+    bind(refusal)
+
+
+async def _remote_dial(dial: Callable[[], Awaitable[ControlStream]]) -> ControlStream:
+    """Run a remote transport's dial; a failure it names (a closed remote phase) keeps its name."""
+
+    try:
+        return await dial()
+    except (LocalControlTransportError, ControlError):
+        raise
+    except Exception as exc:
+        reason = getattr(exc, "reason", None)
+        if type(reason) is str and reason in REMOTE_CONNECTION_PHASES:
+            raise ControlError("service_unavailable", retryable=True, phase=reason) from None
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="remote_unreachable"
+        ) from None
+
+
+async def _remote_end_phase(stream: ControlStream | None, deadline: float) -> str | None:
+    """The closed remote phase a direct stream names for its own end, if it can name one.
+
+    Asked only within the connection's own ``deadline`` (a monotonic time): a transport that
+    takes longer to say why (``ssh`` still running, its diagnostics still open) names nothing,
+    and nothing is waited for once the deadline passed (a hook's budget is never overspent).
+    """
+
+    failure_phase = cast(
+        Callable[[], Awaitable[str | None]] | None, getattr(stream, "failure_phase", None)
+    )
+    if failure_phase is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        async with asyncio.timeout(remaining):
+            phase = await failure_phase()
+    except TimeoutError:
+        return None
+    except asyncio.CancelledError:
+        # A cancellation the stream's own task raised (a close ended its reader) is not this
+        # caller's: it names nothing, so the answer the connection already has (a refusal the
+        # hello named) stays the answer. Only a cancellation of this task leaves as one.
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
+        return None
+    except Exception:  # noqa: BLE001 - a stream that cannot say why names nothing
+        return None
+    return phase if phase in REMOTE_CONNECTION_PHASES else None
+
+
+async def connect_service_via(
+    dial: Callable[[], Awaitable[ControlStream]],
+    client_kind: ControlClientKind,
+    *,
+    workspace_binding: ClientWorkspaceBinding | None,
+    authorization: AuthorizationCheck | None,
+    transport: ConnectionTransport,
+    timeout_seconds: float = _CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+) -> ServiceClient:
+    """Handshake over a stream ``dial`` opens, with no admission of the active root.
+
+    For a client that admitted its connection itself: an SSH target's helper holds its
+    background workspace agents this way (``client.helper``), over its own relay (never through
+    its endpoint, so they never count as client activity) or a direct ``ssh -W`` stream. The
+    ``authorization`` is checked before the dial, before the hello and before every frame, and
+    watched, exactly as for ``connect_service``. Failures are ``service_unavailable`` with a
+    closed phase where the transport names one, or the protocol's own closed reason; never a
+    path.
+    """
+
+    if type(client_kind) is not ControlClientKind:
+        raise TypeError("control_client_kind_invalid")
+    if workspace_binding is not None and type(workspace_binding) is not ClientWorkspaceBinding:
+        raise TypeError("workspace_binding_invalid")
+    if transport not in CONNECTION_TRANSPORTS:
+        raise ValueError("connection_transport_invalid")
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=None,
+        projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+        output_is_controlling_tty=False,
+        timeout_seconds=timeout_seconds,
+        workspace_binding=workspace_binding,
+        authorization=authorization,
+        dial=dial,
+        transport=transport,
+    )
+
+
+def _check_workspace_binding(
+    workspace_locator: WorkspaceLocator | None, workspace_binding: ClientWorkspaceBinding | None
+) -> None:
+    if workspace_binding is None:
+        return
+    if type(workspace_binding) is not ClientWorkspaceBinding:
+        raise TypeError("workspace_binding_invalid")
+    if workspace_locator is not None:
+        # A hello names its workspace by a path or by a claim, never both (ADR-051).
+        raise ValueError("workspace_binding_conflict")
+
+
+@dataclass(frozen=True, slots=True)
+class _RemoteAdmission:
+    """What the shared gate admitted a connection to a server elsewhere under (ADR-052)."""
+
+    authorization: AuthorizationCheck
+    workspace_binding: ClientWorkspaceBinding | None
+    target_id: str = ""
+    kind: str = ""
+    # The level the target record's consent names (ADR-054), or None when it records none.
+    level: ConnectionLevel | None = None
+
+
+async def _admit_remote(
+    workspace_locator: WorkspaceLocator | None,
+    workspace_binding: ClientWorkspaceBinding | None,
+    *,
+    serve_workspace: bool,
+) -> _RemoteAdmission | None:
+    """The shared authorization gate every connection from a remote root passes first (ADR-052).
+
+    ``None`` for a local root (the everyday server, a named local server, an isolated root that is
+    not a target, or one that cannot be resolved, whose own path reports it): the connection is
+    made exactly as before, with no authorization and no watch (O2). For a remote root the gate
+    runs before any claim, dial or spawn (``client.authorization.authorize_active_root``); a
+    refusal is a retryable ``service_unavailable`` naming its closed phase, and in this release,
+    where no remote kind is open, every remote root is refused as ``target_root_is_remote``.
+    Once admitted, ``workspace_locator`` becomes the target's claim, normalized to its worktree's
+    top level, with the agent when ``serve_workspace`` (``remote_binding.binding_for_active_root``,
+    which decides the repository hold); the locator itself is never sent. A workspace the shared
+    root rule cannot resolve is not claimed and the connection names no workspace. A prebuilt
+    ``workspace_binding`` keeps its own check (its repository's hold) beside the admission
+    (``client.authorization.bind_prebuilt_check``); one made for another target is refused
+    ``server_authorization_changed``.
+    """
+
+    from finishup.client.targets import TargetError, TargetRecordUnreadable, active_target_record
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="target_root_is_remote"
+        ) from None
+    except TargetError:
+        return None
+    if record is None or not record.is_remote:
+        return None
+    consent = record.consent
+    level: ConnectionLevel | None = (
+        consent.level if consent is not None and consent.level in CONNECTION_LEVELS else None
+    )
+    from finishup.client.authorization import authorize_active_root
+
+    try:
+        authorization = authorize_active_root()
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    if authorization is None:
+        # The root stopped being remote while it was admitted: refuse rather than guess.
+        raise ControlError("service_unavailable", retryable=True, phase="target_root_is_remote")
+    if workspace_binding is not None:
+        # A binding made earlier keeps its own repository check beside this admission.
+        from finishup.client.authorization import bind_prebuilt_check
+
+        try:
+            check = bind_prebuilt_check(authorization, workspace_binding.authorization)
+        except TargetError as error:
+            raise _remote_target_refusal(error) from None
+        return _RemoteAdmission(check, workspace_binding, record.target_id, record.kind, level)
+    if workspace_locator is None:
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
+    from finishup.adapters.workspace_binding import canonical_workspace_locator
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.client.remote_binding import binding_for_active_root
+
+    # One worktree, one claim: a connection made from a subfolder claims its worktree's top level,
+    # as the hooks and the CLI already do, so every surface reaches the same handle.
+    canonical = canonical_workspace_locator(workspace_locator.path)
+    if canonical is not None and canonical != workspace_locator.path:
+        workspace_locator = WorkspaceLocator(canonical)
+    try:
+        binding = await binding_for_active_root(
+            workspace_locator, serve_workspace=serve_workspace, authorization=authorization
+        )
+    except RepositoryIdentityError:
+        return _RemoteAdmission(authorization, None, record.target_id, record.kind, level)
+    except TargetError as error:
+        raise _remote_target_refusal(error) from None
+    if binding is None or binding.authorization is None:
+        return _RemoteAdmission(authorization, binding, record.target_id, record.kind, level)
+    return _RemoteAdmission(binding.authorization, binding, record.target_id, record.kind, level)
+
+
+async def _connect_remote(
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """Reach an admitted server elsewhere (``_reach_remote``), the connection carrying the level
+    its target was consented at (``ServiceClient.consent_level``, ADR-054)."""
+
+    client = await _reach_remote(
+        admission,
+        client_kind,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        deadline=deadline,
+    )
+    client._consent_level = admission.level  # pyright: ignore[reportPrivateUsage]
+    return client
+
+
+async def _reach_remote(
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """Reach an admitted server elsewhere through its transport, within ``deadline``.
+
+    An SSH target is reached through its helper (the relay style, the default) or directly
+    (``ssh -W``, the owner's advanced choice), as its connection style record says (ADR-052,
+    design v2 section 1.2). Nothing local is ever spawned or superseded but the target's own
+    helper. A server that refused the consented profile revision (``server_profile_changed``)
+    leaves the marker that asks the helper to fetch the profile again; never a fetch here.
+    """
+
+    if admission.kind != "ssh" and admission.kind not in _REST_KINDS:
+        # No transport exists for this kind (the gate refuses it first); a test that opens one in
+        # process without a server dials the target root's own endpoint, as layer 3 did.
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+        )
+    from finishup.client.helper_status import (
+        read_connection_style,
+        read_helper_epoch,
+        request_profile_refresh,
+    )
+    from finishup.client.targets import target_root
+
+    root = target_root(admission.target_id)
+    style = read_connection_style(root)
+    # The target's stop epoch before any dial: every helper this attempt starts carries it, so a
+    # stop made meanwhile (``server use``, ``disconnect``, ``remove``, a zero-network policy)
+    # fences it before it serves anything or reaches the server (``helper_status.start_fenced``).
+    epoch = read_helper_epoch(root)
+    try:
+        if style == "direct" and admission.kind in _REST_KINDS:
+            return await _connect_direct_rest(
+                root,
+                admission,
+                client_kind,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+                deadline=deadline,
+            )
+        if style == "direct":
+            return await _connect_direct(
+                root,
+                admission,
+                client_kind,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+                deadline=deadline,
+            )
+        return await _connect_through_helper(
+            root,
+            admission,
+            client_kind,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            deadline=deadline,
+            epoch=epoch,
+        )
+    except ControlError as error:
+        if error.phase == "server_profile_changed":
+            request_profile_refresh(root, _server_profile_of(admission.authorization))
+            if style == "direct":
+                _start_helper_to_refresh(root, admission, epoch)
+        if error.reason == "service_unavailable" and error.phase is None:
+            # A server elsewhere's outage always names its phase (design v2 section 8.9: hooks
+            # fail open with the reason): a direct stream that did not answer within the
+            # deadline is ``remote_unreachable``, as through the helper, never the local
+            # service's hint.
+            raise ControlError(
+                "service_unavailable",
+                retryable=True,
+                phase="remote_unreachable",
+                correlation_id=error.correlation_id,
+            ) from error
+        raise
+
+
+def _remote_release_mismatch() -> ControlError:
+    """A server elsewhere answered with another schema manifest or protocol.
+
+    Self-hosted servers keep release lockstep with their clients (U18): the server's owner
+    upgrades it (``remote_incompatible``); no service of this computer is involved, so the
+    local ``service restart`` remedy is never named. Unless this process is the stale one: a
+    newer build of this release now runs the target's helper (this process predates an
+    in-place upgrade), which ``service_incompatible`` names (the bridge asks to reopen).
+    """
+
+    if newer_helper_build_holds_selection():
+        return ControlError("service_incompatible", retryable=True)
+    return ControlError("service_unavailable", retryable=True, phase="remote_incompatible")
+
+
+def _installed_manifest_digest() -> str | None:
+    """The schema-manifest digest of the build installed now, read from the installation's files.
+
+    Never this process's own (cached) digest: a process that runs a retained copy of its runtime
+    (an MCP bridge or a hook after an in-place upgrade, ``adapters.release_runtime``) reads the
+    installation it was copied from, and any other process reads its package's files again. The
+    package manager's files are the durable order of two builds of one version: the one
+    installed now is the newer, whatever process started when. ``None`` when it cannot be read.
+    """
+
+    import hashlib
+
+    import finishup
+    from finishup.adapters.release_runtime import installation_prefix
+
+    try:
+        manifest = Path(finishup.__file__).resolve().parent / "resources" / "schemas"
+        manifest /= "manifest.json"
+        here = Path(sys.prefix).resolve()
+        origin = installation_prefix()
+        if origin.resolve() != here:
+            # A retained runtime: the same package path beneath the installation it copies.
+            manifest = origin / manifest.relative_to(here)
+        with manifest.open("rb") as handle:
+            data = handle.read(_INSTALLED_MANIFEST_MAX_BYTES + 1)
+    except (OSError, ValueError):  # a ``ReleaseRuntimeError`` too: no order can be read
+        return None
+    if len(data) > _INSTALLED_MANIFEST_MAX_BYTES:
+        return None
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _stale_against_helper(holder: HelperStamp) -> bool:
+    """Whether this process must never replace ``holder``, a live helper of this release but
+    another build: this process is not the build installed now (it predates an in-place upgrade,
+    a retained runtime), or which build is installed cannot be read. Reads only.
+
+    The order is the installation's (``_installed_manifest_digest``), never a process start
+    time: a retained older bridge that starts its own helper after a newer process started (at a
+    helper's idle exit) is still the older build, and the newer one replaces that helper.
+    """
+
+    if holder.version != __version__:
+        return False
+    own = _manifest_digest_for_client()
+    return holder.schema_manifest_digest != own and _installed_manifest_digest() != own
+
+
+def newer_helper_build_holds_selection() -> bool:
+    """Whether the selected server elsewhere's helper is of this release but another build, and
+    this process is not the build installed now (``_stale_against_helper``): this process is the
+    stale one (it predates an in-place upgrade). For the MCP bridge's remedy text."""
+
+    from finishup.client.helper_status import helper_holder
+
+    root = _remote_target_root()
+    if root is None:
+        return False
+    try:
+        holder = helper_holder(root)
+        return holder is not None and _stale_against_helper(holder)
+    except Exception:  # noqa: BLE001 - a helper that cannot be read is not newer
+        return False
+
+
+def _start_helper_to_refresh(root: Path, admission: _RemoteAdmission, epoch: str) -> None:
+    """Start the target's helper so it fetches the server's profile again (never on this path).
+
+    The relay style's refusal came through the running helper, which takes the marker. The
+    direct style has no helper on its path, and none may run (no registration started one): the
+    marker alone would wait, ``server status`` would go on calling the consent current, and a
+    narrowed profile would never be adjusted. The helper is client-owned and vault-less and does
+    the fetch itself, detached (design v2 section 8.9: no profile refresh on a hook's path).
+
+    Only while the admission this request was made under still holds (a ``server use`` of
+    another server, a ``logout`` or a ``remove`` meanwhile starts nothing), and with the stop
+    epoch read before the dial (``epoch``): a stop since then fences the helper before it
+    reaches the server. Never raises.
+    """
+
+    from finishup.client.helper_status import helper_holder, spawn_helper
+
+    try:
+        if admission.authorization.refusal() is not None:
+            return
+        if helper_holder(root) is None:
+            spawn_helper(root, admission.target_id, epoch=epoch)
+    except OSError:
+        return
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ControlError("service_unavailable", retryable=True, phase="remote_unreachable")
+    return remaining
+
+
+async def _connect_direct(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The direct style: this process's own ``ssh -W`` stream (approach B's seam).
+
+    A remote service that is not running is started once through the server's own launcher (this
+    client's demand), then dialled again inside the same deadline.
+    """
+
+    from finishup.client.server_profile import consented_host_key
+    from finishup.client.ssh_transport import (
+        UpstreamUnavailable,
+        direct_remote_argv,
+        ensure_direct_master,
+        open_direct_stream,
+        require_host_key,
+        resolve_ssh,
+        run_ssh,
+    )
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        record = None
+    if record is None or record.target_id != admission.target_id:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="server_authorization_changed"
+        )
+    try:
+        ssh = resolve_ssh()
+    except UpstreamUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+
+    async def dial() -> ControlStream:
+        # Verified before it is handed back: it rode the master that verified the consented
+        # host key, or verified that key over a connection of its own (ADR-052).
+        return await open_direct_stream(
+            ssh, root, record, expected=consented_host_key(root), deadline=deadline
+        )
+
+    async def attempt() -> ServiceClient:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=_remaining(deadline),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+            dial=dial,
+            transport="ssh",
+        )
+
+    try:
+        return await attempt()
+    except ControlError as error:
+        if error.phase != "remote_service_not_running":
+            raise
+    phase = admission.authorization.refusal()
+    if phase is not None:
+        raise ControlError("service_unavailable", retryable=True, phase=phase)
+    expected = consented_host_key(root)
+    try:
+        await ensure_direct_master(ssh, root, record, expected=expected, deadline=deadline)
+        code, _stdout, stderr = await run_ssh(
+            direct_remote_argv(ssh, root, record, "service", "start", "--json"),
+            seconds=_remaining(deadline),
+        )
+        require_host_key(stderr, expected)
+    except UpstreamUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+    if code != 0:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="remote_service_not_running"
+        )
+    return await attempt()
+
+
+# The kinds reached over REST v1 (ADR-053): through the target's helper (the relay style, the
+# default) or this process's own REST stream (the direct style). A unit test that opens one of
+# them in process without a server empties this (``builders.server_targets.open_remote_kinds``),
+# so its connection dials the target root's own endpoint as before.
+_REST_KINDS: frozenset[str] = frozenset({"https", "local_port"})
+
+
+async def _connect_direct_rest(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+) -> ServiceClient:
+    """The direct style over HTTPS: this process's own REST stream (ADR-053).
+
+    This process reads the target's API key itself (off its event loop, within the deadline;
+    the disclosure says each dialing process does) and maps its control frames to REST v1
+    (``client.rest_stream``). The admission was checked before this dial and is checked before
+    every frame and on its watch, as for any connection; the stream sends nothing more once it
+    refuses.
+    """
+
+    from finishup.client.rest_client import RestTransport, RestUnavailable, load_key
+    from finishup.client.rest_stream import RestControlStream
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        record = None
+    if record is None or record.target_id != admission.target_id:
+        raise ControlError(
+            "service_unavailable", retryable=True, phase="server_authorization_changed"
+        )
+    try:
+        key = await load_key(record.target_id, seconds=min(10.0, _remaining(deadline)))
+    except RestUnavailable as error:
+        raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+    authorization = admission.authorization
+
+    def may_send() -> bool:
+        return authorization.refusal() is None
+
+    async def dial() -> ControlStream:
+        try:
+            # Bound to the consented identity: a CA file replaced since is refused before the
+            # key is sent (``remote_identity_changed``).
+            transport = RestTransport.for_target(record, key=key, consented=True)
+        except RestUnavailable as error:
+            raise ControlError("service_unavailable", retryable=True, phase=error.reason) from None
+        return RestControlStream(transport, may_send=may_send, owns_transport=True)
+
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=None,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+        workspace_binding=admission.workspace_binding,
+        authorization=authorization,
+        dial=dial,
+        transport="https",
+    )
+
+
+def _helper_failure(root: Path, before: object) -> ControlError | None:
+    """The phase the helper recorded for this attempt's failure, if it recorded one meanwhile."""
+
+    from finishup.client.helper_status import read_helper_status
+
+    status = read_helper_status(root)
+    if status is None or status == before or status.reason is None:
+        return None
+    if status.phase != "unavailable" and (status.phase, status.reason) != (
+        "stopped",
+        "zero_network_remote_selected",
+    ):
+        return None
+    if status.reason not in REMOTE_CONNECTION_PHASES:
+        return None
+    return ControlError(
+        "service_unavailable",
+        retryable=True,
+        phase=status.reason,
+        correlation_id=status.correlation_id,
+    )
+
+
+async def _connect_through_helper(
+    root: Path,
+    admission: _RemoteAdmission,
+    client_kind: ControlClientKind,
+    *,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    deadline: float,
+    epoch: str | None = None,
+) -> ServiceClient:
+    """The relay style: the target's helper serves ``<root>/run/control.sock``.
+
+    The helper is client-owned and vault-less, so starting one is always safe: when nothing
+    answers, one is started (never a service), and a helper left by an older release or build of
+    this client is replaced through the target's stop epoch (never a newer one, and only by the
+    build installed now: ``_stale_against_helper``). The replacement is fenced to the helper it
+    decided about (``helper_status.supersede_helper``): one that took the target meanwhile is
+    decided about again, never stopped blind. A helper that holds the lock but has not stamped
+    it yet is unknown: it is waited for within the deadline, never stopped and never doubled. A
+    helper ending at its idle exit is followed by a successor; any other stop (a ``server use``,
+    ``disconnect``, ``remove``, a zero-network policy) stays a stop (A-HANDOFF): every helper
+    started here carries ``epoch`` (the stop epoch read before the first dial, or the one this
+    client's own replacement wrote), and only while the admission still holds. A failure the
+    helper names (a remote phase) ends the wait at once; every ``service_unavailable`` raised
+    here names a remote phase.
+    """
+
+    from finishup.client.helper_status import (
+        HelperHolderChanged,
+        helper_holder,
+        helper_lock_held,
+        read_helper_epoch,
+        read_helper_status,
+        spawn_helper,
+        supersede_helper,
+    )
+
+    if epoch is None:
+        epoch = read_helper_epoch(root)
+    before = read_helper_status(root)
+
+    def idle_exit_finished() -> bool:
+        if helper_holder(root) is not None:
+            return False
+        status = read_helper_status(root)
+        return status is not None and (status.phase, status.reason) == ("stopped", "idle_timeout")
+
+    async def attempt() -> ServiceClient:
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=None,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, _remaining(deadline)),
+            workspace_binding=admission.workspace_binding,
+            authorization=admission.authorization,
+            transport="connector",
+        )
+
+    def named(error: ControlError) -> ControlError:
+        if error.reason != "service_unavailable" or error.phase is not None:
+            return error
+        recorded = _helper_failure(root, before)
+        if recorded is not None:
+            return recorded
+        return ControlError(
+            "service_unavailable",
+            retryable=True,
+            phase="remote_unreachable",
+            correlation_id=error.correlation_id,
+        )
+
+    def spawn() -> None:
+        # The admission this attempt was made under, again: a ``server use`` of another server,
+        # a ``logout`` or a ``remove`` since starts nothing (the helper's own admission is not
+        # bound to the selection).
+        phase = admission.authorization.refusal()
+        if phase is not None:
+            raise ControlError("service_unavailable", retryable=True, phase=phase)
+        try:
+            spawn_helper(root, admission.target_id, epoch=epoch)
+        except FileNotFoundError:
+            # The target's folder is gone (``server remove``): nothing is made again.
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="server_authorization_changed"
+            ) from None
+        except OSError:
+            raise ControlError(
+                "service_unavailable", retryable=True, phase="remote_unreachable"
+            ) from None
+
+    spawned = False
+    awaiting_stamp = False
+
+    async def settle() -> None:
+        """Replace a helper of an older release or build, start one when none holds the target,
+        or note that the holder has not stamped the lock yet (``awaiting_stamp``)."""
+
+        nonlocal awaiting_stamp, epoch, spawned
+        holder = helper_holder(root)
+        while (
+            holder is not None
+            and (
+                holder.version != __version__
+                or holder.schema_manifest_digest != _manifest_digest_for_client()
+            )
+            and holder_version_order(holder.version) != "newer"
+        ):
+            if _stale_against_helper(holder):
+                # Another build of this same release, and this process is not the build
+                # installed now: it predates an in-place upgrade (a retained runtime). It never
+                # replaces that helper; its owner reopens the session (the bridge names that).
+                raise ControlError("service_incompatible", retryable=True)
+            # A helper left by an older release or build of this client (an in-place upgrade)
+            # is client-owned: stop exactly that one (its stop epoch moves; no pid is
+            # signalled), then start this build's. One a newer release started is never
+            # replaced from here.
+            try:
+                written = await asyncio.to_thread(
+                    supersede_helper, root, holder, timeout_seconds=_remaining(deadline)
+                )
+            except HelperHolderChanged:
+                holder = helper_holder(root)
+                continue
+            if written is None:
+                raise named(ControlError("service_unavailable", retryable=True))
+            epoch = written
+            holder = helper_holder(root)
+        awaiting_stamp = holder is None and helper_lock_held(root) is True
+        if holder is None and not awaiting_stamp:
+            spawn()
+            spawned = True
+
+    try:
+        return await attempt()
+    except _AcceptedServiceUnresponsive as error:
+        raise named(error) from error
+    except ControlError as error:
+        if error.reason != "service_unavailable" or error.phase is not None:
+            raise
+        recorded = _helper_failure(root, before)
+        if recorded is not None and recorded.phase != "remote_unreachable":
+            # The running helper read this hello and named why it could not carry it.
+            raise recorded from error
+    await settle()
+    last_error: ControlError | None = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        if awaiting_stamp:
+            # A helper took the lock without a stamp yet: decide once its identity is known.
+            await settle()
+        elif not spawned and idle_exit_finished():
+            # The helper that held the target was ending at its idle exit: start its successor
+            # now instead of waiting on an endpoint nothing will serve again.
+            spawn()
+            spawned = True
+        recorded = _helper_failure(root, before)
+        if recorded is not None and recorded.phase not in {None, "remote_unreachable"}:
+            # The helper named this outage: waiting longer cannot repair it.
+            raise recorded
+        try:
+            return await attempt()
+        except _AcceptedServiceUnresponsive as error:
+            last_error = error
+        except ControlError as error:
+            last_error = error
+            if error.reason != "service_unavailable" or error.phase is not None:
+                raise
+    raise named(last_error or ControlError("service_unavailable", retryable=True))
 
 
 async def connect_service(
@@ -1726,23 +3229,55 @@ async def connect_service(
     workspace_locator: WorkspaceLocator | None = None,
     projection_render_mode: ProjectionRenderMode = ProjectionRenderMode.MACHINE_READABLE,
     output_is_controlling_tty: bool = False,
+    workspace_binding: ClientWorkspaceBinding | None = None,
+    serve_workspace: bool = False,
 ) -> ServiceClient:
-    """Connect only to the verified fixed ordinary endpoint and perform the handshake."""
+    """Connect only to the verified fixed ordinary endpoint and perform the handshake.
+
+    ``workspace_binding`` is for a FinishUP server on another machine: the hello carries its claim
+    instead of a locator, and its agent, if any, answers the server's workspace calls.
+
+    A remote server target's root passes the shared authorization gate first (``_admit_remote``,
+    ADR-052): nothing is claimed, dialled or started before it, and in this release, where no
+    remote kind is open, it refuses every remote root. Once admitted (in a later release), the
+    connection checks its authorization before every frame and watches it; with
+    ``serve_workspace`` it answers the server's workspace calls (set it in a process whose calls
+    run workspace work while they are live, never in a short-lived hook). A local root ignores
+    ``serve_workspace``.
+    """
 
     if type(client_kind) is not ControlClientKind:
         raise TypeError("control_client_kind_invalid")
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
+    _check_workspace_binding(workspace_locator, workspace_binding)
     if type(projection_render_mode) is not ProjectionRenderMode:
         raise TypeError("projection_render_mode_invalid")
     if type(output_is_controlling_tty) is not bool:
         raise TypeError("projection_tty_fact_invalid")
+    if type(serve_workspace) is not bool:
+        raise TypeError("serve_workspace_invalid")
+    admission = await _admit_remote(
+        workspace_locator, workspace_binding, serve_workspace=serve_workspace
+    )
+    if admission is not None:
+        # A server elsewhere is reached through its transport, which may have to start (its
+        # helper, an OpenSSH master, the server's own idle-stopped service): the start budget,
+        # never a local service. A hook passes its own, shorter budget to the on-demand path.
+        return await _connect_remote(
+            admission,
+            client_kind,
+            projection_render_mode=projection_render_mode,
+            output_is_controlling_tty=output_is_controlling_tty,
+            deadline=time.monotonic() + _SERVICE_START_TIMEOUT_SECONDS,
+        )
     return await _connect_service_attempt(
         client_kind,
         workspace_locator=workspace_locator,
         projection_render_mode=projection_render_mode,
         output_is_controlling_tty=output_is_controlling_tty,
         timeout_seconds=_CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+        workspace_binding=workspace_binding,
     )
 
 
@@ -1761,12 +3296,44 @@ def service_holder_identity() -> SingletonHolder | None:
     stopped, or replaced, and must not infer health from it.
     """
 
-    from finishup.service.lifecycle import probe_singleton_holder_identity
+    from finishup.service.lifecycle import SingletonHolder, probe_singleton_holder_identity
 
+    remote_root = _remote_target_root()
+    if remote_root is not None:
+        # A remote target's endpoint belongs to its helper (ADR-052): the holder is the live
+        # stamped helper, and its status generation moves when a repair changes the connection,
+        # so a latched outage clears (the availability latch). It is never superseded from here.
+        from finishup.client.helper_status import helper_holder, read_helper_status
+
+        holder = helper_holder(remote_root)
+        status = read_helper_status(remote_root)
+        if holder is None or status is None or status.pid != holder.pid:
+            return None
+        return SingletonHolder(
+            holder.pid, f"helper-{status.generation}", _manifest_digest_for_client(), __version__
+        )
     try:
         return probe_singleton_holder_identity(_singleton_lock_path())
     except Exception:
         return None
+
+
+def _remote_target_root() -> Path | None:
+    """The active root when it is a server elsewhere's (its helper holds it), else ``None``."""
+
+    try:
+        root = active_root()
+    except PathSafetyError:
+        return None
+    if root is None:
+        return None
+    from finishup.client.targets import TargetError, read_target
+
+    try:
+        record = read_target(root)
+    except TargetError:
+        return None
+    return root if record is not None and record.is_remote else None
 
 
 def _singleton_holder_lock_is_held() -> bool | None:
@@ -1893,6 +3460,8 @@ async def connect_service_on_demand(
     workspace_locator: WorkspaceLocator | None = None,
     timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS,
     supersede_incompatible: bool = True,
+    workspace_binding: ClientWorkspaceBinding | None = None,
+    serve_workspace: bool = False,
 ) -> ServiceClient:
     """Connect to the fixed service, starting one detached successor only when absent.
 
@@ -1912,15 +3481,37 @@ async def connect_service_on_demand(
     is older than its own: sessions opened before an in-place upgrade keep that service, and the
     first session opened afterwards replaces it so the new package actually runs. When no holder
     can be identified the compatible service keeps serving.
+
+    ``workspace_binding`` sends a claim (and declares an agent) in place of the locator, as for
+    ``connect_service``; every connection this call opens carries it. A remote server target's
+    root passes the shared authorization gate first (``_admit_remote``, ADR-052), which refuses
+    it in this release; an admitted one is dialled once within the budget and never supersedes
+    or starts a service of this computer.
     """
 
     if type(client_kind) is not ControlClientKind:
         raise TypeError("control_client_kind_invalid")
     if workspace_locator is not None and type(workspace_locator) is not WorkspaceLocator:
         raise TypeError("workspace_locator_invalid")
+    _check_workspace_binding(workspace_locator, workspace_binding)
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
         raise ValueError("service_start_timeout_invalid")
+    if type(serve_workspace) is not bool:
+        raise TypeError("serve_workspace_invalid")
     deadline = time.monotonic() + timeout_seconds
+    admission = await _admit_remote(
+        workspace_locator, workspace_binding, serve_workspace=serve_workspace
+    )
+    if admission is not None:
+        # One deadline for the whole remote path (design v2 section 8.9): the gate above, the
+        # helper's start, the transport, the handshake; the caller's call and cleanup follow.
+        return await _connect_remote(
+            admission,
+            client_kind,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            deadline=deadline,
+        )
 
     async def connect_with_remaining_budget() -> ServiceClient:
         remaining = deadline - time.monotonic()
@@ -1932,6 +3523,7 @@ async def connect_service_on_demand(
             projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
             output_is_controlling_tty=False,
             timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, remaining),
+            workspace_binding=workspace_binding,
         )
 
     try:

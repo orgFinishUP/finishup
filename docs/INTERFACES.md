@@ -998,7 +998,8 @@ runtime category `request_result|event|config|version_manifest`.
 `common-value`, `MCP input`, `MCP output`, `persisted-envelope`, `event-envelope`,
 `event-payload`, `configuration`, `finding`, `provider-judgment`, `semantic-provenance`,
 `receipt-document`, `privacy-policy`, `outbound-case`, `privacy-audit`, `setup-contract`,
-`local-control`, `service-status`, or `version-report`. `SchemaDocument` contains both
+`local-control`, `service-status`, `version-report`, or `network-control` (the REST v1
+documents `service/rest-*`, ADR-053). `SchemaDocument` contains both
 `schema_kind` and `artifact_role: SchemaArtifactRole`; neither value is inferred from the other.
 The reviewed `schemas/manifest.json` owns the closed path-to-artifact-role mapping, and catalog
 loading fails closed on an unknown or path-incompatible role.
@@ -1107,7 +1108,9 @@ admits only its mapped action/result/evidence families plus opaque unknown event
 finding/check, response, and receipt families enter through `start`, `check`, `respond`, and
 `receipt`; redaction is reserved to the trusted maintenance path. A known family outside its row
 fails before object staging with `event_family_not_admitted`; caller actor/client tokens never
-widen the matrix.
+widen the matrix. The service-written `content_forgotten` 1.0.0 (ADR-054, bundle storage version
+20) enters only when a server copy is forgotten; no publication path admits it (*Level L2: the
+server copy*).
 
 The released `event-draft/1.0.0`, `opaque-unknown-event-draft/1.0.0`, and
 `publish-work-request/1.0.0` bytes stay frozen. Claim correction is authorable only through the
@@ -1971,11 +1974,54 @@ its `-part-NN` parts, not the source file; renderings say "of the captured item"
   be a different finding. The review still dispatches once with the other findings.
 - `task_statement_unavailable`, `task_statement_not_supplied`, `task_statement_not_authorized` —
   what the reviewer knew of the user's request (issue #908; see "Task statement" below).
+- `outside_reads_not_listed` — a claim-bound task's server is in `listed` mode for the client's
+  owner, and the client's workspace agent left unread an existing file the task names, or kept
+  back the server's copy of one kept when the task started, whatever that file is now (a
+  `read_outside_inputs` or kept-copy `snapshot_outside_inputs` answer with a non-empty
+  `unlisted`, counted in `CheckChangeCapture.outside_inputs_not_listed`) or refused a declared
+  test (`root_not_admitted`, counted in the case object's `declared_tests_not_listed`), because its
+  folder is not listed for that server (or, for a test in the project, Git ignores it or cannot
+  answer for it). Only those files are missing; the rest of the check-time change reaches review
+  (ADR-051 decision 5, amended 2026-11-07; dormant in layer 1, where no remote target can be added
+  or selected). Its fixed sentence names both of the owner's ways out
+  with their full arguments and where to run them: `finishup server folders add NAME FOLDER`, or,
+  for a server they trust, `finishup server folders mode NAME local`, on the client machine; every
+  way out is the owner's, never an agent's ("These are the owner's steps, not an agent's."). It
+  says which fits which file: listing a folder covers a file outside the project, while a
+  declared test in the project that Git ignores is read only in `local` mode or once Git no longer
+  ignores it, whatever folder is listed, the project's own included. Its MCP short form
+  (`OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE`) and the shipped guidance (`receipt.md#final-prose`)
+  name the same two ways for such a test, never `local` mode alone. A closed
+  disclosure code with no path. How many were kept back travels as bounded counts, never which
+  file (ADR-051 open question 2, closed 2026-11-07): `FinalSemanticEvaluation.
+  outside_reads_kept_back` (`domain.receipts.OutsideReadsKeptBack`: `task_inputs` and
+  `declared_tests`, each 0 to `MAX_KEPT_BACK_COUNT` = 64, at least one not zero, clamped), recorded
+  on the check as check-recorded 1.7.0's optional `outside_reads_kept_back` (the writer chooses
+  1.7.0 exactly when it is present; 1.6.0 and older readers refuse it), and carried on the
+  receipt's live gap as receipt-document 1.4.0's optional `kept_back` (admitted only beside this
+  code; the released 1.3.0 never carries it; receipt-result 1.5.0, unreleased, carries 1.4.0
+  documents). The gap's detail opens with the fixed line `outside_reads_kept_back_sentence`
+  ("N task inputs and M declared tests outside the folders this server may read were kept back.")
+  before the sentence above, so the JSON, markdown and text receipts, the CLI receipt (which
+  prints the line for a JSON receipt too, `kept_back_from_wire`), the terminal interface and the
+  MCP receipt say the number. An MCP receipt, paged or not, is the receipt itself on both
+  channels (`mcp.server._result_text`: its canonical JSON; a delivery page's via
+  `delivery_page_text`), so the number reaches the agent in the gap's `detail` and `kept_back`
+  for a JSON receipt and in `human_text` for markdown or text; `summary_for_receipt`, which
+  carries the line as a required part, is only the fallback when that canonical copy cannot be
+  encoded. A check result names the code without one. A `semantic_outside_reads_not_listed` diagnostic record (same request id as `semantic_case_built`,
+  written only when not zero) carries the count as `semantic_task_inputs_outside_not_listed`
+  (task inputs and declared tests together; `finishup service diagnostics` shows it), classified like
+  `task_input_outside_not_admitted` (G4c disclosure, AI-powered baseline only). The MCP check
+  summary shows its sentence, or its short form, in the same part as that code's.
 - `task_input_baseline_unavailable` — an outside input reached review as its current bytes and
   FinishUP kept no copy of it from the task's start or from when the task first named it, so the
   reviewer could not tell whether the agent changed it (issue #1118 unit 1, ADR-031 amendment;
   `ready_composition._with_baseline_gap`). A closed disclosure code with no path; it is
   classified like `task_input_outside_not_admitted` (G4c disclosure, AI-powered baseline only).
+  Its sentence adds that a copy is kept only of a file review may read at that moment, so letting
+  review read the folder before the task starts keeps one (an admitted root, or on a remote
+  server in `listed` mode a listed folder).
 - `verification_input_directory_unresolved` — a recorded verification command named a file after
   a directory change FinishUP cannot follow (`cd -`, `cd $X`, `cd` with no or several operands, a
   `..` above the workspace, `popd`, a `cd` in a pipeline, behind a condition or an assignment
@@ -1996,7 +2042,16 @@ its `-part-NN` parts, not the source file; renderings say "of the captured item"
   `CheckChangeCapture.outside_inputs_not_admitted` (stored key written only when true), which the
   composition reads for new and recovered jobs alike; it carries no path. Its fixed sentence
   (`check_time_change_gap_sentence`) names the owner's step, `finishup privacy input-roots add
-  <folder>` on a trusted terminal. Readiness `S`, disclosed on both routes (gap rule G4c): never
+  <folder>` in a trusted terminal on the computer the FinishUP service runs on, and, for a remote
+  server, `finishup server folders add NAME FOLDER` on the client machine, which admits the folder
+  for that server's claim-bound sessions in either mode (ADR-051 decision 5, maintainer decision
+  2026-11-07); its MCP short form (`TASK_INPUT_OUTSIDE_NOT_ADMITTED_SHORT_SENTENCE`) names the
+  same two. On a remote target (dormant in layer 1) `privacy input-roots`' `requires_server_host`
+  line says it runs on the server host for a folder that exists there, and names `server folders
+  add` for a folder on the client (`command_scope.server_host_refusal_line(error, command)`). For
+  a claim-bound task the decision is the server's only for a value its policy covers: a value the
+  agent's answer says a listed folder covers (`listed`) is admitted by the client and never counted
+  here. Readiness `S`, disclosed on both routes (gap rule G4c): never
   agent work, a Stop-gate item or a closure blocker. A capture baseline for AI-powered absence
   proof (`SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS`), never a veto of local proof.
 
@@ -3506,8 +3561,8 @@ encoding, length prefix, hash prepass, normalization, or delimiter.
 CLI/UI-only `lock`/`stop`, and `close`. Shared closed types are `ControlClientKind`
 (`cli|mcp_bridge|ui`), `ControlMethod`, `ControlRequest`, `ControlResult`, `ServiceState`
 (`starting|locked|unlocking|ready|draining|failed`), and `ServiceStatus`. The method registry has
-exactly thirty-one calls: the six workflow operations plus twenty-five support/preview/execute,
-lifecycle, observation-control, and CLI/UI-only methods. The privacy subset is exactly
+exactly thirty-two calls: the six workflow operations plus twenty-six support/preview/execute,
+lifecycle, observation-control, privacy, and CLI/UI-only methods. The privacy subset is exactly
 `privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy|
 privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
@@ -3586,7 +3641,10 @@ connection's `start` and `check` calls; it is never stored, logged, projected or
 Branches and
 linked worktrees share one commitment; independent clones and unrelated repositories do not. An
 older hello decoder or omitted locator produces an unbound session and cannot create, migrate, or
-consume repository disclosure authority.
+consume repository disclosure authority. From control envelopes 2.10.0 a client of a remote target
+sends a `workspace_claim` instead of the locator, never both; the service commits the claim without
+resolving any path (see "Server targets, selection, and the workspace agent" below, ADR-051;
+dormant in layer 1, where no remote target can be added or selected).
 
 The version 2 hello also carries one closed optional `presentation_context(render_mode,
 output_is_controlling_tty)` produced by the authenticated local client from its actual rendering
@@ -4065,6 +4123,56 @@ service may re-read the same scoped entry (or retry OS keyring) before denying o
 control with `vault_locked`. When the credential succeeds but ready-application activation fails,
 the service preserves the soft-lock reason for up to three consecutive attempts so a later dispatch
 can retry; a fourth consecutive activation failure becomes terminal `unlock_failed`.
+The re-ready runs as one daemon-owned task: a caller that stops waiting (a claim hello at its
+5-second handshake deadline, a cancelled control call) never interrupts it, so it never leaves the
+lifecycle `unlocking` or turns a cancelled activation into `unlock_failed`; a caller that arrives
+meanwhile waits on the same attempt. A lock outranks it: `SERVICE_LOCK`, a session lock, suspend or
+monitor loss cancels the attempt in flight and lets none start until the lock has applied, then
+records its own reason. A lock whose own caller stops waiting (a `SERVICE_LOCK` whose connection
+closed) leaves the unwind to finish without it and does not apply. Shutdown cancels the attempt
+too, and its `shutdown_requested` stands over any lock racing it. The attempt also has its own
+30-second deadline, the budget an on-demand client gives a cold start for the same unlock and
+activation. A cancelled or expired attempt always finishes its unwind, even when cancelled again
+meanwhile: it locks the vault and returns to `locked`, and an expired one keeps its soft-lock
+reason, so a later request tries again. Status shows that soft-lock reason from the moment the
+unwind begins, never the `unlock_failed` a cancelled activation records on its way out, so a
+request arriving during the unwind joins the attempt (or, while a lock applies, is refused at
+once) and is answered with a retryable `vault_locked`. A lock and the deadline reach the attempt
+only where it yields. In a `passphrase` vault the attempt calls the credential store in a worker
+thread twice: the scoped-entry read, and, once a candidate opened the vault, the staged-slot
+reconcile that promotes or discards staged entries. The reconcile is hygiene: the attempt goes on
+to activation without waiting for it, so neither its failure (logged as `auto_unlock` outcome
+`degraded`, reason `staged_reconcile_failed`) nor a store that never answers it delays `ready` or
+relocks the vault. The next attempt waits for a reconcile still running before it reads, so a read
+never overlaps one. A passphrase rotation does not open while a reconcile runs: the reconcile
+discards a staged rotation entry it finds, and the trusted helper stages its replacement once the
+rotation opened. The open waits up to 5 seconds (the handshake deadline) for it, without holding
+activation or the event loop, then proceeds; a reconcile still running then means a store that
+does not answer, and the open is refused as `state_forbidden` (logged as `vault_passphrase_rotate`
+outcome `refused`, reason `staged_reconcile_outstanding`). The released ceremony vocabulary has no
+closer code, so the interactive helper, which stages only after the open, checks the service
+status: with a passphrase vault `ready`, or still `unlocking` (the open needs only an open vault,
+so it can come while the unlock that started the reconcile still activates; status cannot tell
+that from a lock already being unlocked again, where a retry in a moment is also the answer), it
+reports the local reason `credential_store_check_in_progress` (continuation
+`ceremony_retry_shortly`: nothing changed, try again in a moment) on the CLI and in the terminal
+interface instead of the unlock advice. None starts while a rotation is open: only an
+unlock starts one, and the lock before it ends the ceremony. A lock or the deadline ends an
+attempt's wait for either call, not the thread.
+Until a call an attempt stopped waiting for returns, no attempt starts another store call; requests
+meanwhile are answered as locked at once, keeping the soft-lock reason, so a credential store that
+never answers holds one worker thread however often requests retry, and the candidates a read
+returns afterwards are overwritten as they arrive. Status keeps the soft-lock reason throughout;
+the service log records each expiry as `auto_unlock` reason `reready_deadline_exceeded` and each
+attempt that a pending store call turned away as `auto_unlock_store_call_outstanding`. An
+`os_keyring` vault reads its root key on the service's own event loop, so a credential store that
+never answers there stalls the whole service, locks and the deadline included. An activation step
+that runs in a worker thread and joins it before it honours a cancel (for example reading the
+catalog's recovery routes or provisioning a ledger) finishes that step first; the lock or the
+deadline then takes effect. The attempt is background work: it starts in an empty context, so
+neither it nor the READY maintenance it starts carries the triggering call's live-call scope or
+agent channel. An unexpected failure of the attempt is recorded as `service.daemon` operation
+`soft_lock_reready`, whether or not a caller still waits on it.
 The resulting `VAULT_LOCKED` error is retryable only while this automatic recovery path remains
 eligible. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
 `passphrase_required` reasons do not take that path. The trusted unlock helper may submit the scoped entry through the
@@ -4115,7 +4223,19 @@ uninitialized vault). CLI-side staging, promotion, and proof-based discard seria
 bundle-scoped advisory lock held by the initializing process for its whole
 stage→ceremony→promote span and re-checked by discard-only callers while held, so a stale status
 read can never delete a credential whose vault commit is in flight, and generated-passphrase
-installations cannot be stranded. Because trusted initialization may run before any service start
+installations cannot be stranded. That lock covers initialization only. Known limit, tracked in
+issue #1319: rotation staging and promotion run in the trusted helper's process under no lock the
+service's reconcile honours, so the accepting unlock's proof does not cover a rotation in flight
+there. The generated
+rotation (`vault_passphrase_rotate`, ADR-015) stages its replacement before it opens the ceremony;
+a reconcile at service start or after a soft re-ready that reads that entry and returns before the
+ceremony opens discards it, the rewrap still goes through, the helper's promotion fails with
+`missing`, and no stored entry opens the vault. An interactive rotation stages only after the
+service admitted the ceremony, which the soft re-ready rule above keeps clear of a reconcile. A
+generated rotation refused at open keeps the bare `ceremony_state_forbidden`: its replacement is
+already staged, and a retry can be refused as `auto_unlock_entry_exists` until a reconcile clears
+it.
+Because trusted initialization may run before any service start
 has created the bundle root (issue #565), the guard first creates exactly that root, owner-only and
 only when its parent already exists, then verifies the path symlink-free, owned, and owner-only with
 the same helper the service uses; it never creates anything outside the selected bundle. Guard
@@ -4508,6 +4628,1310 @@ agent-authorized rotation stages a locally generated replacement. Startup reconc
 the active and staged scoped credential entries and retains only the candidate that authenticates
 the committed envelope.
 
+### Server targets, selection, and the workspace agent (ADR-051)
+
+[ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) owns every
+name in this section. With no selection file and no target, none of them changes local behaviour:
+clients still send a `workspace_locator`, never declare a workspace agent, and reach the ambient
+service exactly as described above.
+
+**Layer 1 status** (ADR-051, "Built in layer 1, and not yet built"). Only the everyday server and
+named `local` targets can be added, selected and connected to. The remote kinds
+(`local_port`, `ssh`, `https`) stay in the closed kind vocabulary and their `target.json` field
+sets are unchanged, but none can be added or selected, and no remote runtime is registered.
+
+**Layer 4 status** (ADR-051, "Built in layer 4, and not yet built"; ADR-052 decisions 13 to 19).
+`ssh` is open (`OPEN_REMOTE_KINDS == {"ssh"}`): `finishup server add NAME ssh://[user@]host[:port]`
+runs SSH discovery and the consent, `server use NAME` asks for the consent again, the `ssh` runtime
+(`client.helper_runtime.SshTargetRuntime`) is registered, and the `server folders` and `server
+repositories` groups and `service profile` are shown in help. Every layer-1 rule in the list below
+still holds for `https` and `local_port`, except that the `remote_kind_unavailable` text now names
+both open families: "this release connects to FinishUP servers on this computer (the everyday
+server and named local servers, 'finishup server add NAME --local') and over SSH ('finishup server
+add NAME ssh://[user@]host[:port]'). HTTPS and port servers arrive in a later release". `server add`
+tells the kind from the argument's prefix alone (`ssh://`; `--port`, `https://127.0.0.1:` and
+`https://[::1]:` for `local_port`; any other `https://`; anything else refused as a closed kind)
+before anything else. The SSH names are in *SSH servers and the helper (ADR-052, layer 4)*.
+
+**Layer 5 status** (ADR-051, "Built in layer 5, and not yet built"; ADR-053; ADR-052 decisions 20
+to 23). `https` and `local_port` are open too (`OPEN_REMOTE_KINDS == {"ssh", "https",
+"local_port"}`): `finishup server add NAME https://HOST[:PORT][/BASE]` and `--port PORT` run
+discovery without a key, the key and its check, then the consent; `server use`, `server login`,
+`server logout`, `server set --style` and the helper runtime act for both kinds; `server login`
+and `server logout` are shown in help, as are `--port`, `--ca-file`, `--tls-pin` and
+`--key-file`. The layer-1 rules in the list below now apply only to an address that names none of
+the open kinds (`http://`, another scheme), refused `remote_kind_unavailable` with the text "this
+release connects to FinishUP servers on this computer (the everyday server and named local
+servers, 'finishup server add NAME --local'), over SSH ('finishup server add NAME
+ssh://[user@]host[:port]') and over HTTPS ('finishup server add NAME https://host[:port]', or
+--port PORT on this computer); that address names none of them; nothing was added"; no record of
+an open kind shows as not available in this release. The REST names are in *HTTPS servers and
+REST v1 (ADR-053, layer 5)*.
+
+- `finishup server add NAME https://…|--port N` (a kind closed in this release) refuses
+  `remote_kind_unavailable` before any trusted-console prompt, zero-network check, probe, dial,
+  key prompt or write; the kind is told by the address prefix alone, and nothing touches the
+  network. The text is "this release connects to FinishUP servers on this computer (the everyday
+  server and named local servers, 'finishup server add NAME --local') and over SSH ('finishup
+  server add NAME ssh://[user@]host[:port]'). HTTPS and port servers arrive in a later release;
+  nothing was added", printed as one stderr line after the closed token
+  (`remote_kind_unavailable: …`) with exit 2 and nothing on stdout. `server add` has no
+  `--json` option, so no JSON document carries the reason; a script reads the token before the
+  first colon.
+- A remote record another build or a hand edit wrote is read, never used: `server use NAME`
+  refuses `remote_kind_unavailable` and leaves the selection unchanged, as does choosing it in the
+  terminal interface's `/server`, and `server list`, `server status` and `/server` show it as not
+  available in this release. `server login` refuses `remote_kind_unavailable` (no key is read or
+  stored). `server logout` stays the offline reverse path: it deletes a stored key if one exists
+  and never touches the network.
+- Connection and spawn paths keep the refusal for a remote root (retryable
+  `service_unavailable`, phase `target_root_is_remote`: nothing is sent, no service starts), and
+  `runtime_for(kind)` answers `remote_unreachable` / phase `runtime_unavailable` for a remote kind.
+  Every host's SessionStart hook (mapped and unmapped) and the terminal menu (its home line and
+  the actions that need the service) keep that phase and name it with its directive, never a
+  service still to start or `finishup service run`. The directive follows what named the root
+  (`targets.remote_root_continuation`, read by every surface that names the refusal: the CLI,
+  setup, the menu, the terminal interface, hooks and MCP). For the saved selection it is the
+  phase's own continuation (`remote_target_no_local_service`; `server_reauthorization_required`
+  for a stale disclosure, which `finishup server use NAME` cannot confirm while the remote kinds
+  are closed, so it also points to this computer's server and says a later release can authorize
+  that server again): the owner runs `finishup server use local`, then starts a new agent session,
+  since an open session's MCP bridge keeps the root it started with. When an isolation variable or
+  a pinned launcher names the root, `finishup server use local` answers `selection_overridden`, so
+  it is `remote_root_override_clear` (`targets.REMOTE_ROOT_OVERRIDE_CONTINUATION`, attached by the
+  client, never through a reason code): the owner unsets the variable or uses an unpinned launcher,
+  then starts a new agent session. The menu refuses each action whose CLI command is `server_host`
+  in `cli.command_scope` (`menu._ACTION_COMMANDS`: every provider action, refused at the submenu's
+  entry, the harness skill actions, the setup posture, and unlocking or initializing the vault)
+  with that phase and directive on stderr before any prompt, ceremony, service call or write. An MCP tool result keeps the phase as
+  `safe_details.phase` beside its continuation (the normalizer admits exactly the three remote-root
+  phases, `REMOTE_ROOT_REFUSAL_PHASES`), and its text channel reads `Reason: service_unavailable
+  (phase: <phase>).`
+- Setup refuses a remote root at its entry (`cli.setup._remote_root_refused`, reading
+  `targets.active_remote_refusal()`), whether a selection or an isolation variable names it:
+  `setup run` in every form, bare `finishup` and the menu's setup wizard (all through
+  `run_setup_wizard`), and the terminal interface's first run (`FinishUpRuntime.remote_root_refusal`,
+  asked on mount before the interface reads this computer's policy, a read that records its
+  answer, so nothing live is read or written).
+  The phase (`target_root_is_remote`, `zero_network_remote_selected` or
+  `target_reauthorization_required`) and its directive go to stderr with exit 20 before any
+  discovery, question, registration or host-configuration write; stdout stays empty, so a `--json`
+  report keeps its released shape. `setup status` writes nothing and `setup disconnect` is the way
+  out, so neither is refused.
+- `server login`, `server logout` and the `server folders` group are hidden from `--help` and
+  still parse. The terminal interface's `/server` add flow offers only "on this computer" (a named
+  local server), and setup and menu next steps never suggest adding a remote server.
+
+The remote-target names below (claims and workspace calls over a network connection, outside-read
+modes and folders, the zero-network selection rules, the selected server's policy lines,
+credentials, client attestation and the `client_attested` receipt lines) are shared and tested in
+process. In layer 1 they are dormant: they act at most on a remote record or selection another build
+or a hand edit left, which every connection path refuses as above. The remote runtimes and the
+long-lived client processes that hold remote connections arrive with later layers: the background
+helper with SSH (layer 4), and REST with the gateway and native server edges (layer 5). ADR-051 owns
+the model's vocabulary: levels L0 (everything on this computer), L1 (the server keeps tasks and
+review, this computer's workspace agent answers its reads) and L2 (the server keeps a copy of the
+code); connection styles `unix`, relay and direct; server edges ssh, gateway and native; the server
+offers, the client decides.
+
+**Target records.** Both are owner-only, symlink-free canonical JSON in the ADR-048 tag namespace,
+never inside a repository, with exact field sets.
+
+| Record | Location | Fields |
+|---|---|---|
+| `yoetz.server-target/1` | `<ambient state dir>/servers/t_<8 hex>/target.json` | The key set is exact per kind (`client.targets._FIELDS_BY_KIND`); every listed key is present, a nullable one as JSON `null`, and no other key is admitted. Every kind: `schema`, `target_id` (`t_` + 8 lowercase hex, the folder's own name), `name`, `kind`, `created_at` (RFC 3339, milliseconds). `local`: those five only. `https` and `local_port`: also `base_url` (normalized; loopback only for `local_port`), `ca_file` (absolute path or `null`), `tls_pin` (`sha256:<64 hex>` or `null`; at most one of `ca_file` and `tls_pin` is set, and both `null` means the system certificate store) and `credential` (`keyring`, `file` or `null` while no key is stored). `ssh`: also `user` (or `null`), `host`, `port` (22 when the address names none), `remote_root`, `remote_endpoint` (the endpoint the server's own launcher reported at SSH discovery, layer 4; else `<remote_root>/run/control.sock`, derived) and `remote_launcher` (`--remote-launcher`, or the one discovery found), the last three absolute paths or `null`. Every remote kind also has `claim_salt` (base64 of 32 random bytes), `authorized_at` and `disclosure_version` (an integer of at least 1), never `null`. |
+| `yoetz.server-selection/1` | `<ambient config dir>/server-selection.json` | `schema`, `target_id`. Absent means the ambient service. |
+| `yoetz.credential-generation/1` | `<target root>/config/credential-generation` (layer 2, ADR-052) | `schema`, `generation` (32 lowercase hex, random), canonical JSON and a newline. Written only by the owner's own commands on the target's key (`server logout`, `server remove`; `server login`, which stores a key from layer 5), never by a token refresh; a change ends every connection admitted under the previous one (`server_authorization_changed`). Holds no secret. |
+| `yoetz.server-target/2` | `<ambient state dir>/servers/t_<8 hex>/target.json` (layer 3, ADR-052) | A remote record the owner consented to under a server profile: the `/1` key set of its kind plus `consent`, an exact object: `level` (`L1`; `L2` from layer 6), `profile_digest` (`sha256:<64 hex>`), `profile_revision` (`{issuer: 32 hex, revision: integer ≥ 1}`), `retention` (`null` at L1, else `{kind, days}`), `envelope_digest` (the digest of `config/consent-envelope.json`) and `adjusted` (`null`, or `{at, coverage_reduced}` once a narrowed profile adjusted it). Local records stay `/1`; a `/1` remote record still reads and is refused `target_reauthorization_required` (`DISCLOSURE_VERSION` 3). |
+| `yoetz.consent-envelope/1` | `<target root>/config/consent-envelope.json` (layer 3) | The consented envelope (`protocol.consent_envelope` canonical form) and a newline; written only by the owner's consent on the trusted console and by a narrowing adjustment; bound to `target.json` by `consent.envelope_digest`. |
+| `yoetz.server-profile-cache/1` | `<target root>/state/server-profile.json` (layer 3) | `schema`, `fetched_at`, `endpoint` (`{identity_type, identity}`: what the transport observed, never what the server says) and `profile` (a `server-profile` 1.0.0 document); written by whoever fetches a profile (`server add`/`use` here, the helper from layer 4); hooks only read it. |
+| `yoetz.helper-registration/1` | `<target root>/state/registrations/<claim hex>-<worktree hex>-<registrant>.json` (layer 3) | `schema`, `target_id`, `registrant` (16 hex), `source` (`cli`, `hook`, `mcp_bridge`, `mcp_roots`, `registered_project`, `ui`), `claim` (`{identity_kind, digest, worktree}`), `worktree` (absolute, never sent), `repository_key`, `grant` (`{identity_digest, consent_digest, credential_generation}`), `server_profile` (the revision triple), `selection_bound` (the registering connection followed the selection file, rather than a root pinned on purpose), `registered_at`, `expires_at` (a 15-minute lease). At most 64 per target; written and pruned under the registry lock. See *Server profiles and consent*. |
+| `yoetz.helper-status/1` | `<target root>/state/helper-status.json` (SSH targets from layer 4, HTTPS and port targets from layer 5; ADR-052 decision 13) | `generation` (integer ≥ 1; moves on every change of phase or reason and with every new helper process), `phase` (`starting\|ready\|unavailable\|stopped`), `reason` (`null`; for `unavailable` a member of `REMOTE_CONNECTION_PHASES`; for `stopped` `idle_timeout`, `stop_requested`, `helper_failed`, `target_removed` or `zero_network_remote_selected`), `correlation_id`, `pid`, `started_at`, `style` (`relay\|direct`). Written by the helper only, atomically, never creating a removed target's folder; read by clients (the phase of a connection the helper closed, the bridge's availability latch) and `server status`. |
+| `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets from layer 4, HTTPS and port targets from layer 5) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper (and, for SSH, the master) stopped. |
+| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest. The stamp is advisory (the release a client compares, the status latch); no process is signalled by it. |
+| `yoetz.helper-epoch/1` | `<target root>/state/helper-epoch` (SSH targets from the layer-4 review, HTTPS and port targets from layer 5) | `schema`, `epoch` (32 lowercase hex, random), canonical JSON and a newline; absent reads as `none`. Every stop (`server disconnect`, `remove`, `use <other>`, `set --style`, `login`, `logout`, a replacement) writes a new token; the helper stops on its next tick when it moves, and one spawned with an older token (`helper run --epoch`) exits without serving once it holds the lock. Never sent to a server. |
+| `helper-epoch.lock` | `<target root>/state/helper-epoch.lock` (layer 7) | An empty owner-only flock: the fence between a client replacing one exact helper and a helper taking the singleton lock. The helper holds it while it takes `helper.lock` and reads the epoch; a replacing client holds it while it checks that the holder it decided about still holds the target and moves the epoch (otherwise it moves nothing and decides again). Never sent to a server. |
+| `yoetz.ssh-master/1` | `<target root>/state/ssh-master.json` and `state/ssh-master.lock` (SSH targets, direct style, layer 4 review) | `schema`, `host_key` (`sha256:<64 hex>`: the consented key the master verified) and `socket` (`[device, inode]` of `run/m` when it was verified); written under the flock `ssh-master.lock` by the process that started and verified the direct style's master, removed with every `-O exit`. A master is ridden only when this record names the current consent's key and its socket. Never sent to a server. |
+| `profile-refresh-requested` | `<target root>/state/profile-refresh-requested` (SSH targets from layer 4, HTTPS and port targets from layer 5) | An empty marker a client leaves when the server refused its hello or request with `server_profile_changed`; the helper takes it and fetches the profile (at most once per 30 seconds). |
+| `helper.stderr` | `<target root>/log/helper.stderr` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper process's standard error (owner-only, `0600`, appended), made only beneath an existing target folder: what the interpreter itself prints, such as an unexpected failure. OpenSSH's diagnostics go to the helper through a pipe and only choose a closed reason; they are not written there. |
+| `yoetz.server-profile-revision/1` | `<service state dir>/server-profile-revision.json` (server side, layer 3) | `schema`, `issuer` (32 hex, random), `revision` (integer ≥ 1), `profile_digest`; advanced at service start when the offer's digest changes; one that cannot be read is replaced under a new issuer. |
+| `yoetz.everyday-repository-policy/1` | `<ambient state dir>/servers/everyday-repositories.json` (layer 2, ADR-051 decision 8) | `schema` and `repositories`: per repository `key` (`sha256:` over the shared repository identity), `no_network`, `no_network_since` (the start of the current no-network stretch, or `null`), `reported_at` and up to 8 `worktrees`; at most 256 entries and 256 KiB (the writer keeps the reader's bound), permitted ones evicted first; an update that still would not fit is not written and is recorded in `yoetz.everyday-repository-overflow/1`. Written only while a remote target record exists (`targets.remote_target_recorded`, O3); deleted when the last one is removed. Never sent to a server. |
+| `yoetz.everyday-repository-overflow/1` | `<ambient state dir>/servers/everyday-repositories-overflow.json` (layer 2) | `schema` and `overflowed_at`: when an update of the repository reports last did not fit their 256 KiB bound; removed by the next update that fits and with the reports. `server repositories list` names it. Never sent to a server. |
+| `yoetz.server-repositories/1` | `<target root>/config/repositories.json` (remote kinds only, layer 2) | `schema`, `target_id` (the root's own) and `repositories`: per repository `key`, `choice` (`send`, with its `disclosure_version`, or `keep`), the `no_network_since` it was made in, `decided_at` and the `worktree` it was made from; at most 64. Written by `server repositories add` (trusted console), `keep`, and `remove [--all]`; never sent to a server. |
+| `yoetz.server-folders/1` | `<target root>/config/folders.json` (remote kinds only) | `schema`, `target_id` (the root's own), `folders` (sorted, unique, at most 32 absolute paths that pass `admitted_input_root_valid` and neither are nor hold the home directory), and `mode` (`local\|listed`) once the owner chose one (at `server add`, or with `server folders mode`). Every remote kind has the same two modes and no default: no `mode` means `listed` (`not_chosen`), except an `https` target whose base URL matches an origin in `client.server_folders.OFFICIAL_ENDPOINT_ORIGINS` (scheme, host, port and path prefix; layer 5 replaced layer 1's hostname list `OFFICIAL_ENDPOINT_HOSTS`) and that trusts the system certificate store, which is `local` (`official_endpoint`). An absent record means no folder and no mode; one that cannot be read means `listed` with no folder. In both modes the folders also admit task inputs for that target's claim-bound sessions, whatever the server's own input-root policy names (maintainer decision 2026-11-07). Written only by `server add` and `server folders add`/`remove`/`mode`, never sent to a server. |
+
+A target name matches `[a-z0-9][a-z0-9-]{0,15}` and `local` is reserved. The name appears in
+`target.json` and in owner-facing output on this computer: the `finishup server` commands (`add`,
+`use` and `remove` confirm it; `list`, `status`, `test`, `connect`, `disconnect`, `set` and the
+`folders` group, hidden before layer 4, show it) and the terminal interface's `/server` (its choices and "Using the server
+NAME"). Structural errors (closed reason tokens and their fixed refusal text), logs and receipts
+name a target by `target_id` only, and never print a name, host, address or path.
+
+**Target kinds** (closed): `local` (a named persistent instance root with its own service),
+`local_port` (`https://127.0.0.1:<port>` or `https://[::1]:<port>`), `ssh`
+(`ssh://[user@]host[:port]`, optional remote isolated root and absolute remote launcher) and
+`https` (`https://host[:port][/base]`; no userinfo, query or fragment; plain `http` refused). Every
+kind except `local` is a remote kind.
+
+**Root resolution.** `config.paths.active_root()` resolves `FINISHUP_ISOLATED_ROOT` (or
+`YOETZ_ISOLATED_ROOT`), then the ADR-028 runtime pin, then the selection file, else `None`
+(ambient). It is memoized once per process and imports only `json` and `os`.
+`selection_override(root)` resolves one root for the calling context only (a `contextvars`
+variable that `asyncio.to_thread` workers inherit), so a probe in one thread is never seen by
+another and never changes the process's memo. Every answer, remembered or overridden, still needs
+the root's `target.json`: once `server remove` deleted it (an MCP bridge started on that target),
+it fails closed with `isolation_root_invalid` as a fresh read would, so no path helper recreates
+the folder. `isolated_root()` is
+unchanged and keeps meaning "explicitly isolated". State, runtime, config, log, cache and bundle
+roots derive from `active_root()`; registrations, launch lines, the Codex RECORD proof and the
+upgrade guard stay on `isolated_root()`, the host-configuration lock and project-membership record
+on `installation_state_dir()` (the explicit root's state, else the everyday one), and an AST
+test locks that classification of every call site. `isolation_binding()` is the closed set
+`ambient|environment|runtime_pin|environment_and_pin|selection`; isolation report schema
+`service/isolation-report-1.1.0` adds `selection` to `binding`. A selection naming a missing or
+unsafe root fails with `isolation_root_invalid` and never resolves to ambient; `finishup server`
+commands name that state `selection_invalid`, and `server use local` and `server remove
+--select-local` clear it without resolving it (they check only the variable and the pin).
+`config.paths.server_target_kind(root)` is the service's own minimal, fail-closed read of a root's
+`target.json` kind. A service started on demand serves its spawner's root: a resolved root rides in
+the isolation variable, and the everyday installation in the hidden `service run --ambient-root`
+flag, whose parameter callback calls `config.paths.ignore_server_selection()` before the
+server-host guard runs, so the service never reads a selection its spawner did not use.
+
+**Commands and the runtime seam.** `finishup server add|list|use|status [--json]|test|remove|
+login|logout|connect|disconnect`, `finishup server set NAME --style relay|direct` (layer 4) and
+`finishup server folders add NAME FOLDER|list NAME|remove NAME FOLDER|--all|mode NAME local|listed`
+(`cli/server.py`). A registry folder that holds no
+`target.json` at all is a leftover of an interrupted add or remove, not a target:
+`targets.list_targets()` skips it (a record that cannot be read still fails closed),
+`leftover_target_ids()` names it, `server list` prints one line per leftover with the command
+that deletes it, and `server remove ID` (an id is never a name) deletes it under the registry
+lock once it still holds no record (`remove_leftover_root`; otherwise `target_unknown`). A
+`server remove NAME` whose folder deletion fails part way refuses `target_partly_removed` (after
+recording that a key it deleted is gone), naming the same command or the leftover's id.
+`use`, `login` and `logout` read a target's record again under the registry lock after their
+slow step (the typed name, the key prompt and check) and change only their own field
+(authorization or `credential`); a target removed meanwhile is `target_unknown` (for `login`,
+after deleting the key it just stored) and its folder is never recreated. In layer 1 only
+`logout` keeps that step: `login`, and `use` of a remote record, refuse first. `server add` for any
+remote kind (refused first in layer 1, `remote_kind_unavailable`, which leaves this block's
+remote-kind steps dormant there) asks the outside-read mode on the trusted console inside its
+typed confirmation, after
+the disclosure and before the typed name: the question `client.server_folders.OUTSIDE_READ_QUESTION`
+with one line per mode (`OUTSIDE_READ_MODE_LINES`), answered `local` or `listed`; Enter alone or
+another word asks again, up to three answers, and then, or at end of input or an interrupt,
+nothing is added (`outside_reads_not_chosen`). `--outside-reads local|listed` answers it up
+front (any other value is `outside_read_mode_invalid` before any console; with `--local` it is
+`usage`), and the console then shows the mode it authorizes. When the mode is `local`, answered
+or by the flag, the console shows the body of the `server folders mode NAME local` notice (what
+that mode lets the server read, a rule-breaking server included) before the typed name, with no
+extra prompt. An official endpoint (`server_folders.official_address`) is not asked, sees no such
+notice, and is left unrecorded, `local`. The answer is
+written with `set_mode` under the registry lock that creates the target; where it cannot be,
+the target is still added and `add` says it is `listed` until the owner chooses. The terminal
+interface's `/server` add flow offers only a server on this computer (since layer 1), so it asks
+no outside-read question and offers no official service; `finishup server add official` is the
+official preset (layer 5, *HTTPS servers and REST v1*). `server folders mode NAME local`
+records `local` only after the typed name on the trusted console, unless the owner already chose
+`local`, and even for an official endpoint, which is `local` unrecorded; without the console an
+official endpoint is left unrecorded (it says so and exits 0) and any other target is
+`trusted_console_required`. `mode NAME listed` is its reverse and asks nothing; any other value
+is `outside_read_mode_invalid`. A change of mode or folders applies from the workspace agent's
+next read; a read already in progress may still return files. `server folders remove` says so in
+either mode, and that a review the server already prepared may still send what it read; in
+`local` mode it also says the server no longer reads the files a task names beneath that folder
+unless its own policy covers them. The `local`-mode notice (`cli.server._LOCAL_MODE_BODY`, at
+`server add` and `server folders mode NAME local`) says a listed folder admits a task's files
+beside the server's policy. `server folders add`
+refuses a folder that `client.server_folders.folder_admissible` rejects (`folder_invalid`: not the
+input-root shape, the home directory, a folder holding it by spelling or identity, or one in its
+private trees) before it asks on the trusted console, and `add_folder` applies the same rule again
+under the registry lock. The input-root shape (`domain.privacy.admitted_input_root_valid`, with
+`cli.privacy_setup.admitted_root_from_path` for existence and links) refuses exactly: a path that
+is not absolute and normalized, missing or reached through a link, over 190 characters or 16
+parts, a part with other characters than letters, digits and `. _ + @ -` or starting with a dot,
+the filesystem root, and `SYSTEM_DIRECTORY_PREFIXES` (`/boot`, `/dev`, `/etc`, `/proc`, `/run`,
+`/sys`, `/var/run`, `/private/etc`, `/private/var/run`) and beneath them; the private trees are
+`Library`, `AppData` and `snap`. The `folder_invalid` text and the servers guide name exactly
+these and nothing broader ("system folder" is not a rule: `/usr/lib` is admitted). `server folders remove NAME --all` on a record that cannot be read
+replaces it with an empty one in `listed` mode (`clear_folders` → `reset_to_listed`). `server
+add` prints a remote target's mode and the command that changes it. `server status --json` emits
+`server-target-status-1.0.0` and names the deciding root source, never a credential; for a remote
+target its `target.outside_reads` carries `mode` (`local|listed`), `mode_source`
+(`owner|official_endpoint|not_chosen|unreadable`) and the listed `folders`, and is null for any
+other target (the golden vector is `fixtures/service/server-target-status.case.json`). The text
+form (`cli.server.status_lines`) heads with the target and, only for the server this process uses
+(`cli.server.target_in_use`), `chosen by: <source>`; a target named that is not in use reads `not
+the server in use` instead, in `server status NAME`, `server test NAME` and `/server`, while the
+JSON `source` keeps naming what decides this process's root. The text
+form, `server folders list` and the terminal's `/server` status show the same, and for
+`not_chosen` the two `server folders mode` commands that choose. For `unreadable` they say the
+record is damaged or not private, and name the one repair with the target's name and where to run
+it, `finishup server folders remove NAME --all` on this computer, then `server folders mode NAME
+local` to choose local again (`cli.server._unreadable_record_lines`); `server folders list` shows
+this and exits 0 rather than refusing, while `add`, `remove FOLDER` and `mode` refuse
+`folders_record_invalid` or `folders_record_unsafe` with the same repair (fixed text, `NAME`) and
+"run this command again". The terminal's `/server` folders commands include `server folders
+remove NAME --all` and say it repairs a damaged record. The document's top-level
+`zero_network_selection` is null, or the zero-network item (ADR-051 decision 8): `reason`
+(`zero_network_remote_selected|zero_network_selection_unreadable`), `target_id`, `kind`
+(`local_port|ssh|https`) and `detail` (a closed token), all nullable but `reason`, and
+`policy_read` (`live|last_reported`) with `last_reported_at` (a `YYYY-MM-DDTHH:MM:SS.mmmZ` time,
+set exactly when `policy_read` is `last_reported`; the schema's `if`/`then`/`else` and the model's
+validator both enforce it; amended in place, 2026-11-07, as 1.0.0 is unreleased). The `probe`
+carries its own `last_reported_at`, set exactly when its `outcome` is `not_probed` (nothing was
+sent because this computer last reported zero-network: `reason` `zero_network_remote_selected`
+for the selected target, `zero_network_in_force` for any other): when this computer reported that
+policy, the time `server login`, `connect` and `test` name (`cli.server.zero_network_refusal`);
+the text and `/server` say "last reported, at <time>" beside the reason (enforced likewise, amended
+in place for the same reason). It is the fact
+(`ZeroNetworkSelection.fact()`) of the item
+`cli.zero_network_selection.find_zero_network_selection()` reports, filled by
+`cli.server._zero_network_selection`; null when that check reports nothing (no selection or a server
+on this computer, an isolation variable or pin, or this computer's policy permits network use, was
+never set up, or cannot be read and was not last reported zero-network). `build_status_document(name, *, now=None, zero_network=None)` asks
+the check itself unless the caller passes the item it already found: `server status` passes the one
+it printed on stderr, so the stderr line and the field are the same item from one policy read; the
+terminal interface's `/server` status passes the item `/server` read just before while
+`still_selected` holds (else none), and `server test`, which never shows it, passes none, so neither
+asks this computer's service a second time.
+`connect`, `disconnect` and `test` dispatch through `finishup.client.target_runtime.TargetRuntime`:
+`ensure_ready(root) -> None`, `stop(root) -> None`, `probe(root) -> ProbeResult`, registered per
+kind (`register_target_runtime(kind, loader)`, looked up by `runtime_for(kind)`). Layer 1
+registers only `LocalTargetRuntime` for `local`, so `runtime_for` raises
+`TargetRuntimeError("remote_unreachable", phase="runtime_unavailable")` for a remote kind; the
+remote runtimes arrive with the background helper (layer 4) and REST (layer 5). Layer 4 registers
+`SshTargetRuntime` for `ssh` (`ensure_ready`: the shared gate, then a connection as any client
+makes one; `stop`: the helper through its stop epoch (no pid is signalled; it succeeds once the
+lock is seen free) and `ssh -O exit` for the master, `target_still_connected` when the helper
+does not stop; `probe`: status round trips over the real transport); `https` and `local_port` keep
+the layer-1 answer until layer 5 registers the same runtime for both (`ensure_ready` through the
+helper or the direct REST dial; `stop` the helper through its stop epoch, with no master to end).
+The server-host commands `finishup service start` and `finishup service endpoint --json` are added.
+
+**Command scope.** `cli/command_scope.py` labels every Typer and terminal-interface command `any`,
+`server_host` or `client_only`. `require_server_host()` refuses a `server_host` command while the
+active root is a remote target, with `requires_server_host` (`ServerHostRequired`). A root that
+resolves but whose `target.json` cannot be read fails closed with `ServerTargetUnreadable` (a
+`ServerHostRequired` whose `reason` is the record's `target_root_unsafe` or
+`target_record_invalid`); `targets.active_target_record()` raises `TargetRecordUnreadable` for it.
+
+**Zero-network and a remote selection are never in force together** (ADR-051 decision 8,
+maintainer decision 2026-11-07, replacing 2026-11-06). `cli/zero_network_selection.py` and
+`client/everyday_policy.py` own it. In layer 1 the marker is still kept, but the refusals, guards
+and displays below fire only for a remote record or selection another build or a hand edit left:
+`server add` of a remote kind refuses `remote_kind_unavailable` before any zero-network check,
+and no connection to a remote target is opened.
+
+*The marker.* `client.everyday_policy`: `record_reported_policy(*, zero_network, now=None) -> bool`,
+`read_marker() -> ReportedPolicy | "absent" | "unreadable"`, `last_reported_zero_network() ->
+ReportedPolicy | None` (`ReportedPolicy(zero_network: bool, reported_at: str)`), `remove_marker() ->
+bool`, `marker_path()`. The file is `<ambient state dir>/servers/everyday-policy.json` (constant
+`MARKER_NAME`), owner-only (0600 in a 0700 folder), canonical JSON with exactly `schema`
+(`yoetz.everyday-network-policy/1`), `zero_network` and `reported_at`, at most 512 bytes; written
+atomically (temporary file, fsync, rename, which replaces a damaged file or a link without
+following it); read with `O_NOFOLLOW` after an `lstat` that requires a regular file of this user
+with no group or other bits. Under an isolation variable or runtime pin nothing records and the
+read is `absent`. Nothing raises. Writers: `everyday_network_state()` on every answer (and
+`no_policy` removes it), `remember_reported_policy(response)` for a `privacy_get_effective` answer
+of this computer's machine scope on the everyday root (`privacy show`, the menu's privacy view,
+setup's update-policy read), and `after_policy_change[_async]()` after every committed change.
+The test suite points `_location` at a per-test folder (`tests/conftest.py`).
+
+*Reads.* `everyday_network_state()` answers `zero_network|network_permitted|no_policy|unreadable`
+from the everyday installation's effective machine-scope policy, in a fresh `contextvars.Context`
+(`asyncio.to_thread` copies a context naming the running async library under `anyio.run`), which
+enters `selection_override(None)` again itself. In layer 1 neither `server add` nor `server use`
+reads it: both refuse a remote kind with `remote_kind_unavailable` before any policy read, and a
+server on this computer needs no network, so `zero_network_in_force` arises only from
+`zero_network_refusal(record)` below. `find_zero_network_selection()` reads the selection file
+afresh (`read_selection_on_disk()`, never the memo) and returns a
+`ZeroNetworkSelection(reason, target_id, kind, detail, policy_read, last_reported_at)` under
+`zero_network` (`policy_read="live"`), or under `unreadable` when the marker says zero-network
+(`last_reported`), never under an isolation variable or pin, with the closed `reason`
+`zero_network_remote_selected` (`target_id`, `kind`) or `zero_network_selection_unreadable`
+(`detail`: `selection_invalid`, `target_root_unsafe`, `target_record_invalid`, or a path-safety
+reason). Its `lines()`, `line()`, `next_step()`, `indicator()`, `heading()` and `fact()` say
+"refused" and `finishup server use local`.
+
+*Before a change.* `guard_policy_change(*, forbids_network, interactive) -> "clear" | "switched"`
+raises `ZeroNetworkChangeStopped(reason, cancelled=)` (a `ValueError`). It applies when
+`candidate_forbids_network(candidate)` (a `PrivacyPolicy` or its wire JSON whose
+`effective_scope.kind` is `machine` and `network_egress_permitted` is false), the process is on the
+everyday root (no isolation variable or pin, `active_root()` is `None`) and the selection on disk
+names a remote kind or cannot be read. On the trusted console (only with `interactive` and not
+`machine_readable_requested()`), read on the calling thread with `signal.default_int_handler`
+installed for the read, `1` runs `use_target("local")` and returns `switched`; anything else
+(Enter, end of input, Ctrl-C) cancels (`cancelled=True`, "Cancelled: nothing was changed." on
+stdout). Otherwise one stderr line `<reason>: this change would … nothing was changed. Run
+'finishup server use local' in your own terminal, then make the change again.` and
+`cancelled=False`. Callers: `cli.app._call_support` for `privacy propose|tighten` (exit code of
+`INVALID_REQUEST`, stdout empty, nothing sent), and `privacy_setup._propose_pending`,
+`_tighten_machine` and `_propose_machine` (`interactive=prompt and _interactive_terminal()`; the
+relayed `propose_privacy_candidate` passes `prompt=False`); the questionnaire reports
+`PrivacySetupReport("cancelled", reason=<token>)`. Before an approval of a pending proposal is
+sent, `cli.privacy_control` guards it again from its preview (`preview_forbids_network(preview:
+PrivacyPolicyDecisionPreview) -> bool`: a `global` `network_egress` change to off in a
+`machine_ceiling` member, or in a single-scope `changes` diff): the interactive ceremony with
+`interactive=True` once the owner answers approve, a supplied decision (`decide_policy(...,
+decision=, passphrase=)`, the relayed grant) with `interactive=False`. A stop cancels the ceremony
+session and raises `ZeroNetworkChangeStopped`: `privacy decide-policy` (which sets
+`machine_readable_answer(json_output)`) exits with `INVALID_REQUEST` through `_trusted_call`,
+stdout empty; the questionnaire's decision reports `PrivacySetupReport("cancelled", <proposal id>,
+reason=<token>)`; the relayed grant reports `repository_privacy_grant_failed` after the refusal
+line. `machine_readable_answer(enabled)` (a context
+variable) marks a `--json` command whose change happens further down (`privacy
+credential-heuristic|conversations|input-roots`). While a remote target is selected only a process
+that resolved the everyday root before the selection changed can make such a change, since
+`server_host` privacy commands are refused with `requires_server_host` and `privacy
+tighten|propose` reach the target.
+
+*Switching.* `cli.server.use_target(name: str) -> TargetSwitch` is the one way the selection
+changes (`server use`, the choice `1` above, and the terminal interface's `use_server`); it asks
+nothing. `use_target("local")` clears the selection without resolving it, so a damaged or dangling
+selection is cleared too. Any other name must be a target: a remote kind is refused with
+`ServerCommandRefused("remote_kind_unavailable")` (fixed text ending "the selected server is
+unchanged") on its first read and again on the record re-read under `registry_lock()` immediately
+before `write_selection`, so a record another process rewrote as a remote kind in between is
+refused and nothing is written. While the isolation variable or a runtime pin is in force both
+forms refuse `selection_overridden`. The result, `TargetSwitch` (`record`, the target now selected
+or `None`; `left`, the remote target the selection named before when the switch moved away from
+it; `left_open`; `left_lines()`), stops `left` through
+`runtime_for(left.kind).stop(target_root(left.target_id))` after the selection changed, as `server
+disconnect` does; a kind with no registered runtime (every remote kind in layer 1) has nothing of
+this client's to stop and is not left open. `server use`, the choice `1` and the terminal
+interface's `use_server` (`tui.models.ServerSwitch`: `indicator`, `left_lines`, `left_open`)
+print its lines, and a stop that did not finish goes to stderr (UNPROVEN in the terminal
+interface) with `finishup server disconnect` while the switch stands.
+
+*The connection check.* `targets.require_current_authorization(record)` refuses a remote record
+with `TargetError("zero_network_remote_selected")` while `last_reported_zero_network()` answers,
+before `target_reauthorization_required`. `zero_network_remote_selected` is a protocol reason code
+and a member of `REMOTE_CONNECTION_PHASES`, continuation `zero_network_local_server_required`
+(directive: this computer makes no network connections, nothing was sent, ask the owner to run
+`finishup server use local`, then restart the session; nudge: never select a server or change the
+policy for the owner). `cli.server.zero_network_connection_refusal(record)` (a
+`ServerCommandRefused` or `None`) names it for one target while the marker says zero-network: the
+selected target (or any, while `read_selected_target_id()` raises) is
+`zero_network_remote_selected`; any other remote target is `zero_network_in_force` with the fixed
+sentence naming `reported_at`, the target id and `finishup privacy setup`. `server login` refuses
+its key check and `server connect` its `ensure_ready` with it, and `build_status_document` sends no
+probe: its `probe` is `{"outcome": "not_probed", "reason": <that token>, ...}` (all other fields
+null, `samples` 0), `status_lines` says "State: not probed, nothing was sent (<token>)" and the
+fix, and `server test` exits with the refusal (exit 2) instead of "did not answer". A client-owned
+process that keeps connections to a remote target open or reconnects on its own reads
+`last_reported_zero_network()` itself before each connection and at least once a second, closes
+what it holds and sends nothing more once it answers. Layer 1 has no such process; from layer 4
+the background helper of an SSH target is one (ADR-052 decision 14: it records
+`zero_network_remote_selected`, asks its OpenSSH master to exit and stops, with no last delivery).
+
+*Displays.* Owner displays carry the item, live or last reported: `server status` (stderr, and
+beside `--json` also the document's `zero_network_selection` above), `server list`, `setup status`
+(stderr; `yoetz.setup-status/2` is unchanged), the setup wizard's `next_steps`, the menu home, the
+terminal interface's header indicator and `/server` (`FinishUpRuntime.zero_network_heading()`), and
+`setup status --next`, whose `yoetz.setup-readiness/1` `facts` gain `server_selection`: `{reason,
+target_id, kind, detail, policy_read, last_reported_at, next_command}` (`next_command` is the
+pinned continuation of `server use local`), and whose top-level `next_command` is then that same
+continuation, whatever the operation: every other step waits for the switch, and a readiness probe
+the refusal stopped reads as an unavailable service a restart would not fix. Every field is a
+generated id, a closed token or a fixed-shape time; no owner-typed name.
+
+**Which server's policy a command changes** (ADR-051 decision 8). `cli/policy_server.py` owns it.
+`selected_policy_server() -> PolicyServer | None` reads `targets.active_target_record()` (the
+process's resolved root, not the selection read afresh) and answers only for the remote kinds
+(`ssh`, `https`, `local_port`); `None` for the everyday root, an isolated root, a named `local`
+target and a record that cannot be read. `PendingProposal(proposal_id, expires_at=None)` is a
+proposal waiting on the server host (`of(id, expiry)`, `from_answer(answer)` for a
+`decision_required` body, `from_report(report)` for a `PrivacySetupReport`); `decide_command()`
+is `finishup privacy decide-policy <id>` only for an id of the closed `ppr_<uuid>` shape and
+`deadline()` is `before <YYYY-MM-DD> <HH:MM> UTC` (rounded down) only for an expiry of the closed
+`YYYY-MM-DDTHH:MM:SS.mmmZ` shape, else `before it expires`; a value of another shape is never
+printed. `PolicyServer(target_id, kind)` renders fixed lines: `before_line()` (`Privacy policy
+changes here apply to the selected FinishUP server <id> (<kind>), not to this computer's everyday
+FinishUP.`), `applied_line()`, `pending_line(pending)` (the change waits and the policy has not
+changed, because a trusted decision runs only on that server host; `Run '<decide command>' on
+that host <deadline>; after that it expires unchanged, and making the change again here proposes
+it anew.`, or `Make the change again here to propose it anew.` without a usable id),
+`unchanged_line()`, `unconfirmed_line()` (points at `finishup privacy show`),
+`answer_line(answer)` for a `tightening_applied` / `decision_required` answer (anything else is
+unconfirmed), `result_line(report | None)` for a `PrivacySetupReport` (`configured` applied;
+`cancelled` with `requires_server_host` pending with the report's `proposal_id` and `expires_at`;
+`unchanged|cancelled|failed` unchanged; `None`, a questionnaire that raised, unconfirmed),
+`summary_suffix()` (` (on the FinishUP server <id> (<kind>))`), `privacy_next_step(pending)`
+(setup's privacy next step in place of `finishup --privacy`: the decide-policy continuation with
+the deadline or `rerun 'finishup setup run' here`) and `credential_next_step()` (in place of
+`finishup --set`: both it and `finishup provider credential set` run only on that server's
+host). `privacy tighten|propose` (`_call_support`) print the before line, then the answer line
+or, on any exception after it, the unconfirmed line, all on stderr in text and `--json` modes;
+the stdout document (the released control result body) is unchanged. `run_privacy_setup` prints
+them on stdout around `_privacy_setup_questionnaire(decide_here=)`, which proposes through
+`_propose_pending() -> PendingProposal | None` (`_propose()` returns its id for the other callers)
+and on a remote target returns a widening's proposal as `PrivacySetupReport("cancelled", …,
+proposal_id, "requires_server_host", …, expires_at)` without opening the local decision ceremony.
+Setup reads the server once, before the provider and privacy steps (`_setup_policy_server()` in
+setup run and in `run_provider_setup`), and keeps it with the step's waiting proposal: the
+summary's privacy lines (`_emit_human_report(report, policy_server=)`,
+`_emit_provider_setup_layer_report`, `_emit_codex_subscription_layer_report`,
+`_emit_privacy_incomplete(…, policy_server=, pending=)`) end with that server's suffix, and on a
+remote server `_NEXT_PRIVACY` in `next_steps` (the JSON report's list too, a free-text list) and
+the closing `--privacy` / `--set` lines become `privacy_next_step(pending)` and
+`credential_next_step()`. The terminal interface's `_hand_over_privacy(operation)` reads
+`FinishUpRuntime.selected_policy_server() -> PolicyServer | None` before each of its four
+questionnaire hand-overs (`/privacy`, local-only, Codex subscription, API provider binding) and
+says `result_line(report | None)` for that server afterwards, also when the questionnaire raised
+or the owner switched servers inside it. `privacy decide-policy` stays `server_host` (refused with
+`requires_server_host`, whose line names `<id> (<kind>)`). No output schema changes.
+
+**Credentials.** `finishup.client.credentials.CredentialSource` reads, stores and deletes one
+target's credential, so a later OAuth source can replace the API key. `KeyringOrFileCredential` uses
+the OS credential store (service `yoetz.server-credential.v1`, account = `target_id`) and, where
+none is usable, the macOS keychain is missing or locked (read first without user interaction), or
+it refuses the write, the owner-only file store at `<target root>/config/credential`; `store()`
+raises `credential_store_unavailable` only when the file cannot keep the key either, and returns
+the location the caller records (ADR-051 decision 7).
+`delete()` raises `credential_store_unavailable` only when the store the key is recorded in cannot
+be used (a recorded platform store that cannot be loaded now included); the other store is tidied
+best effort. `server remove` asks no store for an SSH target, and when the recorded platform store
+cannot be used it
+still removes the target and names, on stderr, the entry left there (service and target id). The
+credential never appears in argv, the environment, `target.json`, a registration, a log, hook
+output, an MCP frame or JSON output. In layer 1 `server login` refuses `remote_kind_unavailable`,
+so no key is stored; `server logout` and `server remove` still delete one another build stored,
+without touching the network. From layer 5 `server add` of an HTTPS or port target and `server
+login` store a key the server accepted (or, for `login`, one it did not answer about, "not
+verified yet"), and `logout` also moves the credential generation and stops the helper (*HTTPS
+servers and REST v1*).
+
+**Control envelopes 2.10.0.** All four control envelopes move together. The wire is shared and
+complete in layer 1, where no FinishUP client sends a claim or declares a workspace agent outside
+in-process tests; every client of a local root still sends its locator.
+
+- Hello: optional `workspace_claim` `{schema_version: "1.0.0", identity_kind:
+  "git_common_root"|"directory", digest: "sha256:<64 hex>", worktree: "sha256:<64 hex>"}`,
+  mutually exclusive with `workspace_locator` (`workspace_binding_conflict`); optional
+  `workspace_agent` `{schema_version: "1.0.0", operations: [<operation>...], max_reply_bytes:
+  <int>}`.
+- Client claim: `HMAC-SHA256(claim_salt, "yoetz/workspace-claim/v1\0" ‖ identity_kind ‖ 0x00 ‖
+  canonical root)`, the canonical root from `adapters/workspace_root.py`; every linked worktree of
+  one repository claims the same digest. Worktree digest: `HMAC-SHA256(claim_salt,
+  "yoetz/workspace-worktree/v1\0" ‖ worktree top level)`, over the directory the connection's
+  agent serves (its locator).
+- Server commitment: the installation MAC under domain `yoetz/repository-claim/v1` over
+  `identity_kind ‖ digest`, giving `RepositoryPrivacyContext(identity_kind="client_claim",
+  workspace_locator=None, workspace_handle=<handle>)`. No path is resolved for a claim-bound
+  connection. Worktrees share a commitment (privacy authority and consent scope), not a handle.
+- Hello-result: required `workspace_binding: "none"|"local_path"|"client_claim"` on every
+  admitted answer (only the manifest-mismatch answer omits it, keeping the frozen pre-2.10 shape,
+  and the client requires it on every other); optional
+  `workspace_handle` = `client:` + the first 16 hex of `SHA-256("yoetz/workspace-handle/v1\0" ‖
+  commitment ‖ 0x00 ‖ worktree digest)` (`ports.workspace_agent.workspace_handle_for_claim(
+  commitment, worktree)`), one per claimed worktree, carried only with `workspace_binding:
+  "client_claim"` (the 2.10.0 schema enforces it). The client refuses an answer whose binding is
+  not the one its hello asked for as `protocol_mismatch`, so a handle on a session it did not
+  claim is refused there; a handle beside any other binding fails frame validation first as
+  `frame_invalid`, and the client's own handle check stays behind it as defence in depth.
+  `ControlSession.workspace_worktree` keeps the claim's worktree digest on both sides.
+- `workspace_call` (server→client, a control-result branch): `kind`, `protocol_version: "1.0"`,
+  `call_id`, `service_instance_id`, `service_generation`, `operation`, `arguments` (JSON object),
+  `deadline_ms`. Sent only to a connection whose hello carried `workspace_agent`.
+- `workspace_reply` (client→server, a control-request branch): `kind`, `protocol_version: "1.0"`,
+  `call_id`, `outcome: "ok"|"unavailable"|"refused"|"failed"`, `result` (JSON or `null`),
+  `reason` (closed token or `null`).
+- On a claim-bound connection a `start` that names a workspace must name the handle; an absolute
+  path is `workspace_ref_not_portable`. The MCP bridge and the CLI rewrite an absolute
+  `workspace_ref` to the handle before sending, but only one that names the worktree the
+  connection serves (rule R, below). A start that names no workspace is admitted where it is on
+  one computer, and any session it opens records the connection's handle in its opening event
+  (`execute_start(..., session_workspace_ref=)`, outside the request identity).
+- **Rule R: the connection's own folder decides the repository and the worktree** (the owner's
+  choice, 2026-11-12). With a server elsewhere, as on `main`, the folder a connection was made from
+  decides which repository and worktree its tasks read; `workspace_ref` never selects disclosure
+  authority. The client compares an absolute `workspace_ref` with that folder before it rewrites
+  it (`client.workspace_ref.names_served_workspace`):
+  - **The comparison.** Both paths are resolved (every symlink followed, `strict`) and reduced to
+    their worktree top: the nearest `.git` entry, a directory for a primary checkout or a file for
+    a linked worktree or a submodule, found as the connection's claim finds it
+    (`canonical_workspace_locator`). The two tops are compared by file identity
+    (`os.path.samefile`: device and inode), never as strings. So a subfolder of the served
+    worktree, a symlinked spelling of it and, on a case-insensitive file system (macOS APFS by
+    default), a spelling that differs only by case are the served worktree; on a case-sensitive
+    file system a case variant is another folder or none. The reduction is the one the remote
+    admission applies to the connection's own locator before it makes the claim, so both sides
+    meet the same rules: a repository at the home folder without home admission and a symlinked
+    `.git` have no top there, and a path in them is refused (fail closed; the start may name no
+    workspace instead).
+  - **Each kind of `workspace_ref`:**
+
+    | `workspace_ref` | Claim-bound connection (a server elsewhere) |
+    |---|---|
+    | absolute, naming the served worktree or a folder in it | sent as the connection's handle, as before |
+    | absolute, naming another repository | refused `workspace_ref_not_served`; nothing sent |
+    | absolute, naming another worktree of the same repository (a linked worktree, or the primary checkout from a linked one) | refused the same way; identity is not recomputed (#1346), only the worktree compared |
+    | absolute, naming a repository nested beneath the served worktree (a submodule, a vendored checkout, a bare repository kept in the tree) or the worktree's own `.git` | refused: another repository's worktree or storage |
+    | absolute, naming a folder in no repository, a path that does not exist, or a file | refused the same way |
+    | not absolute (a label, a relative path) or a `client:` handle | unchanged by rule R: sent as written, and the server accepts only this connection's handle (`workspace_ref_not_portable` otherwise) |
+    | absent | unchanged: the server opens the session on the connection's handle |
+
+  - **Which folder is served.** The folder the caller made the connection from (the CLI's
+    working folder, the bridge's own folder or Cursor's bound root, the hook's locator); where the
+    connection reports the worktree its claim was made for (`ServiceClient.remote_workspace`),
+    that worktree, so the rule compares against exactly what the server reads. A connection to a
+    server elsewhere that carries no claim (made from a folder in no repository) serves no folder:
+    any absolute `workspace_ref` is refused the same way, since sending it as written would name a
+    folder of this computer to that server.
+  - **Which operations.** Only `start` carries a `workspace_ref` (`start-request` 1.0.0 and 1.1.0,
+    in the pair with `external_ref`); the rule applies to every mode that carries one
+    (`create`, `create_or_attach`, `attach` by the pair, and a `delegate` or child start that
+    names a pair). Attach by `session_id` or `attach_handle`, `publish_work`, `check`, `respond`,
+    `status`, `receipt` and `closure_prepare` carry none: they reach the session the start bound,
+    whose handle never changes, and the server's existing repository fence answers a call from
+    another repository (`repository_identity_mismatch`).
+  - **The refusal.** `WorkspaceRefNotServed`: `INVALID_REQUEST`, not retryable,
+    `safe_details` `reason_code: workspace_ref_not_served`, `field: /workspace_ref` and a
+    continuation that fits the surface: `workspace_folder_run_required` from a command (run it
+    from the folder `workspace_ref` names) and `workspace_not_served_tell_user` from an MCP
+    bridge, whose agent cannot restart it in another folder (tell the user in one line and carry
+    on without FinishUP for that folder). The message and details are fixed and name no path,
+    the served one included; the message says which folder is served by how the connection was
+    made ("the repository worktree it runs in", "the repository worktree its host started
+    FinishUP in"), which is the form the honesty rules allow. A JSON caller of the CLI
+    (`--json`, or a stdout that is not a terminal) reads the frozen start failure body on stdout,
+    as it would for a refusal by the server, and the directive on stderr; a refusal the client
+    raises for `workspace_ref_not_portable` answers the same way.
+  - **What is never sent.** The refused request: nothing about it reaches the server, so nothing
+    is read or synced for it, and neither the named folder nor the served one is copied for it.
+    The connection itself (its hello, its claim and, where it serves, its workspace agent) was
+    already made from the caller's own folder before the request was read (the bridge's one
+    cached connection; the CLI's per-command connection) and is unchanged.
+  - **L0 is unchanged.** A connection bound by a local path (`main`'s one-computer service) or
+    not bound sends `workspace_ref` exactly as written, even when it names another repository; that
+    mix-up on `main` (git evidence from the connection's folder, the reviewer's reads from the
+    named one) is issue #1349.
+  - **Old and new builds.** A new client refuses before sending, so an old server sees nothing
+    new. An old client against a new server still sends the connection's handle for any absolute
+    path; the server sees only the handle and cannot tell which folder was named, so with an old
+    client the task is read, and at code level L2 copied, from the connection's own repository.
+
+**Workspace-agent operation catalog** (`ports/workspace_agent.py`, the single source of truth).
+Each operation fixes its argument and result codecs and an argument byte bound and a result byte
+bound, both under the 6 MiB frame; this table names the seam each one mirrors and its result.
+Bytes travel as base64 strings inside canonical JSON, and every codec round-trips exactly. In
+layer 1 the catalog, the client-side agent and the hub below are complete and tested in process
+but dormant: a local root's workspace is a path, which the routing hands to the unchanged local
+adapters.
+
+| Operation | Family | Mirrors (the existing local seam) | Result |
+|---|---|---|---|
+| `read_task_base` | git | `ChangeCapturePort.read_task_base` | `TaskChangeBase` (`encode_task_change_base`) |
+| `capture` | git | `ChangeCapturePort.capture` | `CheckChangeCapture` (`encode_check_change`) |
+| `capture_metadata` | git | `capture_metadata` | `CheckChangeMetadata` (new codec) |
+| `probe_requested_paths` | git | `probe_requested_paths` | `RequestedPathProbe` tuple |
+| `count_change_lines` | git | `count_change_lines` | `ChangeLineCounts` |
+| `classify_undeclared_references` | git | `classify_undeclared_references` | reference triples |
+| `read_outside_inputs` | reads | `task_input_read.read_outside_inputs` | `OutsideInputsRead` (`inputs`: `TaskInputFile` tuple; `unlisted` and `listed`: ascending indices into the call's `values`) |
+| `snapshot_outside_inputs` | reads | `task_input_read.snapshot_outside_inputs` | `OutsideSnapshotsRead` (`reads`: `OutsideSnapshotRead` tuple; `unlisted` and `listed` as above, `unlisted` answering for kept copies) |
+| `read_declared_test` | reads | `task_input_read.read_declared_test` | bytes or absent |
+| `read_text_beneath` | reads | `task_input_read.read_text_beneath` | `(bytes, size)` or absent |
+| `list_beneath` | reads | `task_input_read.list_beneath` | bounded listing |
+| `lstat_candidates` | reads | the outside-input admission `lstat` helper | per-candidate link-free stat facts |
+| `open_workspace` | observation | `open_local_workspace` | opaque remote handle |
+| `load_check_policy` | observation | `load_observation_check_policy` | raw policy bytes |
+| `subject_state_capture` | observation | `SubjectStateCapturePort.capture` | `SubjectStateCaptureResult` |
+| `list_changed_paths` | observation | `list_changed_relative_paths` | workspace-relative paths |
+| `inspect` | observation | `WorkspaceInspectPort.inspect` | `WorkspaceInspectResult` |
+| `run_approved_check` | observation | `ApprovedCheckRunner.run` | `ApprovedCheckResult` plus output bytes |
+
+A reply that is not `ok` carries one closed reason from `WORKSPACE_REPLY_REASONS`: a refusal
+(`WORKSPACE_REFUSAL_REASONS`: `arguments_invalid`, `check_not_approved`, `operation_not_declared`,
+`operation_unknown`, `root_not_admitted`, `workspace_not_claimed`), an unavailable reason (change
+capture's own `ChangeCaptureUnavailable` reasons and the subject-state limitations with their exact
+tokens, plus `agent_busy`, `deadline_exceeded`, `handle_unknown`, `policy_absent`,
+`policy_ambiguous`, `policy_invalid`, `read_deadline`, `result_too_large`, `workspace_unavailable`)
+or `internal_error`. Reads name the claimed workspace by its handle, never by its path: a read root
+or an `excluded` entry may be the handle itself, a declared-test location may be
+`client:<16 hex>/<relative>`, and `ports.workspace_agent.resolve_client_location(value, handle,
+root)` maps them on the client (`client_location_valid(value, *, relative=True)` checks the shape).
+Outside-input roots and `lstat` candidates stay absolute.
+
+**Workspace agent (client side).** `finishup.client.workspace_agent.WorkspaceAgentHandler(workspace,
+*, protected=None, operations=None, max_reply_bytes=6291456, check_sandbox=None,
+opened_handle_key=None, check_policy_trust=None, outside_reads=None)` answers the
+catalog against the real local adapters with their existing fences: Git hardening, ownership
+checks and the change capture's ignore rules, credential-named and hidden-path refusals, byte and
+time bounds, and the network-denying check sandbox. `answer(call, *, workspace_handle)` is synchronous and runs in a worker thread. Its
+confinement rules:
+
+- It answers for the one workspace its connection claimed (`workspace` is the same locator the
+  claim and the hooks use); any other handle is refused `workspace_not_claimed`. The filesystem
+  root is never a workspace (`ValueError("workspace_locator_path_invalid")`), and
+  `client.workspace_claim.workspace_claim` refuses it with `repository_locator_invalid`, so a
+  connection started at `/` names no workspace.
+- Outside admission is this client's own record (`client.server_folders`, ADR-051 decision 5).
+  `outside_reads` answers, on each call, an `OutsideReads(mode, folders, source)`; it is bound,
+  when the handler is built, to the record of the target the connection's claim was made for:
+  `outside_reads_reader(root)` for a caller that holds the target's root, or
+  `outside_reads_reader(claim_salt=...)` (as `remote_workspace_binding` does) for the target this
+  process uses then, which must be the one whose salt the claim was made under. A handler built
+  with no `outside_reads`, and `outside_reads_reader()` with neither argument, are `listed` with no
+  folder, never the mode of the target in use: the process's selection alone may name another
+  server. A later
+  change of the process's selection (`server use`, a `selection_override` probe of another
+  target) never switches an agent to another target's record. A local root, a mismatched salt,
+  a record that cannot be read, and an answer that fails or is not an `OutsideReads` are `listed`
+  with no folder. Every read root must pass `admitted_input_root_valid` (the shape an owner may
+  admit), or the call is `root_not_admitted`. In mode `local` that is all: reads are answered as
+  the local adapters answer them, with the protected directories excluded as a local service
+  excludes them, so a read rooted in one answers nothing (`None`, or no input) and is not
+  refused; task-input reads walk every named root, and a declared test outside the claimed root
+  is read as a local service reads it. In both modes a listed folder admits the task inputs
+  beneath it for that target's claim-bound sessions, whatever the server's own policy names
+  (maintainer decision 2026-11-07): `read_outside_inputs` and `snapshot_outside_inputs` walk the
+  server's named roots first and then the listed folders, so an input beneath both keeps the
+  server's root and one beneath a listed folder alone has that folder as its root, and their
+  answer carries `listed`, the ascending indices of the server's values a listed folder covers
+  (only for a value the outside-input candidate rule would look at, outside the claimed worktree
+  and the protected directories; never the folder). The server marks an input whose root its own
+  policy does not admit `TaskInputFile.client_listed` (stored as `"client_listed": true`, only
+  when set), binds it to no policy root for egress (`semantic_case` leaves it out of
+  `input_roots`, so the gateway's E2E-2 root check does not apply; the client revokes it), sends a
+  kept copy beneath such a folder only while the current read names its path `listed`
+  (`CurrentInputsRead.listed`), and treats the covered values as admitted in
+  `outside_inputs_not_admitted`. A claim-bound task's agent is asked whenever the recipe carries
+  task inputs, even with no root of the policy's (`_outside_inputs`; `InputSnapshotScope.
+  client_record` at task start) and with no room left (it then reads nothing and only reports
+  coverage, and nothing it left unread is counted). In mode `listed` what a read reaches must lie
+  inside the claimed worktree or at or beneath a listed folder (`folder_covers`, exact spelling);
+  beneath the server's own roots the record narrows them, never widens them:
+  - `read_text_beneath` and `list_beneath` on an absolute root in a protected directory are
+    `root_not_admitted` even beneath a listed folder: a deliberate stricter-than-local rule for
+    reviewer reads in mode `listed` alone, invisible to the server, where a refused reviewer read
+    reads as `None`. Task-input roots there are excluded, not refused.
+  - `read_text_beneath` and `list_beneath` on an absolute root are admitted when the root lies
+    inside the claimed worktree or at or beneath an admitted folder, or when the root joined with
+    `relative`, normalized, does; otherwise `root_not_admitted` (a listing of a root above a
+    narrower folder included).
+  - `read_outside_inputs` and `snapshot_outside_inputs` first narrow the values to those the
+    local read would look for (`task_input_read.outside_read_window`: its first 16, less the
+    space-cut words of a quoted spaced value that names something beneath a named root, issue
+    #1102's `drop_space_cut_words`, decided over every named root), so leaving a spaced value
+    unread never lets one of its words, a folder the owner may have listed for another reason, be
+    read in its place, and a value past the local window is never read. They then judge each
+    value at or beneath a named root on its own (amended 2026-11-07): one that lies neither inside
+    the claimed worktree nor at
+    or beneath an admitted folder is left unread, and its index joins the answer's `unlisted`
+    when it names something that exists and passes the outside-input candidate rule (no hidden
+    component, not credential-named, in no system or protected directory) and the local read's
+    own trusted metadata walk would read a file for it (`task_input_read.
+    outside_inputs_readable`, no content read); one that names nothing, or only what the local
+    read would not read (a hard-linked file, one others may write, a home-private tree), is not
+    reported, as a local read finds nothing there. Unlike existence, that bit tells the server
+    more than `lstat_candidates` does (ADR-051 decision 5): whether a local read would read the
+    path, which depends on its link count and owner, its directories' owners, the home
+    directory's private trees and, for a directory, whether it holds a file the read would read;
+    never a name, a size or content. `snapshot_outside_inputs`, whose values at a
+    check or a review are the paths of the server's kept copies, answers `unlisted` for those
+    copies instead (`workspace_agent._copies_unlisted`): every value at or beneath a named root
+    that no listed folder admits (the complement of `listed` there), whatever is there now and
+    past the window too, since the server would send its copy, not the file; it looks at nothing
+    on the client, so it tells the server no more than `listed` does, beside the mode. Either
+    call reads every value it did not leave unread: it
+    walks the named roots that are admitted or hold an admitted folder, and the listed folders,
+    for the values it kept, and each input keeps the root it was read beneath
+    (`TaskInputFile.root`); a named root with no value beneath it is left out unopened. The
+    window is decided over the named roots and the listed folders together. The server freezes how many values the check-time
+    read left unread, plus the kept copies the current read named `unlisted` (whose copies it
+    then does not send) that lie beneath none of those values, as the count
+    `CheckChangeCapture.outside_inputs_not_listed` (written only when not zero), and discloses
+    `outside_reads_not_listed` (below); a task-start snapshot simply keeps no copy of an unlisted
+    value. A copy whose file has since been deleted or changed is counted and left out alike:
+    listing its folder again, or `local` mode, sends it. The reviewer's kept-copy root (`s{n}`)
+    follows the same answer: when a review is prepared, `ready_composition._copies_still_listed`
+    asks `snapshot_outside_inputs` with `limit` 0 (no bytes read) and offers only the copies it
+    does not name `unlisted`; an agent that cannot answer leaves the root out.
+  Outside reads never enter the claimed workspace through an outside root and never enter a
+  protected directory, whatever the server lists as excluded; an `lstat` candidate inside either
+  is reported as not found. An exclusion naming a directory this user cannot examine does not
+  empty the read.
+- `read_declared_test` in mode `local` is the local `read_declared_test` with the server's and
+  this client's protected exclusions, exactly as a local service reads the test its agent declared
+  (#1220): inside the claimed root or outside it, whether or not Git ignores it or can answer for
+  it (amended 2026-11-07). In mode `listed` it reads a location strictly beneath the claimed root
+  (handle-relative, or absolute under the root's spelling) that Git answers is not ignored (next
+  item), or one at or beneath a listed folder; an existing location (one `lstat` finds that the
+  outside-input candidate rule would look at) that is neither is `root_not_admitted` when the
+  local read's fences and walk would open it (`task_input_read.declared_test_readable`, no
+  content read; so the refusal, like `unlisted`, also tells the server whether the file's link
+  count, its owner and its directories' owners let the local read open it), and one that does not
+  exist, or that the local read would not open, reads as `None`, as locally. Both comparisons are made on the location as
+  written and as the local read walks it (`task_input_read.declared_test_top`: a first component
+  that is a root-owned link to a directory at most two levels deep, macOS `/tmp` or `/var`, is
+  replaced by its target). One read outside the claimed root in mode `listed` also excludes the
+  claimed root, by case-folded spelling and by device and inode, as every other outside read
+  does, so another spelling of the workspace (another case on a case-insensitive volume, a bind
+  mount) never reaches a file Git would report ignored. The server's declared-test pinning reads
+  through `ClientWorkspaceReads.declared_test`, which lets the refusal through: a
+  `root_not_admitted` refusal is not pinned, and the check discloses `outside_reads_not_listed`
+  (frozen into the job's `yoetz.semantic-case/2` object as the count `declared_tests_not_listed`,
+  1 to 3, written only when not zero).
+- A reviewer's workspace file read (`read_text_beneath` on the handle) first asks
+  `probe_requested_paths` for that path, relative to the claimed root, as the reviewer broker
+  does, and reads only when the probe answers `ignored is False`, the broker's own rule, which a
+  local service keeps too. Anything else reads as absent: a path Git reports ignored, and one Git
+  cannot answer for (`ignored` None for a path inside a submodule or a home-private path;
+  `not_git`, a linked worktree's `unsafe_root` or any other `ChangeCaptureUnavailable`), as well
+  as a handle read that names the claimed root itself. In mode `listed` a reviewer read on an
+  absolute root that reaches a path that does not exist reads as `None` rather than
+  `root_not_admitted`. `list_beneath` returns names only and does not ask.
+- Honest limit: the agent cannot tell an honest server's question from any other, so a server
+  that breaks the protocol can obtain any file in the claimed worktree that the fences pass and Git
+  answers is not ignored (in mode `local`, as a declared test, one Git ignores too, as a local
+  service could), the names in its listings (ignored entries included), any
+  eligible file beneath an admitted folder (not hidden, not credential-named, in no system or
+  protected directory) and its directories' names, and the `lstat` metadata of any path the
+  outside-input candidate rule would look at (in mode `listed`, also whether such a path exists,
+  from a refusal or an `unlisted` index).
+- `lstat_candidates` answers only for a candidate the local outside-input rule
+  (`outside_input_candidates`) would look at: no hidden component, not credential-named, in no
+  system directory, at or beneath a path an owner may admit. Any other candidate is reported as
+  not found, so a server learns nothing of it; an honest server never asks about one.
+- `inspect` excerpts only the workspace's own changed paths: the agent takes
+  `list_changed_relative_paths` itself and inspects only paths in it (no Git-ignored, unchanged
+  or `.git` file), never a credential-named path, nor one in the home directory's private state
+  when the workspace is the home directory. A path left out is `path_out_of_scope` (`partial`, or
+  `rejected` when none is left) and its bytes are never read.
+- `protected` defaults to `client_protected_directories()`: this process's isolation root and its
+  bundle, config, cache, state, log and runtime directories, then
+  `config.paths.ambient_installation_dirs()` — the everyday installation's directories under both
+  the `finishup` and the legacy `yoetz` name — so a selected or isolated root never makes those
+  readable.
+- `run_approved_check` runs only when the repository's own `.finishup/checks.toml` approves
+  exactly the requested argv and this client's owner trusted that policy's exact raw digest in the
+  client's observation store (`finishup observe checks trust`; checked on every call through
+  `client.observation_outbox.check_policy_trusted`, so a revoke takes effect at once);
+  `check_not_approved` otherwise, whatever the server asked. HOME decisions use this machine's
+  home directory, never the server's. The run ends within the call's deadline less a 15 s reserve
+  for reaping, redaction and the reply (`ApprovedCheckRunner(..., run_seconds_cap=)`), so its
+  result, a `timeout` included, reaches the server in time: the transport caps a call at 300 s,
+  so an approval longer than about 285 s is cut there and records `timeout` on a remote target.
+  With no time left past the reserve the call answers `deadline_exceeded` and nothing runs.
+- Unknown operations are refused; logs carry closed tokens only, never a path, argument or output.
+
+**Hub and routing (service side).** `service.workspace_hub.WorkspaceAgentHub(*,
+inline_wait_seconds=5.0, background_wait_seconds=30.0)` is the service's registry of agent
+channels. The daemon registers a channel for each agent-declaring, claim-bound connection at
+handshake (`register(*, handle, declaration, service_instance_id, service_generation, writer,
+worktree=None)`) and unregisters it on close (`unregister(channel)`), which fails its pending calls
+at once. A claim on a locked service binds no handle and no agent; the claim hello first re-opens
+a soft lock (idle, session lock, suspend) as a first request would, while a hard lock keys
+nothing. Such a connection is never served as an unbound one: `ServiceDaemon.dispatch(...,
+claim_unkeyed=True)` answers every method but `service_status`, `service_lock` and
+`service_stop` with `vault_locked` (retryable unless a hard lock holds), and the daemon ends the
+connection once a ready generation is published (one whose vault is ready by the end of its
+handshake ends at once), so its client, a background agent included, connects again and its
+hello gets a handle. Every channel under one handle serves one worktree: `register` refuses a channel whose
+`worktree` digest differs from a live channel's under the same handle (`ValueError("workspace_agent_worktree_conflict")`; the daemon
+records that token and closes the connection), and a call for a handle with no channel fails
+`no_agent` rather than reaching another worktree's agent. `async call(handle, operation, arguments, *,
+timeout_seconds, background=None)` sends one `workspace_call` under the session's write lock and
+awaits the correlated reply (`deliver(channel, reply)`); `call_blocking(...)` is the same call from
+a worker thread, never from the hub's own loop. `has_agent(handle)`, `bind_loop(loop=None)` and
+`close()` complete it.
+
+- **Wait bounds.** With no channel for the handle, a call waits for one:
+  `INLINE_AGENT_WAIT_SECONDS = 5.0` inside a live control call and
+  `BACKGROUND_AGENT_WAIT_SECONDS = 30.0` for background work (the detached review, verification,
+  sweeps, recovered jobs). The daemon marks each dispatched call with
+  `live_call_scope(channel=None)` (`in_live_call()` reads it), naming the agent the serving
+  connection itself offered: a live call for that channel's handle goes to it first. The mark
+  holds only while the call is live: work the call left running once it returned (the detached
+  review whose caller stopped waiting or left, a timer it set) is background work from then on,
+  with the longer wait and no preferred agent, even inside a handler scope it entered while the
+  call was live. Each call is then bounded by the catalog's call deadline.
+- **The control call bounds its workspace calls.** The daemon runs each ready handler inside
+  `workspace_call_deadline(deadline_at=None)` (the handler's own deadline on the loop clock, or
+  none). A workspace call made there never waits past that deadline and is not sent when no time
+  is left (`deadline_exceeded`); when the handler is cancelled or times out, every workspace call
+  it left in flight is cancelled at once, a blocking one in a worker thread included, which then
+  fails `call_cancelled` and frees its worker thread and agent slot. Work the handler started that
+  outlives it (a task that copied its context) is no longer bounded or cancelled by it.
+- **Deadlines and whole frames.** The slot wait and the frame write share a call's
+  `timeout_seconds`; the agent is told what is left of it as `deadline_ms`, and the reply is
+  awaited that long after the frame is fully written, plus a 1 s grace, so an answer given in the
+  agent's own time is never dropped as late. The frame write is shielded: a caller that stops
+  waiting never cuts a frame off part-way. The daemon writes every frame of a connection (control
+  results and workspace calls) one at a time, and a write that a timeout, a cancellation or a
+  transport failure interrupts leaves the connection out of step: its write side is shut, so the
+  peer reads the end of the stream rather than a spliced frame, and no later frame is written on
+  it.
+- **Channel bounds.** A channel serves `MAX_CALLS_PER_CHANNEL = 4` calls at once with at most
+  `MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL` argument bytes in flight. A pending call keeps its
+  connection out of idle close, and a `workspace_reply` on a connection that declared no agent
+  closes that connection.
+- **Several connections per worktree.** A live call goes first to the agent its own connection
+  offered, otherwise to the newest live channel for the handle that declares its operation; every
+  channel under one handle serves the same worktree. When that channel drops before answering and
+  another live channel for the same handle declares the operation, a read (every operation but
+  `run_approved_check`, which may already have run) is sent once more to that channel; otherwise
+  the call fails `agent_disconnected` at once. A read still unanswered on a background (helper)
+  channel goes on, with the time the call has left, at a newer background channel of the same
+  handle that declares the operation, as soon as one registers (a helper stopped or killed without
+  unregistering stays registered at its edge until its lease ends); the older channel stays open,
+  its later answer is dropped as unmatched, and the hub records `workspace_call superseded`.
+- **Opened workspaces.** An agent built with an `opened_handle_key` answers `open_workspace` with
+  a keyed handle (`rws_` + the first 32 hex of `HMAC-SHA256(key, "yoetz/opened-workspace/v1\0" ‖
+  admitted-HOME flag ‖ 0x00 ‖ its root)`), so any agent of the same client for the same worktree
+  recomputes and answers it; `remote_workspace_binding` derives that key from the target's claim
+  salt (`HMAC-SHA256(claim_salt, "yoetz/opened-workspace-key/v1")`), which the server never sees.
+  An agent without a key keeps random handles in a bounded table. As a backstop, the routing
+  (`RoutedObservationWorkspace` and its subject-state, inspect, changed-path and approved-check
+  calls) reopens a workspace whose handle the answering agent reports `handle_unknown`, keeps the
+  new handle and retries the call once; nothing else is retried there.
+- **Typed loss.** Every failure is `ports.workspace_agent.WorkspaceAgentUnavailable(reason,
+  agent_reason=None)`, `reason` in `WORKSPACE_AGENT_UNAVAILABLE_REASONS`: `no_agent`,
+  `agent_disconnected`, `deadline_exceeded`, `agent_busy`, `operation_not_declared`,
+  `reply_invalid`, `agent_unavailable`, `agent_refused`, `agent_failed` (the last three carry the
+  agent's own closed `agent_reason`), `arguments_invalid`, `hub_unavailable` or `call_cancelled`. `.refused` is true
+  for `agent_refused`, whose public token is `workspace_agent_refused`. The hub logs closed tokens
+  only and records each delivered answer under the `client_attested` label.
+
+`service/workspace_routing.py` wraps every workspace port and callable the ready composition
+injects. `WorkspaceRouting.compose(hub, local_capture)` gives `.change_capture`
+(`RoutedChangeCapture`: the port, its `probe_requested_paths`, `count_change_lines` and
+`classify_undeclared_references` extensions, and `lstat_probe(workspace)`) and
+`.reads_for(workspace)` (`ClientWorkspaceReads` for a handle, None for a path).
+`RoutedObservationWorkspace(hub, local=None)` stands behind `ObservationCoordinator.workspace_access`
+(`application.observation_workspace.ObservationWorkspaceAccess`, `LocalObservationWorkspace` by
+default), and `RoutedApprovedCheckRunner` runs approved checks. An absolute-path workspace goes to
+the unchanged local adapter; a `client:<16 hex>` handle (`client_bound(value)`) goes to the hub, and
+no local adapter is ever handed it. An agent answer that carries a change-capture reason raises the
+same `ChangeCaptureUnavailable` a local read would. A reviewer's agent reads (`list_beneath`,
+`read_text_beneath`, `read_declared_test`) and its ignored-path rule give the agent's answer no
+more time than the read's own stop leaves when the read starts, within the reviewer's per-read
+budget (`LOCAL_READ_SECONDS` plus 1 s): the loop hands every read an
+`application.reviewer_loop.ReadStop`, the `expired` callable whose `seconds_left()` is the time
+until that stop. The stop bounds the answer, not the wait for an agent connection, which keeps
+the hub's own bound (5 s in a live call, 30 s for background work such as the detached review),
+so a read whose agent connects late can end past its stop. A read whose stop has passed sends
+nothing and raises `ReadDeadline` (a declared test reads as not visible, as locally), and the
+broker discards a read answered after its stop with the same `ReadDeadline`, so a slow agent
+ends the review `deadline` as a slow local read does; one that finds no agent within the agent
+wait ends it `workspace_agent_unavailable`. `ClientWorkspaceReads.refused_paths(paths, expired)`
+answers that rule for a whole listing in batches of 64 (`ReadRoot.refuse_many(paths, expired)`,
+asked in place of `refuse` for the read path too), checking the stop before every batch; the
+broker checks it before probing. The reviewer broker's file reads (and its
+refusal probe), declared-test pinning, the observation verification steps and the post-run hash
+now run in `asyncio.to_thread`. `build_ready_application_factory(..., workspace_hub=)` and
+`provide_service_ready_context(..., workspace_hub=)` take the composition's one hub; without one, a
+claim-bound read fails `hub_unavailable`, a typed gap and never a local read.
+`application.service.context_workspace(context)` is a connection's locator path or handle.
+
+**Composition flag.** `ServiceComposition.refuse_workspace_locators: bool = False`. A network
+server edge that admits only claims sets it; the daemon then closes any hello that names a
+`workspace_locator`. Local clients keep naming their path. Nothing sets it in layer 1, and the REST
+edges of layer 5 do not need it: REST names no path at all (the client's mapping never sends a
+hello that names a locator, a start needs a claim, and a `workspace_ref` must be a `client:`
+handle).
+
+**Agent loss in results.** A read that ends `WorkspaceAgentUnavailable` fires the gap of what it
+would have read. The check-time change records one of two reasons, each with its own fixed sentence
+and registered in the gap-effect tables: `check_time_change_unavailable_workspace_agent_refused`
+when the agent refused the read or never offered the operation (hub reasons `agent_refused`,
+`operation_not_declared`). Listed mode no longer refuses a check-time read (it leaves an unlisted
+input unread, `outside_reads_not_listed`), so this is a request the agent does not answer: "the
+FinishUP workspace agent on the client machine refused a request the check needed as one it does
+not answer (for a workspace it did not claim, an operation or argument it does not know, or a
+folder no owner could admit), so the server could not see the change. This usually means the two
+computers run different FinishUP releases: install the same release on both, the client machine
+(the computer that holds the project) included, and check again."; and
+`check_time_change_unavailable_workspace_agent_unavailable` for every other loss (no agent, a
+dropped connection, a deadline, a busy agent, an undecodable reply, an agent that failed): "the
+FinishUP workspace agent on the client machine gave no usable answer to the server's read of the
+workspace (it was not connected, did not answer in time, or failed), so the server could not see
+the change. On the client machine, the computer that holds the project, `finishup server status
+NAME` shows the connection; checking again then can help." A reviewer read the agent refused reads
+as nothing. One whose time ran out, on the client (the agent's `read_deadline`, or the client's own
+`deadline_exceeded`) or while the hub waited for its answer (the hub's own `deadline_exceeded`: an
+agent whose worker has no timer of its own, or a link slower than the reply grace), raises
+`ReadDeadline`, as a slow local read does, so the review ends `deadline` on every transport; a
+declared test then reads as not visible, as the local declared-test read has it. A reviewer whose
+file read finds the agent gone, busy or failed, or whose answer was too large to carry, ends
+`workspace_agent_unavailable` (`application.reviewer_loop.WORKSPACE_AGENT_UNAVAILABLE_ENDING`),
+which becomes an unavailable semantic result with failure class `transport`, never a judgment:
+what the agent never read is never shown to the reviewer as an empty listing or an absent file.
+An ignored-path probe batch the agent refused, or answered with a change-capture reason, refuses
+its paths, as the local per-path rule does.
+
+**Client connection.** `service.client.ClientWorkspaceBinding(claim, agent=None)` is how a
+connection to a remote root names its workspace: `claim` (`ports.control.WorkspaceClaim`) replaces
+the locator in the hello, and `agent`, a `WorkspaceCallHandler` (a `declaration` property and a
+synchronous `answer(call, *, workspace_handle) -> WorkspaceReply`), is declared there and serves
+the connection's `workspace_call` frames. `connect_service`, `connect_service_on_demand` and
+`_connect_service_attempt` take `workspace_binding=`; passing it with a locator raises
+`workspace_binding_conflict`. `ServiceClient.workspace_binding` and `ServiceClient.workspace_handle`
+expose the hello-result's answer. A client with an agent runs at most four workspace calls at once
+in daemon worker threads (each in a copy of the connection's `contextvars` context, so a
+`selection_override` that opened it holds there) and writes each reply under its write lock,
+answering busy, deadline, reply-too-large and internal-error cases with closed reasons; a client
+without one still treats a `workspace_call` as `frame_invalid`. Closing the connection never waits
+for a running call: its daemon worker finishes or ends with the process, so a short-lived CLI exits
+after its command (an approved check such a worker started stays in its own process group). In
+layer 1 only in-process tests build a binding: no connect path calls `binding_for_active_root`,
+and a remote root is refused ("Layer 1 status" above).
+
+- `finishup.client.workspace_claim`: `workspace_claim(locator, salt)` (awaitable) and
+  `workspace_claim_for_root(root, salt, worktree)` compute the claim with its worktree digest
+  (`worktree_digest(worktree, salt)`, over `locator.path` in normal form); `new_claim_salt()`
+  mints a salt of `WORKSPACE_CLAIM_SALT_BYTES = 32`. The salt is checked before anything on disk
+  is read.
+- `finishup.client.remote_binding`: `remote_workspace_binding(workspace, claim_salt, *,
+  serve_workspace=True, protected=None)` composes the binding (the agent's adapters load only when
+  `serve_workspace`). `binding_for_active_root(locator, *, serve_workspace)` decides from the active
+  root: None for the everyday installation, an isolated root that is not a target, a named local
+  server, or a remote root with no workspace; otherwise the binding under the target's own
+  `claim_salt`. `is_remote_active_root()` answers whether the active root is a `local_port`, `ssh`
+  or `https` target. Both fail closed with the root's `TargetError`, never reading as local.
+- `finishup.client.workspace_ref`: `start_request_for_connection(request, connection, *, serving,
+  surface="command")` rewrites an absolute `workspace_ref` that names the worktree of `serving`
+  (the locator the caller made the connection from) to the connection's handle, and raises
+  `WorkspaceRefNotServed` for any other (rule R above; `surface="bridge"` picks the bridge's
+  continuation). The MCP start path passes the bridge's own locator (Cursor's bound root), the CLI
+  start path the folder it runs in, and the SessionStart auto-attach the locator it connected with,
+  so the auto-attach meets the rule by construction. A claim-bound connection without a handle (the server's
+  vault was not ready at hello, so it could not key the claim) raises the retryable `ControlError`
+  `vault_locked` and nothing is sent, so the MCP bridge discards that connection and its next call
+  reconnects with a fresh hello. `WorkspaceRefNotPortable` (`INVALID_REQUEST`, reason
+  `workspace_ref_not_portable`) stays for a caller that must refuse a path for another reason.
+  `portable_start_request` and `portable_workspace_ref` are its parts.
+- `finishup.client.observation_outbox.ClientObservationDrain(workspace, *, state=None,
+  budget_seconds=20.0, ingest_deadline_ms=3000, spool_batch_limit=64)`: `drain(client) ->
+  ClientDrainSummary(spool_replayed, delivery, stopped)` replays the claimed workspace's spooled
+  hook records into its outbox, then runs the shared `ObservationOutboxSweeper` narrowed to that
+  workspace with each row sent as `observation_ingest`, stopping at the first control failure; rows
+  not settled stay pending. `close()` releases it, and `drain_client_observation(client, workspace,
+  *, state=None, budget_seconds=20.0)` is one pass. No long-lived client process keeps a drain per
+  claimed workspace in layer 1; from layer 4 the SSH target's background helper does, every 30
+  seconds per served workspace (ADR-052 decision 16). The service's own sweeper
+  reads only its own state directory, so it never touches a client root.
+- `finishup.client.targets.active_root_may_be_remote() -> bool`: true for a root whose
+  `target.json` names a remote kind or cannot be read (`TargetRecordUnreadable`), false for every
+  local root and for a root that cannot be resolved at all (its own path reports that). On such a
+  root a hook pass's own outbox drain (`cli.observe_hooks._drain_connector`) and `finishup observe
+  drain` (`cli.observe._claim_bound_drain`, which then covers the named workspace or the current
+  folder's) connect with `workspace_locator=` so the connect seam claims it; a hook pass without a
+  workspace fails its drain connect retryably and its rows stay pending. Every local root and an
+  injected connector connect exactly as before. Layer 1 has no connect seam that claims for a
+  remote root, so such a drain's connection fails (`service_unavailable`) and its rows stay
+  pending.
+
+**Provenance.** Workspace evidence obtained through the hub is labelled `client_attested`
+(`domain.receipts.CLIENT_ATTESTED`). `domain.receipts.CLIENT_ATTESTED_WORKSPACE_LINE` is the one
+fixed line: "Workspace evidence was read on the client machine by the FinishUP workspace agent and
+attested over the connection; the server did not read the repository itself." Nothing
+user-controlled is ever rendered beside it. In layer 1 only in-process tests open a claim-bound
+task, so the `client_attested` section and connection lines below render nowhere else. A task
+whose evidence a server read from its copy (level L2) never carries that line: its receipt ends
+with `server_copy_receipt_block` and carries `evidence_provenance` instead (*Level L2: the server
+copy*).
+
+- Service side: the text and markdown receipt of a claim-bound task (its `SessionOpened`
+  `workspace_ref` is a `client:` handle; a start naming no workspace on a claim-bound connection
+  (a create, a parent-registered child, a child attached by its attach handle) records that
+  connection's handle there through `execute_start(..., session_workspace_ref=)`, outside the
+  request identity) ends with `client_attested_receipt_block(
+  service_instance_id, markdown=...)`: a "Workspace evidence" heading, the fixed line and `Served by
+  FinishUP service <svc_…> (connection: client_claim).` The stored document is unchanged.
+  `application.receipt._attested_by` finds the opening record by
+  `schema.name == "session_opened"`, never by payload type, and `execute_receipt` calls it before
+  it stages or appends anything (a replay through `read_recorded_receipt` reads it the same way).
+  It never refuses a receipt (owner decision D4): any `Exception` from the ledger read (an
+  `OSError`, a malformed record, a ledger's own `PublicOperationError`) is recorded through
+  `record_classified_exception_without_raising` under component `application.receipt` and
+  operation `receipt_attestation_read`, and leaves the binding unknown; cancellation propagates.
+  An opening record that carries no decoded `SessionOpenedPayload` leaves the binding unknown
+  too. `_attested_by` answers a `_Provenance` whose value is the closed reason naming the cause,
+  so the section's last line says only what is true of it (decision D4b):
+  `_Provenance.UNREADABLE` (`session_opening_unreadable`, the passing cause) for a failed read and
+  for an `AcceptedEvent` opening whose envelope is `present` but whose payload is None, which is
+  what `SqliteLedger` recovery keeps when it cannot read a payload object (`KeyError`, `OSError`
+  or `ValueError` from `open_verified`) and keeps for as long as that ledger holds the task,
+  unless the ledger reports it unverifiable (below). The lasting causes are decided by envelope
+  state first, whatever the version
+  (`_LASTING_ENVELOPE_STATES`): `_Provenance.REDACTED` (`session_opening_redacted`) for
+  `logically_redacted`, `_Provenance.ERASED` (`session_opening_erased`) for `erased_claimed`,
+  `_Provenance.KEY_UNAVAILABLE` (`session_opening_key_unavailable`) for `key_unavailable`; then
+  `_Provenance.FORMAT_UNKNOWN` (`session_opening_format_unknown`) for any `UnknownEvent` (a
+  `session_opened` version this service cannot decode, its payload read or not) and any other
+  non-`SessionOpenedPayload` payload; last, `_Provenance.COPY_UNVERIFIABLE`
+  (`session_opening_copy_unverifiable`) for a decodable `present` opening with no payload whose
+  ledger answers `payload_object_unverifiable(event_id)` with exactly `True`.
+  `SqliteLedger.payload_object_unverifiable` is a structural availability fact, never payload
+  content: recovery records an event id only when `open_verified` raised the object-store port's
+  deterministic `ValueError("object_verification_failed")` (missing object, or bytes that fail
+  the envelope digest, header, decryption, size or commitment check), which opening the task
+  again repeats; an environmental `OSError` (re-raised as it is by the store), a `KeyError` or any
+  other `ValueError` is not recorded and stays passing. The fact belongs to one recovery and is
+  rebuilt when the task is opened afresh. `_ReadLedger` forwards it; a ledger without it (the
+  memory ledger, which holds every payload) answers False, and a failing lookup is recorded under
+  `receipt_attestation_read` and stays passing. A failed read is never called lasting: nothing
+  there tells a passing fault from a lasting one. The receipt is built and its text and markdown renderings end
+  with `workspace_provenance_unknown_block(markdown=..., reason=...)`: the "Workspace evidence"
+  heading and `workspace_provenance_unknown_lines(reason)`, never with no section. Every reason
+  shares `WORKSPACE_PROVENANCE_UNKNOWN_LINE` (what happened: "Provenance unknown: the record of
+  how this task's session was opened could not be read from the server's ledger.") and
+  `WORKSPACE_PROVENANCE_UNKNOWN_IMPACT_LINE` (why it matters). The passing cause ends with
+  `WORKSPACE_PROVENANCE_UNKNOWN_RETRY_LINE` (run receipt again; if it persists, `finishup service
+  restart` on the server host, then run receipt again). Each lasting cause ends with its own
+  "Why it lasts:" line and gives no retry or restart advice: `WORKSPACE_PROVENANCE_REDACTED_LINE`
+  and `WORKSPACE_PROVENANCE_ERASED_LINE` ("the record was redacted" or "erased", "so it will not
+  become readable again and this task's receipts will keep saying so. Running receipt again or
+  restarting the service will not change this."), `WORKSPACE_PROVENANCE_KEY_UNAVAILABLE_LINE`
+  ("the server does not have the key that decrypts the record, so running receipt again or
+  restarting the service will not read it, and this task's receipts will keep saying so while
+  that key is unavailable.") and `WORKSPACE_PROVENANCE_FORMAT_UNKNOWN_LINE` ("the record is in a
+  format this FinishUP version cannot decode, so running receipt again or restarting the service
+  will not read it, and this task's receipts will keep saying so until the server runs a FinishUP
+  version that knows this format."), and `WORKSPACE_PROVENANCE_COPY_UNVERIFIABLE_LINE` ("the
+  server's stored copy of the record is missing or fails its integrity check, so running receipt
+  again or restarting the service will not read it, and this task's receipts will keep saying so
+  for as long as that copy is missing or fails the check."). Only the redacted and erased lines
+  say the record will not become readable again. Any other reason is `invalid_receipt_document`. The words live in
+  `domain.workspace_provenance` (standard library only, so the protocol models admit exactly
+  them; `SESSION_OPENING_*` name the tokens) and `domain.receipts` re-exports the shared lines.
+  Either "Workspace evidence" section is rendered with the receipt, never appended to it:
+  `_internal_result` passes it as `render_receipt_human(document, markdown=, trailer=)`, and the
+  renderer reserves the section's room (`"\n\n"` plus the section, at most
+  `_HUMAN_TEXT_TRAILER_MAX` = 2,048 characters; an empty or longer one is
+  `invalid_receipt_document`) inside the 32,768-character `human_text` bound before it places the
+  other sections. A receipt whose other sections leave that room is unchanged with the section
+  after it; a longer one has those sections shortened, the truncation marker naming them, and
+  still ends with the whole section, so its result validates for every client. Appended after the
+  bound, the section pushed such a receipt past it and every projection, replays included, failed
+  as a retryable `response_projection_failed`.
+  Every receipt format, JSON included, also carries the result member `workspace_provenance`
+  (receipt-result 1.5.0, `ReceiptSuccessModel.workspace_provenance`,
+  `ReceiptWorkspaceProvenanceModel`; 1.4.0 shipped in v0.3.0 and is never amended; control-result
+  2.10.0 carries 1.5.0 bodies), built by `workspace_provenance_unknown_wire(reason)`: `status`
+  `unknown`; `reason`, a closed token from `WORKSPACE_PROVENANCE_REASONS` naming the cause
+  (`session_opening_unreadable`: the read failed or the record did not load, which can pass;
+  `session_opening_redacted`, `session_opening_erased`, `session_opening_key_unavailable`,
+  `session_opening_format_unknown`, `session_opening_copy_unverifiable`: the lasting causes
+  above); and `notice`, exactly
+  `workspace_provenance_unknown_notice(reason)` (that reason's three lines joined by newlines).
+  Each reason admits only its own notice: `ReceiptWorkspaceProvenanceModel` refuses another as
+  `workspace_provenance_notice_invalid`, and the 1.5.0 schema pairs them with a `oneOf` beside
+  the `enum`s. The token is carried only by 1.5.0, which is unreleased, so 1.5.0 is amended in
+  place and no released schema changes. It is optional and non-null: absent whenever the binding
+  was read, never an explicit null. Its three leaves are `public_structural`. `result_delivery`
+  places it right after `conclusion` among the actionable items, so a paged receipt delivers it
+  whole at the head of its first page.
+  Every receipt and replay reads the opening record again, so once the read succeeds (a transient
+  fault clears, or the task's ledger is opened afresh after the runtime evicts the idle entry or
+  the service restarts, and the object reads) the same request renders the binding the record
+  holds. A lasting cause keeps its section, and says it will, through every retry and restart:
+  for good when the opening was redacted or erased, while the key is unavailable, until the
+  service runs a version that knows the format of an `UnknownEvent` opening, and for as long as
+  its stored copy is missing or fails verification (`docs/usage/servers.md` says so).
+- Client side (`finishup.client.attribution`): `connection_attribution(connection) ->
+  ServiceAttribution | None` reads a connection's `workspace_binding`, `service_instance_id` and
+  `transport`; it is None unless the binding is `client_claim`, and a claim-bound connection with
+  malformed facts raises `service_attribution_invalid` instead of dropping its provenance.
+  `ServiceAttribution(service_instance_id, transport).lines()` is the fixed line plus `This client
+  reached FinishUP service <svc_…> (transport: <token>).`; `attribution_lines(attribution, shown=,
+  receipt_page=, provenance_unknown=)` omits a line the rendered text already carries, and omits
+  `CLIENT_ATTESTED_WORKSPACE_LINE` when that text carries `WORKSPACE_PROVENANCE_UNKNOWN_LINE`,
+  `receipt_page` is set, or `provenance_unknown` says the receipt result carries
+  `workspace_provenance`, so a receipt of unknown provenance gains only the
+  `This client reached …` line. `result_from_public_model` sets `receipt_page` for every
+  `delivery_page` whose `source_operation` is `receipt`, the first page from `receipt` and each
+  `status` continuation alike: the receipt's "Workspace evidence" section is fragmented with the
+  rest of `human_text` and lands on at most one page; it sets `provenance_unknown` for a receipt
+  that carries `workspace_provenance`. A JSON receipt, or one whose `human_text` is an omission,
+  has no section of its own: `render_human_receipt` appends
+  `workspace_provenance_unknown_block(markdown=False, reason=<the member's reason>)` unless the
+  text already carries `WORKSPACE_PROVENANCE_UNKNOWN_LINE`, the terminal interface's JSON receipt
+  shows the same block after the document, the MCP canonical text carries the member (its reason
+  token included), and `summary_for_receipt` admits that reason's three lines as required parts
+  only when the member's `reason` is a closed token and its `notice` is exactly that reason's
+  fixed text. A lasting reason's rendering on every surface ends with the lasting line and never
+  with the retry line. `render_human_status` and
+  `render_human_receipt` (CLI), `result_from_public_model(..., attribution=)` for the MCP `status`
+  and `receipt` text and its canonical fallback, and the terminal interface's task views and
+  receipt (through `FinishUpRuntime`) end with these lines. The connection's lines never enter
+  structured MCP content, CLI JSON or a local connection's output, so a Codex agent outside code
+  mode, which reads only `structuredContent`, sees none of them (codex-integration.md, Remote
+  server).
+- Transport tokens (`CONNECTION_TRANSPORTS`, closed): `unix` (default; a service's local control
+  endpoint), `connector` (a local relay process carries the connection on: ADR-051's relay
+  connection style), `ssh` (an SSH channel the client process opened) and `https` (HTTPS the
+  client process speaks). Whoever builds the connection supplies it: `ServiceClient(...,
+  transport=)` through `_connected_client(..., transport=)`, exposed as `ServiceClient.transport`
+  beside `ServiceClient.service_instance_id`. In layer 1 every connection is `unix`; the other
+  three are kept for the relay and direct styles of later layers.
+
+**Observation on a remote target** (ADR-051 decision 12; dormant in layer 1, where no remote
+target can be added or selected and only in-process tests send an attested row). The client's
+observation store under the target root is the authority: consent, content profiles, the
+content-capture fence, approved-check trust, the observation key, the lifecycle mappings and the
+outbox and spool stay on the client, and the `observe` commands and `/observe` (scope `any`)
+administer it there. Over a claim-bound connection every `observation_ingest` body carries
+`client_attestation` (control-request 2.10.0, golden vector CTL-2106), built by
+`finishup.client.observation_attestation` when the row is sent. Claim binding is decided by the
+connection's `workspace_binding` (`connection_claim_bound`), not by the handle alone: a
+claim-bound connection the server gave no handle sends no row at all (`attest_for_connection`
+raises the retryable `vault_locked` before encoding, so the row stays pending and never carries
+the workspace path):
+
+| Member | Value |
+|---|---|
+| `schema_version` | `1.0.0` |
+| `consent` | `active`, `paused` or `revoked` (no consent: the row goes unattested) |
+| `granted_at` | the consent's grant time |
+| `content_capture_profiles` | the enabled native content profiles |
+| `authority_generation` | the client's content-capture fence, or null |
+| `check_policy_digest` | the one approved-check policy digest trusted on the client, or null |
+| `route` | `{task_id, session_id, writer_id}` from the client's mapping, or null |
+
+Workspace-locator content in the row is replaced by the connection's `client:` handle; every other
+content chunk (prompts, agent messages, tool inputs and outputs captured under the client's consent
+and content profiles) is sent unchanged to every remote server, whatever its outside-read mode, as
+a local service would receive it (maintainer decision of 2026-11-07, ADR-051 decision 12). A
+`listed`-mode server therefore also receives content that can name or hold files outside its
+listed folders: the outside-read mode limits only what the server reads, never what the client's
+hooks deliver. The server disclosure names it (`cli.server.DISCLOSURE_LINES`,
+`client.targets.DISCLOSURE_VERSION` 2), and a target confirmed under disclosure 1 is refused
+`target_reauthorization_required` until the owner confirms again. The service
+(`application.observation_claims.ClaimObservationRouter`) accepts the envelope's session
+commitment and the attestation as `client_attested`, records them in the claimed worktree's own
+store `<state dir>/observation-claims/<16 hex of the handle>/` (`ClientAttestedObservationStore`,
+an observation store and lifecycle-mapping directory under a key the service generates) and runs
+the unchanged coordinator over it with `client_workspace_handle` set. The handle names one
+worktree, so linked worktrees of one repository never share consent, revocation, content fence or
+approved-check trust here either. A route whose task was not opened under
+the same claim, and a claim-bound row without an attestation, are refused `consent_missing` before
+any write. Claim stores persist with no operator surface yet: nothing lists or clears them, and a
+client that stops sending rows leaves the last mirrored consent and trust in place, inert because
+every row is mirrored from its own attestation first (ADR-051 decision 12, Limits; follow-up owner
+issue #903). A route naming a session its task has since replaced is judged by the task's current
+route (`StartCatalog.session_binding`), and the coordinator then follows `session_superseded` to the
+successor as it does locally; an attestation on a connection without a claim is `frame_invalid`.
+Text and markdown receipts of a claim-bound task with hook-observed evidence add
+`CLIENT_ATTESTED_OBSERVATION_LINE` after the workspace-evidence line. A claim-bound connection's
+rendering of a receipt without that trailer (a JSON receipt in the CLI, the terminal interface or
+the MCP text) adds it after the connection's workspace-evidence line when the result's
+`coverage.publication_channels` names `hook_observed` (`attribution_lines(..., hook_observed=)`,
+`client.attribution.coverage_hook_observed`), never on a receipt page or beside an unknown
+provenance; raw JSON output carries none. A claim-bound `check` with `await_observations` reports
+the wait `unavailable`; `render_human_check(..., claim_bound=True)` (the CLI, when the connection
+is claim-bound) renders it as `cli.render.CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE`, naming
+`finishup observe drain` on the client and then a check without `--await-observations` (an awaited
+claim-bound check is `unavailable` again), instead of "local outbox not readable".
+
+**Closed tokens** (`protocol/errors.py` protocol reason codes, each with an ADR-030 directive in
+`protocol/recovery.py` or, for the two workspace-agent reasons, a recorded exemption):
+
+| Token | Raised when | Recovery |
+|---|---|---|
+| `workspace_binding_conflict` | a hello carries both `workspace_claim` and `workspace_locator`, or a `start` names a `client:` handle on a connection without a claim | name the workspace by its absolute root (the bridge and CLI pick the form) |
+| `workspace_ref_not_portable` | a claim-bound `start` names an absolute or relative `workspace_ref`, or a handle other than the connection's | send the connection's `workspace_handle`, or no workspace (the bridge and CLI rewrite the absolute root to the handle) |
+| `workspace_ref_not_served` | rule R, in the client: a claim-bound `start`'s absolute `workspace_ref` names another folder than the worktree the connection serves (another repository or worktree, a nested repository, no repository, a missing path or a file); nothing is sent | continuation `workspace_folder_run_required` from a command (run it from the named folder) or `workspace_not_served_tell_user` from an MCP bridge (tell the user, carry on without FinishUP for that folder) |
+| `workspace_agent_unavailable` | no workspace agent answered within the hub's wait | no directive (`REASON_CODE_DIRECTIVE_EXEMPTIONS`): it is recorded as the check-time change gap `check_time_change_unavailable_workspace_agent_unavailable`, never raised as an error, and that gap's fixed sentence names `finishup server status NAME` on the client and that checking again can help |
+| `workspace_agent_refused` | the agent refused a read the check-time change needed as one it does not answer (a workspace it did not claim, an unknown operation or argument, a root no owner could admit) | no directive, on the same terms: the gap `check_time_change_unavailable_workspace_agent_refused` names the release mismatch and installing the same release on both computers. The directives `workspace_agent_reconnect` and `workspace_agent_refusal_review` were removed (2026-11-07): nothing raised an error carrying these reasons, so they never reached an agent. Files listed mode keeps from a server are not refusals of the check but the disclosure `outside_reads_not_listed` |
+| `requires_server_host` | a `server_host` command runs while a remote target is active | run it on the server host (for SSH, through `ssh -t`) |
+| `target_root_is_remote` | a service is asked to run in a root whose `target.json` names a remote kind or cannot be read: the daemon refuses at composition, before any bundle, state or singleton exists (`LifecycleError`, recorded as a startup failure), and an on-demand start refuses to spawn one (`service_unavailable` with this phase, at once). A human `service run`/`service start` on a readable remote record meets the server-host guard first (`requires_server_host`). From layer 4 a connection to an SSH root is made through its transport instead, and this phase names an HTTPS or port root (the gate's kind step) or an unreadable record | continuation `remote_target_no_local_service`: the selected server is an HTTPS or port server this release does not reach, or its record is unreadable, so the owner runs `finishup server use local`, then starts a new session; nothing was sent or started. When an isolation variable or a pinned launcher names the root, `remote_root_override_clear` instead: the owner unsets it or uses an unpinned launcher (`targets.remote_root_continuation`) |
+| `selection_overridden` | `server use` while the isolation variable or a runtime pin decides the root | unset the variable or use an unpinned runtime |
+| `repository_egress_held` | layer 2: the shared gate's last step (ADR-052) refuses a connection to a server elsewhere, before anything from it is sent, for a repository whose own grant on this computer allows no network use and for which the owner made no current choice; a long-lived connection that is already open ends as `server_authorization_changed` once the repository becomes held | continuation `repository_send_decision_required`: ask the user once; only they run `finishup server repositories add` on the trusted console; on a decline run `finishup server repositories keep` and do not ask again; then repeat the request |
+| `repository_egress_kept` | layer 2: as above, for a repository the owner kept on this computer for that target | continuation `repository_kept_on_this_computer`: continue without FinishUP for that repository; never ask again |
+| `server_authorization_changed` | layer 2: a connection admitted to a server elsewhere ends because what it was authorized under changed — the selection no longer names its target, the target's record was replaced or removed, the credential generation changed, or (for an open connection, whatever the gate now refuses) this computer's policy or the repository's hold changed (ADR-052); FinishUP stopped sending over it and what the server received stays there | continuation `server_connection_renew`: a request already sent over that connection may be recorded there and is never resent (no replay across targets), so its outcome is unknown; later requests run under the current selection or name the refusal now in force |
+| `server_profile_changed` | layer 3: the consent step (ADR-052 decision 10): what the selected server elsewhere offers or needs (its profile, as last fetched) is wider than, or not comparable with, what the owner consented to; or its revision is another issuer's, its endpoint identity changed, or a consent record is missing, unreadable or inconsistent; or the server refused the revision a hello or request named (control error code `server_profile_changed`). Refused before that server did any work for it: by this client before anything was sent, or by the server before it keyed the claim, registered an agent or did the request's work; every other call already sent over a connection the server refused ends as `server_authorization_changed` (its outcome is unknown, it is never resent) | continuation `remote_reconsent`: only the owner agrees again, with `finishup server use NAME` in their own terminal; agents never do. When the target's consent still admits the profile this computer holds (the server named a revision this computer has not fetched), `remote_profile_checking` instead: FinishUP is checking what changed, so the agent repeats the same request and follows the next refusal's continuation (`targets.profile_change_continuation`, read through `targets.remote_root_continuation`; attached by the client, never through a reason code) |
+| `server_level_unavailable` | layer 3: the server requires a level of use above the one the owner agreed to (never a silent upgrade); refused before anything was sent | continuation `server_level_decision_required`: only the owner decides (`finishup server use NAME` shows what it requires, or `finishup server use local`) |
+| `remote_kind_unavailable` | layer 1: `server add` of a remote kind (`ssh://…`, `https://…`, `--port N`), before any console prompt, zero-network check, probe, dial, key prompt or write; `server use` naming a remote record, or a remote record chosen in the terminal interface's `/server` (the selection is unchanged); `server login` (no key is read or stored). From layer 4 the same for `https://…`, `--port N` and their records only (and any address that is not `ssh://`), and `server login` for every kind. From layer 5 only an address that names none of the open kinds (`http://`, another scheme) | continuation `server_on_this_computer_required` (`REASON_CODE_CONTINUATIONS`): nothing was added, selected or sent; the owner runs `finishup server use local`, then the request is repeated |
+| `target_reauthorization_required` | a connection would be opened to a remote target the owner confirmed under an older disclosure version (`targets.require_current_authorization`, called by `is_remote_active_root`, `binding_for_active_root` and `server connect`) | continuation `server_reauthorization_required`: the owner runs `finishup server use local`, or, for an SSH server (layer 4), `finishup server use NAME` on their own terminal to agree to the current disclosure, then starts a new session; in layer 4 an HTTPS or port server could be authorized again only by a later release, and from layer 5 `finishup server use NAME` agrees again for it too (`remote_root_override_clear` when an isolation variable or a pinned launcher names the root) |
+| `zero_network_remote_selected` | a connection would be opened to a remote target while this computer last reported a zero-network policy (`targets.require_current_authorization`, before the disclosure check; ADR-051 decision 8, 2026-11-07); also the CLI's refusal of a privacy change that would leave both in force | the owner runs `finishup server use local`, then restarts open sessions (and makes the refused change again) |
+
+The remote connection phases ride as `phase` on a retryable `service_unavailable`
+(`REMOTE_CONNECTION_PHASES`) and are protocol reason codes too: `remote_unreachable`,
+`remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running`,
+`remote_incompatible` (whose text names both releases), and the client's own refusals
+`target_reauthorization_required`, `target_root_is_remote` and `zero_network_remote_selected`, and,
+from layer 2, `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`
+(the six `AUTHORIZATION_REFUSAL_PHASES`, which a `phase` safe detail admits and every surface
+renders alike). A client that catches that `TargetError` from the binding
+helpers raises it as this phase, so every surface renders its directive. A CLI command that
+answers in JSON answers such a refusal on stdout with the body `service status --json` prints
+(`ok: false`, `public_code`, `reason`, `phase`, `retryable`, `correlation_id`, `recovery`), the
+operation commands included (`bootstrap.is_remote_refusal`, ADR-052 consequences); their other
+control failures print nothing on stdout, as on `main`. `remote_auth_failed` is
+a server that answered and refused this client's key, so no surface calls it unreachable or
+unanswered: `server status` and `server test` say "State: answered, key refused" with the fix for
+the target's kind. In layer 1 no remote server is ever reached, so these phases arise only as the
+client's own refusals and as `runtime_for`'s `remote_unreachable` (phase `runtime_unavailable`).
+From layer 4 an SSH server's transport raises the five outage phases, and every surface that
+admitted `AUTHORIZATION_REFUSAL_PHASES` admits all of `REMOTE_CONNECTION_PHASES`, each outage with
+its fixed `refusal_summary` and its own continuation (`remote_server_test`,
+`remote_credential_repair`, `remote_identity_verify`, `remote_service_start_required`,
+`remote_release_mismatch`), never a local service to start (ADR-052 decision 18). From layer 7,
+`remote_unreachable` while the root is a server elsewhere reached in the direct style resolves to
+`remote_direct_slow` instead (`targets.DIRECT_STYLE_SLOW_CONTINUATION`, chosen by
+`targets.remote_root_continuation` from the target's `config/connection-style.json`, never
+through a reason code): the direct style is slow on this network, and `finishup server set NAME
+--style relay` is the remedy (the owner's WAN-gate decision, ADR-052 decision 24.5).
+The check-time change gains the
+unavailable reasons `workspace_agent_unavailable` and `workspace_agent_refused`, so
+`check_time_change_unavailable_workspace_agent_unavailable` and
+`check_time_change_unavailable_workspace_agent_refused` join
+`CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS`.
+
+**Shared authorization (layer 2, ADR-052).**
+
+- `client.authorization` (hook-safe): `OPEN_REMOTE_KINDS` (empty in layers 2 and 3; exactly
+  `{"ssh"}` in layer 4; `{"ssh", "https", "local_port"}` from layer 5; an architecture test pins
+  it), `AUTHORIZATION_REFUSALS`, `gate(record, *,
+  repository_key=None)` (raises `TargetError` in the order zero-network, disclosure, open kind,
+  consent, hold), `authorize_active_root() -> ConnectionAuthorization | None` (None for a local
+  root), `authorize_target(record) -> ConnectionAuthorization` (layer 4: pinned to the target's own
+  root, not selection-bound; the helper's admission), `preflight_refusal() -> str | None`
+  (record-only; replaces `active_remote_refusal` in the SessionStart auto-attach, which
+  server-host actions keep asking), `ConnectionAuthorization.refusal()` / `.for_repository(key)` /
+  `.grant`, `AuthorizationGeneration`, `read_generation(root, *, selection_bound)`,
+  `bump_credential_generation(root) -> bool`, `credential_generation_path(root)`,
+  `refusal_summary(phase)`.
+- `service.client`: `AuthorizationCheck` (Protocol: `refusal() -> str | None`),
+  `ClientWorkspaceBinding.authorization` (replaces round 5's `hold`), `GENERATION_RECHECK_SECONDS`
+  (1.0), `connect_service(..., serve_workspace=False)` and `connect_service_on_demand(...,
+  serve_workspace=False)` (the MCP bridge passes true). A remote root's connection is admitted
+  before any claim, dial, spawn or supersede and then checked before every frame, by `connect()`,
+  before a workspace reply and by its watch; a local one carries no check.
+- `client.remote_binding`: `binding_for_active_root(locator, *, serve_workspace, authorization=None)`
+  and `remote_workspace_binding(..., target=None, authorization=None)`;
+  `client.workspace_agent.WorkspaceAgentHandler(..., held_roots=None, own_authorization=None)`.
+- `client.repository_hold`: `decide`, `require_sendable`, `SendHold` (`phase()`, `held()`,
+  `refusal()`), `held_worktrees`, `hook_context(phase, variant)`, `repository_key`, the choice
+  record (`add_override`, `add_kept`, `remove_override`, `clear_overrides`, `read_overrides`).
+  `client.everyday_repository`: `read_everyday_repository`, `remember_repository_setup`,
+  `refresh_at_session_start`, `session_start_hold_phase`, `report_needs_refresh`.
+  `client.targets.remote_target_recorded()` switches the reads on (O3): a bounded presence check
+  of `servers/remote-target-recorded` (`write_target` makes it before a remote record;
+  `remove_target_root` drops it with the last one through `reconcile_remote_presence`).
+- `protocol.consent_envelope` (SHARED): `ConsentEnvelope` and its parts, `envelope_from_json`,
+  `envelope_to_json`, `canonical_bytes`, `envelope_digest`, `consentable`, `precedes`,
+  `compare(consented, current) -> EnvelopeComparison` (`same`, `narrower`, `ask_again`,
+  `level_unavailable`).
+- `cli.render.render_authorization_refusal(error)`; `server status --json` gains
+  `target.repositories` (null for a server on this computer, which asks no live read); `server
+  repositories add|keep|list|remove` is `client_only` in `cli.command_scope` (hidden in layers 2
+  and 3, shown from layer 4, where `add` acts for an SSH target), with the
+  `_REMEDIES` keys `repositories_not_applicable`, `repository_invalid`, `repository_limit`,
+  `repositories_record_invalid` and `repositories_record_unsafe`; hook diagnostics record
+  `repository_egress_held`, `repository_egress_kept` and `server_authorization_changed`.
+
+**Not yet built.** Layer 1 ships no remote runtime, no long-lived client process that holds a remote
+connection, no network protocol and no server edge. Server profiles and their consent binding arrive
+in layer 3; the background helper (one per server, for the relay and direct connection styles) with
+SSH targets in layer 4 (built: *SSH servers and the helper*); REST, its gateway and native server
+edges, API key scopes (`agent`, `operator`; ADR-051 decision 9), discovery with the official
+origin preset and the conformance kit in layer 5 (built: *HTTPS servers and REST v1*); the L2
+server copy in layer 6 (built and released: *Level L2: the server copy*).
+
 ### Several-agent setup batches (issue #1119)
 
 `cli.host_batch` composes the existing host connection plans for CLI and full-screen first run.
@@ -4753,8 +6177,12 @@ decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #73
 and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
 line reports its inventory, including both setup contracts and `isolation-report` `1.0.0`
 (issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes. `2.3.0`
-shipped in v0.3.0 and is frozen with them; the inventory after it (receipt-result `1.4.1`) is
-reported by `2.3.1`.
+shipped in v0.3.0 and is frozen with them. `main` then reported its inventory with
+receipt-result `1.4.1` in `2.3.1` (#1348), also frozen here. The ADR-051 inventory (control
+`2.10.0`, `isolation-report` `1.1.0` and `server-target-status` `1.0.0`; layer 1 adds no
+network-binding contract) is reported by `2.4.0`, which also lists `check-recorded` `1.7.0` and
+`receipt-document` `1.4.0` (the counts listed mode kept back, ADR-051 decision 5) and names
+`receipt-document` `1.4.0` as the version new receipts are written in.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -6663,7 +8091,17 @@ reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
-`storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
+`storage_unsafe`, and `storage_corrupt` tokens. A selected remote server this computer refuses
+before any dial (ADR-051 decision 8) records its own reason, `zero_network_remote_selected`,
+`target_reauthorization_required`, or `target_root_is_remote` for any other remote root (or one whose
+record cannot be read), since this release reaches no server elsewhere: one of
+`targets.REMOTE_ROOT_REFUSALS`, read by `targets.active_remote_refusal()` from the target record and
+this computer's last-reported policy marker without a connection attempt, the same phase the connect
+seams refuse with. The SessionStart context of every host then names that reason with its registry
+directive (the owner's fix: `finishup server use local` when the selection names the root, or
+unsetting the isolation variable or using an unpinned launcher when one names it,
+`targets.remote_root_continuation`) and continuation, never a hook-budget outage or a service still to start; a mapped session's status read
+keeps the same phase. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
 bounded `pending_lifecycles` queue and source/session/generation-scoped paired-orphan identities,
@@ -7691,8 +9129,8 @@ plus optional `"unknown_members": true`; refused unless a regular file owned by 
 account with no group or other bits; a compare-then-rename replace through a 0600 temporary
 with a parent-directory fsync) names the projects that connected a Codex home or Cursor config
 root. Each installation also keeps a membership witness, `host_projects.witness_path_for(root)` =
-`<state_dir()>/host-config-locks/<same key>.members` (same canonical JSON and checks as the record,
-0600): every project it recorded for that root minus those it saw disconnect
+`<installation_state_dir()>/host-config-locks/<same key>.members` (same canonical JSON and checks
+as the record, 0600): every project it recorded for that root minus those it saw disconnect
 (`write_connected_projects(..., departed=..., shared_removed=...)`); `recorded_members(root)`
 reads it (absent or unreadable names none; maintained best effort after each record write and
 deleted when the shared pieces go). The record write re-reads and compares the record with the
@@ -7701,8 +9139,9 @@ rename with a parent-directory fsync; between the compare and the rename a write
 neither lock (another installation) can still change it, so cross-installation updates are
 narrowed, not excluded. `host_projects.host_config_lock(config_root)` is the per-root setup lock `apply_connection`
 holds for every host across refresh, apply and the record update: an exclusive `flock` on
-`host_projects.lock_path_for(config_root)` = `<state_dir()>/host-config-locks/<sha256 of the
-resolved absolute path, NFC, case-folded>.lock`, a 0600 regular file owned by the invoking account
+`host_projects.lock_path_for(config_root)` = `<installation_state_dir()>/host-config-locks/<sha256
+of the resolved absolute path, NFC, case-folded>.lock` (an explicit isolation root's state, else the
+everyday installation's; never a selected server's), a 0600 regular file owned by the invoking account
 in a 0700 directory without symlinked components, opened `O_NOFOLLOW`, never deleted; it does not
 serialise another installation's setups (the record's compare-then-rename narrows that race; it does not close it). A lock that cannot be
 created, opened or taken raises `HostProjectsError("lock_unavailable")`, surfaced as the
@@ -8974,6 +10413,10 @@ the basis could not be read):
   `conclusion_basis {reasons[{code, rule, count, refs, since_frontier?}], reason_total}`, and a gap
   `effect` (`bounds|disclosed`). A clean conclusion beside a limitation id or a bounding gap is
   invalid, and `reason_total` is zero exactly when the conclusion is clean.
+- `receipt-document` 1.4.0 (a new version; 1.3.0 shipped in v0.3.0): 1.3.0 plus a live
+  `outside_reads_not_listed` gap's optional `kept_back {task_inputs, declared_tests}` (ADR-051
+  decision 5). Every rule of 1.3.0 (children, terminal sections) holds for 1.4.0 too
+  (`_CHILD_BEARING_ARTIFACTS`); `kept_back` is refused on any other artifact.
 
 Text (`finishup.protocol.readiness_text`): the owner-approved `readiness_directive` sentence is
 unchanged; `predicted_receipt_variants` appends "The receipt will read X: <reasons>." (while work
@@ -9126,7 +10569,10 @@ facade and are never MCP tools.
   state. `read_guidance` does not use the service client. On the policy route
   `build_bridge_runtime` reads the service configuration once at startup, through the same
   tolerant loader the logging sink uses, only to render the AI-powered review destination disclosure
-  (issue #479); it keeps no configuration state and the strict route never reads it.
+  (issue #479); it keeps no configuration state and the strict route never reads it. When the
+  bridge's root is a FinishUP server elsewhere (a remote target, ADR-051), or its target record
+  cannot be read, it reads no configuration: the disclosure says that server decides AI-powered
+  review under its own settings and that this computer's settings do not apply.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
   workflow tool names, `read_guidance`, `closure_prepare`, descriptions, and annotations, plus
   the `instructions` text.
@@ -9136,10 +10582,13 @@ facade and are never MCP tools.
   destination-disclosure amendment), which `mcp/semantic_destination.py` renders from validated
   configuration through a closed catalog (`BUNDLED_ENDPOINT_HOSTS`, `DISCLOSABLE_PROVIDER_IDS`,
   `DISCLOSURE_PREFIX`, `MAX_DISCLOSURE_ENCODED_BYTES`, `disclose_semantic_destination()`,
-  `read_semantic_destination_disclosure()`) and hands to `server_instructions()` only as a
-  `SemanticDestinationDisclosure`. Absent or invalid configuration renders as unknown, an
-  off-catalog endpoint profile as an unknown host, an unlisted provider id as unlisted, and a
-  configured fallback endpoint beside the primary; strict instructions never carry it. Shared values
+  `disclose_remote_destination()`, `read_semantic_destination_disclosure()`) and hands to
+  `server_instructions()` only as a `SemanticDestinationDisclosure`. Absent or invalid
+  configuration renders as unknown, an off-catalog endpoint profile as an unknown host, an unlisted
+  provider id as unlisted, and a configured fallback endpoint beside the primary; a remote root
+  renders as `remote`, naming the selected server by its target id and transport only (never a host
+  name), and an unreadable target record renders as `remote` without them; strict instructions
+  never carry it. Shared values
   are `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
@@ -9301,7 +10750,9 @@ facade and are never MCP tools.
   `instance_service_running` 20 as `BUNDLE_BUSY`) and carries their remediation lines.
 - `cli/instance.py`: `finishup instance create|status|dispose` (ADR-028). `create_instance()`
   creates one owner-only root (parent must exist; same path-safety gate; socket path bound
-  `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
+  `MAX_SOCKET_PATH_BYTES` from `config/installation.py`, the platform's usable `sun_path` bytes:
+  107 on Linux, 103 on Darwin; `client/targets.py` checks `target_root_too_long` against the same
+  bound), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
   it echoes the exact root once. Creation is whole or nothing: a refusal after the root exists
   (`runtime_pin_unwritable`, a pin conflict found at write time, a failed seal) first removes this
   call's own marker and the directories it created, each only when empty, so a retry after the
@@ -9839,7 +11290,11 @@ configuration root, bounded reason, read-only prerequisite facts and one quoted 
 (or null when no setup prerequisite is missing). `connection_observed` is always false. Local and
 review operations evaluate service/vault/repository prerequisites; review additionally requires a
 provider binding and review permission. Connection-only evaluates the common host plan without
-requiring service or provider login. No native session or provider dispatch is inferred.
+requiring service or provider login. No native session or provider dispatch is inferred. Every
+operation adds the `server_selection` fact while this computer's policy forbids network use and a
+remote server is still selected (ADR-051 decision 8; see the server-target section above), and
+its human text adds a `Server:` line with that fact's `next_command`; `reason` and
+`next_command` keep naming the setup prerequisite.
 
 Codex plugin/MCP/provider status gain the additive local inspection field `inspected_codex_home`.
 Their existing schema tokens remain unchanged; this field is not a service-wire or ledger field.
@@ -10487,7 +11942,13 @@ the ledger), and since issue #1102 `semantic_task_input_candidates`, `semantic_t
 `task_input_outside_not_admitted`, counted before any `lstat` against the connection's root the
 read uses, else the session's workspace; 0 when neither is known) and
 `semantic_task_inputs_outside_not_admitted` (0 or 1); a candidate count beside a 0 flag means
-FinishUP saw such a path but could not count it. Resolved parts have passed capture
+FinishUP saw such a path but could not count it. Since ADR-051 decision 5, a separate
+`semantic_outside_reads_not_listed` record (component `semantic_composition`, reason `not_listed`,
+same request id, written only when not zero) carries `semantic_task_inputs_outside_not_listed`:
+the existing task inputs and declared tests a remote server's workspace agent kept back under its
+owner's `listed` mode, as frozen in the check change and the job's case object. It is its own
+record because a diagnostic line is at most 1,024 bytes and `semantic_case_built` is at that
+bound. Resolved parts have passed capture
 authentication; selected excerpts are in the built packet. These counts precede privacy
 minimization and do not prove provider delivery or code correctness. The record contains no
 content, paths, or content hashes.
@@ -13182,7 +14643,8 @@ effect on findings, closure readiness or AI-review requirements.
 
 The unreleased `status-request/1.2.0` / `status-result/1.4.0` admit `view=coverage`, and their
 #1139 delivery successors `status-request/1.3.0` / `status-result/1.5.0` inherit it; receipt-document
-`1.3.0`, carried by receipt-result `1.3.0`, `1.4.0` and `1.4.1`, optionally carries `verification_coverage`. CLI status, TUI `/coverage`
+`1.3.0`, carried by receipt-result `1.3.0`, `1.4.0` and `1.4.1`, and its successor `1.4.0`, carried by
+receipt-result `1.5.0` (what this build writes), optionally carry `verification_coverage`. CLI status, TUI `/coverage`
 and receipt JSON/markdown/text share the projection. Wire quote leaves are separated into
 `task_criterion_quote` (`task_description`) and `obligation_criterion_quote` (`obligation_text`);
 `worst` and `checks` use command metadata; `expected_from` is a closed structural label shown on
@@ -13233,6 +14695,704 @@ sits before the linked-check question, which stays last. On a channel whose prep
 most `SMALL_REVIEW_CHANNEL_BYTES` (16,384, the minimal policy's 4,096 tokens) it is not asked when
 the test-quality question rides, because that packet already has no room left (#1173). It is
 bound into `case_digest` with the rest of the question set and is never in the cached instruction.
+
+## Server profiles and consent (ADR-052, layer 3)
+
+**Schema.** `server-profile` 1.0.0 (`schemas/service/server-profile-1.0.0.schema.json`, generated
+from `protocol.server_profile_contract`; golden vectors `fixtures/service/server-profile.case.json`):
+`schema_version`, `release`, `schema_manifest_digest`, `service_instance_id`, `key` (`{id | null,
+scope: operator | agent | read, principal}`), `edges` (`rest-1`, `ssh-control`), `levels`
+(`{offered, required_min}`), `code_sync`, `retention` (`{options, default}`) and `exclusions`
+(`{always}`) — present exactly when L2 is offered, else `null` — `review` (`{ai_review: none |
+server_policy, provider_disclosure, fallback_disclosure}`: the provider review sends to first and
+the one a pairing falls back to, each a token or `null`; `none` names neither, and a fallback
+needs a first provider), `official` (a claim only), `profile_revision` (`{issuer,
+revision, profile_digest}`) and `profile_digest` (`sha256` over `yoetz/server-profile/v1` NUL and
+the canonical `{levels, code_sync, retention, exclusions, review}`, each shared member in the
+consent envelope's encoding). `protocol.server_profile` is the hook-safe strict parser; a document
+whose digest does not recompute, or with anything unknown, is refused (`ProfileError`, closed
+reasons `profile_member_unknown`, `profile_member_missing`, `profile_member_invalid`,
+`profile_value_unknown`, `profile_schema_unsupported`, `profile_digest_mismatch`,
+`profile_too_large`, `profile_not_json`).
+
+**Control wire 2.10.0 (amended in place, unreleased).** Method `server_profile` (body `{}`; result a
+`server-profile` document; structural: answered while locked, for `cli` and `ui` clients, not the
+MCP bridge). `control-hello.server_profile` and `control-hello-result.server_profile`: the revision
+triple. A hello naming a revision or a claim is admitted only under the revision the service
+issues now; otherwise the answer names the current one and the service closes before keying the
+claim or registering an agent (client: phase `server_profile_changed`). Control error code
+`server_profile_changed`: a request that does work on a session bound to an older revision.
+`control-hello.workspace_agent.role`: `connection` (default) or `background`. The manifest-mismatch
+answer lists only released methods (#436).
+
+**Where the offer comes from.** `service.server_profile`: levels pinned by the release (L1 offered
+and required); review from the service's `config.toml` (an external semantic provider →
+`server_policy` with its provider id and, with a `[semantic_fallback]` pairing, the fallback's;
+otherwise `none`); `official` false; edge `ssh-control`; the owner's key (`{null, operator,
+owner}`). A configuration whose provider id is not a profile token offers no profile: no revision
+is issued, `server_profile` is refused `method_forbidden` and every hello naming a revision or a
+claim is refused `server_profile_changed`.
+
+**CLI.** `finishup service profile [--json]` (hidden in layer 3, shown from layer 4, whose SSH
+discovery runs it on the server; server-host scope): starts this root's service on demand and
+prints the verified profile.
+
+**Client.** `client.server_profile`: `consent_verdict(record)` (the gate's step 5),
+`consent_envelope_for`, `record_consent(..., basis=None)`, `refresh_profile(..., basis=None)`,
+`PROFILE_SOURCES` (empty in layer 3; `ssh` from layer 4), `styles_offered(record)` (layer 4).
+`FetchBasis(identity, credential)` and `fetch_basis(record)` (layer 5): read before a fetch reads
+its key; with a `basis`, `refresh_profile` and `record_consent` record nothing once the target's
+identity or its credential generation (`authorization.credential_generation(root)`) moved since
+(`TargetError("server_authorization_changed")`): the helper's refresh and `server use` pass one.
+`server status --json` gains `target.consent` (`{level, profile_revision, state: current | changed |
+level_unavailable, adjusted_at, coverage_reduced}`; `null` for a local target or one never
+consented); the owner display shows `server_profile_narrowed` while a narrowing adjusted the
+consent.
+
+**Helper registration API.** `client.helper_registrations`: `register(authorization, claim,
+worktree, *, registrant, source, wanted=None)` (under the registry lock: re-admission, the target
+still the one admitted, the credential generation and consent read, the limit, the write; a
+`wanted` that answers false writes nothing), `renew`, `release`, `release_registrant`,
+`served_workspaces(record)` (async; drop reasons `expired`, `unreadable`, `target_changed`,
+`selection_changed`, `credential_changed`, `consent_changed`, `claim_mismatch`, or the gate's
+phase; a dropped record is removed under the lock only while it still holds the bytes judged),
+`RegistrationError` (`registration_refused` with a phase, `registration_limit`,
+`registration_unsafe`, `registration_invalid`). The MCP bridge registers a claim-bound workspace
+under a registrant of that connection's own, renews it at half its lease from a renewal task the
+connection owns (whether or not another request reuses it), and releases it, cancelling that
+task, on close and when Cursor's roots change; a renewal under way then writes nothing.
+
+**Agent routing (`service.workspace_hub`).** A live call: its own connection's agent, else the
+newest background agent, else the newest connection agent. Background work: the newest background
+agent, else the newest connection agent.
+
+## SSH servers and the helper (ADR-052, layer 4)
+
+ADR-052 decisions 13 to 19 and ADR-051 (*Built in layer 4*, decision 3, decision 7 *SSH add*,
+*Topology*) own these names. With no SSH target recorded, nothing here runs or is imported on a
+hook's path.
+
+**CLI.**
+
+- `finishup server add NAME ssh://[user@]host[:port] [--remote-root ABS] [--remote-launcher ABS]
+  [--outside-reads local|listed]` (`client_only`; the address, `--remote-root`,
+  `--remote-launcher` and `--outside-reads` are shown in help; `--port`, `--ca-file`, `--tls-pin`
+  stay hidden in layer 4 and are shown from layer 5). Order: the selection in force, the name,
+  the address and options (remote paths absolute, SRV-11; `--ca-file`/`--tls-pin` with SSH is
+  `target_tls_invalid`), the name not taken, zero-network (SRV-3), SSH discovery, then the
+  consent on the trusted console. It prints "Asking the server over SSH where its FinishUP service
+  listens and what it offers." before discovery;
+  when OpenSSH will ask about an unknown host key, "This computer does not know the server's SSH
+  host key yet, so OpenSSH asks you to confirm it here: compare the fingerprint with the server's
+  own before you answer yes."; after the add, a warning when the endpoint is session-bound
+  (enable linger or add again with `--remote-root`), the held or kept repository line (FR-5) and
+  "Use it with 'finishup server use NAME'.".
+- `finishup server use NAME` for an SSH target: fetches the profile (an unknown host key may be
+  asked about on the owner's terminal; the terminal interface's `use` never lets OpenSSH ask, and
+  an unknown key there is `trusted_console_required`), the consent on the trusted console, the
+  selection, then the FR-5 line.
+- `finishup server set NAME --style relay|direct` (`client_only`, shown): refusals `style_invalid`
+  (another value), `style_not_applicable` (not an SSH target), `style_unavailable` (a style the
+  server's last profile does not offer), `target_still_connected` (the helper did not stop).
+- `finishup server connect|disconnect|test NAME` for an SSH target go through `SshTargetRuntime`
+  (INTERFACES *Commands and the runtime seam*). `server logout` refuses an SSH target
+  (`credential_not_applicable`); in layer 4 `server login` stays refused for every kind (from
+  layer 5 it acts for HTTPS and port targets and refuses SSH, `credential_not_applicable`).
+- `finishup helper run --target <t_ id>` (hidden, `client_only`, started by clients; `--idle-seconds`
+  is a hidden test option): exit 0, 2 (`helper_target_invalid: give the id of an SSH server target
+  on this computer; an isolation variable or runtime pin naming another root also refuses`) or 20
+  (`helper_failed: the target's local endpoint could not be bound safely`).
+- `finishup service profile [--json]` is shown in help (it is what discovery runs on the server).
+- New `server` refusal reasons (`cli.server._REMEDIES`, fixed text, never a host or path):
+  `remote_launcher_not_found` ("no FinishUP launcher was found on that server at the usual install
+  paths (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, /usr/bin), so nothing was added; give its
+  absolute path with --remote-launcher", exit 20), `remote_host_key_unconfirmed` (OpenSSH's
+  question declined or not answered; nothing added; exit 20), `style_invalid`,
+  `style_not_applicable`, `style_unavailable` (exit 2). A transport outage during a `server`
+  command prints its phase as the reason (`remote_unreachable`, `remote_auth_failed`,
+  `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`).
+
+**SSH discovery** (`client.ssh_discovery`; never on a hook's path). `SSH_LAUNCHER_CANDIDATES` =
+`$HOME/.local/bin/finishup`, `/opt/homebrew/bin/finishup`, `/usr/local/bin/finishup`,
+`/usr/bin/finishup` (the first executable, found by one fixed remote script; never a bare `PATH`
+lookup). Then `[env FINISHUP_ISOLATED_ROOT=<remote root>] <launcher> service endpoint --json`
+(`yoetz.service-endpoint/1`: an absolute `endpoint` and this release's `schema_manifest_digest`,
+else `remote_incompatible`; `runtime_dir_session_bound` true with `linger` not `enabled` makes the
+add warn) and `… service profile --json` (`server-profile` 1.0.0; exit 20 there is
+`remote_service_not_running`). Probe argv: `ssh -v -o ControlPath=none -o ControlMaster=no -o
+BatchMode=yes -o StrictHostKeyChecking=yes -T -p PORT [user@]host -- <command>`; the asking
+probe replaces `BatchMode`/`StrictHostKeyChecking=yes` with `-o StrictHostKeyChecking=ask -o
+PasswordAuthentication=no -o KbdInteractiveAuthentication=no`, at most once per discovery and only
+with a `HostKeyQuestion` (the trusted console). `discover(...) -> SshDiscovery(endpoint, launcher,
+session_bound, profile)`, `fetch_profile(record, *, question=None)`, `SshProfileSource`
+(`PROFILE_SOURCES["ssh"]`), `host_key_question(question)` (a context block for `server use`). The
+endpoint identity is `FetchedProfile(..., "ssh_host_key", "sha256:<64 hex>")`, from OpenSSH's own
+`debug1: Server host key: <type> SHA256:<base64>` line; none, or two different keys among the
+probes, is `remote_identity_changed`.
+
+**OpenSSH argv** (`client.ssh_transport`; every child gets this process's environment without
+FinishUP's own variables, `ssh_environment()`; `ssh` is `shutil.which("ssh")`, none is
+`remote_unreachable`). Relay master: `ssh -M -S <troot>/run/m -N -T -o BatchMode=yes -o
+StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o StreamLocalBindMask=0177 -o
+StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1
+-p PORT -L <troot>/run/upstream.sock:<remote endpoint> [user@]host`. Direct master
+(`ensure_direct_master(ssh, root, record, *, expected, deadline=None)`): `ssh -M -S <troot>/run/m
+-o ControlPersist=15m -N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o
+ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1 -p PORT [user@]host`. Direct
+stream (`open_direct_stream(ssh, root, record, *, expected, deadline=None)`): `ssh -S
+<troot>/run/m -o ControlMaster=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o
+ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=DEBUG1 -p PORT -W <remote endpoint>
+[user@]host`, handed back after `SshControlStream.verify(expected)`. Remote commands (`service
+start`) run the recorded absolute launcher, shell-quoted and pinned to the recorded remote root,
+over the master (`-o ControlMaster=no -o LogLevel=DEBUG1`). Master control: `ssh -S <troot>/run/m
+-O check|exit -p PORT [user@]host`. `expected` is `server_profile.consented_host_key(root)`: every
+connection is used only once its own `Server host key` line named it (`host_keys`,
+`require_host_key`; ADR-052 decision 20), else `remote_identity_changed`. Socket paths are handed
+over as written (spaces included); one holding `:`, `%`, `$` or a control character is refused
+(`forwardable_path`, `ssh_paths_usable`; `server add` refuses `ssh_path_unusable`). `run_ssh(argv,
+*, seconds, stdout_limit=65536, stderr_limit=65536)` reads both streams bounded and kills and reaps
+a command past either (`remote_incompatible`). Failures are closed phases chosen by fixed OpenSSH
+phrases (`classify_ssh_failure`): a host-key failure is `remote_identity_changed`, a refused key
+`remote_auth_failed`, a refused channel `remote_service_not_running`, anything else
+`remote_unreachable`.
+
+**Helper** (`client.helper_status`, hook-safe; `client.helper`; ADR-052 decisions 13 to 16).
+`HELPER_STATUS_SCHEMA` `yoetz.helper-status/1`, `CONNECTION_STYLE_SCHEMA`
+`yoetz.connection-style/1`, `HELPER_IDLE_SECONDS` 900, `HELPER_PHASES`, `HELPER_REASONS`,
+`PROFILE_REFRESH_MARKER`; `read_helper_status`, `write_helper_status`, `read_connection_style`,
+`write_connection_style`, `request_profile_refresh`, `take_profile_refresh_request`,
+`HelperLock`, `helper_holder(root) -> HelperStamp | None`, `read_helper_epoch(root)`,
+`start_fenced(root, epoch)`, `spawn_helper(root, target_id, *, epoch=None)` (a detached `python -m
+finishup helper run --target ID --epoch <epoch>` with the scrubbed `helper_environment()`, stderr
+to `log/helper.stderr`, reaped by a daemon thread; `epoch` is the one its caller read before
+dialling, else the one read now), `stop_helper(root, *, timeout_seconds)` (moves the stop epoch;
+`True` only once the lock is seen free; never signals), `supersede_helper(root, holder, *,
+timeout_seconds)` (the same stop for exactly the holder decided about, under the epoch fence;
+raises `HelperHolderChanged` and moves nothing when another holds the target; returns the epoch it
+wrote once the lock is free), `helper_lock_held(root)`, `helper_start_fence(root)`. Records and sockets beneath an
+SSH target root: `state/helper.lock`, `state/helper-status.json`, `state/helper-epoch`,
+`config/connection-style.json`, `state/ssh-master.json` and `state/ssh-master.lock`,
+`state/profile-refresh-requested`, `log/helper.stderr`, and in `run/` `control.sock` (the relay's
+endpoint), `upstream.sock` (the master's forward) and `m` (the OpenSSH master, either style); see
+*Target records*. Timings: drain every 30 s per agent; registrations re-read on a folder change
+(1-second tick) and every 30 s; profile refresh at start, every 10 min while an upstream was used
+in the last 10 min (a live agent connection counts as use), on demand, at most every 30 s, and
+scheduled under gate steps 2 to 4 only (not under the admission); hello read within 10 s; each
+upstream attempt (master, channel, hello, first answer) within 30 s; the captured admission asked
+again before every forwarded hello and every remote `service start`; the server's `service start`
+at most once per 30 s, for a client's connection only; a last drain bounded to 2 s.
+
+**Service client.** `connect_service` and `connect_service_on_demand` reach an admitted SSH root
+through its transport: the relay style dials `<troot>/run/control.sock` (transport `connector`),
+starting the helper when nothing answers and replacing one an older release stamped; the direct
+style dials `ssh -W` (transport `ssh`). Over `connector`, a connection whose binding claims a
+workspace writes the relay binding first (`helper_status.relay_binding(repository_key)`: `0xFF`,
+`yoetz-relay/1 `, the binding's `ClientWorkspaceBinding.repository_key`, a newline;
+`RELAY_BINDING_BYTES` long; `read_relay_binding`, `starts_relay_binding`); the helper binds the
+relay and its REST stream to that repository's hold and never forwards it, and refuses a claim
+without it. A dialed stream with `bind` (a REST stream) is bound to the connection's own
+authorization (a refusal names `server_authorization_changed`). `connect_service_via(dial, client_kind, *,
+workspace_binding, authorization, transport, timeout_seconds=5.0) -> ServiceClient` is the
+handshake over a stream a caller dials itself (the helper's background agents).
+`ServiceClient.wait_closed()`. A `server_profile_changed` refusal from the server leaves the
+refresh marker. `service_holder_identity()` of a remote root is the helper (pid and
+`helper-<generation>`). `cli.app.build_service_client` serves a remote root's live calls
+(`serve_workspace=True`) and registers once through `helper_runtime.register_for_background(client,
+"cli")`. `adapters.control.unix_socket.connect_owner_only_endpoint(path)` dials an owner-only
+socket that is not the service's own (the master's forward).
+
+**`server-target-status` 1.0.0** (amended in place, unreleased): `target.connection` is `null` for
+a target that is not SSH (from layer 5: not SSH, HTTPS or port), else `{style: relay|direct,
+styles_offered: [relay|direct] (at most 2), helper: {running: bool, phase:
+starting|ready|unavailable|stopped, reason: token|null, generation: integer ≥ 1} | null}`
+(`helper` null until a helper recorded a status). Text (`cli.server.connection_lines`):
+"Connection: relay (this computer's FinishUP helper keeps one SSH connection for every program
+here)." or "Connection: direct (each program here opens its own SSH channel through a shared
+OpenSSH master).", then "Helper: running|not running; last <phase>[, <reason>].". In layer 4
+`server list` and `server status` mark only `https` and `local_port` records "not available in
+this release"; from layer 5 no record of an open kind is marked.
+
+**MCP bridge.** After registering a claim-bound workspace it starts the helper in the direct style
+(`helper_runtime.ensure_helper_for_direct_style`). `_SENT_REQUEST_TARGETS` (at most 4,096 request
+ids, oldest forgotten first) maps each request id it sent to a target id or `None` (this
+computer); a request id already sent to another one is refused `server_authorization_changed`
+before it is sent.
+
+## HTTPS servers and REST v1 (ADR-053, layer 5)
+
+[ADR-053](adr/ADR-053-rest-v1-public-contract.md) owns these names; ADR-052 decisions 20 to 23 own
+how the authorization crosses REST, and ADR-051 (*Built in layer 5*, decisions 3, 5, 7, 9 and 10,
+*Topology*) the client's commands. With no HTTPS or port target recorded, nothing here runs or is
+imported on a hook's path, and no listener starts unless a server's owner runs `finishup service
+rest run`.
+
+**Modules.** `finishup.rest` (SHARED in the cut-line map; importing it is inert): `rest.contract`
+(the wire contract both sides share, standard library and `finishup.protocol` only; the only part
+a client imports), `rest.contract_models` (the schema contracts the generator reads, never
+imported at runtime), `rest.api_keys` (`ApiKeyStore`, `ApiKeyRecord`, `ApiKeyError`,
+`MAX_API_KEYS` 256), `rest.backend` (`RestBackend`, `BackendRefusal`, `AgentHandle`), `rest.app`
+(`RestApp`, `UnauthenticatedBudget`, `MAX_PENDING_OPERATIONS_PER_KEY` 32, `MAX_AGENTS_PER_KEY`
+16), `rest.listener` (`RestListener`, `ListenerError`, `parse_listen`, `MAX_TCP_CONNECTIONS` 256,
+`MAX_TCP_CONNECTIONS_PER_PEER` 64, `REQUEST_HEAD_SECONDS` 10, `REQUEST_BODY_SECONDS` 120) and
+`rest.audit` (`RestAudit`, `FileAuditSink`, `AUDIT_FILE_NAME`, `AUDIT_ROTATE_BYTES` 8 MiB).
+`finishup.gateway` (side GATEWAY: SHARED modules and `service.client` only):
+`gateway.backend.ControlSocketBackend` and `gateway.run.serve_gateway` (a call naming an agent is
+written on that agent's one control connection, and so is its cancel: a cancel that crossed its
+call's answer is a no-op there, `ControlSession` remembering its newest
+`MAX_FINISHED_CALLS_REMEMBERED` = 256 answered rpc ids and `ControlSession.is_running(rpc_id)`; the
+service never interrupts an answer it is writing, so the connection and its other calls go on; a
+cancel naming no call of the connection is still `correlation_mismatch`). `service.rest_native`
+(SERVER): `NativeBackend` and `NativeRestEdge` (`run_service(rest_edge=…)`). Client side:
+`client.rest_client` (`RestTransport`, `RestUnavailable`, `load_key`, `load_trust`, `TlsTrust`,
+`MAX_RESPONSE_BYTES`), `client.rest_stream.RestControlStream`, `client.rest_discovery`
+(`discover`, `check_discovery`, `fetch_profile`, `fetch_profile_async`, `check_key`, `KeyCheck`,
+`RestProfileSource`) and `client.helper.RestUpstream`. CLI: `cli.rest_server` (`api_key_app`,
+`rest_app`).
+
+**Routes** (relative to the target's base URL, its path prefix included; canonical JSON bodies and
+answers, `cache-control: no-store`, never a redirect):
+
+| Route | Auth | Answer |
+|---|---|---|
+| `GET /.well-known/finishup` | none | `rest-discovery` 1.0.0 |
+| `GET /v1/server` | key | `server-profile` 1.0.0 with the caller's `key: {id, scope, principal}` and `edges: ["rest-1"]` |
+| `GET /v1/session` | key, revision | `rest-session` 1.0.0 |
+| `POST /v1/{method}` | key, revision | the control-result body byte for byte, `finishup-outcome: ok\|error`; `202` with `rest-operation` and `location: /v1/operations/{id}` while running after `wait_ms` (at most 25,000; default 25,000) |
+| `GET /v1/operations/{id}` | key, revision | a long-poll of that operation |
+| `DELETE /v1/operations/{id}` | key | `204` (cancel) |
+| `POST /v1/agents` | key, revision, claim | `201` `rest-agent` 1.0.0 (body `rest-agent-declaration` 1.0.0) |
+| `GET /v1/agents/{id}/work` | key, revision | `rest-agent-work` 1.0.0 |
+| `POST /v1/agents/{id}/replies` | key, revision | `202` |
+| `DELETE /v1/agents/{id}` | key | `204` |
+
+**Headers** (`rest.contract.HEADER_*`, lowercase). Request: `authorization: Bearer
+fuk_<12 hex>_<43 base64url>` (`API_KEY_PREFIX` `fuk_`); `finishup-api-manifest` (every `/v1`
+request); `finishup-server-profile` = `<issuer 32 hex>.<revision>.<sha256:64 hex>` (every `/v1`
+request but `GET /v1/server` and the two `DELETE` routes); `finishup-workspace-claim` =
+`<git_common_root|directory>:sha256:<hex>:sha256:<hex>`; `finishup-client-kind` (a
+`ControlClientKind`; absent is `cli`); `finishup-service-instance`, `finishup-service-generation`;
+`finishup-operation-id` (`rpc_<uuid4>`, idempotent per key); `finishup-deadline-ms`;
+`finishup-route-profile`; `finishup-host-profile` (`generic|codex|claude|cursor`);
+`finishup-agent` (`agt_<32 hex>`, on a call: the agent the calling connection registered; it must
+be the caller's own, live, of the same claim and revision, else `agent_unknown`). Response:
+`finishup-outcome`, `finishup-operation-id`, `finishup-service-instance`,
+`finishup-service-generation`, `finishup-workspace-handle`, `location`.
+
+**Order of checks** on every request (first refusal wins): `Origin` present; the unauthenticated
+budget (per peer 20, refilled 5 per second; in total 200, refilled 50 per second; discovery,
+whatever its method, and every refusal of a request no key authenticated, whatever its reason);
+the key; the API manifest; the revision (before any work: `RestBackend.admit(client_kind,
+revision, start_service)` is asked before any body is read, and the work checks again); the scope
+(an out-of-scope call answers the control `method_forbidden` result, never dispatched;
+`observation_ingest` only with a claim); the claim, namespaced by the key's principal
+(`rest.contract.claim_for_principal`, domain `yoetz/claim-principal/v1`); the per-key caps (a
+registration holds its agent slot while it waits for the backend). `RestBackend.dispatch(...,
+agent=)` takes the calling connection's registered `AgentHandle` (its `binding` is the backend's
+own: the native edge's hub channel, the gateway's agent connection); a call whose frame reached the
+service and whose result cannot be read is `request_timeout`; handles of ended agents are let go.
+Each `rest-agent-work` call is exactly a control `workspace_call` frame (`parse_agent_work`
+validates it with `control_protocol.parse_workspace_call`). The key file's folder must be
+owner-only and link-free, and the file is judged by the opened descriptor (`fstat`); a key
+`create` stored but whose folder could not be flushed is revoked before it fails
+(`ApiKeyError.active_key_id` names one that could not be). A start
+needs a claim and a `workspace_ref` must be a `client:` handle. Operation answers are kept 120
+seconds (`OPERATION_RESULT_SECONDS`; at most 64 per key, 1,024 and 64 MiB in all); an id whose
+answer was dropped stays spent 900 seconds (`SPENT_OPERATION_SECONDS`).
+
+**`rest-error` 1.0.0** (`{schema_version, reason}`; `rest.contract.REST_ERROR_STATUS`):
+
+| Reason | Status | When |
+|---|---|---|
+| `frame_invalid` | 400 | a body this route refuses (a `workspace_ref` that is not a `client:` handle included) |
+| `header_invalid` | 400 | a FinishUP header absent where required, or malformed (the API manifest, the revision, the claim) |
+| `api_key_invalid` | 401 | no key, a malformed key or an unknown one |
+| `api_key_revoked` | 401 | a revoked key |
+| `api_key_expired` | 401 | an expired key |
+| `origin_forbidden` | 403 | an `Origin` header |
+| `workspace_claim_required` | 403 | a start, or an agent, without a claim |
+| `route_unknown` | 404 | no such route |
+| `operation_unknown` | 404 | no such operation for this key, or its answer is gone |
+| `agent_unknown` | 404 | no such agent for this key (lease ended, service restarted, key revoked) |
+| `method_not_allowed` | 405 | another HTTP method on a known route |
+| `server_profile_changed` | 409 | the consented revision is not the one the service issues now; no work done |
+| `api_manifest_unsupported` | 412 | the client's API manifest is not one this server serves |
+| `frame_too_large` | 413 | a body over its bound |
+| `operation_limit` | 429 | 32 operations already pending for this key |
+| `agent_limit` | 429 | 16 agents already registered for this key |
+| `rate_limited` | 429 | over the unauthenticated budget |
+| `internal_failure` | 500 | the edge failed; nothing names why |
+| `service_unavailable` | 503 | the service could not be reached or started |
+| `server_keys_unusable` | 503 | the server's key file is damaged or unsafe |
+| `workspace_agent_unavailable` | 503 | an agent cannot be registered now (the service cannot key the claim, for example while its vault is locked) |
+
+**Documents** (`schemas/service/rest-*-1.0.0.schema.json`, generated from `rest.contract_models`,
+artifact role `network-control`; golden vectors with rejections in
+`fixtures/service/rest.case.json`; `rest.contract` is the runtime parser):
+
+- `rest-discovery`: `schema_version`, `product` (`finishup`), `rest_majors` (1 to 8; `["1"]`),
+  `api_manifests` (1 to 16 `sha256:` digests), `auth` (1 to 8 tokens; `["api_key"]`),
+  `profile_endpoint` (`/v1/server`), `official` (a claim only; `false` in the core). The client
+  reads at most 4,096 bytes (`MAX_DISCOVERY_BYTES`).
+- `rest-session`: `schema_version`, `status` (`service-status` 1.0.0), `workspace_binding`
+  (`none|client_claim`), `workspace_handle` (`client:<16 hex>` or `null`), `server_profile`
+  (`{issuer, revision, profile_digest}`).
+- `rest-operation`: `schema_version`, `operation_id`, `state` (`pending`).
+- `rest-agent-declaration`: `schema_version`, `operations` (1 to 64), `max_reply_bytes` (at most
+  6,291,456), `role` (`connection|background`).
+- `rest-agent`: `schema_version`, `agent_id` (`agt_<32 hex>`), `workspace_handle`, `lease_ms`
+  (60,000 issued, `AGENT_LEASE_MS`).
+- `rest-agent-work`: `schema_version`, `calls` (at most 64 `workspace_call` frames, oldest first).
+- `rest-error`: above.
+
+The receipt's version slice (`service.ready_composition`) leaves the `rest-*` family out; the
+version manifest lists all of them.
+
+**The REST API manifest** (`rest.contract.current_api_manifest`, `api_manifest_digest`): `sha256`
+over `API_MANIFEST_DOMAIN` (`yoetz/rest-api-manifest/v1` NUL) and the canonical list of `[path,
+sha256]` of the transitive `$ref` closure of `REST_ROOT_SCHEMAS` (control-request and
+control-result 2.10.0, the seven `rest-*`, `server-profile`, `service-status`), read from the
+packaged schema manifest. The core serves exactly its own;
+`fixtures/service/rest-api-manifests.case.json` records, per REST contract version, its digest
+and its frozen request and response vectors (a test pins this release's entry).
+
+**Scopes** (`rest.contract.AGENT_SCOPE_METHODS`, `OPERATOR_SCOPE_METHODS`, `method_allowed`;
+ADR-051 decision 9): `agent` = `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
+`service_status`, `observation_ingest` and, from layer 6, `code_copy` (each with a claim,
+`CLAIM_BOUND_ONLY_METHODS`; *Level L2: the server copy*); `operator` adds
+`project`, `review`, `import_codex_jsonl`, `observation_status`, `privacy_get_setup`,
+`privacy_get_effective`, `privacy_pending_list`, `privacy_receipts_list`, `privacy_receipts_get`,
+`privacy_propose_policy`, `privacy_tighten_policy` and `service_lock`. No other method is reachable
+over REST.
+
+**Server records.**
+
+| Record | Location | Fields |
+|---|---|---|
+| `yoetz.rest-api-keys/1` | `<state dir>/rest/api-keys.json` (server side; lock `.api-keys.lock` beside it) | `schema`, `keys`: per key `key_id` (12 hex), `label` (1 to 48 letters, digits, spaces, `.`, `_`, `-`; shown only in `api-key list`), `scope` (`agent\|operator`), `principal` (`p_<16 hex>`), `created_at`, `expires_at` (or `null`), `revoked_at` (or `null`), `salt` (base64 of 16 random bytes), `hash` (`sha256:` over salt and secret, compared in constant time). Owner-only canonical JSON and a newline, at most 256 keys and 256 KiB, written under an exclusive `flock` and renamed into place; re-read by a running edge when it changes. Never holds a key. |
+| `rest-audit.jsonl` | `<log dir>/rest-audit.jsonl`, rotated to `rest-audit.jsonl.1` at 8 MiB | One owner-only canonical JSON line per answered request: `at`, `edge`, `event` (`rest_request`, `rest_call` or `rest_refusal`), `route`, `status` or the closed `reason`, `key_id` once a key authenticated, and for a call `control_method`, `outcome` and `duration_ms`; an unauthenticated refusal at most once per reason per 60 seconds, with a `suppressed` count. Never a body, a header value, a key, a label, a path, a host or an address. |
+
+**CLI, server host** (`server_host` in `cli.command_scope`: `service api-key`, `service rest`):
+
+- `finishup service api-key create (--label L --scope agent|operator | --rotate KEY_ID)
+  [--expires-in-days N] [--output-file F]`: prints "Created API key KEY_ID (scope SCOPE)." after
+  showing the key once on the trusted console, or writing it to a new 0600 file `F`; with
+  `--rotate` it adds "Log its clients in with the new key ('finishup server login NAME' there),
+  then run 'finishup service api-key revoke OLD_ID'.". `list [--json]` (`{"keys":[{created_at,
+  expires_at, key_id, label, principal, revoked_at, scope, state}]}`, `state`
+  `active|revoked|expired`; never a secret); `revoke KEY_ID` ("Revoked API key KEY_ID." or "… was
+  already revoked."). Refusals (exit 2 unless noted): `api_keys_damaged` (20), `api_keys_unsafe`
+  (20), `api_key_unknown`, `api_key_label_invalid`, `api_key_scope_invalid`,
+  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit`, `api_key_output_exists`,
+  `trusted_console_required`, `api_key_not_shown` (the key was revoked) and
+  `api_key_output_failed` (20; the key was revoked).
+- `finishup service rest run --listen HOST:PORT (--tls-cert F --tls-key F | --behind-proxy)
+  [--edge gateway|native]`: foreground; prints "Serving REST v1 (EDGE edge) on SCHEME port PORT;
+  stop it with Ctrl-C." on stderr, and a line naming `finishup service api-key create` while no key
+  exists. Refusals: `rest_edge_invalid`, `rest_listen_invalid`, `rest_tls_required`,
+  `rest_tls_unusable`, `rest_proxy_not_loopback` (exit 2), `rest_listener_unavailable` and
+  `service_already_running` (native edge only; exit 20), and `api_keys_damaged` or
+  `api_keys_unsafe` before anything listens.
+
+**CLI, client** (`client_only`; ADR-051 decisions 3, 5 and 7, ADR-053 decision 12):
+
+- `finishup server add NAME https://HOST[:PORT][/BASE] [--ca-file F | --tls-pin sha256:HEX]
+  [--key-file F] [--outside-reads local|listed]` and `server add NAME --port PORT [...]`. It
+  prints "Asking the server at that address what it is (over HTTPS, without a key)." before
+  discovery and asks "API key for this server (input hidden): " on the trusted console unless
+  `--key-file` gives the key. `--key-file` with SSH is `credential_not_applicable`. A transport
+  failure prints its remote phase as the reason.
+- `finishup server add official`: `official_endpoint_unavailable` ("this release names no official
+  FinishUP service yet, so nothing was added; add a server by its address with 'finishup server add
+  NAME https://HOST'", exit 2) while `OFFICIAL_ENDPOINT_ORIGINS` is empty.
+- `finishup server login NAME [--key-file F]`: "Stored the API key for NAME (ID) in the platform
+  credential store|an owner-only file; the server accepted it." or "…, not verified yet: the
+  server did not answer (PHASE). FinishUP sends nothing to that server until the key is checked:
+  once the server is up, run 'finishup server use NAME' here (it checks the key and asks you
+  again), or log in again." (the profile cached for the previous key is removed, so gate step 5
+  refuses `server_profile_changed` until then); then, for a key that is a new identity, "This key is a different
+  identity at that server than the one you agreed to, so FinishUP asks you again before it
+  connects: run 'finishup server use NAME' here." A refused key, a changed identity or another
+  contract (an invalid profile, or one naming another key, included) prints its phase with a
+  sentence saying nothing was stored. The key, the record, the generation and the profile are
+  changed in one registry-locked step; `logout` deletes the key under the same lock.
+  `credential_not_applicable`
+  ("only HTTPS targets take an API key; SSH targets use your OpenSSH keys and agent") for SSH.
+- `finishup server logout NAME`: "Deleted the API key for ID." or "No API key was stored for ID.".
+  Both `login` and `logout` stop the helper and print, on stderr, "The connection this computer
+  keeps for ID with the earlier|deleted key did not stop in time; run 'finishup server disconnect
+  NAME'." when it does not stop.
+- `finishup server set NAME --style relay|direct` for an HTTPS or port target prints "… is now
+  reached in the relay style: this computer's FinishUP helper keeps one HTTPS connection to it for
+  every program here and is the only program that reads its API key (the default)." or "… direct
+  style: each program here (hooks, the MCP server, commands) reads its API key and opens its own
+  HTTPS connection to it; FinishUP's helper still answers that server's background work.".
+
+**Official origins** (`client.server_folders`): `OfficialOrigin(host, port=443, path_prefix="",
+scheme="https")` with `url()` and `matches(base_url)`; `OFFICIAL_ENDPOINT_ORIGINS`, a tuple of
+them (empty; replaces `OFFICIAL_ENDPOINT_HOSTS`); `official_address(kind, base_url, *, ca_file,
+tls_pin)` (an `https` target matching an origin with neither `ca_file` nor `tls_pin`; a base URL
+with a `.` or `..` path segment never matches, and `targets.normalize_https_url` refuses one,
+`target_url_invalid`);
+`official_preset_url()` (the first origin's URL, or `None`); `official_endpoint(record)`.
+
+**Client transport.** `RestTransport.for_target(record, key=…, consented=False)`: httpx with no
+proxy variables and no redirects; TLS by `tls_pin` (the leaf's DER `sha256` checked after the
+handshake, before any request byte), `ca_file` (that CA only, host name checked) or the system
+store; answers bounded by `MAX_RESPONSE_BYTES` (the largest control frame plus 64 KiB).
+`load_trust(record) -> TlsTrust` reads the CA file once: `TlsTrust.context` holds exactly its PEM
+certificates (OpenSSL's `TRUSTED CERTIFICATE` blocks with their trust settings, through an
+owner-only temporary copy of the same bytes) and `TlsTrust.endpoint` is the identity recorded with a
+fetched profile, `("tls_pin",
+pin)`, `("tls_ca_file", "sha256:<hex of those bytes>")` or `("tls_system_ca", None)`
+(`RestTransport.identity`; it replaces layer 5's `observed_identity`, which read the file a second
+time). `consented=True` (the helper's upstream, the direct style, the helper's refresh, a login
+check) compares that identity with `server_profile.consented_endpoint_identity(root)` before any
+byte and refuses `remote_identity_changed`. `request(..., seconds=…)` bounds one request as a
+whole (connect, TLS, body and every piece of the answer) by a caller's remaining deadline, and one
+given no `seconds` by its connect and read bounds plus 30 s; past it, `remote_unreachable`. `load_key(target_id, *, seconds=10)` reads the key on a daemon thread
+of its own (abandoned, never joined, when its budget ends), at most one outstanding per process (a
+caller that comes meanwhile waits for it within its own budget, then reads afresh); no key, or no
+answer in time, is `remote_auth_failed`. `RestControlStream.bind(refusal)` adds a check asked before every request
+the stream makes (the helper binds a relayed stream's admission and claimed repository);
+`server_profile.forget_cached_profile(root)` removes the cache (an unverified login).
+Failure phases (`RestUnavailable.reason`): `remote_identity_changed`, `remote_unreachable`,
+`remote_auth_failed`, `remote_incompatible`, `remote_service_not_running`. `RestControlStream`
+states `await_hello`, `opening`, `open`, `ended`, `closing`, `closed`; `failure_phase()` names
+why a stream ended (`server_profile_changed` or one of the five). `service.client._REST_KINDS` =
+`{https, local_port}`: the direct style dials a `RestControlStream` in place of the local
+endpoint; the relay style dials the helper's `<troot>/run/control.sock` as for SSH.
+`styles_offered`: edge `rest-1` → `relay`, `direct`. `PROFILE_SOURCES["https"]` and
+`["local_port"]` are `RestProfileSource`. The helper's runtime (`SshTargetRuntime`) is registered
+for both kinds.
+
+**`server-target-status` 1.0.0**: `target.connection` is filled for HTTPS and port targets too;
+text "Connection: relay (this computer's FinishUP helper keeps one HTTPS connection and reads the
+API key)." or "Connection: direct (each program here reads the API key and opens its own HTTPS
+connection).", then the helper line. `target.credential` is `keyring`, `file` or `none` for these
+targets (`not_applicable` for others), shown as "API key: …".
+
+**Conformance kit** (`tests/conformance/rest/`): `FINISHUP_REST_URL`, `FINISHUP_REST_KEY`
+(`operator`), `FINISHUP_REST_AGENT_KEY` (optional `agent`), `FINISHUP_REST_CA_FILE` or
+`FINISHUP_REST_TLS_PIN`; without a URL it provisions its own server root and runs both edges over
+real TLS (see the [test-instances runbook](runbooks/test-instances.md)).
+
+## Level L2: the server copy (ADR-054)
+
+[ADR-054](adr/ADR-054-level-l2-the-server-copy.md) owns these names; ADR-052 owns the gate every
+sync runs again, and ADR-053 the REST scopes. **Level L2 is released**: a server offers it only
+when its owner's `[server.code_copy]` table enables an offer, and a client sends a copy only after
+its owner consents at L2 on the trusted console. Without both, every surface behaves as at level
+L1, byte for byte.
+
+**Rule R at level L2** (run u8; INTERFACES "Rule R" in the claim-bound start section). The copy
+a task reads is the copy of the worktree its connection serves. A start naming another folder is
+refused in the client and never reaches the server, so no copy of either folder is made or
+refreshed for it. A connection's hello keys its claim (`CodeCopies.remember`) and its agent
+registers; neither syncs, and only a task's own base or check read does
+(`test_code_copy.py::test_a_connection_s_hello_alone_syncs_and_reads_nothing`). The server adds no
+fence of its own, because the wire does not allow one: an older client sends the connection's
+handle for any absolute path, and the handle is all the server sees. So with an older client, a
+task naming repository B, started from a folder in repository A, is copied from A, under A's
+hold, level, exclusions and scan, never from B. A's copy is of the folder the user ran it from.
+The receipt's `(tree …)` is the first twelve hex digits of the git tree the copy holds (the
+worktree's files as exported, exclusions and held files left out, always as SHA-1 objects of
+the worktree's raw bytes). A reader can check it where the export and `HEAD` hold the same
+objects: a SHA-1 repository (git's default) with every change committed, no line-ending or other
+content conversion between the worktree and `HEAD`, and nothing excluded or held back. There,
+`git rev-parse HEAD^{tree}` starts with the same digits. A mismatch alone does not show that
+another repository was read (Codex review of run u8).
+
+**Release switch.** `protocol.server_copy.L2_RELEASED` (`True`) and `l2_released()`; no flag,
+variable or file a user can set changes it, and `enable_unreleased_l2` is gone.
+`tests/unit/architecture/test_level_l2_released.py` names each design v2 section 8.3 protection
+(`sync_consent`, `hold_before_bundle`, `encrypted_storage`, `forget`, `provenance`, `receipts`) by
+the code that enforces it and the tests that hold it. The terminal interface has no L2 flows (CLI
+only); it renders a receipt's evidence lines.
+
+**Modules.** `protocol.server_copy` (SHARED, pure: `CODE_SYNC_METHOD`, `verify_snapshot_bundle`,
+the manifest, `EVIDENCE_PROVENANCE`), `domain.code_exclusions` (`ALWAYS_EXCLUDED`),
+`domain.evidence_provenance` (`EvidenceProvenance`, `CopySnapshotRef`, `ContentForgotten`,
+`EVIDENCE_PROVENANCE_SCHEMA`, `EVIDENCE_PROVENANCE_TOKENS`, `evidence_provenance_from_json`,
+`EvidenceAccountIncomplete`, `EVIDENCE_PROVENANCE_UNKNOWN_REASONS`,
+`evidence_provenance_unknown_wire`: the receipt-result member `evidence_provenance_unknown`),
+`client.code_secrets`, `client.code_copy_settings`, `client.code_export` (`export_snapshot`,
+`ExportDatabase`), `client.code_sync` (`CodeSyncResponder`, `export_folder`,
+`subject_state_digest`), the helper's `remote_workspace_binding(..., code_sync=True)`,
+`client.attribution.evidence_provenance_section` and `evidence_provenance_unknown_section`,
+`service.server_profile` (`CodeCopyOffer`,
+`code_copy_offer`), `service.code_store` (`CodeStore`, `PinEntry`), `service.code_copy`
+(`CodeCopies`, `VaultCopyKeyring`), `service.code_checkout` (`CopyCheckouts`),
+`ports.change_capture` (`evidence_task_scope`, `current_evidence_task`),
+`application.content_forgetting` (`forget_task_content`, `new_forget_id`),
+`kernel.forgotten_content` (`FORGOTTEN_EXCERPT`, the masks) with
+`kernel.projections.ContentForgottenMarker`, `config.models` (`ServerConfig`,
+`ServerCodeCopyConfig`), `protocol.consent_envelope.retention_from_token`, and `cli.server_code`
+(`forget_every_copy`, `ForgetOutcome`, `forget_lines`).
+
+**Wire** (control 2.10.0, amended in place, unreleased):
+
+- Sync method `git-bundle-1`: a git bundle v2 with one ref, `refs/finishup/snap/<n>`, and a v2 pack
+  of whole blob, tree and commit objects (sha1, hashed by the client); two synthetic commit shapes
+  (base: no parent; snapshot: one parent, the base), author and committer `FinishUP export
+  <export@finishup.invalid> 0 +0000`, message `finishup snapshot`.
+- Workspace operations, family `copy` (the catalogue grows from 18 to 20): `code_sync_prepare`
+  `{purpose: base|check, have (at most 16), base_commit, issuer, revision, profile_digest}` →
+  `{unchanged, sync_id, manifest, size, sha256, retention}`; `code_sync_read` `{sync_id, offset,
+  length (at most 3 MiB)}` → a base64 chunk. Declared only by the helper's background agent of a
+  target consented at L2; never by the MCP bridge, a CLI command or a hook. The hub never replays
+  either to another connection. A `code_sync_prepare` still unanswered on an older helper agent is
+  taken over by a newer one that registers meanwhile (see *Several connections per worktree*),
+  whose snapshot the sync's reads then fetch; a `code_sync_read` never is.
+- Reply reasons: refused `code_copy_not_consented`, `repository_egress_held`,
+  `repository_egress_kept`, `server_authorization_changed`, `server_profile_changed`,
+  `zero_network_remote_selected`; unavailable `code_copy_too_large`, `code_export_failed`
+  (the client's own `code_export_audit_failed` included), `code_sync_unknown`.
+- O7: `OutsideInputsRead.fenced` and `OutsideSnapshotsRead.fenced` (0 to 4,096, required): the
+  outside reads the client's agent left unread because they reached a worktree its owner holds
+  from that server; a count only, never which value or repository.
+- Control method `code_copy`: body `{action: status|forget}` → `{action, copy, forgot}`; `copy` is
+  `{snapshots, stored_bytes, created_at, last_sync_at, retention: {kind:
+  days|task_close|until_forgotten, days}}` or `null`; `forgot` is `{copies, snapshots, objects,
+  bytes, backups: not_managed}` or `null`. Claim-bound only, structural (answered while locked and
+  under another revision), never to the MCP bridge; in the full method list only (#436). Over REST:
+  `AGENT_SCOPE_METHODS` (and so `operator`) and `CLAIM_BOUND_ONLY_METHODS`; the REST contract 1.0.0
+  entry of `fixtures/service/rest-api-manifests.case.json` is amended in place. A service that
+  keeps no copies refuses it `method_forbidden`.
+- Server events (bounded, closed tokens): `code_copy_sync_<outcome>`, `code_copy_expiry` and
+  `code_snapshot_mismatch`; store refusal `code_copy_forgotten` (an upload begun before a forget).
+
+**Snapshot manifest** `yoetz.code-snapshot/1` (canonical JSON, beside the bundle): `schema`,
+`snapshot`, `base`, `tree`, `base_tree`, `original_base` (`{object_format, commit}`, provenance
+only), `export_id`, `worktree`, `policy` (the exclusion policy's digest), `completeness` (lists
+`excluded`, `held_for_content`, `too_large`, `lfs_content`, `case_collision`,
+`nested_repository`, each `{paths (at most 256), more}`; counts `links`, `gitlinks`,
+`lfs_pointers`, `special`, `unrepresentable`), `subject_state` (the client's subject-state digest,
+`sha256:<64 hex>`, as its agent computes it for an approved check, or `null` when it cannot be
+captured), `revision` (`{issuer, revision, profile_digest}`), `purpose`, `synced_at`, `files`,
+`bytes`. Paths only, never contents.
+
+**Reads from the copy** (`service.workspace_routing`, `service.code_copy`). Served from the pinned
+snapshot's checkout when the service keeps copies, the claim's repository has a copy and the read's
+snapshot is known (the preceding sync returned `synced` or `unchanged`, or the client is offline
+and the task has a pin): `read_task_base`, `capture`, `capture_metadata`,
+`probe_requested_paths`, `count_change_lines`, `classify_undeclared_references`, the reviewer's
+`list_beneath`, `read_text_beneath` and `read_declared_test` beneath the root, task inputs inside
+the root, and an opened observation workspace's `list_changed_paths` and `inspect`. Still the
+client's agent: `read_outside_inputs`, `snapshot_outside_inputs`, `lstat_candidates`,
+`load_check_policy`, `subject_state_capture` and `run_approved_check`. A task keeps one source for
+its git reads (the source of its base). Offline (`no_agent`, a disconnected agent,
+`hub_unavailable`, the deadline): the pinned snapshot, counted `stale_copy_read`; an approved check
+then fails `workspace_agent_unavailable`. A refused sync never falls back to the copy. An approved
+check of a copy task syncs first; a subject-state digest other than the pinned snapshot's is
+`stale` / `subject_state_mismatch` (`code_snapshot_mismatch`). `evidence_task_scope(task_id)` (a
+context variable that `asyncio.to_thread` copies) names the task whose reads are counted; a read
+outside any scope is counted for no task.
+
+**Evidence provenance** `yoetz.evidence-provenance/1` (`EvidenceProvenance.to_json()`): `schema`,
+`reads` (every token, 0 to 1,000,000,000: `server_copy_read`, `client_attested_read`,
+`client_check`, `client_observation`, `outside_read`, `stale_copy_read`), `fenced_reads`,
+`snapshot` (`{synced_at, tree}`, RFC 3339 UTC with milliseconds and 40 hex, or `null`) and
+`content_forgotten` (`{at, reason: owner|expired}` or `null`). An account is level L2's
+(`level_l2`) when it counts a read from the copy, fresh or stale, or carries the marker.
+
+**Receipts.** Receipt-result 1.5.0 (unreleased, amended in place) gains the optional, non-null
+`ReceiptSuccessModel.evidence_provenance` (`ReceiptEvidenceProvenanceModel`): exactly a
+level-L2 account, for a claim-bound task; absent otherwise, so a level-L1 receipt keeps its bytes.
+Recomputed on every receipt and replay
+(stored receipts and digests unchanged); `result_delivery` places it after `workspace_provenance`
+among the actionable items, so a paged receipt delivers it on its first page. The REST contract
+1.0.0 manifest digest is amended in place. Text and markdown end with
+`server_copy_receipt_block(service_instance_id, account, markdown=, hook_observed=)` in place of
+`client_attested_receipt_block`: `evidence_provenance_lines(account, hook_observed=)` —
+`SERVER_COPY_WORKSPACE_LINE` (or `SERVER_COPY_NONE_COUNTED_LINE` when no read from the copy is
+counted), `EVIDENCE_READS_PREFIX` ("Evidence reads by source (yoetz.evidence-provenance/1): ")
+with every token in order, zeros included, the fenced line, the snapshot line (sync time and the
+tree id's first 12 hex), the stale line when one is counted, the forgotten line ("the owner forgot
+it" or "its retention expired"; findings and checks remain without their excerpts) and
+`CLIENT_ATTESTED_OBSERVATION_LINE` when hook-observed — then "Served by FinishUP service <id>
+(connection: client_claim)."; at most 1,310 characters. An account that cannot be read gives no
+member and `evidence_provenance_unknown_receipt_block` (`EVIDENCE_PROVENANCE_UNREADABLE_LINE` and
+its impact line, which say neither that the server read its copy nor that it did not), recorded as
+the bounded event `receipt_evidence_provenance_read`. Client side,
+`client.attribution.evidence_provenance_section(member, hook_observed=)` renders the same lines
+from the member of a JSON receipt for the CLI, MCP text and summary, and the terminal interface,
+which never add `CLIENT_ATTESTED_WORKSPACE_LINE` to it; a connection whose target was consented
+at L2 carries `SERVER_COPY_CONNECTION_LINE` (`ServiceAttribution.level`,
+`ServiceClient.consent_level`) where level L1's carries the client-attested line.
+
+**Forgetting task content** (owner ruling U20). Event family `content_forgotten` 1.0.0
+(`CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION`, `ContentForgottenPayload`,
+`schemas/events/content-forgotten-1.0.0.schema.json`): `forget_id` (32 lowercase hex), `reason`
+(`owner|expired`), `source` (`server_copy`), `objects_erased` (0 to 1,000,000,000), `provenance` (an
+account with `snapshot` and `content_forgotten` null). Service-written only: an agent's draft is
+`event_family_not_admitted`, and a ledger where another writer recorded one is corrupt
+(`is_content_forgotten_record`). Bundle storage version 20 (`migrations/bundle/0020.sql` widens the
+events summary check; a bundle at 19 upgrades). `STATUS_HISTORY_OMITTED_FAMILIES` keeps its rows
+out of status history. `forget_task_content` appends it, then marks the task's check-change
+(`vnd.yoetz.check-change+json`) and `SEMANTIC_RESPONSE` objects `redacted` in the inventory and
+deletes them; idempotent by `forget_id`; outcomes `forgotten`, `task_not_found`,
+`task_unavailable`, `erasure_incomplete`. After the event, projections read finding
+`challenge.snippet` and check `review_summary` as absent and each `verified` row's `snippet` as
+`FORGOTTEN_EXCERPT` ("[content forgotten: the server's copy of the code it quoted was deleted]")
+for checks of earlier work; a recovered job whose check change was erased ends with the gap
+`check_time_change_unavailable_content_forgotten` (reason `content_forgotten`).
+
+**Records.**
+
+| Record | Location | Fields |
+|---|---|---|
+| `yoetz.server-code-copy/1` | `<target root>/config/code-copy.json` (client, remote targets) | `schema`, `target_id` and `repositories`: per repository `repository` (the hold's repository key), `level` (`L1` or `null`; never more than the consent), `exclude` (patterns) and `allow` (`[path, sha256:<hex>]` of exact bytes); at most 256 repositories and 256 entries each, 1 MiB. Owner-only canonical JSON, read fail-closed (a bad record refuses every export); written under the registry lock by `server code exclude`, `allow add`, `allow remove` and `level`; never sent to a server. |
+| `yoetz.code-export/1` | `<target root>/state/code-export/<digest of the repository key>/export.json` (client) | `schema`, `export_id`, `next_ref`, `sent` (the snapshots sent) and `root` (the repository's folder, recorded once the gate passed; a record without it is unreadable to `forget --all`); beside FinishUP-owned git loose objects, never the repository's own `.git`. Removed by `server code forget`. |
+| `yoetz.code-copy/1` | `<state>/code-copies/copies/<copy key>/copy.json` (server) | `schema`, `copy_key`, `copy_id`, `principal` and `repository` (digests only), `created_at`, `last_sync_at`, `retention` (`{kind, days}`), `snapshots` (at most 64), `pins`, `stored_bytes`, `objects` and `wrap`; beside it `objects/`, `snapshots/<snapshot>.enc` and `index.enc`, each an AES-256-GCM frame. Written last at every commit. `pins`: per task id `{snapshot, synced_at, served, stale, reads, fenced}` (ids and counts only), buffered and written at each sync, account, forget and expiry and every 32 reads. |
+| `yoetz.code-copy-wrap/1` | the `wrap` member of `copy.json` (server) | `schema`, `algorithm` (`aes-256-kw-rfc3394`), `key_slot`, `wrapped`: the copy's data key wrapped under a key-encryption key the vault's installation MAC derives per copy (domain `yoetz/code-copy-kek/v1`), never stored; a locked vault reads and admits nothing. |
+| `yoetz.code-copy-tombstones/1` | `<state>/code-copies/tombstones.json` (server) | `schema`, `epochs`: per copy `epoch`, `forgotten_at`, `reason`; advanced before a forget deletes the folder, so an upload begun under an older epoch is refused. |
+| `yoetz.code-copy-erasures/1` | `<state>/code-copies/erasures.json` (server) | `schema`, `pending`: per task `forget_id`, `reason`, `task_id`, `account`, `forgotten_at`; owner-only, written before a forgotten copy is deleted, an entry cleared once its task's erasure is done; retried at the next forget, expiry or service start; at most 4,096 entries. |
+
+Staged uploads (`<state>/code-copies/uploads/`) are encrypted under a key held only in memory and
+removed at service start, with any copy folder that has no record. Checkouts
+(`<state>/code-copies/checkouts/<copy key>/`, owner-only, plaintext while in use) are removed at
+service start, on forget and on expiry.
+
+**Server profile and config 1.4.0.** `CodeCopyOffer` (`max_repo_bytes`, `max_file_bytes`,
+retention options and default, exclusions), built by `code_copy_offer(config)` from
+`[server.code_copy]` only when `enabled`; a profile offers `levels {offered: [L1, L2],
+required_min: L1}` with `code_sync`, `retention` and `exclusions` only with an offer and L2
+released, and `exclusions.always` is the offer's patterns with `ALWAYS_EXCLUDED`. Config 1.4.0
+(`schemas/config/yoetz-config-1.4.0.schema.json`; 1.3.0 is frozen) adds `FinishUpConfig.server`
+(`ServerConfig`, keys `code_copy` only) and `ServerCodeCopyConfig`: `enabled` (`false`),
+`max_repo_bytes` (67108864), `max_file_bytes` (16777216, at most `max_repo_bytes`), each 1 to
+2^40; `retention` (`["task_close", "days:30", "until_forgotten"]`, 1 to 16 distinct tokens parsed
+by `retention_from_token`: `task_close`, `until_forgotten`, `days:N` with N 1 to 36500, no sign or
+leading zero); `retention_default` (`"days:30"`, one of `retention`); `exclusions` (`[]`; each 1 to
+512 characters, no control or DEL character, not only `/` or `*`, no repeats; with
+`ALWAYS_EXCLUDED` at most 256 patterns and 32,768 canonical bytes). Only `config.toml` sets it;
+unknown keys `unknown_config_key`, bad values `config_value_invalid` (the key name only); every
+value is checked when `enabled` is `false`; read at service start. The schema states types and
+bounds; the loader enforces the token grammar and pattern rules.
+
+**CLI** (`client_only`, shown in help): `finishup server add|use … --level L1|L2 --retention
+task_close|until_forgotten|days:N` (`days:0` and any other bad token are usage errors); `finishup
+server code list [--repository FOLDER] [--json]`, `forget [--repository FOLDER | --all] [--json]`,
+`exclude add|remove|list PATTERN`, `allow add FILE`, `allow list [--json]` (paths and `sha256:` with
+12 hex), `allow remove PATH`, `level L1|default`; `finishup server remove NAME [--forget-copies |
+--keep-copies]`. `exclude add`, `level L1` and `allow remove` ask nothing; `exclude remove`, `level
+default` and `allow add` are confirmed on the trusted console; `server remove` of a target sent
+copies asks on the trusted console (`yes` forgets first, `no` keeps them, anything else
+`authorization_declined`). `forget --all` names each repository it could not forget by position and
+short id with `export_record_unreadable`, `repository_folder_unknown`, `repository_folder_missing`,
+`repository_invalid`, `repository_changed` or the server's refusal, and exits 20 with
+`code_copy_forget_incomplete` unless every one was forgotten; its JSON is `{action: forget_all,
+repositories: [{position, copy, folder, outcome: forgotten|not_forgotten, reason, answer}],
+forgotten, not_forgotten}`. `code_export_unsafe`: the export records are not owner-only or are
+links. `server remove --forget-copies` (or `yes`) raises the target's L2 sync fence
+(`<target root>/state/code-sync-fence`, a 10-minute lease) before it lists the repositories and
+keeps it through the removal; the helper refuses code sync under it (`server_authorization_changed`);
+a fence that cannot be written is `code_copy_fence_unavailable`. Every `server code` command is
+refused `selection_overridden` under an isolation root or a runtime pin, and connects through the
+root of the target it read, refused `server_authorization_changed` unless admitted for that record
+as read. A command that reaches a server that keeps no copies, and `server use` of a target consented
+at L2 whose server no longer offers L2, are refused `server_level_unavailable`. The L2 disclosure is
+this release's own text; the L1 text and `DISCLOSURE_VERSION` (3) are unchanged.
 
 ## Lossless result delivery (issue #1139)
 
@@ -13401,20 +15561,19 @@ unchanged. The receipt Summary appends "Reviewer notes: N; not answered: M (K ma
 gate asks it once per key, after the premise ask and trimmed before it, also on an
 already-continued Stop within the per-turn cap (`advice_recheck` item,
 `closure_gate_advice_asked` diagnostic, whose row also names the asked key as `advice_set`).
-The receipt result (receipt-result 1.3.0 in place, inherited by 1.4.0 and 1.4.1) carries the optional
-`agent_closing_prompt` (D5): "Tell the user in your final message: receipt conclusion
+The receipt result (receipt-result 1.3.0 in place, inherited by 1.4.0, 1.4.1 and 1.5.0) carries
+the optional `agent_closing_prompt` (D5): "Tell the user in your final message: receipt conclusion
 <conclusion>[; reviewer notes: T, not answered: U[, declined: D]][; name each note not answered or
 declined]." It is derived from the stored document alone (conclusion, `correctness_advisory_counts`
 and the Summary tally for `declined`, left out when unreadable), so a replay reads the same; the
 model admits it only in that closed shape for its own conclusion, and the MCP summary and CLI
 receipt text re-gate and append it. Its schema `pattern` is ECMA-262 as a host's unicode-mode
-engine reads it (no escaped spaces) in 1.4.1, which changes nothing else and is what the MCP
-bridge advertises as `receipt`'s `outputSchema`; 1.3.0 and 1.4.0 shipped in v0.3.0 and keep their
-pattern, which escapes each space (`\ `, Python's `re.escape`), accepts the same strings, and
-fails to compile in such an engine (Cursor 3.27.22 dropped every tool over it). The local control
-result `2.9.0`, also shipped, keeps carrying receipt bodies as 1.4.0; wherever both patterns
-compile (Python's `re`, which the service and bridge validate with), a body valid under one is
-valid under the other. Every pattern the MCP bridge advertises is checked in unicode mode
+engine reads it (no escaped spaces) in 1.4.1, which changes nothing else (published on `main`,
+#1348), and in 1.5.0, amended in place while unreleased, which is what this build's MCP bridge
+advertises as `receipt`'s `outputSchema`. 1.3.0 and 1.4.0 shipped in v0.3.0 and keep their
+pattern, which escapes each space (`\ `, Python's `re.escape`), accepts the same strings, and fails
+to compile in such an engine (Cursor 3.27.22 dropped every tool over it). Every pattern the MCP
+bridge advertises is checked in unicode mode
 (`tests/unit/mcp/test_advertised_schema_patterns.py`). `respond` advisory dispositions are `addressed`,
 `kept_choice` (reason only; label "checked, kept my choice") and `declined`; history and receipt
 rows add `kept_choice` and `response_unavailable`. The `default_local_export` receipt row carries

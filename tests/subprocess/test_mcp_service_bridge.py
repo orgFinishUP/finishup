@@ -246,9 +246,13 @@ def _install_clients(
     remaining = list(clients)
 
     async def connect(
-        _kind: object, *, workspace_locator: object = None, timeout_seconds: float | None = None
+        _kind: object,
+        *,
+        workspace_locator: object = None,
+        timeout_seconds: float | None = None,
+        serve_workspace: bool = False,
     ) -> object:
-        del timeout_seconds
+        del timeout_seconds, serve_workspace
         if observed_locators is not None:
             observed_locators.append(workspace_locator)
         return remaining.pop(0)
@@ -265,9 +269,13 @@ def _install_connect_failure(monkeypatch: pytest.MonkeyPatch, failure: BaseExcep
     """Raise at connect time so `_RECONNECT_REASONS` cannot swallow service_unavailable."""
 
     async def connect(
-        _kind: object, *, workspace_locator: object = None, timeout_seconds: float | None = None
+        _kind: object,
+        *,
+        workspace_locator: object = None,
+        timeout_seconds: float | None = None,
+        serve_workspace: bool = False,
     ) -> object:
-        del _kind, workspace_locator, timeout_seconds
+        del _kind, workspace_locator, timeout_seconds, serve_workspace
         raise failure
 
     monkeypatch.setattr(
@@ -1087,7 +1095,7 @@ async def test_start_timeout_directs_an_exact_replay_not_an_operation_query(
         "reason_code": "request_timeout",
     }
     assert error["message"] == (
-        "The local start timed out and may still have committed. Replay the exact same "
+        "The start timed out and may still have committed. Replay the exact same "
         "start body once with the same request_id; the idempotent start path returns the "
         "stored result or a typed boundary. Do not fabricate session or writer ids for a "
         "status query."
@@ -1130,7 +1138,7 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
         "state": "unknown",
     }
     assert error["message"] == (
-        "The local operation timed out and may still have committed. Retry with the same "
+        "The operation timed out and may still have committed. Retry with the same "
         "request_id to recover the stored outcome; for an existing FinishUP session, status "
         "view=operation can inspect that request_id."
     )

@@ -169,6 +169,31 @@ choose that interpreter for hooks, so a bare `finishup` hook command still resol
 `PATH` (issue #604). This amendment does not rewrite Claude Code or Cursor
 registrations. The project plugin source and the committed repository tree stay portable.
 
+## Amendment proposed by ADR-051 (2026-11-05): a deliberate, owner-written target registry
+
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) adds server
+targets. Once it is accepted, the consequence "there is deliberately no global registry … a shared
+index that can name roots is itself a redirection surface" is amended for one registry, on these
+terms:
+
+- **`<ambient state dir>/servers/` is a deliberately owner-written redirection surface.** It holds
+  one root per target, each with an owner-only `target.json` (`yoetz.server-target/1`), and the
+  selection file names at most one of them. Both are owner-only, symlink-free and never inside a
+  repository. Selecting a remote kind will need the trusted foreground console and a typed
+  confirmation (in layer 1 a remote kind cannot be added or selected at all,
+  `remote_kind_unavailable`); an agent has no tool to change either file.
+- **Never stamped into a registration.** Host registrations, launch lines, the Codex RECORD proof
+  and the upgrade guard keep resolving `isolated_root()` (environment or pin), never the
+  selection, so connecting a host while a target is selected does not bind it to that target and
+  existing ambient registrations do not show as drift.
+- **Pins and the environment always win.** A pinned runtime (decision 2) never sees the selection,
+  so a provisioned test instance cannot be redirected by it; `finishup server use` refuses while
+  the variable or a pin is in force (`selection_overridden`).
+- **Instances stay unlisted.** `finishup server list` lists targets, not ADR-028 instances; there is
+  still no `instance list`. A `local` target's root is a persistent instance root (decision 1)
+  created beneath `servers/`, and `server remove` disposes of it through the same owned-root-only
+  path as `instance dispose`.
+
 ## Amendment — a refused disposal changes nothing, and no launcher is left unpinned (2026-11-12, issue #1350, owner request)
 
 `scripts/provision_test_instance.py dispose` ran `finishup instance dispose` first. That stopped the
@@ -211,10 +236,16 @@ So no path that was a pinned test launcher runs ambient: not on a refusal, a fai
 a crash, a rerun or two disposals at once. The script never runs a launcher it finds unpinned (the
 state the defect left behind); it withdraws and removes it.
 
+On a build with server targets (ADR-051, the amendment above), a runtime with neither the variable
+nor a pin resolves the owner's server selection before the ambient folders. An unpinned test
+launcher would therefore reach whatever server is selected, and the hazard and this fix are the
+same.
+
 **Not changed, open for the owner.** Two paths remain, both changes to decisions 2 and 4 that
 this amendment does not make.
 - `finishup instance dispose` run directly still removes the pin from the runtime that ran it
-  (decision 4, "Reverse states"), and that runtime then resolves ambient.
+  (decision 4, "Reverse states"), and that runtime then resolves ambient, or the owner's server
+  selection on a build with server targets.
 - A process already running from a pinned runtime reads the pin each time it resolves its root,
   so it would resolve ambient once the pin is gone. The script refuses while one runs. In the
   product, the process would have to keep the root it started with.

@@ -635,6 +635,176 @@ before its frozen opaque branch can classify the new pair. Fully restart the exa
 and re-prove descriptor plus correlated model use after upgrading before reporting the capability
 as active.
 
+## Server targets (ADR-051)
+
+Decision for this release: **Cursor uses this computer's FinishUP servers and the owner's FinishUP
+servers over SSH and over HTTPS (on the web or on a port of this computer).** Only the owner adds
+and chooses a server elsewhere, on their own terminal (`finishup server add NAME
+ssh://[user@]host[:port]`, `finishup server add NAME https://HOST[:PORT][/BASE]` or `--port PORT`,
+`finishup server use NAME`), and only the owner types or rotates an HTTPS server's API key
+(`server add`, `server login`, `server logout`). With no remote target, Cursor hooks,
+MCP and the CLI behave exactly as they did before server targets existed, and the Cursor
+registration is unchanged. The shared remote seams (workspace claim, workspace agent,
+outside-read modes, zero-network selection rules, client attestation and the client-attested
+receipt lines) act for an SSH, HTTPS or port target; no real-environment cell is claimed for Cursor
+against one (see *Evidence*).
+
+Decision: **no Cursor registration changes.** The MCP entry, the project MCP entry and the hook
+commands keep their exact launcher, arguments and isolation environment. Which FinishUP server
+they use follows the owner's choice (see the [servers guide](../usage/servers.md)):
+
+- A Cursor connection made under **explicit isolation** carries both isolation-root spellings in
+  its MCP `env` and inline in each hook command; that stamped root always wins, and the selection
+  file never overrides it.
+- A Cursor connection made **without isolation** carries no root, so its bridge and hooks read the
+  owner-only selection file and talk to the selected target.
+
+Connecting Cursor while a target is selected does not stamp that target into a registration (the
+stamp comes only from an explicit isolation variable or pin), and existing ambient registrations
+do not show as drift. `finishup server use local` returns every later unstamped process to the
+default service.
+
+- **Roots.** The Cursor bridge still decodes only local `file:` roots (ADR-010); a root that is
+  itself remote stays refused.
+- **SSH servers and the helper (layer 4, ADR-052).** Supported, same code path as every host; no
+  registration change. Cursor's hooks, its MCP bridge and Agent CLI shell calls reach an SSH server
+  through its one helper (relay, the default: they keep dialling a Unix endpoint) or each through
+  its own `ssh -W` (direct, `finishup server set NAME --style direct`). Hooks never register a
+  workspace and never fetch a profile; in the relay style a hook may start the helper within its
+  own deadline and names `remote_unreachable` when it cannot (`failClosed` gate hooks in required
+  mode deny as for an unreachable local service). The MCP bridge registers each claimed workspace
+  with the helper (source `mcp_roots`) and renews it (layer 3); Cursor's roots changing releases
+  the bridge's registrations, as in layer 3, and the helper closes their background agents. The
+  bridge starts the helper in the direct style and refuses a request id it already sent to another
+  server (`server_authorization_changed`). A workflow command from a shell answers its own live
+  workspace calls and registers once, with a 15-minute lease. Host-key questions arise only on
+  the owner's terminal: `finishup server add` and `finishup server use` let OpenSSH ask about an
+  unknown host key there and take the typed name; an agent's shell has no trusted console
+  (`trusted_console_required`), and no hook or MCP tool can confirm a host key or agree to a
+  server. The five transport outages (`remote_unreachable`, `remote_auth_failed`,
+  `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) reach the
+  SessionStart texts, MCP results and the CLI with their own continuations, never a local service
+  to start. In the direct style `remote_unreachable` carries `remote_direct_slow` instead: the
+  direct style is slow on that network and `finishup server set NAME --style relay` is the remedy
+  (layer 7, the owner's WAN-gate decision; same code path on every host, ADR-052 decision 24.5).
+- **HTTPS and port servers (layer 5, ADR-053).** Supported, same code path as every host and as SSH;
+  no registration change. Cursor's hooks, its MCP bridge and Agent CLI shell calls reach an HTTPS or
+  port server through the same helper (relay, the default: they keep dialling a Unix endpoint, and
+  only the helper reads the API key) or each over its own REST connection (direct, `finishup server
+  set NAME --style direct`, where each of those processes reads the API key itself). Hooks never run
+  HTTPS discovery or fetch a profile, and load the REST client only in the direct style; a hook
+  spends only its own deadline and names the transport phase when the server cannot be reached
+  (`failClosed` gate hooks in required mode deny as for an unreachable local service). The API key
+  is typed only on the owner's terminal (`finishup server add`, `finishup server login`; an agent's
+  shell has no trusted console, `trusted_console_required`) or read from an owner-only `--key-file`;
+  no hook, MCP tool or agent-facing text carries it. A refused or missing key is
+  `remote_auth_failed` with `remote_credential_repair` (the owner runs `finishup server login
+  NAME`); a key the owner replaces or deletes ends every connection made under the old one with
+  `server_authorization_changed`, and a new key asks for the owner's consent again
+  (`server_profile_changed`). The terminal interface adds only a server on this computer; an HTTPS
+  server is added in a terminal.
+- **Level L2, the server copy (layer 6, ADR-054).** Released, and opt-in at both ends: a server
+  offers it only when its owner's `[server.code_copy]` table enables an offer, and a copy is sent
+  only after the owner consents at L2 on the trusted console (`finishup server add|use NAME --level
+  L2 --retention …`). Decision, the same on every host and with no registration change: the sync
+  runs only in the target's helper, whose background agent alone declares the two code-sync
+  operations and checks the gate and the L2 consent again before anything is read; Cursor's hooks,
+  its MCP bridge and Agent CLI shell calls never declare them, so they never sync and the server
+  never asks them. Receipts and status show where each kind of evidence was read (the
+  `evidence_provenance` member and the fixed "Workspace evidence" lines, never the L1
+  client-attested line, for a task that read the copy), the same through the CLI, the MCP text and
+  summary and the terminal interface; the terminal interface has no L2 flows (consent, `server code`
+  and `server remove`'s question are CLI only). No Cursor session ran against a server keeping a
+  copy, and no macOS or WSL 2 run
+  (gaps with owners in the [acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
+- **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host, and
+  acting for an SSH server from layer 4 and an HTTPS or port server from layer 5: the gate's consent
+  step names `server_profile_changed` or `server_level_unavailable` in the same SessionStart texts,
+  MCP shapes and drain records as the other phases, and only the owner agrees again (`finishup
+  server use NAME` on the trusted console; the agent's own shell cannot). The MCP bridge registers
+  its claimed workspace with the target's helper, renews it from a task the connection owns (an idle
+  bridge keeps it), and releases it when it closes, and when Cursor says its roots changed. Nothing
+  changes with no server elsewhere.
+- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on every
+  host, and acting for an SSH server from layer 4 and an HTTPS or port server from layer 5. A held
+  or kept repository gets one byte-identical SessionStart text per state
+  (`repository_hold.hook_context`: the attach form in place of the start advice, an unconsented
+  form, a mapped form on resume and compact); MCP returns the phase with its continuation; the drain
+  sites record the phase and leave rows pending. The agent's own shell cannot confirm `server
+  repositories add` (trusted console); a real terminal can. The per-prompt cue is unchanged. With no
+  remote target recorded, Cursor's session start is byte for byte as before (O3).
+- **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
+  connection it made to a server elsewhere ends with `server_authorization_changed` once the
+  selection, record or key changes, and its next request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown);
+  hooks follow a new selection at once. Restart open Cursor windows and Agent CLI sessions after `finishup server
+  use`. Required-mode `failClosed` gate hooks deny for an unreachable target exactly as for an
+  unreachable local service; nothing falls back to the local service.
+- **Evidence.** Coverage at the time of writing is unit and integration tests, plus capability
+  tests and an end-to-end run of the `finishup` command against a real OpenSSH server on Linux
+  (layer 4), and the REST conformance kit against both server edges over real TLS and an
+  end-to-end run of the `finishup` command against a real HTTPS server on Linux (layer 5). No Cursor
+  session was run against an SSH or HTTPS server, and no remote cell is claimed for Cursor or any
+  other host. Layer 7 ([acceptance matrix](acceptance-matrix.md#hosts-on-linux)) recorded the Linux
+  rows: Cursor agent 2026.10.22: in a scratch home, `~/.cursor/mcp.json` by a test instance's absolute
+  launcher, and `cursor-agent mcp list-tools` started the bridge and listed its eight tools; `hooks
+  cursor-observe` with the recorded payload shapes exited 0. The bridge and hooks against servers elsewhere ran by scripts driving `finishup
+  mcp serve` over stdio as a host does, not from a Cursor session: a model session needs the
+  account's host credentials and was not run. Gaps with owners (macOS, WSL 2, Cursor sessions
+  against a server elsewhere) are in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
+- **Receipt provenance** (ADR-051, decision D4). This part holds for every task, local ones
+  included: when the service cannot read the task's opening record, the receipt is still made and
+  ends with the fixed provenance-unknown section (on a claim-bound task, in place of the
+  `client_attested` line); every format carries the same words as its `workspace_provenance`
+  member, and the agent gets them in the MCP receipt text and its summary and at the head of a
+  paged receipt's first page.
+
+The decisions below take effect only for a remote target, which in this release is an SSH, HTTPS
+or port server.
+
+- **Workspace and outside reads** (ADR-051 decision 5). The bridge sends a workspace claim
+  derived from the local `file:` root instead of the path, rewrites an absolute `workspace_ref` to
+  the connection's handle before `start`, and this computer's workspace agent serves the server's
+  workspace reads. Outside the workspace root it reads as the target's outside-read mode (`local`
+  or `listed`) says; the owner chooses that mode on their own terminal, and no hook, MCP tool or
+  CLI call in a Cursor session asks for it, the same on every host and with no registration
+  change. When `listed` mode leaves files unread, the receipt states the omission code
+  (`outside_reads_not_listed`) and how many task inputs and declared tests were kept back, never
+  which file, and receipts carry the `client_attested` line.
+- **Which folder a task may name** (rule R, ADR-051 amended 2026-11-12). The connection's own
+  folder decides the repository and the worktree: a `start` whose absolute `workspace_ref` names
+  another repository, another worktree of the same repository, or a folder in none is refused in
+  the client, `workspace_ref_not_served`, and nothing about it is sent, read or synced. Cursor's
+  bridge serves the worktree its MCP roots reduce to (checked again before every workflow call;
+  several roots must reduce to one worktree, else `repository_identity_required`), so a subfolder
+  of it, a symlinked spelling or, on macOS, a case variant is the same folder, and a folder
+  outside it is refused. Cursor reads the canonical JSON body, whose message carries the
+  instruction of `workspace_not_served_tell_user`: say so in one line and carry on without
+  FinishUP for that folder; opening that folder as the Cursor workspace gives it its own binding.
+  Host decision: supported, same code path.
+- **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
+  and the outbox stay on this computer, and each row a remote target receives carries the client
+  attestation. Host decision for content: with `cursor-ordinary-observation-v1` enabled, the
+  prompt, message and tool input and output chunks reach the server unchanged, as a local service
+  receives them; without the profile none is sent.
+- **Service attribution in MCP results.** Host decision: supported. Cursor reads the canonical
+  text copy, which ends with the fixed "read on the client machine" line and the line naming the
+  answering service on `status` and receipts; a paged receipt's every page names the service. The
+  structured result never carries them.
+- **Zero-network** (ADR-051 decision 8). A remote target and a zero-network policy on this
+  computer are never in force together: adding or selecting one is refused under zero-network,
+  and every Cursor hook, MCP bridge connection and CLI call to a remote target is refused before
+  anything is sent while this computer last reported zero-network (`zero_network_remote_selected`,
+  continuation `zero_network_local_server_required`). Host decision: supported, same code path; no
+  MCP tool or hook carries or answers the choice, because agents cannot change the policy or the
+  selection.
+- **Whose privacy policy a command changes** (ADR-051 decision 8). With a remote target selected,
+  `privacy tighten|propose` and the privacy step of `setup run` change the target's policy and
+  name it; a widening is decided on the server host (`privacy decide-policy`, refused here as
+  `requires_server_host`). Host decision: same code path for Cursor; no MCP tool or hook changes a
+  privacy policy.
+- **Upgrades.** A remote server is never replaced from this machine; a release mismatch is
+  `remote_incompatible`, naming both releases.
+
 ## Legacy Yoetz registrations
 
 FinishUP was named Yoetz through 0.2.5 (ADR-048). A Cursor configuration connected by Yoetz carries
@@ -1339,8 +1509,13 @@ ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`
 `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
 `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
-`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or
-`storage_corrupt`) in the same diagnostics file, and the session keeps an observation-only binding
+`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
+`storage_corrupt`, or, for a selected remote server this computer refuses before any dial,
+`zero_network_remote_selected`, `target_reauthorization_required` or `target_root_is_remote` (a
+remote record this computer cannot read; before layer 5 also an HTTPS or port root), which the
+`sessionStart` context names with
+the owner's fix) in the same diagnostics file, and the session keeps an
+observation-only binding
 until a retry or an explicit `start` maps it. An explicit `mode=create` collision remains
 `SESSION_CONFLICT` and is not a recovery selector. For `vault_locked` on a never-initialized
 install, that explicit `start` returns the typed `vault_initialization_required` continuation (see
@@ -1597,7 +1772,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | SDK fixture is present | metadata-only experimental scaffolding; no SDK activation or model-use claim exists |
 | Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
 | Installed MCP executable changed but Cursor still shows the old tool inventory | fully quit that exact Cursor testing app; Reload Window is not enough if a shared MCP helper survived. Verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation. `mcp.runtime.activation=full_restart_required` is this state. |
-| Cursor lists FinishUP with "0 tools" while its resources still appear | Cursor compiles every advertised schema `pattern` as a unicode-mode JavaScript regular expression and drops the whole tool list when one fails; its MCP log reports the pattern that failed. Cursor 3.27.22 did this over receipt-result 1.4.0's closing-line pattern, which escaped spaces; builds that advertise receipt-result 1.4.1 do not. Upgrade, fully quit Cursor and re-prove `tools/list`. |
+| Cursor lists FinishUP with "0 tools" while its resources still appear | Cursor compiles every advertised schema `pattern` as a unicode-mode JavaScript regular expression and drops the whole tool list when one fails; its MCP log reports the pattern that failed. Cursor 3.27.22 did this over receipt-result 1.4.0's closing-line pattern, which escaped spaces; builds that advertise receipt-result 1.4.1 or 1.5.0 do not (this build advertises 1.5.0). Upgrade, fully quit Cursor and re-prove `tools/list`. |
 | `semantic_required` returns `route_semantic_ceiling` while plugin status says route `policy` | activation mismatch, not an owner privacy decision; inspect `mcp.runtime`, fully quit the host, and do not mint a fresh AI-powered check against the stale process |
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade FinishUP service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
@@ -2389,7 +2564,11 @@ outside directory named without a trailing `/` is listed; an `other` follow-up r
 only from rows FinishUP recorded for the run or edit it names. When the task names a file or folder
 outside the workspace that no admitted root covers, the check records
 `task_input_outside_not_admitted`, whose fixed sentence names the owner's step
-(`finishup privacy input-roots add <folder>` on a trusted terminal); it is a disclosure only, never
+(`finishup privacy input-roots add <folder>` on a trusted terminal of the computer the FinishUP
+service runs on, or, for a remote server, `finishup server folders add NAME FOLDER` on the client
+machine, which admits the folder for that server's claim-bound sessions in either outside-read
+mode, ADR-051 decision 5 as decided 2026-11-07; host-independent, the same on every host); it is
+a disclosure only, never
 a Stop-gate item or a continuation on Cursor. Cursor still has no write path to admitted roots,
 and FinishUP adds no unattended one: a non-interactive harness can admit roots only through an
 owner-attended ceremony while it is provisioned. The code is decided once by the check-time read,
@@ -2400,8 +2579,15 @@ admitted roots or, with none admitted, the step `finishup privacy input-roots ad
 the CLI, MCP and receipt print the sentence. `finishup service diagnostics` counts the task inputs on
 `semantic_case_built` as integers only: `semantic_task_input_candidates`,
 `semantic_task_inputs_read`, `semantic_task_input_listings`,
-`semantic_task_input_excerpts_selected`, `semantic_task_input_outside_candidates` and
-`semantic_task_inputs_outside_not_admitted`.
+`semantic_task_input_excerpts_selected`, `semantic_task_input_outside_candidates`,
+`semantic_task_inputs_outside_not_admitted`; for a remote server in `listed` mode, a separate
+`semantic_outside_reads_not_listed` record, written only when not zero, counts
+`semantic_task_inputs_outside_not_listed` (how many task inputs and declared tests its workspace
+agent kept back). The receipt says the same numbers, each kind apart, in the
+`outside_reads_not_listed` gap's opening line and its `kept_back` counts (check-recorded 1.7.0,
+receipt-document 1.4.0; ADR-051 decision 5), the same on every host: the MCP receipt, paged or
+not, carries them inside the receipt itself on both channels (the gap's `detail` and `kept_back`,
+or a markdown or text receipt's `human_text`); the compact receipt summary is only a fallback.
 
 ## Possible-credential filter opt-out (issue #982)
 

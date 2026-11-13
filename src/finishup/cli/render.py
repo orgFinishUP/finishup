@@ -7,20 +7,33 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Final, cast
 
+from finishup.client.attribution import (
+    ServiceAttribution,
+    attribution_lines,
+    coverage_hook_observed,
+    evidence_provenance_section,
+    evidence_provenance_unknown_section,
+    shows_server_copy_section,
+)
 from finishup.domain.check_totals import render_check_totals
 from finishup.domain.findings import SELF_VERIFIED_GUIDANCE
 from finishup.domain.receipts import (
     COORDINATOR_FAILURE_LIMITATION,
     DEFERRED_BEFORE_FIRST_EDIT_TEXT,
+    OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE,
     UNRESOLVED_VERIFICATION_GAP,
     UNRESOLVED_VERIFICATION_LIMITATION,
+    WORKSPACE_PROVENANCE_UNKNOWN_LINE,
     check_time_change_gap_sentence,
     historical_gaps_from_wire,
+    kept_back_from_wire,
     limitations_name_coordinator_failure,
+    outside_reads_kept_back_sentence,
     privacy_block_sentence,
     review_deferred_before_first_edit,
     semantic_redacted_value_agent_lines,
     semantic_redacted_value_text,
+    workspace_provenance_unknown_block,
 )
 from finishup.domain.review_guidance import review_guidance_line
 from finishup.domain.review_input_render import (
@@ -118,6 +131,7 @@ __all__ = [
     "render_human_status",
     "render_local_recovery_lines",
     "render_recovery_directive_lines",
+    "render_remote_refusal",
     "render_semantic_outcome_recovery_lines",
     "render_semantic_progress_lines",
 ]
@@ -419,8 +433,24 @@ def _render_overall_next(
     return f"Overall next [{next_step.status}]: {action}{targets}{endpoint}.{predicted}"
 
 
-def render_human_check(result: CheckSuccessModel) -> str:
-    """Render an exact check verdict and bounded AI-powered review status."""
+# ADR-051 decision 12: over a claim-bound connection a check that asked to await observations
+# always reports the wait ``unavailable`` because the rows wait in this computer's outbox, which
+# the server cannot read; this computer's own outbox is fine. Fixed words: what happened, why, and
+# the fix that clears it: deliver the rows, then check without asking the server to wait, since a
+# check that asks again reports the same state.
+CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE: Final = (
+    "Hook observations awaited: unavailable (the server cannot wait for observations still on "
+    "this computer, so the check used the record as it stood; run 'finishup observe drain' in "
+    "the project folder first, then check again without --await-observations)"
+)
+
+
+def render_human_check(result: CheckSuccessModel, *, claim_bound: bool = False) -> str:
+    """Render an exact check verdict and bounded AI-powered review status.
+
+    ``claim_bound`` is True when the check went over a connection to a server on another machine
+    (``workspace_binding == "client_claim"``), so an unavailable observation wait names that cause.
+    """
 
     if type(result) is not CheckSuccessModel:
         raise TypeError("check_result_invalid")
@@ -481,6 +511,8 @@ def render_human_check(result: CheckSuccessModel) -> str:
                 f"Hook observations awaited: bounded_timeout ({int(awaited.pending_count)} "
                 "still pending; the check used the record as it stood)"
                 if awaited.state == "bounded_timeout"
+                else CLAIM_BOUND_AWAIT_UNAVAILABLE_LINE
+                if claim_bound
                 else "Hook observations awaited: unavailable (local outbox not readable)"
             ),
         )
@@ -887,8 +919,14 @@ def _status_task_lifecycle_lines(result: StatusSuccessModel) -> tuple[str, ...]:
     return (line,) if line else ()
 
 
-def render_human_status(result: StatusSuccessModel) -> str:
-    """Render current structural status without dumping the ledger."""
+def render_human_status(
+    result: StatusSuccessModel, *, attribution: ServiceAttribution | None = None
+) -> str:
+    """Render current structural status without dumping the ledger.
+
+    ``attribution`` is the connection's (``finishup.client.attribution``): a claim-bound
+    connection's status ends with the fixed workspace-evidence line and the producing service.
+    """
 
     if type(result) is not StatusSuccessModel:
         raise TypeError("status_result_invalid")
@@ -1140,6 +1178,7 @@ def render_human_status(result: StatusSuccessModel) -> str:
         lines.append(DEFERRED_BEFORE_FIRST_EDIT_TEXT)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     lines.extend(_check_time_change_sentences(tuple(dict.fromkeys(gaps))))
+    lines.extend(attribution_lines(attribution))
     return "\n".join(lines)
 
 
@@ -1219,8 +1258,27 @@ def _render_lineage(page: StatusLineagePageModel) -> list[str]:
     return lines
 
 
-def render_human_receipt(result: ReceiptSuccessModel) -> str:
-    """Render the receipt conclusion without claiming stronger assurance."""
+def render_human_receipt(
+    result: ReceiptSuccessModel, *, attribution: ServiceAttribution | None = None
+) -> str:
+    """Render the receipt conclusion without claiming stronger assurance.
+
+    ``attribution`` is the connection's (``finishup.client.attribution``): a claim-bound
+    connection's receipt ends with the fixed workspace-evidence line, unless the service's own
+    text already carries it, and the producing service.
+
+    A receipt whose ``workspace_provenance`` says the provenance is unknown (decision D4) shows
+    the fixed "Workspace evidence" section for its ``reason`` saying what happened, why it
+    matters, and what to do for the passing cause or why that cause lasts, unless its
+    text already carries it (a JSON receipt, or one whose text was withheld, has no such text);
+    the connection's "read on the client machine" line is then left out.
+
+    A receipt whose ``evidence_provenance`` carries a level-L2 account (ADR-054) shows the same
+    fixed server-copy lines the service's text ends with, rendered from the member, unless its
+    text already carries them; the connection then names only the producing service. So does a
+    receipt whose ``evidence_provenance_unknown`` says that account could not be given, with the
+    evidence-unknown lines for its reason: never the connection's level-L1 line beside them.
+    """
 
     if type(result) is not ReceiptSuccessModel:
         raise TypeError("receipt_result_invalid")
@@ -1259,6 +1317,14 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
 
             lines.append("Verification coverage (agent-declared)")
             lines.extend(verification_coverage_wire_lines(cast(Mapping[str, object], declared)))
+        kept_back = kept_back_from_wire(document)
+        if kept_back is not None and result.human_text is None:
+            # ADR-051 decision 5: a JSON receipt says how many files listed mode kept back and
+            # the owner's two ways out; markdown and text carry the same in ``human_text``.
+            lines.append(
+                f"{outside_reads_kept_back_sentence(kept_back)}"
+                f" {OUTSIDE_READS_NOT_LISTED_SHORT_SENTENCE}"
+            )
         historical = historical_gaps_from_wire(document)
         if historical:
             lines.append(
@@ -1282,9 +1348,37 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
             )
     if result.suppressed_finding_count:
         lines.append(f"Suppressed findings: {result.suppressed_finding_count}")
+    provenance = result.workspace_provenance
+    provenance_unknown = provenance is not None
+    if provenance is not None and WORKSPACE_PROVENANCE_UNKNOWN_LINE not in shown:
+        # ADR-051 decision D4: fixed words for the result's closed reason only; a text or
+        # markdown receipt already ends with them.
+        lines.append(workspace_provenance_unknown_block(markdown=False, reason=provenance.reason))
+    hook_observed = coverage_hook_observed(result.coverage.publication_channels)
+    unknown = result.evidence_provenance_unknown
+    server_copy = result.evidence_provenance is not None or unknown is not None
+    if server_copy and not shows_server_copy_section(shown):
+        # ADR-054: the fixed lines for the member's level-L2 account, or for why that account is
+        # unknown; a text or markdown receipt already ends with them.
+        section = (
+            evidence_provenance_section(result.evidence_provenance, hook_observed=hook_observed)
+            if unknown is None
+            else evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
+        )
+        if section is not None:
+            lines.append(section)
     if result.agent_closing_prompt is not None:
         # #1240 D5: the same closing line the MCP reply carries (fixed words and counts only).
         lines.append(result.agent_closing_prompt)
+    lines.extend(
+        attribution_lines(
+            attribution,
+            shown=shown,
+            provenance_unknown=provenance_unknown,
+            hook_observed=hook_observed,
+            server_copy=server_copy,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -1423,6 +1517,48 @@ def render_recovery_directive_lines(
     if directive.nudge is not None:
         lines.append(directive.nudge)
     return lines
+
+
+def render_remote_refusal(phase: str, *, head: str) -> str:
+    """A connection to a server elsewhere refused or ended (ADR-051, ADR-052): ``<phase>: <head>``,
+    then the directive lines of its way back, as every CLI error surface shows a directive.
+
+    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS``, a protocol reason code. Its directive
+    follows what named the root (``targets.remote_root_continuation``): 'finishup server use
+    local' for the selection, unsetting the variable or using an unpinned launcher for an
+    isolation variable or a pinned launcher. ``head`` is the caller's fixed sentence about what
+    stopped.
+    """
+
+    from finishup.client.targets import remote_root_continuation
+
+    lines = [f"{phase}: {head}"]
+    directive = directive_for(remote_root_continuation(phase))
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive))
+    return "\n".join(lines)
+
+
+def render_authorization_refusal(error: BaseException) -> str | None:
+    """A connection the shared authorization gate refused or ended (ADR-052), or None.
+
+    ``<phase>: <summary>`` and the directive of the phase's way back, for a retryable
+    ``service_unavailable`` whose phase is one of ``client.authorization.AUTHORIZATION_REFUSALS``
+    (the remote-root refusals, the repository hold, a changed authorization); any other error is
+    None, so the caller keeps its own rendering.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    if getattr(error, "reason", None) != "service_unavailable":
+        return None
+    phase = getattr(error, "phase", None)
+    if type(phase) is not str:
+        return None
+    summary = refusal_summary(phase)
+    if summary is None:
+        return None
+    return render_remote_refusal(phase, head=summary)
 
 
 def render_local_recovery_lines(reason: object) -> list[str]:

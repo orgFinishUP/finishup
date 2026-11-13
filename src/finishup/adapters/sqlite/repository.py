@@ -54,6 +54,7 @@ from finishup.domain.findings import (
     SemanticProvenance,
     rank_key,
 )
+from finishup.domain.receipts import OutsideReadsKeptBack
 from finishup.domain.values import (
     Actor,
     ActorType,
@@ -415,6 +416,9 @@ class SqliteLedger:
         self._requires_recovery = _head(db).sequence != 0
         self._recovery_task: asyncio.Task[None] | None = None
         self._recovery_failed = False
+        # Events whose envelope says ``present`` but whose payload object the object store refused
+        # as ``object_verification_failed`` while this ledger recovered the task (ADR-051 D4b).
+        self._unverifiable_payload_event_ids: frozenset[str] = frozenset()
 
     def open_observation_store(self) -> SqliteObservationStore:
         """Public durable-observation seam over this bundle's connection.
@@ -626,7 +630,9 @@ class SqliteLedger:
                 self._db.execute("ROLLBACK")
             raise
 
-    async def _decode_durable_record(self, row: tuple[object, ...]) -> LedgerRecord:
+    async def _decode_durable_record(
+        self, row: tuple[object, ...], unverifiable_payloads: set[str]
+    ) -> LedgerRecord:
         if len(row) != 5 or type(row[0]) is not bytes:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         canonical, status, logical_key, payload_digest, _ = row
@@ -706,7 +712,15 @@ class SqliteLedger:
             if source["redaction"] == "present" and self._objects is not None:
                 try:
                     chunks = [chunk async for chunk in self._objects.open_verified(ref)]
-                except (KeyError, OSError, ValueError):
+                except ValueError as exc:
+                    # The object-store port's deterministic outcome: the object is missing or its
+                    # bytes fail verification. Opening the task again reads the same bytes, so no
+                    # retry or restart clears it; remember that as a structural fact. Any other
+                    # failure (an environmental ``OSError``, a store outside the port) can pass.
+                    if str(exc) == "object_verification_failed":
+                        unverifiable_payloads.add(cast(str, source["event_id"]))
+                    chunks = []
+                except (KeyError, OSError):
                     chunks = []
                 if chunks:
                     payload_json = strict_json_parse(b"".join(chunks))
@@ -774,6 +788,23 @@ class SqliteLedger:
             if task.done() and self._recovery_task is task:
                 self._recovery_task = None
 
+    async def payload_object_unverifiable(self, event_id: str) -> bool:
+        """Whether recovery found ``event_id``'s payload object missing or failing verification.
+
+        A structural availability fact, never payload content (ADR-051, decision D4b). True only
+        for an event whose envelope says ``present`` and whose payload object the object store
+        refused with its deterministic ``object_verification_failed`` while this ledger recovered
+        the task: the object is missing, or its bytes fail the envelope digest, header,
+        decryption, size or commitment check. Opening the task again reads the same bytes, so
+        neither a retry nor a service restart clears it. False for an object that hit an
+        environmental fault (an ``OSError`` such as EIO, which can pass: the ledger reads the
+        object again when the task is opened afresh), for one this ledger never had to read, and
+        for every event it appended itself.
+        """
+
+        await self._ensure_recovered()
+        return event_id in self._unverifiable_payload_event_ids
+
     async def verify_recovery_objects(self) -> int:
         """Authenticate every object that the replayed ledger still declares present."""
 
@@ -824,8 +855,11 @@ class SqliteLedger:
                 ).fetchall(),
             )
             decoded_records: list[LedgerRecord] = []
+            unverifiable_payloads: set[str] = set()
             for index, row in enumerate(rows, start=1):
-                decoded_records.append(await self._decode_durable_record(row))
+                decoded_records.append(
+                    await self._decode_durable_record(row, unverifiable_payloads)
+                )
                 # Decoding verifies and decrypts each payload on the loop; yield often so a
                 # long replay cannot hold every other request off the loop (#1231).
                 if index % 4 == 0:
@@ -857,6 +891,7 @@ class SqliteLedger:
                     cast(str, head_digest),
                 )
             self._state.records = records
+            self._unverifiable_payload_event_ids = frozenset(unverifiable_payloads)
             self._state.projection = projection
             self._state.trusted_projections.remember(projection, records)
             newly_quarantined: list[OperationRecord] = []
@@ -2995,6 +3030,53 @@ class SqliteLedger:
             [await self._resolve_pointer(p, TASK_INPUT_SNAPSHOT_MEDIA_TYPE) for p in pointers]
         )
 
+    async def record_erased_objects(self, refs: tuple[ObjectRef, ...]) -> None:
+        """Mark ``refs`` erased in the object inventory, before their files are deleted (ADR-054).
+
+        Owner ruling U20: a forgotten server copy's derived content objects are erased. Each one
+        reads ``redacted`` from here on, so it leaves every live object set (orphan sweeps,
+        backups, upgrades) and a reader that meets its missing file can tell a forgotten object
+        from a corrupt one. An object the inventory never held (a check's change object is named
+        only from inside its case object) joins it as ``redacted``. Never an event's payload
+        object: that is refused (``erased_object_is_event_payload``) and marks nothing. One
+        transaction, and idempotent.
+        """
+
+        if type(refs) is not tuple or any(type(ref) is not ObjectRef for ref in refs):
+            raise ValueError("erased_objects_invalid")
+        if any(ref.metadata.kind is ObjectKind.EVENT_PAYLOAD for ref in refs):
+            raise ValueError("erased_object_is_event_payload")
+        await self._ensure_recovered()
+        payload_ids = {record.payload_ref.object_id for record in self._state.records}
+        if any(ref.object_id in payload_ids for ref in refs):
+            raise ValueError("erased_object_is_event_payload")
+        async with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._verify_owner()
+                for ref in refs:
+                    self._inventory_object(ref)
+                    self._db.execute(
+                        "UPDATE objects SET state='redacted' WHERE object_id=? "
+                        "AND state IN ('present','redacted')",
+                        (ref.object_id,),
+                    )
+                self._db.execute("COMMIT")
+            except BaseException:
+                if self._db.get_autocommit() is False:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    async def erased_object_ids(self) -> frozenset[str]:
+        """Every object the inventory records as erased (``redacted``), for typed reads."""
+
+        await self._ensure_recovered()
+        async with self._lock:
+            rows = self._db.execute(
+                "SELECT object_id FROM objects WHERE state='redacted'"
+            ).fetchall()
+        return frozenset(cast(str, row[0]) for row in rows)
+
     async def _update_meta(
         self, key: str, change: Callable[[object | None], object | None]
     ) -> object | None:
@@ -3104,6 +3186,7 @@ class SqliteLedger:
         semantic_route_required: bool | None = None,
         deliverable_states: tuple[DeliverableState, ...] = (),
         review_mode: CheckReviewMode | None = None,
+        outside_reads_kept_back: OutsideReadsKeptBack | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -3145,6 +3228,7 @@ class SqliteLedger:
                     semantic_route_required=semantic_route_required,
                     deliverable_states=deliverable_states,
                     review_mode=review_mode,
+                    outside_reads_kept_back=outside_reads_kept_back,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

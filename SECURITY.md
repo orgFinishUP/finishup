@@ -45,6 +45,7 @@ repository. It does not cover unrelated third-party integrations you have config
 | Provider / MCP destinations you enable | Defects in FinishUP classification, binding, or audit | Trustworthiness of an external provider or MCP server you chose |
 | Agent / harness integrations | Defects in FinishUP-owned bridges and guidance delivery | Host agent bugs outside FinishUP adapters |
 | Strict MCP route (`finishup mcp serve --semantic off`) | Any FinishUP semantic capability request or evaluator dispatch from that process | Network activity by the host, OS, local-model process, or unrelated software |
+| FinishUP server selection ([ADR-051](docs/adr/ADR-051-client-server-cut-and-server-targets.md)): named local servers, and the refusal of remote server kinds this release does not open | Defects in target selection, in the isolation between named local servers, and any path that lets a remote server kind be added, selected or reached in this release | Security of other software running as your account |
 | Social engineering, physical access, compromised host OS | Only when FinishUP fails a stated boundary | General host compromise outside FinishUP’s control |
 
 FinishUP does not claim a general-purpose sandbox for untrusted code. Reports that only restate

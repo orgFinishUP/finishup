@@ -1469,6 +1469,180 @@ descriptors remain limited to the frozen v1.0 draft union. The CLI command uses 
 request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
 or supersede claims.
 
+## Server targets (ADR-051)
+
+Decision for this release: **Codex uses this computer's FinishUP servers and the owner's FinishUP
+servers over SSH and over HTTPS (on the web or on a port of this computer).** Only the owner adds
+and chooses a server elsewhere, on their own terminal (`finishup server add NAME
+ssh://[user@]host[:port]`, `finishup server add NAME https://HOST[:PORT][/BASE]` or `--port PORT`,
+`finishup server use NAME`), and only the owner types or rotates an HTTPS server's API key
+(`server add`, `server login`, `server logout`). With no remote target, Codex hooks,
+MCP and the CLI behave exactly as they did before server targets existed, and the Codex
+registration is unchanged. The shared remote seams (workspace claim, workspace agent,
+outside-read modes, zero-network selection rules, client attestation and the client-attested
+receipt lines) act for an SSH, HTTPS or port target; no real-environment cell is claimed for Codex
+against one (see *Evidence*).
+
+Decision: **no Codex registration changes.** The external `codex mcp add` entry and the plugin
+activation-cache `.mcp.json` keep their exact launcher, arguments and isolation environment;
+project-source `.mcp.json` and every plugin hook stay the bare `finishup`. What each process talks
+to follows the FinishUP server the owner selected with `finishup server use` (see the
+[servers guide](../usage/servers.md)):
+
+| Process | Learns its target from |
+|---|---|
+| External and activation-cache MCP connected under explicit isolation | the stamped `--env` isolation root (the selection never overrides it) |
+| External and activation-cache MCP connected without isolation | the selection file |
+| Bare-`PATH` plugin hooks (`hooks observe`, `session-start`, `user-prompt-submit`, `post-tool-use`, `spool`) | the inherited environment; otherwise the selection file |
+| Agent-shell CLI calls (`finishup publish-work`, `closure-prepare`, …) | the inherited environment; otherwise the selection file |
+
+Connecting Codex while a target is selected does not stamp that target into a registration, and
+existing ambient registrations do not show as drift. `finishup server use local` returns every
+later process to the default service.
+
+- **SSH servers and the helper (layer 4, ADR-052).** Supported, same code path as every host; no
+  registration change. Codex hooks, the MCP bridge and agent-shell CLI calls reach an SSH server
+  through its one helper (relay, the default: they keep dialling a Unix endpoint) or each through
+  its own `ssh -W` (direct, `finishup server set NAME --style direct`). Hooks never register a
+  workspace and never fetch a profile; in the relay style a hook may start the helper within its
+  own deadline and names `remote_unreachable` when it cannot. The MCP bridge registers its claimed
+  workspace with the helper and renews it (layer 3), starts the helper in the direct style, and
+  refuses a request id it already sent to another server (`server_authorization_changed`). An
+  agent-shell workflow command (`finishup publish-work`, `closure-prepare`, …) answers its own
+  live workspace calls and registers once, with a 15-minute lease. Host-key questions arise only on
+  the owner's terminal: `finishup server add` and `finishup server use` let OpenSSH ask about an
+  unknown host key there and take the typed name; an agent's shell has no trusted console
+  (`trusted_console_required`), and no hook or MCP tool can confirm a host key or agree to a
+  server. The five transport outages (`remote_unreachable`, `remote_auth_failed`,
+  `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`) reach the
+  SessionStart texts, MCP results and the CLI with their own continuations, never a local service
+  to start. In the direct style `remote_unreachable` carries `remote_direct_slow` instead: the
+  direct style is slow on that network and `finishup server set NAME --style relay` is the remedy
+  (layer 7, the owner's WAN-gate decision; same code path on every host, ADR-052 decision 24.5).
+- **HTTPS and port servers (layer 5, ADR-053).** Supported, same code path as every host and as SSH;
+  no registration change. Codex hooks, the MCP bridge and agent-shell CLI calls reach an HTTPS or
+  port server through the same helper (relay, the default: they keep dialling a Unix endpoint, and
+  only the helper reads the API key) or each over its own REST connection (direct, `finishup server
+  set NAME --style direct`, where each of those processes reads the API key itself). Hooks never run
+  HTTPS discovery or fetch a profile, and load the REST client only in the direct style; a hook
+  spends only its own deadline and names the transport phase when the server cannot be reached. The
+  API key is typed only on the owner's terminal (`finishup server add`, `finishup server login`; an
+  agent's shell has no trusted console, `trusted_console_required`) or read from an owner-only
+  `--key-file`; no hook, MCP tool or agent-facing text carries it. A refused or missing key is
+  `remote_auth_failed` with `remote_credential_repair` (the owner runs `finishup server login
+  NAME`); a key the owner replaces or deletes ends every connection made under the old one with
+  `server_authorization_changed`, and a new key asks for the owner's consent again
+  (`server_profile_changed`). The terminal interface adds only a server on this computer; an HTTPS
+  server is added in a terminal.
+- **Level L2, the server copy (layer 6, ADR-054).** Released, and opt-in at both ends: a server
+  offers it only when its owner's `[server.code_copy]` table enables an offer, and a copy is sent
+  only after the owner consents at L2 on the trusted console (`finishup server add|use NAME --level
+  L2 --retention …`). Decision, the same on every host and with no registration change: the sync
+  runs only in the target's helper, whose background agent alone declares the two code-sync
+  operations and checks the gate and the L2 consent again before anything is read; Codex hooks, the
+  MCP bridge and agent-shell CLI calls never declare them, so they never sync and the server never
+  asks them. Receipts and status show where each kind of evidence was read (the
+  `evidence_provenance` member and the fixed "Workspace evidence" lines, never the L1
+  client-attested line, for a task that read the copy), the same through the CLI, the MCP text and
+  summary and the terminal interface; the terminal interface has no L2 flows (consent, `server code`
+  and `server remove`'s question are CLI only). A Codex agent outside code mode, which reads only
+  `structuredContent`, gets the receipt's `evidence_provenance` member there, never the text lines.
+  No Codex session ran against a server keeping a copy, and no macOS or WSL 2 run
+  (gaps with owners in the [acceptance matrix](acceptance-matrix.md#gaps-and-owners)).
+- **Server profiles and consent (layer 3, ADR-052).** Supported identically on every host, and
+  acting for an SSH server from layer 4 and an HTTPS or port server from layer 5: the gate's consent
+  step names `server_profile_changed` or `server_level_unavailable` in the same SessionStart texts,
+  MCP shapes and drain records as the other phases, and only the owner agrees again (`finishup
+  server use NAME` on the trusted console; the agent's own shell cannot). The MCP bridge registers
+  its claimed workspace with the target's helper, renews it from a task the connection owns (an idle
+  bridge keeps it), and releases it when it closes. Nothing changes with no server elsewhere.
+- **Shared authorization and the repository hold (layer 2, ADR-052).** Supported, identical on every
+  host, and acting for an SSH server from layer 4 and an HTTPS or port server from layer 5. A held
+  or kept repository gets one byte-identical SessionStart text per state
+  (`repository_hold.hook_context`: the attach form in place of the start advice, an unconsented
+  form, a mapped form on resume and compact); MCP returns the phase with its continuation; the drain
+  sites record the phase and leave rows pending. The agent's own shell cannot confirm `server
+  repositories add` (trusted console); a real terminal can. The per-prompt cue is unchanged. With no
+  remote target recorded, Codex's session start is byte for byte as before (O3).
+- **Switching mid-session.** The MCP bridge keeps a server on this computer it started with; a
+  connection it made to a server elsewhere ends with `server_authorization_changed` once the
+  selection, record or key changes, and its next request follows the new selection (ADR-052, O1); a request already sent over it is never resent (its outcome is unknown);
+  hooks and shell calls follow a new selection at once. Restart open Codex sessions after `finishup server use`.
+- **Launcher.** The bare-`PATH` hook rule of issue #604 applies whichever server is selected: put
+  the intended launcher first on `PATH`.
+- **Evidence.** Coverage at the time of writing is unit and integration tests, plus capability
+  tests and an end-to-end run of the `finishup` command against a real OpenSSH server on Linux
+  (layer 4), and the REST conformance kit against both server edges over real TLS and an
+  end-to-end run of the `finishup` command against a real HTTPS server on Linux (layer 5). No Codex
+  session was run against an SSH or HTTPS server, and no remote cell is claimed for Codex or any
+  other host. Layer 7 ([acceptance matrix](acceptance-matrix.md#hosts-on-linux)) recorded the Linux
+  rows: Codex CLI 0.167.0: in a scratch `CODEX_HOME`, `codex mcp add`, `list` and `remove` by a test
+  instance's absolute launcher (Codex starts a server only inside a model session); `hooks
+  observe` with the recorded payload shapes exited 0. The bridge and hooks against servers elsewhere ran by scripts driving `finishup
+  mcp serve` over stdio as a host does, not from a Codex session: a model session needs the
+  account's host credentials and was not run. Gaps with owners (macOS, WSL 2, Codex sessions
+  against a server elsewhere) are in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
+- **Receipt provenance** (ADR-051, decision D4). This part holds for every task, local ones
+  included: when the service cannot read the task's opening record, the receipt is still made and
+  ends with the fixed provenance-unknown section (on a claim-bound task, in place of the
+  `client_attested` line); every format carries the same words as its `workspace_provenance`
+  member, and the agent gets them in the MCP receipt text and its summary and at the head of a
+  paged receipt's first page.
+
+The decisions below take effect only for a remote target, which in this release is an SSH, HTTPS
+or port server.
+
+- **Zero-network** (ADR-051 decision 8). A remote target and a zero-network policy on this
+  computer are never in force together: adding or selecting one is refused under zero-network,
+  and every Codex hook, MCP bridge connection and CLI call to a remote target is refused before
+  anything is sent while this computer last reported zero-network (`zero_network_remote_selected`,
+  continuation `zero_network_local_server_required`). Host decision: supported, same code path; no
+  MCP tool or hook carries or answers the choice, because agents cannot change the policy or the
+  selection.
+- **Whose privacy policy a command changes** (ADR-051 decision 8). With a remote target selected,
+  `privacy tighten|propose` and the privacy step of `setup run` change the target's policy and
+  name it; a widening is decided on the server host (`privacy decide-policy`, refused here as
+  `requires_server_host`). Host decision: same code path for Codex; no MCP tool or hook changes a
+  privacy policy.
+- **Workspace and outside reads** (ADR-051 decision 5). The bridge, hooks and shell calls send a
+  workspace claim, and this computer's workspace agent serves the server's workspace reads.
+  Outside the project folder it reads as the target's outside-read mode (`local` or `listed`)
+  says; the owner chooses that mode on their own terminal, and no hook, MCP tool or CLI call in a
+  Codex session asks for it, the same on every host and with no registration change. When
+  `listed` mode leaves files unread, the receipt states the omission code
+  (`outside_reads_not_listed`) and how many task inputs and declared tests were kept back, never
+  which file, and receipts carry the `client_attested` line.
+- **Which folder a task may name** (rule R, ADR-051 amended 2026-11-12). The connection's own
+  folder decides the repository and the worktree: a `start` whose absolute `workspace_ref` names
+  another repository, another worktree of the same repository, or a folder in none is refused in
+  the client, `workspace_ref_not_served`, and nothing about it is sent, read or synced. A subfolder
+  of the bridge's worktree, a symlinked spelling or, on macOS, a case variant is the same folder.
+  The Codex registration sets no `cwd`, so a session's bridge runs in the folder Codex starts it
+  in and serves that worktree; hooks name the session `cwd`, so the auto-attach meets the rule by
+  construction. A session whose agent works in another checkout than the one its bridge was
+  started in (seen on the Mac on 2026-11-12: bridge in one repository, agent in another) is told
+  `workspace_not_served_tell_user`: say so in one line and carry on without FinishUP for that
+  folder, since the agent cannot restart its bridge. `finishup start` from a shell is told
+  `workspace_folder_run_required` (run it from the named folder), with the failure body on stdout
+  for `--json`. Host decision: same code path for Codex CLI and the Codex app. Gap: whether the
+  app starts a thread's bridge in that thread's worktree (`~/.codex/worktrees/`) is not recorded;
+  until it is, a thread working in a worktree its bridge does not serve is refused as above.
+- **Observation** (ADR-051 decision 12). Consent, content profiles, approved-check trust, mappings
+  and the outbox stay on this computer, and each row a remote target receives carries the client
+  attestation. Host decision for content: Codex hook content is the profileless arm of observation
+  consent, so with consent alone its prompt, message and tool output chunks reach the server
+  unchanged, as a local service receives them.
+- **Service attribution in MCP results.** Host decision: not shown outside code mode. The "read on
+  the client machine" line and the line naming the answering service ride the MCP text channel
+  only, and Codex hands the model the serialized `structuredContent`, which never carries them; in
+  code mode the bounded text summary carries them, and the owner's `finishup` command and terminal
+  interface show them. Follow-up owner: issue #903, if a closed structured provenance member is
+  wanted.
+- **Subscription evaluator.** It runs where the FinishUP service runs: a remote server needs its
+  own Codex installation and login, and this machine's Codex home is never used for its reviews.
+- **Upgrades.** A remote server is never replaced from this machine; a release mismatch is
+  `remote_incompatible`, naming both releases.
+
 ## Legacy Yoetz registrations
 
 FinishUP was named Yoetz through 0.2.5 (ADR-048). A Codex home and project connected by Yoetz carry
@@ -2283,7 +2457,7 @@ egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog requires the selected root task to be active and non-quarantined, its canonical workspace and repository-privacy binding to match, and no start already pending for that selected route. Unrelated tasks in the same workspace do not block this recovery (#814); a pair already bound to another task remains a conflict. Delegated child routes require an authenticated attach handle or target selector. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog requires the selected root task to be active and non-quarantined, its canonical workspace and repository-privacy binding to match, and no start already pending for that selected route. Unrelated tasks in the same workspace do not block this recovery (#814); a pair already bound to another task remains a conflict. Delegated child routes require an authenticated attach handle or target selector. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, `zero_network_remote_selected` / `target_reauthorization_required` / `target_root_is_remote` (for a selected remote server only, which this computer refused before any dial; the last is a remote record this computer cannot read, and before layer 5 also an HTTPS or port root; the SessionStart context names the reason and the owner's fix: `finishup server use local` and a new agent session when the selection names the root, or unsetting the isolation variable or using an unpinned launcher when one names it; for a stale disclosure of an SSH server it also names `finishup server use NAME` on the owner's own terminal), the five transport outages of an SSH or HTTPS server (`remote_unreachable`, `remote_auth_failed`, `remote_identity_changed`, `remote_service_not_running`, `remote_incompatible`, each with its own fix), or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `finishup hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The rendered command now passes `--workspace .`, and the probe selects its locator in a fixed order (issue #659): an explicit project path other than the bare `.`, then the host payload's session `cwd` (a subdirectory resolves to the repository root), then the hook's own working directory. The host cwd outranks the bare `.` because Codex hook working directories are not stable across surfaces; an explicit path that cannot be canonicalized never falls through to another repository. `finishup hooks observe --event SessionStart` and the shared mapped-session lane derive the probe locator the same way when no explicit workspace was consented. A fence refusal is `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory, and a companion diagnostic row names the locator source (`locator_source_explicit`, `locator_source_host_payload`, `locator_source_cwd`, `locator_absent`, or `locator_unresolvable`) so an absent context and a supplied one that failed to resolve are distinguishable; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | A scoped `start` returns `SESSION_CONFLICT` with `repository_identity_required` or `repository_identity_mismatch` | `repository_identity_required` means the attach request omitted the trusted workspace/repository context; `repository_identity_mismatch` means the context resolved to a different repository than the bound route. Keep the selected `session_id`/`writer_id`, resolve the canonical repository root, and retry the same attach with that trusted context. The corrected request resumes the existing task (a rotated session/writer is allowed by the 0.3 recovery contract); it does not create a sibling. Never copy a commitment or infer a selector from a public workspace string. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `finishup hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
@@ -3407,7 +3581,11 @@ outside directory named without a trailing `/` is listed; an `other` follow-up r
 only from rows FinishUP recorded for the run or edit it names. When the task names a file or folder
 outside the workspace that no admitted root covers, the check records
 `task_input_outside_not_admitted`, whose fixed sentence names the owner's step
-(`finishup privacy input-roots add <folder>` on a trusted terminal); it is a disclosure only, never
+(`finishup privacy input-roots add <folder>` on a trusted terminal of the computer the FinishUP
+service runs on, or, for a remote server, `finishup server folders add NAME FOLDER` on the client
+machine, which admits the folder for that server's claim-bound sessions in either outside-read
+mode, ADR-051 decision 5 as decided 2026-11-07; host-independent, the same on every host); it is
+a disclosure only, never
 a Stop-gate item or a continuation on Codex. Codex still has no write path to admitted roots,
 and FinishUP adds no unattended one: a non-interactive harness can admit roots only through an
 owner-attended ceremony while it is provisioned. The code is decided once by the check-time read,
@@ -3418,8 +3596,15 @@ admitted roots or, with none admitted, the step `finishup privacy input-roots ad
 the CLI, MCP and receipt print the sentence. `finishup service diagnostics` counts the task inputs on
 `semantic_case_built` as integers only: `semantic_task_input_candidates`,
 `semantic_task_inputs_read`, `semantic_task_input_listings`,
-`semantic_task_input_excerpts_selected`, `semantic_task_input_outside_candidates` and
-`semantic_task_inputs_outside_not_admitted`.
+`semantic_task_input_excerpts_selected`, `semantic_task_input_outside_candidates`,
+`semantic_task_inputs_outside_not_admitted`; for a remote server in `listed` mode, a separate
+`semantic_outside_reads_not_listed` record, written only when not zero, counts
+`semantic_task_inputs_outside_not_listed` (how many task inputs and declared tests its workspace
+agent kept back). The receipt says the same numbers, each kind apart, in the
+`outside_reads_not_listed` gap's opening line and its `kept_back` counts (check-recorded 1.7.0,
+receipt-document 1.4.0; ADR-051 decision 5), the same on every host: the MCP receipt, paged or
+not, carries them inside the receipt itself on both channels (the gap's `detail` and `kept_back`,
+or a markdown or text receipt's `human_text`); the compact receipt summary is only a fallback.
 
 ## Possible-credential filter opt-out (issue #982)
 

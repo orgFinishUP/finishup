@@ -248,6 +248,11 @@ ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop"})
 # is teardown-only and cannot continue the agent.
 STANDING_ADVICE_CADENCE_EVENTS: Final = frozenset({"SessionStart"})
 _MAX_ADVICE_CONTEXT: Final = 1_200
+# A repository whose privacy policy on this computer allows no network use, held from the selected
+# server elsewhere or kept on this computer as its owner chose (ADR-051 decision 8): the closed
+# phases ``client.repository_hold`` names (``HOLD_PHASES``), spelled here so a hook pass that never
+# meets one does not import it.
+_HOLD_PHASES: Final = frozenset({"repository_egress_held", "repository_egress_kept"})
 _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
 # later drain. Anything else is permanently invalid and gets quarantined so it
@@ -502,6 +507,39 @@ class _HookDrainClient(Protocol):
 type HookDrainConnector = Callable[[ControlClientKind], Awaitable[_HookDrainClient]]
 
 
+def _drain_connector(connect: object, workspace_locator: str | None) -> HookDrainConnector:
+    """The connector a hook pass's own outbox drains use (ADR-051).
+
+    An injected ``connect`` is used as given. Otherwise the root decides when the drain connects:
+    a local root (the everyday server, an isolated root, a named local server) connects exactly
+    as before, naming no workspace. A server on another machine accepts a row only when it is
+    attested over a connection that claims the row's workspace (decision 12); an unbound drain
+    there is refused, or its rows are quarantined. So on a remote root the drain names the hook's
+    canonical workspace and the connect seam claims it: the hello carries the claim, never the
+    path. A pass that knows no workspace sends nothing there: its connect fails, the rows stay
+    pending, and the background drain delivers them claim-bound.
+    """
+
+    if connect is not None:
+        return cast(HookDrainConnector, connect)
+
+    async def drain_connect(kind: ControlClientKind) -> _HookDrainClient:
+        from finishup.client.targets import active_root_may_be_remote
+
+        real = cast(Callable[..., Awaitable[_HookDrainClient]], _connect_service())
+        if not active_root_may_be_remote():
+            return await real(kind)
+        if workspace_locator is None:
+            from finishup.ports.control import ControlError
+
+            raise ControlError("service_unavailable", retryable=True)
+        from finishup.ports.control import WorkspaceLocator
+
+        return await real(kind, workspace_locator=WorkspaceLocator(workspace_locator))
+
+    return drain_connect
+
+
 class _StartClient(Protocol):
     async def start(self, request: object, *, deadline_ms: int | None = None) -> object: ...
 
@@ -584,8 +622,27 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 
 
 def _attachment_recovery_context(reason: str) -> str:
-    """Render only trusted classifications, never host/error payload text."""
+    """Render only trusted classifications, never host/error payload text.
 
+    A repository held from the selected server elsewhere, or kept on this computer (ADR-051
+    decision 8), is the whole session-start text: the caller substitutes it for the static
+    advisory, whose "call start" advice it would contradict.
+    """
+
+    if reason in _HOLD_PHASES:
+        from finishup.client.repository_hold import hook_context
+
+        return hook_context(reason, "attach")
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    if reason in REMOTE_CONNECTION_PHASES:
+        # ADR-051 decision 8: this computer refused the selected server before anything was sent
+        # (zero-network, an older disclosure, or any other remote root, which this release does
+        # not connect to), or ended a connection whose authorization changed (ADR-052). Name the
+        # reason and the way back, as MCP ``start`` and the CLI do; no service is left to start.
+        from finishup.cli.hooks import remote_refusal_context
+
+        return remote_refusal_context(reason)
     if reason == "service_incompatible":
         return (
             "FinishUP attachment pending: service_incompatible. The selected service has an "
@@ -2704,8 +2761,15 @@ async def _try_service_ingest(
     content_capture_profile: str | None = None,
     capture_only: bool = False,
     deadline_ms: int,
+    store: LocalObservationStore | None = None,
+    workspace_commitment: str | None = None,
+    _state: Path | None = None,
 ) -> ObservationIngestResult:
-    """Attempt one typed ingest through an already-open preflight client."""
+    """Attempt one typed ingest through an already-open preflight client.
+
+    Over a claim-bound connection (a remote server target) the row is attested from ``store``
+    and this root's mapping first (ADR-051 decision 12); every other connection sends it as is.
+    """
 
     from finishup.application.observation_drain import (
         ObservationControlFailure,
@@ -2715,15 +2779,30 @@ async def _try_service_ingest(
 
     stage = "request_encode"
     try:
-        body = observation_ingest_request_to_json(
-            ObservationIngestRequest(
-                codex_session_id=codex_session_id,
-                envelope=envelope,
-                content_chunks=content_chunks,
-                content_capture_profile=content_capture_profile,
-                capture_only=capture_only,
-            )
+        request = ObservationIngestRequest(
+            codex_session_id=codex_session_id,
+            envelope=envelope,
+            content_chunks=content_chunks,
+            content_capture_profile=content_capture_profile,
+            capture_only=capture_only,
         )
+        if (
+            getattr(client, "workspace_binding", None) == "client_claim"
+            or getattr(client, "workspace_handle", None) is not None
+        ):
+            # A remote server target: the row goes out attested, without the path, or not at all.
+            if store is None or workspace_commitment is None:
+                raise ValueError("observation_attestation_unavailable")
+            from finishup.client.observation_attestation import attest_for_connection
+
+            request = attest_for_connection(
+                request,
+                client,
+                store=store,
+                workspace_commitment=workspace_commitment,
+                state=_state,
+            )
+        body = observation_ingest_request_to_json(request)
         stage = "control"
         raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
         stage = "response_decode"
@@ -2923,6 +3002,9 @@ async def _stage_native_content(
                     content_capture_profile=content_capture_profile,
                     capture_only=True,
                     deadline_ms=max(1, int(left * 1_000)),
+                    store=store,
+                    workspace_commitment=workspace_commitment,
+                    _state=_state,
                 ),
                 timeout=left,
             )
@@ -2940,6 +3022,23 @@ async def _stage_native_content(
         if staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON:
             staged_content_sources.add(source_identity)
     return staged_content_sources
+
+
+def _drain_connect_failure(failure: BaseException) -> str:
+    """The closed diagnostic reason a drain connection that could not be opened records.
+
+    A connect that ran out of its preflight bound is told apart from one that failed (tb4n2
+    N-3b); one the connection seam refused because this repository is held from the selected
+    server elsewhere, or kept on this computer (ADR-051 decision 8), names that phase: its rows
+    stay pending in this computer's outbox.
+    """
+
+    if isinstance(failure, TimeoutError):
+        return "drain_connect_timeout"
+    phase = getattr(failure, "phase", None)
+    if phase in _HOLD_PHASES:
+        return cast(str, phase)
+    return "drain_connect_failed"
 
 
 async def _stage_content_without_lease(
@@ -2982,8 +3081,8 @@ async def _stage_content_without_lease(
                     client = await asyncio.wait_for(
                         connector(ControlClientKind.CLI), timeout=timeout
                     )
-                except TimeoutError:
-                    failure_reason = "drain_connect_timeout"
+                except Exception as failure:
+                    failure_reason = _drain_connect_failure(failure)
                     raise
                 failure_reason = "native_content_stage_failed"
                 started = monotonic()
@@ -3081,14 +3180,9 @@ async def _drain_outbox_leased(
         )
     except Exception as failure:
         # A connect that ran out of its preflight bound is told apart from one the service
-        # refused or that failed outright (tb4n2 N-3b).
-        record_hook_diagnostic(
-            "drain_connect_timeout"
-            if isinstance(failure, TimeoutError)
-            else "drain_connect_failed",
-            event_name,
-            _state=_state,
-        )
+        # refused or that failed outright (tb4n2 N-3b), and one the connection seam refused for a
+        # held or kept repository names its phase; the rows stay pending either way.
+        record_hook_diagnostic(_drain_connect_failure(failure), event_name, _state=_state)
         if content_by_source_identity:
             store.note_coverage_gap(
                 workspace_commitment,
@@ -3274,6 +3368,9 @@ async def _drain_outbox_leased(
                         content_chunks=chunks,
                         content_capture_profile=row_profile,
                         deadline_ms=max(1, int(remaining * 1_000)),
+                        store=store,
+                        workspace_commitment=workspace_commitment,
+                        _state=_state,
                     ),
                     timeout=remaining,
                 )
@@ -3417,10 +3514,23 @@ async def _try_auto_start(
 
     if workspace_locator is None:
         return AutoAttachOutcome(None, "auto_attach_workspace_unbound")
+    from finishup.client.authorization import preflight_refusal
+
+    refusal = preflight_refusal()
+    if refusal is not None:
+        # This computer refuses the selected server before any dial (ADR-051 decision 8; the
+        # shared authorization gate, ADR-052); naming it here sends nothing and keeps the closed
+        # reason for the context and diagnostics.
+        return AutoAttachOutcome(None, refusal)
 
     from pydantic import ValidationError
 
     from finishup import __version__
+    from finishup.client.workspace_ref import (
+        WorkspaceRefNotPortable,
+        WorkspaceRefNotServed,
+        start_request_for_connection,
+    )
     from finishup.ports.control import ControlClientKind, ControlError, WorkspaceLocator
     from finishup.protocol.ids import IdKind, new_id
     from finishup.protocol.models import OperationFailureModel, StartRequest
@@ -3480,12 +3590,27 @@ async def _try_auto_start(
             )
         else:
             client = await connect(ControlClientKind.CLI)
-        result = await client.start(request, deadline_ms=_remaining_deadline_ms())
+        # ADR-051: a server on another machine is sent the connection's handle, never the locator.
+        # The start names the locator the connection was made from, so rule R holds by
+        # construction; the check still runs, and a refusal is ``auto_attach_refused``.
+        result = await client.start(
+            start_request_for_connection(
+                request, client, serving=WorkspaceLocator(workspace_locator)
+            ),
+            deadline_ms=_remaining_deadline_ms(),
+        )
         # A validated local predecessor selects recovery before admission. An
         # ordinary create attempt would now succeed and strand predecessor work.
     except ControlError as error:
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
         from finishup.service.client import handshake_failure
 
+        if error.phase in REMOTE_CONNECTION_PHASES:
+            # The connection seam refused it before anything was claimed or dialled: a selection
+            # that changed after the check above, or this repository held from the selected
+            # server elsewhere or kept on this computer (ADR-051 decision 8, ADR-052). It is
+            # named, never a service that is still starting.
+            return AutoAttachOutcome(None, error.phase)
         if handshake_failure(error) is not None:
             # A running service of this installation closed the hello (#1040 follow-up): not a
             # service that still has to start, and not another installation to replace.
@@ -3495,6 +3620,10 @@ async def _try_auto_start(
         )
     except TimeoutError:
         return AutoAttachOutcome(None, "timeout")
+    except (WorkspaceRefNotPortable, WorkspaceRefNotServed) as refusal:
+        # Nothing was sent: the connection had no workspace handle to name instead of a path, or
+        # (rule R) the locator does not name the worktree it serves.
+        return AutoAttachOutcome(None, _AUTO_ATTACH_ERROR_REASONS[refusal.code])
     except Exception:
         return AutoAttachOutcome(None, "service_unavailable")
     finally:
@@ -4306,6 +4435,102 @@ def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
     return "workspace_unconsented"
 
 
+def _refresh_repository_report(
+    event: str,
+    payload: Mapping[str, JsonValue],
+    workspace_locator: str | None,
+    *,
+    skip_service: bool,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """At a SessionStart other than ``clear`` that may use a service, ask this computer's
+    FinishUP about the session's repository, within the hook budget.
+
+    ``client.everyday_repository.refresh_at_session_start``: only on this computer's everyday
+    root or while a server elsewhere is selected, only for a missing or stale report, at most
+    0.5 s, in a fresh context on its own event loop. Never raises.
+    """
+
+    if (
+        event != "SessionStart"
+        or skip_service
+        or workspace_locator is None
+        or _session_start_source(payload) == "clear"
+    ):
+        return
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return
+    with contextlib.suppress(Exception):
+        from finishup.client.everyday_repository import refresh_at_session_start
+
+        refresh_at_session_start(workspace_locator, budget_seconds=remaining)
+
+
+def _repository_hold_notice(
+    payload: Mapping[str, JsonValue],
+    workspace_locator: str | None,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+    _state: Path | None,
+) -> str:
+    """At a SessionStart without observation consent, the text naming this session's repository
+    held from the selected server elsewhere, or kept on this computer; ``""`` otherwise.
+
+    ``client.everyday_repository.session_start_hold_phase``: the records alone, no service, and
+    the repository's one Git read only when this computer reported a repository that allows no
+    network use. The same text every host receives (``repository_hold.hook_context``), without
+    the observation clause: nothing is captured here. Never raises.
+    """
+
+    if workspace_locator is None or _session_start_source(payload) == "clear":
+        return ""
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return ""
+    try:
+        from finishup.client.everyday_repository import session_start_hold_phase
+        from finishup.client.repository_hold import hook_context
+
+        phase = session_start_hold_phase(workspace_locator, budget_seconds=remaining)
+        if phase is None:
+            return ""
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic(phase, "SessionStart", _state=_state)
+        return hook_context(phase, "unconsented")
+    except Exception:
+        return ""
+
+
+def _unconsented_session_start_context(
+    payload: Mapping[str, JsonValue],
+    workspace_locator: str | None,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float],
+    _state: Path | None,
+) -> str:
+    """The context a SessionStart without observation consent gives the agent.
+
+    A repository held from the selected server elsewhere, or kept on this computer, is named
+    first, from the records alone (ADR-051 decision 8); the cached release recommendation follows
+    only when both fit the bound. Never raises.
+    """
+
+    additional = _repository_hold_notice(
+        payload, workspace_locator, deadline=deadline, monotonic=monotonic, _state=_state
+    )
+    with contextlib.suppress(Exception):
+        recommendation = _cached_recommendation_context(_state=_state)
+        if recommendation and not additional:
+            additional = recommendation
+        elif recommendation and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT:
+            additional = f"{additional} {recommendation}"
+    return additional
+
+
 def _session_start_source(payload: Mapping[str, JsonValue]) -> str | None:
     """Resolve the closed SessionStart lifecycle source from a host envelope.
 
@@ -4830,6 +5055,10 @@ class _SessionStartAttach:
     # The bounded post-compaction recap (ADR-044), kept apart from ``additional`` so the
     # admission notice and release recommendation are composed against their own bound first.
     recap: str = ""
+    # The phase when the attach or status read found this repository held from the selected
+    # server elsewhere, or kept on this computer (ADR-051 decision 8): no admission read follows,
+    # since it would only meet the same refusal at the connection seam.
+    hold_phase: str | None = None
 
 
 def _session_start_attach(
@@ -4867,7 +5096,6 @@ def _session_start_attach(
         _STARTUP_RECOVERY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
-        _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _WORKSPACE_MISMATCH_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         _WORKSPACE_UNBOUND_CONTEXT,  # pyright: ignore[reportPrivateUsage]
         SessionWorkspace,
@@ -4877,12 +5105,14 @@ def _session_start_attach(
         _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
         bound_connector,
         resolve_session_workspace,
+        unavailable_context,
     )
 
     additional = ""
     recap_text = ""
     attach_reason: str | None = None
     attach_advisory_only = False
+    hold_phase: str | None = None
     session_lifecycle_lock = (
         contextlib.nullcontext(True)
         if session_lock_owned
@@ -4934,7 +5164,12 @@ def _session_start_attach(
                         "necessary bootstrap clarification, call start to attach a task "
                         "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                     )
-                    if attach_reason is not None:
+                    if attach_reason in _HOLD_PHASES:
+                        # Substituted, never prepended: the static advisory's "call start"
+                        # would contradict the held repository's own text (ADR-051 decision 8).
+                        additional = _attachment_recovery_context(attach_reason)
+                        hold_phase = attach_reason
+                    elif attach_reason is not None:
                         additional = _attachment_recovery_context(attach_reason) + additional
                     attach_advisory_only = True
                 else:
@@ -5033,13 +5268,18 @@ def _session_start_attach(
                     with contextlib.suppress(Exception):
                         record_hook_diagnostic(kind, event, _state=_state)
                 else:
-                    additional = _UNAVAILABLE_CONTEXT
+                    additional = unavailable_context(outcome.phase)
+                    if outcome.phase in _HOLD_PHASES:
+                        hold_phase = outcome.phase
+                        with contextlib.suppress(Exception):
+                            record_hook_diagnostic(outcome.phase, event, _state=_state)
     return _SessionStartAttach(
         mapping=mapping,
         pending_mapping_deferred=pending_mapping_deferred,
         additional=additional,
         attach_advisory_only=attach_advisory_only,
         recap=recap_text,
+        hold_phase=hold_phase,
     )
 
 
@@ -5611,6 +5851,19 @@ def handle_observe(
             # different commitment, including a legacy exact-subdirectory grant.
             workspace_commitment = store.find_workspace_for_codex_session(host_session_id)
             workspace_locator = None
+        # ADR-051 decision 8 (2026-11-07, round 4): before any attach, status or drain
+        # connection, in both consent branches, a SessionStart asks this computer's FinishUP about
+        # the session's repository when its report is missing or stale. On the everyday root the
+        # report then exists before the owner switches to a server elsewhere; with one selected,
+        # a repository just found to allow no network use is held in this pass.
+        _refresh_repository_report(
+            resolved_event,
+            payload,
+            workspace_locator,
+            skip_service=skip_service,
+            deadline=entry_started + _HOOK_TOTAL_BUDGET_SECONDS - 0.1,
+            monotonic=_monotonic,
+        )
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0,
@@ -5621,12 +5874,21 @@ def handle_observe(
                 record_hook_diagnostic(binding_diagnostic, resolved_event, _state=_state)
             # Update advice consumes only the precomputed cache, independently of observation
             # consent. Never ingest or spool this event on the no-consent path.
-            additional = ""
-            if resolved_event == "SessionStart" and (
-                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
-            ):
-                with contextlib.suppress(Exception):
-                    additional = _cached_recommendation_context(_state=_state)
+            additional = (
+                _unconsented_session_start_context(
+                    payload,
+                    workspace_locator,
+                    deadline=entry_started + _HOOK_TOTAL_BUDGET_SECONDS - 0.1,
+                    monotonic=_monotonic,
+                    _state=_state,
+                )
+                if resolved_event == "SessionStart"
+                and (
+                    source is not ObservationSource.CURSOR_HOOK
+                    or _output_event_name == "sessionStart"
+                )
+                else ""
+            )
             _stdout_json(_render_context(additional) if additional else {}, stdout)
             return 0
 
@@ -6378,6 +6640,7 @@ def handle_observe(
             else None
         )
         session_recap = ""
+        session_hold_phase: str | None = None
         if resolved_event == "SessionStart":
             session_source_value = _session_start_source(payload)
             if session_source_value != "clear":
@@ -6411,6 +6674,7 @@ def handle_observe(
                 additional = attach.additional
                 attach_advisory_only = attach.attach_advisory_only
                 session_recap = attach.recap
+                session_hold_phase = attach.hold_phase
             elif (
                 source is ObservationSource.CURSOR_HOOK
                 and mapping is None
@@ -6447,7 +6711,7 @@ def handle_observe(
                         codex_session_id=codex_session_id,
                         content_by_source_identity=content_map,
                         content_capture_profile=service_content_profile,
-                        connect=cast(HookDrainConnector | None, connect),
+                        connect=_drain_connector(connect, workspace_locator),
                         event_name=resolved_event,
                         _state=_state,
                         budget_seconds=native_content_drain_budget,
@@ -6518,7 +6782,7 @@ def handle_observe(
                     codex_session_id=codex_session_id,
                     content_by_source_identity=content_map,
                     content_capture_profile=service_content_profile,
-                    connect=cast(HookDrainConnector | None, connect),
+                    connect=_drain_connector(connect, workspace_locator),
                     event_name=resolved_event,
                     _state=_state,
                     budget_seconds=(
@@ -6553,7 +6817,7 @@ def handle_observe(
                         workspace_commitment=workspace_commitment,
                         codex_session_id=codex_session_id,
                         finishup_session_id=stop_mapping.finishup_session_id,
-                        connect=cast(HookDrainConnector | None, connect),
+                        connect=_drain_connector(connect, workspace_locator),
                         _state=_state,
                         deadline=stop_drain_deadline,
                         monotonic=_monotonic,
@@ -6726,6 +6990,9 @@ def handle_observe(
                         _include_admission_notice
                         and not pending_mapping_deferred
                         and not mapping_lifecycle_deferred
+                        # A held or kept repository's admission read would only meet the same
+                        # refusal at the connection seam (ADR-051 decision 8).
+                        and session_hold_phase is None
                     ),
                     harness_id=harness_id,
                     workspace_locator=workspace_locator,

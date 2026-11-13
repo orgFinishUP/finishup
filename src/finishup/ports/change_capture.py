@@ -63,11 +63,17 @@ __all__ = [
     "TaskChangeBaseStorePort",
     "check_workspace_source_scope",
     "current_check_workspace_source",
+    "current_evidence_task",
+    "evidence_task_of",
+    "evidence_bindings",
     "decode_check_change",
     "decode_task_change_base",
     "drop_space_cut_words",
     "encode_check_change",
     "encode_task_change_base",
+    "evidence_task_scope",
+    "task_input_file_from_wire",
+    "task_input_file_wire",
     "metadata_path_representable",
     "RequestedPathProbe",
     "MAX_BASELINE_UNTRACKED_FILES",
@@ -75,6 +81,7 @@ __all__ = [
     "MAX_TASK_INPUT_FILES",
     "MAX_TASK_INPUT_TEXT_BYTES",
     "NestedUntrackedBaseline",
+    "OutsideSnapshotRead",
     "TASK_INPUT_ORIGINS",
     "TASK_INPUT_BASELINES",
     "TaskInputBaseline",
@@ -397,9 +404,20 @@ class TaskInputFile:
     # then says whether the file read at check time still matched it.
     baseline: TaskInputBaseline = "current"
     current_state: TaskInputCurrentState | None = None
+    # ADR-051 decision 5 (amended 2026-11-07): a claim-bound task's input read beneath a folder
+    # its client's owner listed for this server (``finishup server folders add``), not beneath a
+    # root this server's own policy admits. Set by the server from its own policy, never taken
+    # from the agent. Its ``root`` is that folder, which this server's policy cannot revoke: the
+    # owner removes it on the client, from the agent's next read. Such an input is never bound to
+    # a policy root for egress, and every other privacy control still applies to it.
+    client_listed: bool = False
 
     def __post_init__(self) -> None:
         if self.origin not in TASK_INPUT_ORIGINS or type(self.summary) is not bool:
+            raise _invalid()
+        if type(self.client_listed) is not bool or (
+            self.client_listed and (self.origin != "outside_workspace" or self.root is None)
+        ):
             raise _invalid()
         if self.baseline not in TASK_INPUT_BASELINES or (
             (self.baseline == "current") != (self.current_state is None)
@@ -437,6 +455,23 @@ class TaskInputFile:
             raise _invalid()
 
 
+# Kept beside ``TaskInputFile`` so a client workspace agent can return it over a connection
+# (ADR-051); ``finishup.adapters.task_input_read`` produces it and re-exports the name.
+@dataclass(frozen=True, slots=True)
+class OutsideSnapshotRead:
+    """One snapshot candidate the outside read reached (#1118 unit 1).
+
+    ``text`` is the whole file when it is UTF-8 text of at most ``max_bytes``; otherwise
+    ``None`` and ``reason`` is the closed code for why no full original was kept.
+    """
+
+    root: str
+    path: str
+    size: int
+    text: bytes | None
+    reason: Literal["too_large", "not_text", "unreadable"] | None
+
+
 @dataclass(frozen=True, slots=True)
 class CheckChangeCapture:
     """One bounded, rendered check-time change: a plain-text header followed by a unified diff.
@@ -450,7 +485,10 @@ class CheckChangeCapture:
     task input files the same read carried (issue #1045); they are not part of the change and never
     enter ``text``. ``outside_inputs_not_admitted`` is the service's closed decision, taken when
     the read ran, that the task names an existing input outside the workspace that no root the
-    owner admitted covers (issue #1102); it names no path.
+    owner admitted covers (issue #1102); it names no path. ``outside_inputs_not_listed`` counts,
+    for a claim-bound task, the existing task-named inputs (and kept copies of them) the client's
+    workspace agent left unread because its owner has not listed their folder for this server
+    (ADR-051 decision 5); only those inputs are missing, and it names no path either.
     """
 
     base: ChangeBaseKind
@@ -463,6 +501,7 @@ class CheckChangeCapture:
     base_commit: str = field(default="", repr=False)
     inputs: tuple[TaskInputFile, ...] = field(default=(), repr=False)
     outside_inputs_not_admitted: bool = False
+    outside_inputs_not_listed: int = 0
     # One-based diff-section ordinals whose body could not be redacted. Only their safe header
     # remains in text; composition gives each a separate, withheld item.
     withheld_sections: tuple[int, ...] = ()
@@ -492,6 +531,8 @@ class CheckChangeCapture:
             type(self.truncated) is not bool
             or type(self.redacted) is not bool
             or type(self.outside_inputs_not_admitted) is not bool
+            or type(self.outside_inputs_not_listed) is not int
+            or not 0 <= self.outside_inputs_not_listed <= _MAX_FILE_COUNT
         ):
             raise _invalid()
         if self.omitted_files and not self.truncated:
@@ -1034,14 +1075,20 @@ class CheckWorkspaceSource:
     ``workspace`` is the locator the authenticated connection supplied at handshake and
     ``repository_commitment`` the installation-keyed commitment the service derived from that same
     locator. The capture runs only when the commitment equals the task route's own, so a
-    connection cannot point one task's review at another repository.
+    connection cannot point one task's review at another repository. A claim-bound connection's
+    ``workspace`` is its ``client:`` handle (ADR-051): only its workspace agent reads it.
     """
 
     workspace: str = field(repr=False)
     repository_commitment: str
 
     def __post_init__(self) -> None:
-        if type(self.workspace) is not str or not Path(self.workspace).is_absolute():
+        # Imported here: the workspace-agent catalog builds on this module's own codecs.
+        from finishup.ports.workspace_agent import workspace_handle_valid
+
+        if type(self.workspace) is not str or not (
+            Path(self.workspace).is_absolute() or workspace_handle_valid(self.workspace)
+        ):
             raise _invalid()
         validate_commitment(self.repository_commitment)
 
@@ -1066,6 +1113,66 @@ def check_workspace_source_scope(source: CheckWorkspaceSource | None) -> Generat
 
 def current_check_workspace_source() -> CheckWorkspaceSource | None:
     return _CHECK_WORKSPACE_SOURCE.get()
+
+
+_EVIDENCE_TASK: ContextVar[str | None] = ContextVar("evidence_task", default=None)
+_EVIDENCE_BINDINGS: ContextVar[dict[object, object] | None] = ContextVar(
+    "evidence_bindings", default=None
+)
+
+
+@contextmanager
+def evidence_task_scope(task_id: str | None) -> Generator[None]:
+    """Name the task whose workspace evidence the reads inside this scope gather (ADR-054).
+
+    Level L2 pins a task's reads to one snapshot of the server's copy and counts, per task, where
+    each piece of evidence was read (design v2 section 8.6). The routed readers are blocking ports
+    that see only a workspace, so the caller that holds the task's runtime names the task here;
+    ``asyncio.to_thread`` copies the scope into the worker thread. ``None`` names no task: its
+    reads are pinned and counted under no task. Only the task's id crosses; nothing else.
+
+    Each scope is one evidence job (a check, a review, a verification worker) and starts with
+    its own empty bindings (``evidence_bindings``): what its reads are bound to stays fixed for
+    the job, whatever another job of the same task does meanwhile.
+    """
+
+    if task_id is not None and (type(task_id) is not str or not 1 <= len(task_id) <= 128):
+        raise TypeError("evidence_task_invalid")
+    token = _EVIDENCE_TASK.set(task_id)
+    bindings = _EVIDENCE_BINDINGS.set({})
+    try:
+        yield
+    finally:
+        _EVIDENCE_BINDINGS.reset(bindings)
+        _EVIDENCE_TASK.reset(token)
+
+
+def evidence_bindings() -> dict[object, object] | None:
+    """The current evidence job's bindings (``evidence_task_scope``), or None outside a scope.
+
+    Shared by every worker thread the job's reads run in (the scope's own mapping, copied by
+    reference); level L2 keeps there the snapshot a job's reads were first served from, so a
+    review keeps reading the snapshot it started with (design v2 section 8.6).
+    """
+
+    return _EVIDENCE_BINDINGS.get()
+
+
+def evidence_task_of(runtime: object) -> str | None:
+    """The task id a task runtime names, for ``evidence_task_scope``; None for anything else.
+
+    A stand-in or mismatched runtime (one a later identity check refuses) names no task, so the
+    scope never decides that refusal earlier or differently.
+    """
+
+    task_id = getattr(runtime, "task_id", None)
+    return task_id if type(task_id) is str and 1 <= len(task_id) <= 128 else None
+
+
+def current_evidence_task() -> str | None:
+    """The task the current evidence reads belong to (``evidence_task_scope``), or None."""
+
+    return _EVIDENCE_TASK.get()
 
 
 def encode_task_change_base(base: TaskChangeBase) -> bytes:
@@ -1173,6 +1280,71 @@ def _baseline_files(raw: object) -> tuple[UntrackedBaselineFile, ...]:
     return tuple(files)
 
 
+def task_input_file_wire(item: TaskInputFile) -> dict[str, JsonValue]:
+    """One task input file as the JSON object a check-change object stores it in (#1045).
+
+    A field at its default is left out, so an input read before the field existed keeps its
+    bytes; the workspace-agent catalog carries inputs in this same shape (ADR-051).
+    """
+
+    if type(item) is not TaskInputFile:
+        raise _invalid()
+    return {
+        "path": item.path,
+        "redacted": item.redacted,
+        "size": item.size,
+        "text": item.text.decode("utf-8"),
+        **({"origin": item.origin} if item.origin != "task" else {}),
+        **({"summary": True} if item.summary else {}),
+        # #1118 unit 1: written only when set, so an older input keeps its bytes.
+        **({"root": item.root} if item.root is not None else {}),
+        **({"baseline": item.baseline} if item.baseline != "current" else {}),
+        **({"current_state": item.current_state} if item.current_state else {}),
+        # ADR-051 decision 5: written only when set, so every other input keeps its bytes.
+        **({"client_listed": True} if item.client_listed else {}),
+    }
+
+
+def task_input_file_from_wire(row: object) -> TaskInputFile:
+    """Decode exactly the shape ``task_input_file_wire`` writes; anything else is refused."""
+
+    if type(row) is not dict:
+        raise _invalid()
+    fields = cast(dict[str, object], row)
+    if (
+        set(fields) - {"origin", "summary", "root", "baseline", "current_state", "client_listed"}
+        != {"path", "redacted", "size", "text"}
+        or type(fields["text"]) is not str
+        # A workspace agent's reply is untrusted: refuse a wrong-typed field here, as the codec's
+        # own error, before ``TaskInputFile`` hashes or slices it and fails as some other error.
+        or type(fields["path"]) is not str
+        or type(fields["redacted"]) is not bool
+        or type(fields["size"]) is not int
+        or any(
+            name in fields and type(fields[name]) is not str
+            for name in ("origin", "root", "baseline", "current_state")
+        )
+        or fields.get("origin", "verification") == "task"
+        or fields.get("summary", True) is not True
+        or fields.get("baseline", "task_start") == "current"
+        or fields.get("client_listed", True) is not True
+    ):
+        # A default value is never written, so a present default is not canonical.
+        raise _invalid()
+    return TaskInputFile(
+        fields["path"],
+        fields["text"].encode("utf-8"),
+        fields["size"],
+        fields["redacted"],
+        cast(TaskInputOrigin, fields.get("origin", "task")),
+        fields.get("summary", False) is True,
+        cast(str | None, fields.get("root")),
+        cast(TaskInputBaseline, fields.get("baseline", "current")),
+        cast(TaskInputCurrentState | None, fields.get("current_state")),
+        fields.get("client_listed", False) is True,
+    )
+
+
 def encode_check_change(capture: CheckChangeCapture) -> bytes:
     if type(capture) is not CheckChangeCapture:
         raise _invalid()
@@ -1192,24 +1364,13 @@ def encode_check_change(capture: CheckChangeCapture) -> bytes:
         # written without them keeps its bytes.
         # ``origin`` and ``summary`` (issue #1082) are written only when not the default, so an
         # input read before they existed keeps its bytes.
-        body["inputs"] = [
-            {
-                "path": item.path,
-                "redacted": item.redacted,
-                "size": item.size,
-                "text": item.text.decode("utf-8"),
-                **({"origin": item.origin} if item.origin != "task" else {}),
-                **({"summary": True} if item.summary else {}),
-                # #1118 unit 1: written only when set, so an older input keeps its bytes.
-                **({"root": item.root} if item.root is not None else {}),
-                **({"baseline": item.baseline} if item.baseline != "current" else {}),
-                **({"current_state": item.current_state} if item.current_state else {}),
-            }
-            for item in capture.inputs
-        ]
+        body["inputs"] = [task_input_file_wire(item) for item in capture.inputs]
     if capture.outside_inputs_not_admitted:
         # Issue #1102: written only when set, so every object without it keeps its bytes.
         body["outside_inputs_not_admitted"] = True
+    if capture.outside_inputs_not_listed:
+        # ADR-051 decision 5: a count, written only when not zero, likewise.
+        body["outside_inputs_not_listed"] = capture.outside_inputs_not_listed
     if capture.withheld_sections:
         body["withheld_sections"] = list(capture.withheld_sections)
     return canonical_encode(cast(JsonValue, body))
@@ -1224,6 +1385,7 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
         "base_commit",
         "inputs",
         "outside_inputs_not_admitted",
+        "outside_inputs_not_listed",
         "withheld_sections",
     } != {
         "base",
@@ -1238,8 +1400,13 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
         raise _invalid()
     if source["schema"] != _CHECK_CHANGE_SCHEMA or type(source["text"]) is not str:
         raise _invalid()
-    if source.get("outside_inputs_not_admitted", True) is not True:
-        # A default value is never written, so a present ``false`` is not canonical.
+    not_listed = source.get("outside_inputs_not_listed", 1)
+    if (
+        source.get("outside_inputs_not_admitted", True) is not True
+        or type(not_listed) is not int
+        or not 1 <= not_listed <= _MAX_FILE_COUNT
+    ):
+        # A default value is never written, so a present ``false`` or ``0`` is not canonical.
         raise _invalid()
     withheld = source.get("withheld_sections", [])
     if type(withheld) is not list or ("withheld_sections" in source and not withheld):
@@ -1247,34 +1414,7 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
     inputs_raw = source.get("inputs", [])
     if type(inputs_raw) is not list or ("inputs" in source and not inputs_raw):
         raise _invalid()
-    inputs: list[TaskInputFile] = []
-    for row in cast(list[object], inputs_raw):
-        if type(row) is not dict:
-            raise _invalid()
-        fields = cast(dict[str, object], row)
-        if (
-            set(fields) - {"origin", "summary", "root", "baseline", "current_state"}
-            != {"path", "redacted", "size", "text"}
-            or type(fields["text"]) is not str
-            or fields.get("origin", "verification") == "task"
-            or fields.get("summary", True) is not True
-            or fields.get("baseline", "task_start") == "current"
-        ):
-            # A default value is never written, so a present default is not canonical.
-            raise _invalid()
-        inputs.append(
-            TaskInputFile(
-                cast(str, fields["path"]),
-                fields["text"].encode("utf-8"),
-                cast(int, fields["size"]),
-                cast(bool, fields["redacted"]),
-                cast(TaskInputOrigin, fields.get("origin", "task")),
-                fields.get("summary", False) is True,
-                cast(str | None, fields.get("root")),
-                cast(TaskInputBaseline, fields.get("baseline", "current")),
-                cast(TaskInputCurrentState | None, fields.get("current_state")),
-            )
-        )
+    inputs = [task_input_file_from_wire(row) for row in cast(list[object], inputs_raw)]
     return CheckChangeCapture(
         base=cast(ChangeBaseKind, source["base"]),
         text=source["text"].encode("utf-8"),
@@ -1286,5 +1426,6 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
         base_commit=cast(str, source.get("base_commit", "")),
         inputs=tuple(inputs),
         outside_inputs_not_admitted=source.get("outside_inputs_not_admitted") is True,
+        outside_inputs_not_listed=cast(int, source.get("outside_inputs_not_listed", 0)),
         withheld_sections=tuple(cast(list[int], withheld)),
     )

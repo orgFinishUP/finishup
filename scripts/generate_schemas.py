@@ -185,8 +185,9 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # owning ripple mirrors the enlarged inventory, then rebuilds this schema in the same
     # pass and verifies a fixed point before reporting success.
     destination = source.parents[1] / entry.relative_path
-    if entry.schema_version == "2.3.1" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.3.0.schema.json")
+    if entry.schema_version == "2.4.0" and not destination.exists():
+        # 2.3.1 (main, receipt-result 1.4.1) is the last frozen report before this one.
+        document = _load_versioned_template(entry, "version/version-manifest-2.3.1.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -2777,6 +2778,50 @@ def _check_recorded_v1_6_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _outside_reads_kept_back_schema() -> dict[str, JsonValue]:
+    """ADR-051 decision 5: how many task inputs and declared tests listed mode kept back.
+
+    Bounded counts, never which file; at least one is not zero.
+    """
+
+    from finishup.domain.receipts import MAX_KEPT_BACK_COUNT
+
+    count: dict[str, JsonValue] = {
+        "maximum": MAX_KEPT_BACK_COUNT,
+        "minimum": 0,
+        "type": "integer",
+    }
+    return {
+        "additionalProperties": False,
+        "anyOf": [
+            {"properties": {"task_inputs": {"minimum": 1}}},
+            {"properties": {"declared_tests": {"minimum": 1}}},
+        ],
+        "properties": {"declared_tests": dict(count), "task_inputs": dict(count)},
+        "required": ["declared_tests", "task_inputs"],
+        "type": "object",
+    }
+
+
+def _check_recorded_v1_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """ADR-051 decision 5 (open question 2 closed 2026-11-07): 1.6.0 plus the optional
+    ``outside_reads_kept_back`` counts.
+
+    1.6.0 shipped in v0.3.0, so it is never amended: a 1.6.0 reader keeps rejecting the field,
+    and the writer chooses 1.7.0 exactly when the counts are present.
+    """
+
+    document = _load_versioned_template(entry, "events/check-recorded-1.6.0.schema.json")
+    properties = cast(dict[str, JsonValue], document["properties"])
+    if "outside_reads_kept_back" in properties:
+        raise SchemaGenerationError(
+            "check_recorded_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["outside_reads_kept_back"] = _outside_reads_kept_back_schema()
+    document["title"] = f"FinishUP check recorded {entry.schema_version}"
+    return document
+
+
 def _check_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Select the current built-in packs, including the dedicated coordination policy."""
 
@@ -3059,6 +3104,56 @@ def _lineage_child_snapshot_schema() -> dict[str, JsonValue]:
         ],
         "type": "object",
     }
+
+
+def _content_forgotten_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """The closed ``content_forgotten`` payload (ADR-054, owner ruling U20).
+
+    The forget's 32-hex identity, its closed reason and source, how many objects the erasure set
+    out to delete, and the task's evidence account then (``yoetz.evidence-provenance/1`` with no
+    snapshot and no marker: counts per closed token and fenced reads only).
+    """
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_PROVENANCE_SCHEMA,
+        EVIDENCE_PROVENANCE_TOKENS,
+    )
+
+    count = {"maximum": 1_000_000_000, "minimum": 0, "type": "integer"}
+    raw: dict[str, object] = {
+        "additionalProperties": False,
+        "properties": {
+            "forget_id": {
+                "maxLength": 32,
+                "minLength": 32,
+                "pattern": r"^[0-9a-f]{32}$",
+                "type": "string",
+            },
+            "objects_erased": count,
+            "provenance": {
+                "additionalProperties": False,
+                "properties": {
+                    "content_forgotten": {"type": "null"},
+                    "fenced_reads": count,
+                    "reads": {
+                        "additionalProperties": False,
+                        "properties": {token: count for token in EVIDENCE_PROVENANCE_TOKENS},
+                        "required": list(EVIDENCE_PROVENANCE_TOKENS),
+                        "type": "object",
+                    },
+                    "schema": {"const": EVIDENCE_PROVENANCE_SCHEMA, "type": "string"},
+                    "snapshot": {"type": "null"},
+                },
+                "required": ["content_forgotten", "fenced_reads", "reads", "schema", "snapshot"],
+                "type": "object",
+            },
+            "reason": {"enum": ["expired", "owner"], "type": "string"},
+            "source": {"const": "server_copy", "type": "string"},
+        },
+        "required": ["forget_id", "objects_erased", "provenance", "reason", "source"],
+        "type": "object",
+    }
+    return _normalize(raw, entry)
 
 
 def _lineage_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -7891,7 +7986,8 @@ def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # #1240 D5: the closing line asking the agent to tell the user the conclusion and the open or
     # declined reviewer notes. Additive and optional on the unreleased 1.3.0 (in place), so 1.4.0
     # inherits it. Fixed words, the conclusion token and counts only. Shipped in v0.3.0 with
-    # ``re.escape``'s escaped spaces, which these published schemas keep (1.4.1 drops them).
+    # ``re.escape``'s escaped spaces, which these published schemas keep (1.4.1 and 1.5.0 drop
+    # them).
     from finishup.domain.receipt_closing import PUBLISHED_CLOSING_PROMPT_PATTERN
 
     cast(dict[str, JsonValue], success["properties"])["agent_closing_prompt"] = {
@@ -7910,7 +8006,8 @@ def _receipt_result_v1_4_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     ``re.escape``). An ECMAScript engine in unicode mode, which is how a host such as Cursor
     compiles a JSON Schema pattern, refuses that escape, and Cursor dropped every FinishUP tool
     over it. 1.4.0 shipped in v0.3.0 and keeps its bytes; this patch changes that one pattern and
-    nothing else, and the two patterns accept exactly the same strings.
+    nothing else, and the two patterns accept exactly the same strings. Published on ``main``
+    (#1348); this build advertises 1.5.0, which carries the same pattern.
     """
 
     from finishup.domain.receipt_closing import (
@@ -7933,6 +8030,232 @@ def _receipt_result_v1_4_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
         )
     closing["pattern"] = CLOSING_PROMPT_PATTERN
     return document
+
+
+def _receipt_document_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """ADR-051 decision 5 (open question 2 closed 2026-11-07): 1.3.0 plus an optional
+    ``kept_back`` count on an ``outside_reads_not_listed`` gap.
+
+    1.3.0 shipped in v0.3.0, so it is never amended. ``kept_back`` is admitted only beside that
+    code and only on a live gap: how many task inputs and declared tests a remote server's
+    listed mode kept from review, never which.
+    """
+
+    document = _load_versioned_template(entry, "receipts/receipt-document-1.3.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    gap = cast(dict[str, JsonValue], definitions["receipt_gap"])
+    properties = cast(dict[str, JsonValue], gap["properties"])
+    if "kept_back" in properties:
+        raise SchemaGenerationError(
+            "receipt_document_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["kept_back"] = _outside_reads_kept_back_schema()
+    cast(list[JsonValue], gap.setdefault("allOf", [])).append(
+        {
+            "if": {"required": ["kept_back"]},
+            "then": {
+                "not": {"required": ["status"]},
+                "properties": {"code": {"const": "outside_reads_not_listed"}},
+            },
+        }
+    )
+    return document
+
+
+def _receipt_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """ADR-051 decision D4: 1.4.0 plus the optional ``workspace_provenance`` member.
+
+    1.4.0 shipped in v0.3.0, so it is never amended; a 1.4.0 reader keeps rejecting the member.
+    The member is present, on every receipt format, exactly when the record that opened the
+    task's session could not be read or could not say whether the task is claim-bound. Its
+    ``status``, ``reason`` and ``notice`` admit only the fixed values of
+    ``finishup.domain.workspace_provenance``: nothing user-controlled. ``reason`` names the cause,
+    and so whether it can pass or lasts, and ``oneOf`` pairs each reason with its own notice, so a
+    reader that validates by schema alone admits no notice beside another reason's token.
+
+    ADR-054 (in place, 1.5.0 being unreleased) adds the optional ``evidence_provenance`` member, a
+    claim-bound task's level-L2 evidence account (``_evidence_provenance_schema``), and the
+    optional ``evidence_provenance_unknown`` member, present when that account could not be given
+    (``_evidence_provenance_unknown_schema``).
+    """
+
+    from finishup.domain.workspace_provenance import (
+        WORKSPACE_PROVENANCE_REASONS,
+        WORKSPACE_PROVENANCE_UNKNOWN,
+        workspace_provenance_unknown_notice,
+    )
+
+    # ADR-051 decision 5 (open question 2, 2026-11-07): 1.5.0 is still unreleased, so it is
+    # amended in place to carry receipt-document 1.4.0, the version with the kept-back counts.
+    document = _load_versioned_template(
+        entry,
+        "operations/receipt-result-1.4.0.schema.json",
+        replacements={"receipt-document-1.3.0": "receipt-document-1.4.0"},
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    success = cast(dict[str, JsonValue], definitions["success"])
+    properties = cast(dict[str, JsonValue], success["properties"])
+    if "workspace_provenance" in properties:
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    # The closing line's pattern as ECMA-262 reads it in unicode mode: 1.4.0 escaped each space
+    # (``\ ``, Python's ``re.escape``), which such an engine refuses, and Cursor dropped every
+    # FinishUP tool over it. 1.5.0 is unreleased, so it is amended in place to the same language
+    # without those escapes; 1.4.0 keeps its shipped bytes.
+    from finishup.domain.receipt_closing import (
+        CLOSING_PROMPT_PATTERN,
+        PUBLISHED_CLOSING_PROMPT_PATTERN,
+    )
+
+    closing = cast(dict[str, JsonValue], properties["agent_closing_prompt"])
+    if (
+        closing.get("pattern") != PUBLISHED_CLOSING_PROMPT_PATTERN
+        or PUBLISHED_CLOSING_PROMPT_PATTERN.replace("\\ ", " ") != CLOSING_PROMPT_PATTERN
+    ):
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    closing["pattern"] = CLOSING_PROMPT_PATTERN
+    notices = [
+        workspace_provenance_unknown_notice(reason) for reason in WORKSPACE_PROVENANCE_REASONS
+    ]
+    properties["workspace_provenance"] = {
+        "additionalProperties": False,
+        "oneOf": [
+            {
+                "properties": {
+                    "notice": {"const": notice},
+                    "reason": {"const": reason},
+                },
+            }
+            for reason, notice in zip(WORKSPACE_PROVENANCE_REASONS, notices, strict=True)
+        ],
+        "properties": {
+            "notice": {"enum": cast(list[JsonValue], notices), "type": "string"},
+            "reason": {"enum": list(WORKSPACE_PROVENANCE_REASONS), "type": "string"},
+            "status": {"const": WORKSPACE_PROVENANCE_UNKNOWN, "type": "string"},
+        },
+        "required": ["status", "reason", "notice"],
+        "type": "object",
+    }
+    if "evidence_provenance" in properties:
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["evidence_provenance"] = _evidence_provenance_schema()
+    if "evidence_provenance_unknown" in properties:
+        raise SchemaGenerationError(
+            "receipt_result_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    properties["evidence_provenance_unknown"] = _evidence_provenance_unknown_schema()
+    return document
+
+
+def _evidence_provenance_unknown_schema() -> dict[str, JsonValue]:
+    """ADR-054 (in place on the unreleased 1.5.0): a claim-bound task's evidence account could
+    not be given. ``status``, ``reason`` and ``notice`` admit only the fixed values of
+    ``finishup.domain.evidence_provenance``, and ``oneOf`` pairs each reason with its own notice."""
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_PROVENANCE_UNKNOWN,
+        EVIDENCE_PROVENANCE_UNKNOWN_REASONS,
+        evidence_provenance_unknown_notice,
+    )
+
+    notices = [
+        evidence_provenance_unknown_notice(reason) for reason in EVIDENCE_PROVENANCE_UNKNOWN_REASONS
+    ]
+    return {
+        "additionalProperties": False,
+        "oneOf": [
+            {
+                "properties": {
+                    "notice": {"const": notice},
+                    "reason": {"const": reason},
+                },
+            }
+            for reason, notice in zip(EVIDENCE_PROVENANCE_UNKNOWN_REASONS, notices, strict=True)
+        ],
+        "properties": {
+            "notice": {"enum": cast(list[JsonValue], notices), "type": "string"},
+            "reason": {"enum": list(EVIDENCE_PROVENANCE_UNKNOWN_REASONS), "type": "string"},
+            "status": {"const": EVIDENCE_PROVENANCE_UNKNOWN, "type": "string"},
+        },
+        "required": ["status", "reason", "notice"],
+        "type": "object",
+    }
+
+
+def _evidence_provenance_schema() -> dict[str, JsonValue]:
+    """ADR-054 (in place on the unreleased 1.5.0): a claim-bound task's level-L2 evidence account.
+
+    Exactly ``finishup.domain.evidence_provenance.EvidenceProvenance.to_json()``: the schema tag,
+    every token's count, the outside reads a held repository fenced (ADR-052 O7), the copy
+    snapshot last read and the content-forgotten marker; closed tokens, bounded counts, synthetic
+    ids and service-stamped times only. ``anyOf`` admits only a level-L2 account: a read from the
+    server's copy, fresh or stale, or the marker.
+    """
+
+    from finishup.domain.evidence_provenance import (
+        EVIDENCE_COUNT_MAX,
+        EVIDENCE_PROVENANCE_SCHEMA,
+        EVIDENCE_PROVENANCE_TOKENS,
+    )
+
+    count: dict[str, JsonValue] = {"maximum": EVIDENCE_COUNT_MAX, "minimum": 0, "type": "integer"}
+    time: dict[str, JsonValue] = {
+        "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
+        "type": "string",
+    }
+    return {
+        "additionalProperties": False,
+        "anyOf": [
+            {"properties": {"reads": {"properties": {"server_copy_read": {"minimum": 1}}}}},
+            {"properties": {"reads": {"properties": {"stale_copy_read": {"minimum": 1}}}}},
+            {"properties": {"content_forgotten": {"type": "object"}}},
+        ],
+        "properties": {
+            "content_forgotten": {
+                "oneOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "at": dict(time),
+                            "reason": {"enum": ["expired", "owner"], "type": "string"},
+                        },
+                        "required": ["at", "reason"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "fenced_reads": dict(count),
+            "reads": {
+                "additionalProperties": False,
+                "properties": {token: dict(count) for token in EVIDENCE_PROVENANCE_TOKENS},
+                "required": list(EVIDENCE_PROVENANCE_TOKENS),
+                "type": "object",
+            },
+            "schema": {"const": EVIDENCE_PROVENANCE_SCHEMA, "type": "string"},
+            "snapshot": {
+                "oneOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "synced_at": dict(time),
+                            "tree": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+                        },
+                        "required": ["synced_at", "tree"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+        },
+        "required": ["schema", "reads", "fenced_reads", "snapshot", "content_forgotten"],
+        "type": "object",
+    }
 
 
 def _publish_work_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -10016,6 +10339,599 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return _admit_privacy_policy_v1_2(document)
 
 
+def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend frozen 2.9 with workspace claims and the workspace-agent frames (ADR-051).
+
+    ``control-hello`` gains two optional members: ``workspace_claim``, a client's keyed claim on
+    its workspace sent in place of ``workspace_locator`` (the service refuses a hello carrying
+    both with ``workspace_binding_conflict``; the schema leaves that check to the handshake so the
+    refusal keeps its own reason), with the keyed ``worktree`` digest that gives each linked
+    worktree of one repository its own workspace handle, and ``workspace_agent``, the catalog
+    operations the connection answers. ``control-hello-result`` gains ``workspace_binding`` and ``workspace_handle``; the
+    binding is on every admitted session's answer and absent only from the manifest-mismatch
+    answer, which keeps the frozen pre-2.10 shape so an older peer still reads it and names
+    ``manifest_mismatch`` (#436). A hello-result that carries ``workspace_handle`` must carry
+    ``workspace_binding: "client_claim"``, as the client's handshake requires; the schema cannot
+    tell an admitted answer from the mismatch answer, so the client, not the schema, requires the
+    binding on every admitted answer. ``control-result`` gains the server-to-client
+    ``workspace_call`` frame and ``control-request`` the client-to-server ``workspace_reply``;
+    their ``arguments`` and ``result`` are the catalog codecs of
+    ``finishup.ports.workspace_agent``, which owns each operation's exact shape and byte bound.
+    """
+
+    from finishup.ports.workspace_agent import (
+        MAX_WORKSPACE_DEADLINE_MS,
+        MAX_WORKSPACE_FRAME_BYTES,
+        WORKSPACE_FAILURE_REASONS,
+        WORKSPACE_OPERATION_NAMES,
+        WORKSPACE_REFUSAL_REASONS,
+        WORKSPACE_UNAVAILABLE_REASONS,
+    )
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.10.0", "2.9.0")
+    )
+    # ADR-051 decision D4 (in place on the unreleased 2.10.0): the receipt bodies it carries are
+    # receipt-result 1.5.0, which adds the optional ``workspace_provenance`` member.
+    document = cast(
+        dict[str, JsonValue],
+        json.loads(
+            source.read_bytes().replace(
+                b"operations/receipt-result-1.4.0.schema.json",
+                b"operations/receipt-result-1.5.0.schema.json",
+            )
+        ),
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    rpc_id: dict[str, JsonValue] = {
+        "maxLength": 40,
+        "minLength": 40,
+        "pattern": "^rpc_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    operations = cast(list[JsonValue], list(WORKSPACE_OPERATION_NAMES))
+    if entry.schema_name == "control-hello":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        if "workspace_locator" not in properties or "workspace_claim" in properties:
+            raise SchemaGenerationError(
+                "control_hello_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        properties["workspace_claim"] = {
+            "additionalProperties": False,
+            "properties": {
+                "digest": {
+                    "maxLength": 71,
+                    "minLength": 71,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string",
+                },
+                "identity_kind": {"enum": ["directory", "git_common_root"], "type": "string"},
+                "schema_version": {"const": "1.0.0"},
+                "worktree": {
+                    "maxLength": 71,
+                    "minLength": 71,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string",
+                },
+            },
+            "required": ["schema_version", "identity_kind", "digest", "worktree"],
+            "type": "object",
+        }
+        properties["workspace_agent"] = {
+            "additionalProperties": False,
+            "properties": {
+                "max_reply_bytes": {
+                    "maximum": MAX_WORKSPACE_FRAME_BYTES,
+                    "minimum": 1,
+                    "type": "integer",
+                },
+                "operations": {
+                    "items": {"enum": operations, "type": "string"},
+                    "maxItems": len(operations),
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "schema_version": {"const": "1.0.0"},
+            },
+            "required": ["schema_version", "operations", "max_reply_bytes"],
+            "type": "object",
+        }
+    elif entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        if "allowed_methods" not in properties or "workspace_binding" in properties:
+            raise SchemaGenerationError(
+                "control_hello_result_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        properties["workspace_binding"] = {
+            "enum": ["client_claim", "local_path", "none"],
+            "type": "string",
+        }
+        properties["workspace_handle"] = {
+            "maxLength": 23,
+            "minLength": 23,
+            "pattern": "^client:[0-9a-f]{16}$",
+            "type": "string",
+        }
+        # A handle names a claimed workspace, so it rides only a ``client_claim`` binding. The
+        # manifest-mismatch answer carries neither member and stays valid.
+        if "if" in document or "then" in document:
+            raise SchemaGenerationError(
+                "control_hello_result_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        document["if"] = {"required": ["workspace_handle"]}
+        document["then"] = {
+            "properties": {"workspace_binding": {"const": "client_claim"}},
+            "required": ["workspace_binding"],
+        }
+    elif entry.schema_name == "control-request":
+        branches = document.get("oneOf")
+        if not isinstance(branches, list):
+            raise SchemaGenerationError(
+                "control_request_schema_template_invalid", entries=(entry.relative_path,)
+            )
+
+        def reply(outcome: JsonValue, result: JsonValue, reason: JsonValue) -> JsonValue:
+            return {
+                "additionalProperties": False,
+                "properties": {
+                    "call_id": dict(rpc_id),
+                    "kind": {"const": "workspace_reply"},
+                    "outcome": outcome,
+                    "protocol_version": {"const": "1.0"},
+                    "reason": reason,
+                    "result": result,
+                },
+                "required": ["kind", "protocol_version", "call_id", "outcome", "result", "reason"],
+                "type": "object",
+            }
+
+        any_json: dict[str, JsonValue] = {
+            "type": ["array", "boolean", "integer", "null", "object", "string"]
+        }
+        branches.extend(
+            [
+                reply({"const": "ok"}, any_json, {"type": "null"}),
+                reply(
+                    {"const": "unavailable"},
+                    {"type": "null"},
+                    {
+                        "enum": cast(
+                            list[JsonValue],
+                            sorted(WORKSPACE_UNAVAILABLE_REASONS, key=str.encode),
+                        ),
+                        "type": "string",
+                    },
+                ),
+                reply(
+                    {"const": "refused"},
+                    {"type": "null"},
+                    {
+                        "enum": cast(
+                            list[JsonValue], sorted(WORKSPACE_REFUSAL_REASONS, key=str.encode)
+                        ),
+                        "type": "string",
+                    },
+                ),
+                reply(
+                    {"const": "failed"},
+                    {"type": "null"},
+                    {
+                        "enum": cast(
+                            list[JsonValue], sorted(WORKSPACE_FAILURE_REASONS, key=str.encode)
+                        ),
+                        "type": "string",
+                    },
+                ),
+            ]
+        )
+        _add_observation_client_attestation(entry, document)
+    elif entry.schema_name == "control-result":
+        branches = document.get("oneOf")
+        if not isinstance(branches, list) or not branches:
+            raise SchemaGenerationError(
+                "control_result_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        template = cast(dict[str, JsonValue], cast(dict[str, JsonValue], branches[0])["properties"])
+        branches.append(
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "arguments": {"type": "object"},
+                    "call_id": dict(rpc_id),
+                    "deadline_ms": {
+                        "maximum": MAX_WORKSPACE_DEADLINE_MS,
+                        "minimum": 1,
+                        "type": "integer",
+                    },
+                    "kind": {"const": "workspace_call"},
+                    "operation": {"enum": operations, "type": "string"},
+                    "protocol_version": {"const": "1.0"},
+                    "service_generation": copy.deepcopy(template["service_generation"]),
+                    "service_instance_id": copy.deepcopy(template["service_instance_id"]),
+                },
+                "required": [
+                    "kind",
+                    "protocol_version",
+                    "call_id",
+                    "service_instance_id",
+                    "service_generation",
+                    "operation",
+                    "arguments",
+                    "deadline_ms",
+                ],
+                "type": "object",
+            }
+        )
+    _add_server_profile(entry, document)
+    _add_code_copy(entry, document)
+    return document
+
+
+_SERVER_PROFILE_SCHEMA_ID: Final = SCHEMA_NAMESPACE + "service/server-profile-1.0.0.schema.json"
+
+
+def _server_profile_revision_schema() -> dict[str, JsonValue]:
+    """The consented profile revision triple (ADR-052): issuer, revision number, digest."""
+
+    return {
+        "additionalProperties": False,
+        "properties": {
+            "issuer": {
+                "maxLength": 32,
+                "minLength": 32,
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string",
+            },
+            "profile_digest": {
+                "maxLength": 71,
+                "minLength": 71,
+                "pattern": _CONTROL_DIGEST_PATTERN,
+                "type": "string",
+            },
+            "revision": {"maximum": 2**53 - 1, "minimum": 1, "type": "integer"},
+        },
+        "required": ["issuer", "revision", "profile_digest"],
+        "type": "object",
+    }
+
+
+def _add_server_profile(entry: _RegistryEntry, document: dict[str, JsonValue]) -> None:
+    """The server profile on the control wire (ADR-052, in place on the unreleased 2.10.0).
+
+    ``control-hello`` gains ``server_profile``, the profile revision a remote client consented to
+    (the service admits a claim-bound hello only with its current one), and its
+    ``workspace_agent`` an optional ``role`` (``connection``, the default, or ``background``: the
+    helper's agent, which answers background work). ``control-hello-result`` gains
+    ``server_profile``, the service's current revision, answered to a hello that carried one or a
+    claim, and the method ``server_profile`` in the full method list. ``control-request`` and
+    ``control-result`` gain that method, whose answer is a ``server-profile`` 1.0.0 document,
+    and the error code ``server_profile_changed``.
+    """
+
+    invalid = SchemaGenerationError(
+        "control_server_profile_template_invalid", entries=(entry.relative_path,)
+    )
+    if entry.schema_name == "control-hello":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        agent = cast(dict[str, JsonValue], properties.get("workspace_agent"))
+        if "server_profile" in properties or not isinstance(agent, dict):
+            raise invalid
+        properties["server_profile"] = _server_profile_revision_schema()
+        cast(dict[str, JsonValue], agent["properties"])["role"] = {
+            "enum": ["background", "connection"],
+            "type": "string",
+        }
+        return
+    if entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        allowed = cast(dict[str, JsonValue], properties["allowed_methods"])
+        lists = cast(list[JsonValue], allowed["enum"])
+        released = cast(list[JsonValue], lists[1])
+        items = cast(list[JsonValue], cast(dict[str, JsonValue], allowed["items"])["enum"])
+        if "server_profile" in properties or "server_profile" in released or len(lists) != 2:
+            raise invalid
+        # The released full list stays admitted: the manifest-mismatch answer still lists only
+        # what a released peer knows (#436). An admitted session's answer lists the method.
+        full = [*released, "server_profile"]
+        full.sort(key=lambda value: str(value).encode("ascii"))
+        lists.append(full)
+        items.append("server_profile")
+        items.sort(key=lambda value: str(value).encode("ascii"))
+        allowed["maxItems"] = len(full)
+        properties["server_profile"] = _server_profile_revision_schema()
+        return
+    branches = cast(list[JsonValue], document["oneOf"])
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+
+    def method_of(branch: JsonValue) -> str | None:
+        properties = cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])
+        method = properties.get("method")
+        return cast(str, cast(dict[str, JsonValue], method)["const"]) if method else None
+
+    templates = [branch for branch in branches if method_of(branch) == "service_status"]
+    if not templates or any(method_of(branch) == "server_profile" for branch in branches):
+        raise invalid
+    added: list[JsonValue] = []
+    for template in templates:
+        branch = copy.deepcopy(cast(dict[str, JsonValue], template))
+        properties = cast(dict[str, JsonValue], branch["properties"])
+        properties["method"] = {"const": "server_profile"}
+        body = cast(dict[str, JsonValue], properties["body"])
+        if body.get("$ref") == "#/$defs/service_status_body":
+            properties["body"] = (
+                {"$ref": "#/$defs/server_profile_body"}
+                if entry.schema_name == "control-request"
+                else {"$ref": _SERVER_PROFILE_SCHEMA_ID}
+            )
+        added.append(branch)
+    position = min(
+        index for index, branch in enumerate(branches) if method_of(branch) == "service_lock"
+    )
+    branches[position:position] = added
+    if entry.schema_name == "control-request":
+        if "server_profile_body" in definitions:
+            raise invalid
+        definitions["server_profile_body"] = copy.deepcopy(definitions["service_status_body"])
+        document["$defs"] = dict(sorted(definitions.items()))
+        return
+    error_body = cast(dict[str, JsonValue], definitions["error_body"])
+    generic = [
+        branch
+        for branch in cast(list[JsonValue], error_body["oneOf"])
+        if "enum"
+        in cast(
+            dict[str, JsonValue],
+            cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])["code"],
+        )
+    ]
+    if len(generic) != 1:
+        raise invalid
+    code = cast(
+        dict[str, JsonValue],
+        cast(dict[str, JsonValue], cast(dict[str, JsonValue], generic[0])["properties"])["code"],
+    )
+    codes = cast(list[JsonValue], code["enum"])
+    if "server_profile_changed" in codes:
+        raise invalid
+    codes.append("server_profile_changed")
+    codes.sort(key=lambda value: str(value).encode("ascii"))
+
+
+def _add_code_copy(entry: _RegistryEntry, document: dict[str, JsonValue]) -> None:
+    """Level L2's ``code_copy`` method (ADR-054, in place on the unreleased 2.10.0).
+
+    A claim-bound request about the server's copy of the claimed repository: ``status`` answers
+    what the copy holds (or null), ``forget`` deletes it and answers exactly what it deleted. It
+    joins the full method list beside ``server_profile`` (never the released list, #436).
+    """
+
+    invalid = SchemaGenerationError(
+        "control_code_copy_template_invalid", entries=(entry.relative_path,)
+    )
+    if entry.schema_name == "control-hello":
+        return
+    if entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        allowed = cast(dict[str, JsonValue], properties["allowed_methods"])
+        lists = cast(list[JsonValue], allowed["enum"])
+        items = cast(list[JsonValue], cast(dict[str, JsonValue], allowed["items"])["enum"])
+        full = cast(list[JsonValue], lists[-1])
+        if "code_copy" in items or "server_profile" not in full:
+            raise invalid
+        full.append("code_copy")
+        full.sort(key=lambda value: str(value).encode("ascii"))
+        items.append("code_copy")
+        items.sort(key=lambda value: str(value).encode("ascii"))
+        allowed["maxItems"] = len(full)
+        return
+    branches = cast(list[JsonValue], document["oneOf"])
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+
+    def method_of(branch: JsonValue) -> str | None:
+        properties = cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch)["properties"])
+        method = properties.get("method")
+        return cast(str, cast(dict[str, JsonValue], method)["const"]) if method else None
+
+    templates = [branch for branch in branches if method_of(branch) == "server_profile"]
+    if not templates or any(method_of(branch) == "code_copy" for branch in branches):
+        raise invalid
+    count: dict[str, JsonValue] = {"maximum": 2**53 - 1, "minimum": 0, "type": "integer"}
+    stamp: dict[str, JsonValue] = {
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+        "type": "string",
+    }
+    result_body: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "action": {"enum": ["forget", "status"], "type": "string"},
+            "copy": {
+                "anyOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "created_at": dict(stamp),
+                            "last_sync_at": {"anyOf": [dict(stamp), {"type": "null"}]},
+                            "retention": {
+                                "additionalProperties": False,
+                                "properties": {
+                                    "days": {
+                                        "anyOf": [
+                                            {"maximum": 36500, "minimum": 0, "type": "integer"},
+                                            {"type": "null"},
+                                        ]
+                                    },
+                                    "kind": {
+                                        "enum": ["days", "task_close", "until_forgotten"],
+                                        "type": "string",
+                                    },
+                                },
+                                "required": ["kind", "days"],
+                                "type": "object",
+                            },
+                            "snapshots": dict(count),
+                            "stored_bytes": dict(count),
+                        },
+                        "required": [
+                            "snapshots",
+                            "stored_bytes",
+                            "created_at",
+                            "last_sync_at",
+                            "retention",
+                        ],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "forgot": {
+                "anyOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "backups": {"const": "not_managed"},
+                            "bytes": dict(count),
+                            "complete": {"type": "boolean"},
+                            "copies": dict(count),
+                            "objects": dict(count),
+                            "snapshots": dict(count),
+                        },
+                        "required": [
+                            "copies",
+                            "snapshots",
+                            "objects",
+                            "bytes",
+                            "backups",
+                            "complete",
+                        ],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+        },
+        "required": ["action", "copy", "forgot"],
+        "type": "object",
+    }
+    added: list[JsonValue] = []
+    for template in templates:
+        branch = copy.deepcopy(cast(dict[str, JsonValue], template))
+        properties = cast(dict[str, JsonValue], branch["properties"])
+        properties["method"] = {"const": "code_copy"}
+        body = cast(dict[str, JsonValue], properties["body"])
+        if body.get("$ref") == "#/$defs/server_profile_body":
+            properties["body"] = {"$ref": "#/$defs/code_copy_body"}
+        elif body.get("$ref") == _SERVER_PROFILE_SCHEMA_ID:
+            properties["body"] = copy.deepcopy(result_body)
+        added.append(branch)
+    position = min(
+        index for index, branch in enumerate(branches) if method_of(branch) == "server_profile"
+    )
+    branches[position:position] = added
+    if entry.schema_name == "control-request":
+        if "code_copy_body" in definitions:
+            raise invalid
+        definitions["code_copy_body"] = {
+            "additionalProperties": False,
+            "properties": {"action": {"enum": ["forget", "status"], "type": "string"}},
+            "required": ["action"],
+            "type": "object",
+        }
+        document["$defs"] = dict(sorted(definitions.items()))
+
+
+def _add_observation_client_attestation(
+    entry: _RegistryEntry, document: dict[str, JsonValue]
+) -> None:
+    """Let a claim-bound ``observation_ingest`` carry the client's own attestation (ADR-051).
+
+    For a remote target the client's observation store is the authority: the consent state, its
+    grant time, the enabled content profiles, the client's content-capture fence, the one trusted
+    approved-check policy digest and the route its lifecycle mapping names. The service accepts the
+    member only on a claim-bound connection, as ``client_attested``; every member is required (the
+    nullable ones say "none" explicitly) so an attestation is never partial.
+    """
+
+    from finishup.domain.observation import (
+        OBSERVATION_CLIENT_ATTESTATION_SCHEMA_VERSION,
+        OBSERVATION_CLIENT_CONSENT_STATES,
+    )
+    from finishup.domain.observation_profiles import ORDINARY_CONTENT_CAPTURE_PROFILE_IDS
+
+    definitions = document.get("$defs")
+    ingest = definitions.get("observation_ingest_body") if isinstance(definitions, dict) else None
+    properties = ingest.get("properties") if isinstance(ingest, dict) else None
+    if not isinstance(properties, dict) or "client_attestation" in properties:
+        raise SchemaGenerationError(
+            "control_request_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    digest: dict[str, JsonValue] = {
+        "maxLength": 71,
+        "minLength": 71,
+        "pattern": _CONTROL_DIGEST_PATTERN,
+        "type": "string",
+    }
+    properties["client_attestation"] = {
+        "additionalProperties": False,
+        "properties": {
+            "authority_generation": {"anyOf": [dict(digest), {"type": "null"}]},
+            "check_policy_digest": {"anyOf": [dict(digest), {"type": "null"}]},
+            "consent": {
+                "enum": cast(
+                    list[JsonValue], sorted(OBSERVATION_CLIENT_CONSENT_STATES, key=str.encode)
+                ),
+                "type": "string",
+            },
+            "content_capture_profiles": {
+                "items": {
+                    "enum": cast(
+                        list[JsonValue],
+                        sorted(ORDINARY_CONTENT_CAPTURE_PROFILE_IDS, key=str.encode),
+                    ),
+                    "type": "string",
+                },
+                "maxItems": len(ORDINARY_CONTENT_CAPTURE_PROFILE_IDS),
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "granted_at": {
+                "maxLength": 24,
+                "minLength": 24,
+                "pattern": _CONTROL_TIMESTAMP_PATTERN,
+                "type": "string",
+            },
+            "route": {
+                "anyOf": [
+                    {
+                        "additionalProperties": False,
+                        "properties": {
+                            "session_id": _control_id_schema("session_id"),
+                            "task_id": _control_id_schema("task_id"),
+                            "writer_id": _control_id_schema("writer_id"),
+                        },
+                        "required": ["task_id", "session_id", "writer_id"],
+                        "type": "object",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "schema_version": {"const": OBSERVATION_CLIENT_ATTESTATION_SCHEMA_VERSION},
+        },
+        "required": [
+            "schema_version",
+            "consent",
+            "granted_at",
+            "content_capture_profiles",
+            "authority_generation",
+            "check_policy_digest",
+            "route",
+        ],
+        "type": "object",
+    }
+
+
 # The largest page ``privacy_receipts_list`` answers; a partial page cannot skip more rows than it
 # reads.
 _PRIVACY_RECEIPT_PAGE_MAX: Final = 100
@@ -11514,6 +12430,15 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "configuration",
         lambda: __import__("finishup.config.models", fromlist=["FinishUpConfig"]).FinishUpConfig,
     ),
+    # ADR-054: the ``[server]`` table and its ``[server.code_copy]`` offer (level L2).
+    _RegistryEntry(
+        "config/yoetz-config-1.4.0.schema.json",
+        "yoetz-config",
+        "1.4.0",
+        "config",
+        "configuration",
+        lambda: __import__("finishup.config.models", fromlist=["FinishUpConfig"]).FinishUpConfig,
+    ),
     _RegistryEntry(
         "consent/catalog-2.0.0.schema.json",
         "catalog",
@@ -12019,6 +12944,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.7.0.schema.json",
+        "check-recorded",
+        "1.7.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "finishup.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -12470,6 +13407,20 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             __import__(
                 "finishup.domain.events", fromlist=["ContactExpectationDeclaredPayload"]
             ).ContactExpectationDeclaredPayload
+        ),
+    ),
+    # ADR-054 (owner ruling U20): the service-written record that a server copy's content was
+    # forgotten. A new family: agents cannot publish it, so no event draft names it.
+    _RegistryEntry(
+        "events/content-forgotten-1.0.0.schema.json",
+        "content-forgotten",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "finishup.domain.events", fromlist=["ContentForgottenPayload"]
+            ).ContentForgottenPayload
         ),
     ),
     _RegistryEntry(
@@ -13053,12 +14004,26 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).ReceiptResultModel
         ),
     ),
-    # 1.4.0 shipped in v0.3.0 and is frozen; 1.4.1 writes its closing-line pattern without the
-    # escaped spaces a unicode-mode ECMAScript engine refuses (the same strings are accepted).
+    # 1.4.0 shipped in v0.3.0 and is frozen; 1.4.1 (main, #1348) writes its closing-line pattern
+    # without the escaped spaces a unicode-mode ECMAScript engine refuses.
     _RegistryEntry(
         "operations/receipt-result-1.4.1.schema.json",
         "receipt-result",
         "1.4.1",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "finishup.protocol.models", fromlist=["ReceiptResultModel"]
+            ).ReceiptResultModel
+        ),
+    ),
+    # ADR-051 decision D4: 1.4.0 shipped in v0.3.0 and is frozen; 1.5.0 adds the optional
+    # ``workspace_provenance`` member.
+    _RegistryEntry(
+        "operations/receipt-result-1.5.0.schema.json",
+        "receipt-result",
+        "1.5.0",
         "request_result",
         "MCP output",
         lambda: (
@@ -13327,6 +14292,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "receipts/receipt-document-1.3.0.schema.json",
         "receipt-document",
         "1.3.0",
+        "request_result",
+        "receipt-document",
+        lambda: (
+            __import__("finishup.domain.receipts", fromlist=["ReceiptDocument"]).ReceiptDocument
+        ),
+    ),
+    _RegistryEntry(
+        "receipts/receipt-document-1.4.0.schema.json",
+        "receipt-document",
+        "1.4.0",
         "request_result",
         "receipt-document",
         lambda: (
@@ -13702,6 +14677,38 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("finishup.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
+        "service/control-hello-2.10.0.schema.json",
+        "control-hello",
+        "2.10.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("finishup.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.10.0.schema.json",
+        "control-hello-result",
+        "2.10.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("finishup.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.10.0.schema.json",
+        "control-request",
+        "2.10.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("finishup.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.10.0.schema.json",
+        "control-result",
+        "2.10.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("finishup.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
         "service/isolation-report-1.0.0.schema.json",
         "isolation-report",
         "1.0.0",
@@ -13711,6 +14718,131 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             __import__(
                 "finishup.protocol.isolation_report", fromlist=["IsolationReportContract"]
             ).IsolationReportContract
+        ),
+    ),
+    # ADR-051: ``binding`` gains ``selection`` (the owner-only server selection); the released
+    # 1.0.0 enum is closed, so it stays byte-frozen and this successor carries the new value.
+    _RegistryEntry(
+        "service/isolation-report-1.1.0.schema.json",
+        "isolation-report",
+        "1.1.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "finishup.protocol.isolation_report", fromlist=["IsolationReportContract"]
+            ).IsolationReportContract
+        ),
+    ),
+    # ADR-053: the REST v1 public contract's own documents (design v2 U9, section 6).
+    _RegistryEntry(
+        "service/rest-agent-1.0.0.schema.json",
+        "rest-agent",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentContract"]
+            ).RestAgentContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-agent-declaration-1.0.0.schema.json",
+        "rest-agent-declaration",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentDeclarationContract"]
+            ).RestAgentDeclarationContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-agent-work-1.0.0.schema.json",
+        "rest-agent-work",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestAgentWorkContract"]
+            ).RestAgentWorkContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-discovery-1.0.0.schema.json",
+        "rest-discovery",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestDiscoveryContract"]
+            ).RestDiscoveryContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-error-1.0.0.schema.json",
+        "rest-error",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestErrorContract"]
+            ).RestErrorContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-operation-1.0.0.schema.json",
+        "rest-operation",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestOperationContract"]
+            ).RestOperationContract
+        ),
+    ),
+    _RegistryEntry(
+        "service/rest-session-1.0.0.schema.json",
+        "rest-session",
+        "1.0.0",
+        "request_result",
+        "network-control",
+        lambda: (
+            __import__(
+                "finishup.rest.contract_models", fromlist=["RestSessionContract"]
+            ).RestSessionContract
+        ),
+    ),
+    # ADR-052: what a FinishUP server offers and requires (design v2 section 2.2).
+    _RegistryEntry(
+        "service/server-profile-1.0.0.schema.json",
+        "server-profile",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "finishup.protocol.server_profile_contract", fromlist=["ServerProfileContract"]
+            ).ServerProfileContract
+        ),
+    ),
+    # ADR-051: ``finishup server status --json``.
+    _RegistryEntry(
+        "service/server-target-status-1.0.0.schema.json",
+        "server-target-status",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "finishup.protocol.server_target_status", fromlist=["ServerTargetStatusContract"]
+            ).ServerTargetStatusContract
         ),
     ),
     _RegistryEntry(
@@ -13793,12 +14925,20 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("finishup.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
-    # The first inventory change after v0.3.0 shipped 2.3.0 (receipt-result 1.4.1); that report
-    # is frozen, as the 0.2 line's 2.2.x reports were.
+    # main (#1348): the first inventory change after v0.3.0 shipped 2.3.0 (receipt-result 1.4.1).
     _RegistryEntry(
         "version/version-manifest-2.3.1.schema.json",
         "version-manifest",
         "2.3.1",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("finishup.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    # ADR-051: the inventory of this build; 2.3.0 (v0.3.0) and 2.3.1 (main) are frozen.
+    _RegistryEntry(
+        "version/version-manifest-2.4.0.schema.json",
+        "version-manifest",
+        "2.4.0",
         "version_manifest",
         "version-report",
         lambda: __import__("finishup.version", fromlist=["VersionManifest"]).VersionManifest,
@@ -13829,6 +14969,9 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/check-recorded-1.4.0.schema.json",
         "events/check-recorded-1.5.0.schema.json",
         "events/check-recorded-1.6.0.schema.json",
+        # The counts listed mode kept back (ADR-051 decision 5, open question 2).
+        "events/check-recorded-1.7.0.schema.json",
+        "receipts/receipt-document-1.4.0.schema.json",
         "events/finding-recorded-1.4.0.schema.json",
         "findings/provider-judgment-1.1.0.schema.json",
         "findings/provider-judgment-1.2.0.schema.json",
@@ -13862,16 +15005,20 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/work-closed-1.0.0.schema.json",
         "events/work-written-off-1.0.0.schema.json",
         "events/contact-expectation-declared-1.0.0.schema.json",
+        "events/content-forgotten-1.0.0.schema.json",
         "operations/check-result-1.3.0.schema.json",
         "operations/check-result-1.4.0.schema.json",
         "operations/check-result-1.5.0.schema.json",
         "operations/check-result-1.6.0.schema.json",
-        "config/yoetz-config-1.3.0.schema.json",
+        # ADR-054: config 1.4.0 (the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
+        "config/yoetz-config-1.4.0.schema.json",
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
         "operations/receipt-result-1.3.0.schema.json",
         # Rebuilt by --check too: its closing-line pattern is derived, not copied (1.4.0 is frozen).
         "operations/receipt-result-1.4.1.schema.json",
+        # The same for the version this build advertises (Codex review of the main merge).
+        "operations/receipt-result-1.5.0.schema.json",
         "operations/respond-request-1.1.0.schema.json",
         "operations/respond-result-1.1.0.schema.json",
         "operations/publish-work-result-1.1.0.schema.json",
@@ -13897,6 +15044,11 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "service/control-hello-result-2.9.0.schema.json",
         "service/control-request-2.9.0.schema.json",
         "service/control-result-2.9.0.schema.json",
+        # Workspace claims and the workspace-agent frames (ADR-051).
+        "service/control-hello-2.10.0.schema.json",
+        "service/control-hello-result-2.10.0.schema.json",
+        "service/control-request-2.10.0.schema.json",
+        "service/control-result-2.10.0.schema.json",
     }
 )
 
@@ -14251,6 +15403,8 @@ def build_schema_documents(
             "config/yoetz-config-1.0.0.schema.json",
             "config/yoetz-config-1.1.0.schema.json",
             "config/yoetz-config-1.2.0.schema.json",
+            # Released in v0.3.0; config 1.4.0 carries the ``[server]`` table (ADR-054).
+            "config/yoetz-config-1.3.0.schema.json",
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "events/result-recorded-1.0.0.schema.json",
@@ -14259,6 +15413,7 @@ def build_schema_documents(
             "findings/semantic-provenance-1.0.0.schema.json",
             "operations/check-result-1.0.0.schema.json",
             "operations/receipt-result-1.0.0.schema.json",
+            "service/isolation-report-1.0.0.schema.json",
         }:
             # Released contracts whose owning model has since moved on stay byte-frozen.
             normalized = _frozen_schema(entry)
@@ -14289,6 +15444,9 @@ def build_schema_documents(
         elif entry.relative_path == "events/check-recorded-1.6.0.schema.json":
             normalized = _check_recorded_v1_6_schema(entry)
             _admit_review_blocked(cast(JsonValue, normalized))
+        elif entry.relative_path == "events/check-recorded-1.7.0.schema.json":
+            # Copied from the reviewed 1.6.0 bytes, which already admit ``review_blocked``.
+            normalized = _check_recorded_v1_7_schema(entry)
         elif entry.relative_path == "findings/provider-judgment-1.1.0.schema.json":
             normalized = _provider_judgment_v1_1_schema(entry)
         elif entry.relative_path == "findings/provider-judgment-1.2.0.schema.json":
@@ -14336,6 +15494,8 @@ def build_schema_documents(
             "events/contact-expectation-declared-1.0.0.schema.json",
         }:
             normalized = _lineage_event_schema(entry)
+        elif entry.relative_path == "events/content-forgotten-1.0.0.schema.json":
+            normalized = _content_forgotten_event_schema(entry)
         elif entry.relative_path in {
             "events/coordination-context-recorded-1.0.0.schema.json",
             "events/coordination-obligation-declared-1.0.0.schema.json",
@@ -14371,6 +15531,13 @@ def build_schema_documents(
             "service/control-result-2.9.0.schema.json",
         }:
             normalized = _control_v2_9_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.10.0.schema.json",
+            "service/control-hello-result-2.10.0.schema.json",
+            "service/control-request-2.10.0.schema.json",
+            "service/control-result-2.10.0.schema.json",
+        }:
+            normalized = _control_v2_10_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.2.0.schema.json":
@@ -14424,6 +15591,8 @@ def build_schema_documents(
             normalized = _receipt_result_v1_3_schema(entry)
         elif entry.relative_path == "operations/receipt-result-1.4.1.schema.json":
             normalized = _receipt_result_v1_4_1_schema(entry)
+        elif entry.relative_path == "operations/receipt-result-1.5.0.schema.json":
+            normalized = _receipt_result_v1_5_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
         elif entry.relative_path == "operations/start-result-1.1.0.schema.json":
@@ -14480,6 +15649,8 @@ def build_schema_documents(
         elif entry.relative_path == "receipts/receipt-document-1.3.0.schema.json":
             normalized = _receipt_document_v1_3_schema(entry)
             _admit_review_blocked(cast(JsonValue, normalized))
+        elif entry.relative_path == "receipts/receipt-document-1.4.0.schema.json":
+            normalized = _receipt_document_v1_4_schema(entry)
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",
@@ -14489,9 +15660,10 @@ def build_schema_documents(
             "version/version-manifest-2.2.3.schema.json",
             "version/version-manifest-2.2.4.schema.json",
             "version/version-manifest-2.3.0.schema.json",
+            "version/version-manifest-2.3.1.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.3.1.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.4.0.schema.json":
             normalized = _version_manifest_schema(entry)
         elif entry.relative_path == "service/control-request-2.6.1.schema.json":
             normalized = _control_request_v2_6_1_schema(entry)

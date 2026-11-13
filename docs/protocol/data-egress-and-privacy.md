@@ -14,6 +14,35 @@ the egress gateway, key access, and structural receipts. CLI, MCP, a future UI, 
 and provider adapters are callers with bounded capabilities. An MCP caller or agent is never a
 local-human authorization principal, even when its request asserts that the user consented.
 
+[ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed) defines FinishUP
+servers on another machine. This release selects only servers on this computer (the everyday
+server and named local servers, each its own instance of this trusted service); it refuses every
+remote kind (`remote_kind_unavailable`) before any prompt or probe, and refuses a connection to a
+remote root before any dial, so no FinishUP server hop is taken and no channel is added to the five
+below. When a remote kind opens, the selected server's service is this trusted service and this
+protocol runs there unchanged; the hop between the owner's FinishUP client and that server is the
+owner-authorized FinishUP server hop, not one of the five network channels, and enabling it enables
+none of them. The zero-network state and a selected remote target are never in force together
+(ADR-051 decision 8, maintainer decision of 2026-11-07): adding or selecting a remote target is
+refused in that state; a change into it while a remote target is selected asks the owner on the
+trusted console to switch to this computer's everyday FinishUP (`finishup server use local`) and
+make the change, or cancel it (Enter, end of input and Ctrl-C cancel), and is refused without that
+console with `zero_network_remote_selected`; and every client connection to a remote target is
+refused, before anything is sent, while this computer last reported the zero-network state. To know
+that while this computer's service is stopped or locked, the client remembers each report of this
+computer's machine-scope policy in an owner-only marker outside the vault; this release already
+keeps that marker up to date.
+
+Layer 2 ([ADR-052](../adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
+adds, still with every remote kind closed: one client-side authorization gate checked before any
+claim, dial or sync (zero-network, the disclosure, an open kind, then the repository hold) and
+watched while a connection is open; and the repository egress hold of ADR-051 decision 8. A
+repository whose own grant composes to no network egress is held from a server elsewhere until the
+owner allows it for that target on the trusted console or keeps it on this computer; unknown is not
+held, and the hold covers FinishUP's own reads and claims, not native hook content from sessions in
+other folders. The client's owner-only repository reports exist only once a remote target is
+recorded.
+
 ## Content classes
 
 Every candidate item is classified before policy evaluation as exactly one of:

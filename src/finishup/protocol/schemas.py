@@ -65,11 +65,14 @@ SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
 SCHEMA_MEMBER_COUNT: Final = (
-    246  # #1239: contact-expectation-declared 1.0.0; #1170: result-recorded 1.1.0; #1139: +4 lossless result-delivery schemas;
+    266  # ADR-054: config 1.4.0 (the [server] table; 1.3.0 shipped in v0.3.0), content-forgotten 1.0.0 (U20);
+    # ADR-053: +7 REST v1 documents; ADR-052: server-profile 1.0.0; ADR-051 decision 5: check-recorded 1.7.0, receipt-document 1.4.0 (kept-back counts);
+    # ADR-051 D4: receipt-result 1.5.0; #1239: contact-expectation-declared 1.0.0; #1170: result-recorded 1.1.0; #1139: +4 lossless result-delivery schemas;
     # #1118: reviewer-reply 1.0.0, check-result/-recorded 1.6.0, privacy-policy 1.3.0;
     # #1119: host-connection batch report and nonsecret ai-status 1.0.0;
-    # receipt-result 1.4.1 (its closing-line pattern compiles in a unicode-mode ECMAScript
-    # engine) and version-manifest 2.3.1 (2.3.0 shipped in v0.3.0)
+    # ADR-051: +4 control envelopes 2.10.0 (workspace claims and workspace-agent frames),
+    # isolation-report 1.1.0 and server-target-status 1.0.0; version-manifest 2.4.0 (2.3.0
+    # shipped in v0.3.0); main (#1348): receipt-result 1.4.1 and version-manifest 2.3.1
 )
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
@@ -127,6 +130,8 @@ class SchemaArtifactRole(str, Enum):  # noqa: UP042 - the wire contract fixes th
     LOCAL_CONTROL = "local-control"
     SERVICE_STATUS = "service-status"
     VERSION_REPORT = "version-report"
+    # ADR-053: the REST v1 public contract's own documents (``service/rest-*``).
+    NETWORK_CONTROL = "network-control"
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,7 +374,10 @@ def _collect_files(root: Traversable) -> frozenset[str]:
 
 def _parse_manifest(data: bytes) -> tuple[_ManifestMember, ...]:
     try:
-        parsed = strict_json_parse(data)
+        # ``canonical_encode`` makes the profile walk the parse would make (the same checks, in
+        # the same order, raising the same reason), so the parse skips its own (see
+        # ``_plain_schema``).
+        parsed = strict_json_parse(data, validate=False)
         if canonical_encode(parsed) != data:
             _protocol_error("schema_manifest_invalid")
         manifest = _as_plain_object(parsed, "schema_manifest_invalid")
@@ -550,12 +558,16 @@ def _derive_role(path: str) -> SchemaArtifactRole:
             return SchemaArtifactRole.SETUP_CONTRACT
         _protocol_error("schema_artifact_role_mismatch")
     if directory == "service":
-        if filename.startswith(("service-status-", "isolation-report-")):
+        if filename.startswith(
+            ("service-status-", "isolation-report-", "server-target-status-", "server-profile-")
+        ):
             return SchemaArtifactRole.SERVICE_STATUS
         if filename.startswith(
             ("control-hello-", "control-hello-result-", "control-request-", "control-result-")
         ):
             return SchemaArtifactRole.LOCAL_CONTROL
+        if filename.startswith("rest-"):
+            return SchemaArtifactRole.NETWORK_CONTROL
         _protocol_error("schema_artifact_role_mismatch")
     _protocol_error("schema_artifact_role_mismatch")
 
@@ -696,7 +708,13 @@ def _validate_document_references(
 
 def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
     try:
-        parsed = strict_json_parse(data)
+        # One profile walk, not two: ``canonical_encode`` runs exactly the walk
+        # ``strict_json_parse`` would run to validate (``ensure_canonical_value``: the same checks
+        # in the same order, so the same reason for any value it refuses), and every refusal
+        # here is ``schema_bytes_invalid`` either way. The parse keeps every lexical check. That
+        # second walk was about 40% of the schema work a hook does before its hello is answered
+        # (design v2 section 8.9).
+        parsed = strict_json_parse(data, validate=False)
         if canonical_encode(parsed) != data:
             _protocol_error("schema_bytes_invalid")
         schema = _as_plain_object(parsed, "schema_bytes_invalid")
@@ -833,7 +851,7 @@ def _load_catalog_state() -> _CatalogState:
     )
     request_versions_dict = _request_result_versions(entries)
     event_versions_dict = _event_payload_versions(entries)
-    if len(request_versions_dict) != 57 or len(event_versions_dict) != 30:
+    if len(request_versions_dict) != 66 or len(event_versions_dict) != 31:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(
@@ -1042,7 +1060,7 @@ def _build_manifest_index() -> _ManifestIndex:
         id_by_identity[(name, version)] = expected_id
         entries.append((name, version, member.schema_kind, member.artifact_role))
     request_versions = _request_result_versions(entries)
-    if len(request_versions) != 57 or len(_event_payload_versions(entries)) != 30:
+    if len(request_versions) != 66 or len(_event_payload_versions(entries)) != 31:
         _protocol_error("schema_catalog_incomplete")
     return _ManifestIndex(
         member_bytes=MappingProxyType(member_bytes),

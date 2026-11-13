@@ -6,7 +6,10 @@ otherwise assemble from subcommands: harness (Codex) MCP registration, the
 provider-credential ceremonies, privacy inspection, and service lifecycle.
 The menu adds no authority: every mutation keeps its preview/confirm gate,
 trusted ceremonies still run through ``cli/unlock.py`` on the controlling
-TTY, no service is ever spawned, and no secret enters a menu prompt.
+TTY, no service is ever spawned, and no secret enters a menu prompt. An
+action whose command administers the server host (``cli.command_scope``) is
+refused while this process's root is a server elsewhere (ADR-051), before
+it asks or changes anything, as the command itself is.
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 import click
@@ -45,7 +49,115 @@ def menu_available() -> bool:
         return False
 
 
+# The CLI command each menu action stands for, by submenu and choice, so whether it administers
+# the server host is read from the one table every command uses (``cli.command_scope``, ADR-051).
+# The setup posture is what 'privacy setup' shows before it asks anything.
+_ACTION_COMMANDS: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
+    {
+        "harness": MappingProxyType(
+            {
+                "1": "integrate mcp status",
+                "2": "integrate mcp preview",
+                "3": "integrate mcp install",
+                "4": "integrate skill status",
+                "5": "integrate skill preview",
+                "6": "integrate skill install",
+                "7": "integrate skill remove",
+            }
+        ),
+        "provider": MappingProxyType(
+            {
+                "1": "provider endpoint",
+                "2": "provider credential set",
+                "3": "provider credential rotate",
+                "4": "provider codex-subscription setup",
+                "5": "provider codex-subscription status",
+                "6": "provider codex-subscription disconnect",
+                "7": "provider codex-subscription rollback",
+                "8": "provider codex-subscription repair",
+                "9": "provider codex-subscription runtime status",
+            }
+        ),
+        "privacy": MappingProxyType({"1": "privacy show", "2": "privacy setup"}),
+        "service": MappingProxyType(
+            {
+                "1": "service status",
+                "2": "service unlock",
+                "3": "service initialize-passphrase",
+                "4": "service lock",
+                "5": "service stop",
+            }
+        ),
+    }
+)
+_SERVER_HOST_ACTION_REFUSAL: Final = (
+    "this action runs on the FinishUP server host, and the server this process uses is "
+    "elsewhere and refused before anything is sent, so nothing was asked or changed"
+)
+
+
+def _server_host_refused(*commands: str) -> bool:
+    """Refuse server-host menu actions while this process's root is a server elsewhere (ADR-051).
+
+    ``commands`` are the CLI command paths of the actions (``_ACTION_COMMANDS``): one chosen
+    action, or every action of a submenu, which is refused at its entry only when each of them is
+    ``server_host``. While the root is a server elsewhere (``targets.active_remote_refusal``: a
+    remote record, one that cannot be read, a stale disclosure or a zero-network report), the
+    menu names that phase and the directive of its way back (``render_remote_refusal``) on stderr
+    before any prompt, ceremony, service call or write, as the CLI refuses the command itself.
+    Returns whether it refused; a local root (the everyday server, a named local one) never is.
+    """
+
+    from finishup.cli.command_scope import command_scope
+
+    if not commands or any(command_scope(command) != "server_host" for command in commands):
+        return False
+    from finishup.client.targets import active_remote_refusal
+
+    phase = active_remote_refusal()
+    if phase is None:
+        return False
+    from finishup.cli.render import render_remote_refusal
+
+    typer.echo(render_remote_refusal(phase, head=_SERVER_HOST_ACTION_REFUSAL), err=True)
+    return True
+
+
+def _remote_refusal_phase(error: ControlError) -> str | None:
+    """The phase of a connection the authorization gate refused or ended (ADR-051, ADR-052).
+
+    One of ``client.authorization.AUTHORIZATION_REFUSALS`` on a ``service_unavailable``: no
+    service of this computer is absent or still starting, so the menu never tells the owner to
+    run one.
+    """
+
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    if error.reason == "service_unavailable" and error.phase in REMOTE_CONNECTION_PHASES:
+        return error.phase
+    return None
+
+
+def _refusal_head(phase: str) -> str:
+    """What stopped, in the shared phase-specific words (``authorization.refusal_summary``).
+
+    Only a phase that refuses before a connection sends anything says so; a changed
+    authorization says FinishUP stopped sending over a connection that had sent, a changed
+    profile that the server did no work for the request, and an unreachable server what
+    happened to the way there.
+    """
+
+    from finishup.client.authorization import refusal_summary
+
+    return refusal_summary(phase) or "the selected FinishUP server could not be reached"
+
+
 def _control_guidance(error: ControlError) -> str:
+    phase = _remote_refusal_phase(error)
+    if phase is not None:
+        from finishup.cli.render import render_remote_refusal
+
+        return "service_unavailable: " + render_remote_refusal(phase, head=_refusal_head(phase))
     code = public_error_code_for_control_reason(error.reason)
     return {
         PublicErrorCode.VAULT_LOCKED: (
@@ -186,6 +298,8 @@ class _Overview:
     service_line: str
     harness_lines: tuple[str, ...]
     setup_line: str
+    # ADR-051 decision 8: a remote server still selected while this computer forbids network use.
+    server_lines: tuple[str, ...] = ()
 
 
 async def _service_summary() -> str:
@@ -197,8 +311,16 @@ async def _service_summary() -> str:
             status = await client.service_status()
         finally:
             await client.close()
-    except ControlError:
-        return "not reachable — start it with 'finishup service run'"
+    except ControlError as error:
+        phase = _remote_refusal_phase(error)
+        if phase is None:
+            return "not reachable — start it with 'finishup service run'"
+        from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.recovery import directive_for
+
+        directive = directive_for(remote_root_continuation(phase))
+        assert directive is not None
+        return f"{_refusal_head(phase)} ({phase}) — {directive.directive}"
     return f"reachable ({status.state.value}, vault: {status.vault_mode})"
 
 
@@ -255,10 +377,23 @@ def _gather_overview() -> _Overview:
 
     run_async(collect)
     setup_line = "complete" if setup_marker_present() else "not completed — option 2 runs it"
+    from finishup.cli.zero_network_selection import find_zero_network_selection
+
+    zero_network = find_zero_network_selection()
+    server_lines: tuple[str, ...] = () if zero_network is None else zero_network.lines()
+    if zero_network is None:
+        from finishup.cli.zero_network_selection import find_repository_hold
+
+        # ADR-051 decision 8, round 4: this folder's repository held from, or kept here for,
+        # the selected server elsewhere; from the records alone.
+        held = find_repository_hold()
+        if held is not None:
+            server_lines = held.lines()
     return _Overview(
         service_line=cast(str, lines["service"]),
         harness_lines=cast(tuple[str, ...], lines["harness"]),
         setup_line=setup_line,
+        server_lines=server_lines,
     )
 
 
@@ -270,6 +405,8 @@ def _print_home(overview: _Overview) -> None:
     for line in overview.harness_lines:
         typer.echo(f"  Harness    {line}")
     typer.echo(f"  First-run  {overview.setup_line}")
+    for line in overview.server_lines:
+        typer.echo(f"  Server     {line}")
     typer.echo("")
     typer.echo("  1  Refresh status      re-probe the summary above")
     typer.echo("  2  Setup wizard        guided harness discovery and MCP registration")
@@ -345,7 +482,7 @@ def _harness_menu() -> None:
     typer.echo("  7  Skill remove")
     typer.echo("  b  Back")
     choice = _ask(("1", "2", "3", "4", "5", "6", "7", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["harness"][choice]):
         return
     if choice in {"1", "2", "3"}:
         _harness_registration({"1": "status", "2": "preview", "3": "install"}[choice])
@@ -355,6 +492,9 @@ def _harness_menu() -> None:
 
 
 def _provider_menu() -> None:
+    # Every provider action administers the server host: refused before its first question.
+    if _server_host_refused(*_ACTION_COMMANDS["provider"].values()):
+        return
     typer.echo("")
     typer.echo("LLM provider connection")
     typer.echo("  API credentials and Codex-managed ChatGPT login are separate authorities.")
@@ -524,6 +664,12 @@ async def _privacy_show(method: str) -> None:
         result = await getattr(client, method)(request)
     finally:
         await client.close()
+    if method == "privacy_get_effective":
+        # ADR-051 decision 8: this computer's machine-scope answer is remembered, as by
+        # 'finishup privacy show'.
+        from finishup.cli.zero_network_selection import remember_reported_policy
+
+        remember_reported_policy(result)
     _show(result)
 
 
@@ -536,7 +682,7 @@ def _privacy_menu() -> None:
     typer.echo("  (policy changes stay explicit: 'finishup privacy setup|propose|tighten',")
     typer.echo("   receipts via 'finishup privacy receipts list|get')")
     choice = _ask(("1", "2", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["privacy"][choice]):
         return
     method = "privacy_get_effective" if choice == "1" else "privacy_get_setup"
     _run(lambda: _privacy_show(method))
@@ -598,7 +744,7 @@ def _service_menu() -> None:
     typer.echo("  5  Stop the service")
     typer.echo("  b  Back")
     choice = _ask(("1", "2", "3", "4", "5", _BACK))
-    if choice == _BACK:
+    if choice == _BACK or _server_host_refused(_ACTION_COMMANDS["service"][choice]):
         return
     if choice == "1":
         _run(lambda: _service_simple("service_status"))
@@ -610,8 +756,84 @@ def _service_menu() -> None:
         _run_ceremony(unlock.initialize_passphrase_vault)
     elif choice == "4":
         _run(lambda: _service_simple("lock"))
-    elif typer.confirm("Stop the local service now?", default=False):
-        _run(lambda: _service_simple("stop"))
+    else:
+        question = _stop_question()
+        if question is not None and typer.confirm(question, default=False):
+            _run(lambda: _service_simple("stop"))
+
+
+def _stop_question() -> str | None:
+    """The question before stopping the service this process uses; ``None`` when it is refused.
+
+    A server elsewhere the shared gate refuses now, or that the current repository is held from
+    or kept away from, is named, with its way back, before any question (L1's known edge: the
+    menu asked first and only then found the connection refused); one it admits is named by its
+    generated id, since stopping it stops that server for every client that uses it.
+    """
+
+    from finishup.client.targets import (
+        TargetError,
+        TargetRecordUnreadable,
+        active_target_record,
+    )
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        record = None
+        remote = True
+    except TargetError:
+        record, remote = None, False
+    else:
+        remote = record is not None and record.is_remote
+    if not remote:
+        return "Stop the local service now?"
+    from finishup.client.authorization import preflight_refusal
+
+    phase = preflight_refusal() or _repository_hold()
+    if phase is not None or record is None:
+        typer.echo(
+            _control_guidance(
+                ControlError(
+                    "service_unavailable", retryable=True, phase=phase or "target_root_is_remote"
+                )
+            ),
+            err=True,
+        )
+        return None
+    return (
+        f"Stop the FinishUP service of the selected server {record.target_id} ({record.kind}) "
+        "now? It stops that server for every client that uses it"
+    )
+
+
+def _repository_hold() -> str | None:
+    """The hold the stop's own connection would be refused with, for this process's workspace.
+
+    The stop connects as every CLI command does (``build_service_client``: the current
+    repository claimed, its hold decided before the claim), so a repository held from the selected
+    server elsewhere, or kept on this computer, refuses it; that is named before the question,
+    not after the owner answered it. File and Git reads only, never a dial.
+    """
+
+    import asyncio
+
+    from finishup.adapters.workspace_root import RepositoryIdentityError
+    from finishup.cli.bootstrap import resolve_cli_workspace_locator
+    from finishup.client.remote_binding import binding_for_active_root
+    from finishup.client.targets import TargetError
+
+    locator = resolve_cli_workspace_locator()
+    if locator is None:
+        return None
+    try:
+        asyncio.run(binding_for_active_root(locator, serve_workspace=False))
+    except RepositoryIdentityError:
+        # Not a repository FinishUP can name: the connection claims no workspace.
+        return None
+    except TargetError as error:
+        return error.reason
+    return None
 
 
 def run_menu() -> int:

@@ -42,6 +42,8 @@ from finishup.tui.models import (
     ProviderPosture,
     ReadinessLayer,
     ReceiptSummary,
+    ServerRow,
+    ServerSwitch,
     StatusSnapshot,
     TaskStatusPage,
     VaultPosture,
@@ -52,6 +54,8 @@ from finishup.tui.models import (
 if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
     from finishup.adapters.integrations.observation_local import LocalObservationStore
     from finishup.application.harness_mcp import HarnessMcpService
+    from finishup.cli.policy_server import PolicyServer
+    from finishup.cli.zero_network_selection import RepositoryHoldItem, ZeroNetworkSelection
     from finishup.domain.observation_budget import CapacityRequest
     from finishup.domain.observation_settings import ObservationDetailProfile
     from finishup.ports.harness_mcp import HarnessBinary, McpRegistrationPreview
@@ -414,6 +418,21 @@ class RuntimeError_(Exception):
         self.details = tuple(details)
 
 
+def _server_failure(error: Exception) -> RuntimeError_:
+    """Map a refused ``finishup server`` step to its closed reason and fixed message."""
+
+    from finishup.cli.server import ROOT_UNUSABLE_MESSAGE, ServerCommandRefused, refusal_message
+    from finishup.client.targets import TargetError
+    from finishup.config.paths import PathSafetyError
+
+    if isinstance(error, TargetError):
+        error = ServerCommandRefused(error.reason)
+    elif isinstance(error, PathSafetyError):
+        error = ServerCommandRefused(error.reason_code, message=ROOT_UNUSABLE_MESSAGE)
+    assert isinstance(error, ServerCommandRefused)
+    return RuntimeError_(error.reason, refusal_message(error))
+
+
 class ObservationCapacityUnavailable(RuntimeError_):
     """A requested capacity the structural queue cannot support; nothing was changed.
 
@@ -669,6 +688,12 @@ class FinishUpRuntime:
         self._check_request_ids: dict[str, str] = {}
         # The evaluator runtime setup last offered as its default (see setup_codex_subscription).
         self._offered_codex_executable: Path | None = None
+        # A remote server still selected while this computer forbids network use (ADR-051
+        # decision 8), as last read by ``refresh_zero_network_item``.
+        self._zero_network: ZeroNetworkSelection | None = None
+        # This interface's repository held from, or kept here for, the selected server elsewhere
+        # (ADR-051 decision 8, round 4), as last read by ``refresh_repository_hold_item``.
+        self._repository_hold: RepositoryHoldItem | None = None
 
     # -- discovery ------------------------------------------------------
 
@@ -902,7 +927,7 @@ class FinishUpRuntime:
             prompt_credential_probe_authorization() if credential_probe else False
         )
         try:
-            return await run_privacy_setup(
+            report = await run_privacy_setup(
                 recipe_hint=cast(
                     Literal[
                         "private",
@@ -925,6 +950,10 @@ class FinishUpRuntime:
                 getattr(error, "reason", "privacy_setup_failed"),
                 "the trusted privacy ceremony could not be completed",
             ) from error
+        # The ceremony itself asked the owner on this terminal before a change that would leave a
+        # remote server selected under zero-network (ADR-051 decision 8); the header follows it.
+        await self.refresh_zero_network_item()
+        return report
 
     def privacy_recommendation(
         self, posture: PrivacyPosture | None = None
@@ -1445,6 +1474,270 @@ class FinishUpRuntime:
                 "the capacity change was not applied",
             ) from error
         return cast(Mapping[str, object], raw)
+
+    # -- server targets ---------------------------------------------------
+
+    def remote_root_refusal(self) -> str | None:
+        """The phase every connection from this process is refused with before anything is sent,
+        while its root is a server elsewhere (``targets.active_remote_refusal``), or ``None``.
+
+        One of ``targets.REMOTE_ROOT_REFUSALS``, read from the target record and this computer's
+        last-reported policy marker alone, never a service: first-run setup asks it before it
+        looks for agents or asks anything (ADR-051, layer 1).
+        """
+
+        from finishup.client.targets import active_remote_refusal
+
+        return active_remote_refusal()
+
+    def server_indicator(self) -> str | None:
+        """The selected server target as ``<kind> <id>``; ``None`` for the everyday server.
+
+        Header text only: a name the owner typed never appears there, and a root that cannot be
+        resolved shows nothing rather than a guess (the next operation reports it).
+        """
+
+        from finishup.client.targets import TargetError, active_target_record
+
+        try:
+            record = active_target_record()
+        except TargetError:
+            record = None
+        indicator = None if record is None else f"{record.kind} {record.target_id}"
+        indicator = self._zero_network_indicator(indicator)
+        return self._repository_hold_indicator(indicator)
+
+    def selected_policy_server(self) -> PolicyServer | None:
+        """The remote server whose privacy policy a questionnaire changes (ADR-051 decision 8).
+
+        ``None`` for this computer's everyday FinishUP. The interface reads it once before it
+        hands the terminal over and names that server afterwards, by generated id and closed kind
+        only: the owner may switch servers during the questionnaire, and the change stays that
+        server's.
+        """
+
+        from finishup.cli.policy_server import selected_policy_server
+
+        return selected_policy_server()
+
+    def _zero_network_indicator(self, indicator: str | None) -> str | None:
+        """The header names the zero-network item while the selection on disk still shows it.
+
+        Only the selection file is read again here; a selection switched or cleared elsewhere
+        drops the item rather than keeping a stale one (ADR-051 decision 8).
+        """
+
+        from finishup.cli.zero_network_selection import still_selected
+
+        item = self._zero_network
+        if item is None:
+            return indicator
+        if not still_selected(item):
+            self._zero_network = None
+            return indicator
+        return item.indicator()
+
+    def _repository_hold_indicator(self, indicator: str | None) -> str | None:
+        """The header adds that this repository is held (or kept here) while it still is.
+
+        A record-only re-check at each header refresh: the same server is still selected on
+        disk and the records still hold the repository from it; otherwise the item is dropped
+        (ADR-051 decision 8, round 4).
+        """
+
+        from finishup.cli.zero_network_selection import still_holds
+
+        item = self._repository_hold
+        if item is None or indicator is None or self._zero_network is not None:
+            return indicator
+        if not still_holds(item):
+            self._repository_hold = None
+            return indicator
+        return indicator + item.indicator_suffix()
+
+    async def refresh_repository_hold_item(self) -> tuple[str, ...]:
+        """Whether this interface's repository is held from the selected server elsewhere, or
+        kept on this computer for it (ADR-051 decision 8, round 4).
+
+        Asks this computer's everyday FinishUP about the repository when it can answer (in a
+        worker thread, in a fresh context, as ``refresh_zero_network_item`` does), then decides
+        from the records. Returns the item's lines for ``/server``, empty when there is nothing
+        to say; the header shows it until it no longer applies.
+        """
+
+        from finishup.cli.zero_network_selection import find_repository_hold_async
+
+        self._repository_hold = await find_repository_hold_async(self._cwd, live=True)
+        return () if self._repository_hold is None else self._repository_hold.lines()
+
+    def repository_hold_heading(self) -> str:
+        """The ``/server`` title of the repository item last read."""
+
+        item = self._repository_hold
+        if item is None:
+            return "This repository's work is held from the selected server"
+        return item.heading()
+
+    async def allow_repository_here(self) -> tuple[str, bool]:
+        """``finishup server repositories add`` for this interface's repository.
+
+        The same core, disclosure and typed name as the command; the caller hands the terminal
+        over first. The typed confirmation is read on the event loop thread (the SRV-6 pattern),
+        the rest in a worker thread. Returns the server's generated id and whether an allow was
+        recorded.
+        """
+
+        import asyncio
+
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            allow_repository_here,
+            confirm_repository_on_this_thread,
+        )
+        from finishup.client.targets import ServerTarget, TargetError
+        from finishup.config.paths import PathSafetyError
+
+        loop = asyncio.get_running_loop()
+
+        async def confirm_on_loop(record: ServerTarget, worktree: str, state: str) -> None:
+            confirm_repository_on_this_thread(record, worktree, state)
+
+        def confirm(record: ServerTarget, worktree: str, state: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                confirm_on_loop(record, worktree, state), loop
+            ).result()
+
+        try:
+            record, allowed = await asyncio.to_thread(
+                allow_repository_here, str(self._cwd), confirm=confirm
+            )
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        if allowed:
+            self._repository_hold = None
+        return record.target_id, allowed
+
+    async def refresh_zero_network_item(self) -> tuple[str, ...]:
+        """Whether this computer forbids network use while a remote server is selected.
+
+        Reads the selection file afresh and, only when it names a remote server, asks this
+        computer's everyday service for its policy (in a worker thread); when that service cannot
+        be asked, what it last reported decides (ADR-051 decision 8). Returns the item's lines
+        for ``/server``, empty when there is nothing to say; the header shows it until the
+        selection changes.
+        """
+
+        from finishup.cli.zero_network_selection import find_zero_network_selection_async
+
+        self._zero_network = await find_zero_network_selection_async()
+        return () if self._zero_network is None else self._zero_network.lines()
+
+    def zero_network_heading(self) -> str:
+        """The ``/server`` title of the item last read (live, or as last reported)."""
+
+        item = self._zero_network
+        if item is None:
+            return "This computer is zero-network: the selected server is refused"
+        return item.heading()
+
+    async def server_rows(self) -> tuple[tuple[ServerRow, ...], tuple[str, ...]]:
+        """Every server target (``local`` first) and the ``finishup server list`` lines."""
+
+        import asyncio
+
+        from finishup.cli.server import ServerCommandRefused, render_target_rows, target_rows
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        try:
+            rows, source = await asyncio.to_thread(target_rows)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        return (
+            tuple(
+                ServerRow(row.name, row.kind, row.target_id, row.location, row.selected)
+                for row in rows
+            ),
+            render_target_rows(rows, source),
+        )
+
+    async def server_status_lines(self, name: str | None = None) -> tuple[str, ...]:
+        """``finishup server status`` for ``name`` (or the selected server), probed once.
+
+        The zero-network item (ADR-051 decision 8) is the one ``/server`` read just before
+        (``refresh_zero_network_item``), kept while the selection on disk still shows it: these
+        lines never show it (``/server`` already did), so this computer's service is not asked
+        for its policy a second time.
+        """
+
+        import asyncio
+
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            build_status_document,
+            status_lines,
+            target_in_use,
+        )
+        from finishup.cli.zero_network_selection import still_selected
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        def zero_network() -> ZeroNetworkSelection | None:
+            item = self._zero_network
+            return item if item is not None and still_selected(item) else None
+
+        try:
+            # Off the loop: the probe, and this client's record of what that server may read
+            # outside your projects (ADR-051 decision 5), which the document carries.
+            document = await asyncio.to_thread(
+                build_status_document, name, zero_network=zero_network, workspace=str(self._cwd)
+            )
+            in_use = await asyncio.to_thread(target_in_use, name)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        return status_lines(document, in_use=in_use)
+
+    async def use_server(self, name: str) -> ServerSwitch:
+        """Select ``name`` (``local``: the everyday server), as ``finishup server use`` does.
+
+        A remote target is refused with ``remote_kind_unavailable`` and the selection stays as it
+        was: the remote kinds are closed in this release. Returns the new header indicator text
+        and what became of the connection to a remote server the switch left (stopped, as
+        ``finishup server disconnect`` stops it).
+
+        Once a kind is open (a later layer), the switch, its policy read and the profile fetch run
+        in a worker thread, but the disclosure and the typed confirmation run on the loop thread,
+        where Ctrl-C reaches the read and cancels it as ``authorization_declined`` (SRV-6).
+        """
+
+        import asyncio
+
+        from finishup.cli.server import (
+            ServerCommandRefused,
+            confirm_use_on_this_thread,
+            use_target,
+        )
+        from finishup.client.targets import TargetError
+        from finishup.config.paths import PathSafetyError
+
+        loop = asyncio.get_running_loop()
+
+        async def confirm_on_loop(target: str, kind: str, lines: tuple[str, ...]) -> None:
+            confirm_use_on_this_thread(target, kind, lines)
+
+        def authorize(target: str, kind: str, lines: tuple[str, ...]) -> None:
+            asyncio.run_coroutine_threadsafe(confirm_on_loop(target, kind, lines), loop).result()
+
+        try:
+            switch = await asyncio.to_thread(use_target, name, authorize=authorize)
+        except (ServerCommandRefused, TargetError, PathSafetyError) as error:
+            raise _server_failure(error) from None
+        record = switch.record
+        return ServerSwitch(
+            "everyday" if record is None else f"{record.kind} {record.target_id}",
+            switch.left_lines(),
+            switch.left_open,
+        )
 
     # -- service --------------------------------------------------------
 
@@ -1980,6 +2273,15 @@ class FinishUpRuntime:
         try:
             await rotate_vault_passphrase()
         except HumanCeremonyCliError as error:
+            if error.reason == "credential_store_check_in_progress":
+                from finishup.cli.exits import remediation_message
+
+                # The service is still finishing an unlock and nothing changed: say why, and to
+                # try again in a moment.
+                raise RuntimeError_(
+                    error.reason,
+                    remediation_message(error.reason) or "the passphrase could not be changed",
+                ) from None
             raise RuntimeError_(error.reason, "the passphrase could not be changed")
 
     async def set_up_storage_automatically(self) -> tuple[bool, str | None, str]:
@@ -2439,6 +2741,7 @@ class FinishUpRuntime:
         """
 
         from finishup.cli.render import render_human_status
+        from finishup.client.attribution import connection_attribution
         from finishup.protocol.models import StatusRequestModel
 
         session = self._sessions.get(title)
@@ -2458,10 +2761,12 @@ class FinishUpRuntime:
         )
         async with self._client() as client:
             result = await client.status(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the task view could not be read")
         session.frontier = success.head_frontier
         return TaskStatusPage(
-            tuple(render_human_status(success).splitlines()), success.page.next_cursor
+            tuple(render_human_status(success, attribution=attribution).splitlines()),
+            success.page.next_cursor,
         )
 
     def _work_detail(self, title: str, session: _WorkSession, compact: object) -> WorkDetail:
@@ -2488,6 +2793,7 @@ class FinishUpRuntime:
         """Read the latest check's operation page, including structural review progress."""
 
         from finishup.cli.render import render_human_status
+        from finishup.client.attribution import connection_attribution
         from finishup.protocol.models import StatusRequestModel
 
         session = self._sessions.get(title)
@@ -2508,8 +2814,11 @@ class FinishUpRuntime:
         )
         async with self._client() as client:
             result = await client.status(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the check progress could not be read")
-        return TaskStatusPage(tuple(render_human_status(success).splitlines()), None)
+        return TaskStatusPage(
+            tuple(render_human_status(success, attribution=attribution).splitlines()), None
+        )
 
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         """Run one check in the requested mode and report it without softening."""
@@ -2557,6 +2866,14 @@ class FinishUpRuntime:
         """
 
         from finishup.cli.render import render_human_receipt
+        from finishup.client.attribution import (
+            attribution_lines,
+            connection_attribution,
+            coverage_hook_observed,
+            evidence_provenance_section,
+            evidence_provenance_unknown_section,
+        )
+        from finishup.domain.receipts import workspace_provenance_unknown_block
         from finishup.protocol.canonical import canonical_encode
         from finishup.protocol.coverage import CheckType
         from finishup.protocol.models import ReceiptRequestModel
@@ -2580,15 +2897,56 @@ class FinishUpRuntime:
             if owner_view:
                 await self._authorize_owner_receipt_view(client, request)
             result = await client.receipt(request)
+            attribution = connection_attribution(client)
         success = self._unwrap(result, "the receipt could not be built")
         session.frontier = success.result_frontier
         coverage = getattr(success, "coverage", None)
         gaps = tuple(str(item) for item in getattr(coverage, "known_gaps", ()) or ())
         semantic = CheckType.SEMANTIC_MODEL_DERIVED in success.coverage.check_types
+        # ADR-051 decision D4: a JSON receipt whose provenance is unknown shows the same fixed
+        # section a text receipt ends with, for the result's own reason (the passing cause says to
+        # retry, a lasting one says why it lasts), and no "read on the client machine" line.
+        provenance = success.workspace_provenance
+        provenance_unknown = provenance is not None
+        # ADR-054: a level-L2 JSON receipt shows the same fixed server-copy lines a text receipt
+        # ends with, from its ``evidence_provenance`` member, and names only the producer.
+        hook_observed = coverage_hook_observed(success.coverage.publication_channels)
+        server_copy = (
+            None
+            if success.evidence_provenance is None
+            else evidence_provenance_section(
+                success.evidence_provenance, hook_observed=hook_observed
+            )
+        )
+        # ADR-054: and, when that account could not be given, the evidence-unknown lines for its
+        # reason, never the connection's level-L1 line.
+        unknown = success.evidence_provenance_unknown
+        if unknown is not None:
+            server_copy = evidence_provenance_unknown_section(unknown, hook_observed=hook_observed)
         rendered = (
-            canonical_encode(success.document).decode("utf-8")
+            "\n".join(
+                (
+                    canonical_encode(success.document).decode("utf-8"),
+                    *(
+                        (
+                            workspace_provenance_unknown_block(
+                                markdown=False, reason=provenance.reason
+                            ),
+                        )
+                        if provenance is not None
+                        else ()
+                    ),
+                    *(() if server_copy is None else (server_copy,)),
+                    *attribution_lines(
+                        attribution,
+                        provenance_unknown=provenance_unknown,
+                        hook_observed=hook_observed,
+                        server_copy=success.evidence_provenance is not None or unknown is not None,
+                    ),
+                )
+            )
             if success.document is not None
-            else render_human_receipt(success)
+            else render_human_receipt(success, attribution=attribution)
         )
         return ReceiptSummary(
             subject_id=session.task_id,
@@ -2816,6 +3174,35 @@ def _connect_failure(error: BaseException) -> RuntimeError_:
             path_reason,
             "FinishUP's local folders cannot be used safely",
             details=() if remedy is None else (remedy,),
+        )
+    phase = getattr(error, "phase", None)
+    if getattr(error, "reason", None) == "service_unavailable" and type(phase) is str:
+        from finishup.client.authorization import refusal_summary
+
+        summary = refusal_summary(phase)
+        if summary is not None:
+            # The shared authorization gate refused or ended a connection to a server elsewhere
+            # (ADR-051, ADR-052): the phase, what stopped, and its way back; never a local
+            # service that is not reachable.
+            from finishup.client.targets import remote_root_continuation
+            from finishup.protocol.recovery import directive_for
+
+            directive = directive_for(remote_root_continuation(phase))
+            return RuntimeError_(
+                phase, summary, details=() if directive is None else (directive.directive,)
+            )
+    from finishup.client.targets import active_root_may_be_remote
+
+    if active_root_may_be_remote():
+        # A server elsewhere whose failure names no phase (L1's known edge: never "the local
+        # FinishUP service"); one that names a phase was answered above with its own words.
+        return RuntimeError_(
+            str(getattr(error, "reason", "service_unavailable")),
+            "the selected FinishUP server elsewhere could not be reached",
+            details=(
+                "'finishup server status' shows what happened; 'finishup server test' "
+                "tries it again.",
+            ),
         )
     return RuntimeError_(
         str(getattr(error, "reason", "service_unavailable")),

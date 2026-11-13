@@ -478,6 +478,78 @@ class EncryptedFilesObjectStore:
     def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]:
         return self._verified_chunks(ref)
 
+    async def published_object_ids(self) -> tuple[str, ...]:
+        """Every published object id beneath this store, sorted; never a staged object.
+
+        A file whose name is not an object id or sits in the wrong shard is not a published
+        object and is not listed. ADR-054 (U20): the erasure of a task's forgotten content scans
+        this list, so a content object no record points to is erased all the same.
+        """
+
+        with self._lock:
+            self._validate_private_directory(self._bundle_root)
+            if not self._objects_root.exists():
+                return ()
+            self._validate_private_directory(self._objects_root)
+            found: list[str] = []
+            for shard in self._objects_root.iterdir():
+                if shard.name == ".staging" or len(shard.name) != 2:
+                    continue
+                self._validate_private_directory(shard)
+                for path in shard.iterdir():
+                    try:
+                        validate_id(IdKind.OBJECT, path.name)
+                    except (TypeError, ValueError):
+                        continue
+                    if path.name[4:6] == shard.name:
+                        found.append(path.name)
+            return tuple(sorted(found, key=str.encode))
+
+    async def describe_published(self, object_id: str) -> ObjectRef:
+        """Authenticate one published object by id alone and return its exact reference.
+
+        The envelope digest is that of the file's own bytes; everything else is what
+        ``resolve_verified`` authenticates. A missing or unauthenticated object is the port's
+        deterministic ``object_verification_failed``.
+        """
+
+        try:
+            path = self._path_for(object_id)
+            self._validate_object_path(path)
+            observed = self._digest_file(path)
+        except (OSError, TypeError, ValueError) as exc:
+            if _is_environmental_open_fault(exc):
+                raise
+            raise _verification_failed() from exc
+        return await self.resolve_verified(object_id, observed)
+
+    async def erase_published(self, ref: ObjectRef) -> bool:
+        """Delete the one published object whose file is exactly ``ref``'s envelope (ADR-054).
+
+        Only the owner's forget of a server copy erases objects, and only content objects, never
+        an event's payload. The file must hold ``ref``'s envelope bytes (anything else is
+        ``object_erase_mismatch`` and is left alone). ``True`` when this call removed the file,
+        ``False`` when it was already gone, so a retry after a crash completes the erasure.
+        """
+
+        if type(ref) is not ObjectRef or ref.key_slot != self._keys.key_slot:
+            raise ValueError("object_erase_mismatch")
+        with self._lock:
+            path = self._path_for(ref.object_id)
+            try:
+                self._validate_object_path(path)
+                path.lstat()
+            except FileNotFoundError:
+                return False
+            if self._digest_file(path) != ref.envelope_digest:
+                raise ValueError("object_erase_mismatch")
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
+            self._fsync_directory(path.parent)
+            return True
+
     async def sweep_orphans(self, root_snapshot: ObjectRootSnapshot, now: datetime) -> int:
         if type(root_snapshot) is not ObjectRootSnapshot:
             raise ValueError("object_root_snapshot_invalid")

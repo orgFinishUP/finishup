@@ -277,6 +277,8 @@ async def test_active_request_exempts_session_from_idle_deadline(
         request: ControlCallRequest,
         *,
         projection_context: object | None = None,
+        claim_unkeyed: bool = False,
+        bound_profile: object | None = None,
         _defer_stop: bool = False,
     ) -> ControlResult:
         if request.method is ControlMethod.SERVICE_STATUS:
@@ -286,6 +288,8 @@ async def test_active_request_exempts_session_from_idle_deadline(
             client_kind,
             request,
             projection_context=projection_context,  # pyright: ignore[reportArgumentType]
+            claim_unkeyed=claim_unkeyed,
+            bound_profile=bound_profile,  # pyright: ignore[reportArgumentType]
             _defer_stop=_defer_stop,
         )
 
@@ -444,6 +448,8 @@ async def test_a_stalled_frame_is_cut_off_even_while_a_call_is_active(
         request: ControlCallRequest,
         *,
         projection_context: object | None = None,
+        claim_unkeyed: bool = False,
+        bound_profile: object | None = None,
         _defer_stop: bool = False,
     ) -> ControlResult:
         if request.method is ControlMethod.SERVICE_STATUS:
@@ -454,6 +460,8 @@ async def test_a_stalled_frame_is_cut_off_even_while_a_call_is_active(
             client_kind,
             request,
             projection_context=projection_context,  # pyright: ignore[reportArgumentType]
+            claim_unkeyed=claim_unkeyed,
+            bound_profile=bound_profile,  # pyright: ignore[reportArgumentType]
             _defer_stop=_defer_stop,
         )
 

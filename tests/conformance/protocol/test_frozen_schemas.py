@@ -26,16 +26,25 @@ _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
 # +1 each: the review-packet-row 2.0.0 provider contract (robust lane row contract).
 # ADR-049: +1 member, decision-recorded 1.1.0 (an event schema, not a request/result version).
-_EXPECTED_MEMBER_COUNT = 246  # #1239 +1 contact-expectation-declared 1.0.0;
-# +1 receipt-result 1.4.1 (the closing-line pattern a unicode-mode ECMAScript engine compiles),
-# +1 version-manifest 2.3.1 (2.3.0 shipped in v0.3.0 and is frozen);
+_EXPECTED_MEMBER_COUNT = (
+    266  # ADR-054 +1 config 1.4.0 (the [server] table), +1 content-forgotten 1.0.0 (U20);
+    # ADR-053 +7 REST v1 documents; ADR-052 +1 server-profile 1.0.0;
+    # ADR-051 decision 5 +2 check-recorded 1.7.0, receipt-document 1.4.0;
+    # ADR-051 +1 version-manifest 2.4.0; #1239 +1 contact-expectation-declared 1.0.0;
+)
+# ADR-051 decision D4 +1 receipt-result 1.5.0 (the optional ``workspace_provenance`` member);
+# main (#1348) +1 receipt-result 1.4.1, +1 version-manifest 2.3.1 (frozen here; 2.4.0 is live);
 # #1170 +1 result-recorded 1.1.0;
 # #1139 +4 lossless result-delivery schemas;
 # #1118 +1 reviewer-reply 1.0.0, +2 check-result/-recorded 1.6.0,
 # +1 privacy-policy 1.3.0;
-# #1119 +2 host-connection batch report and ai-status 1.0.0
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 57  # #1118 reviewer-reply; #1119 batch, ai-status
-_EXPECTED_EVENT_VERSION_COUNT = 30  # #1239 +1 contact-expectation-declared
+# #1119 +2 host-connection batch report and ai-status 1.0.0;
+# ADR-051 +4 control envelopes 2.10.0, +1 isolation-report 1.1.0, +1 server-target-status 1.0.0
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 66  # #1118 reviewer-reply; #1119 batch, ai-status;
+# ADR-051 server-target-status; ADR-052 server-profile; ADR-053 the seven rest-* documents
+_EXPECTED_EVENT_VERSION_COUNT = (
+    31  # #1239 +1 contact-expectation-declared; ADR-054 +1 content-forgotten
+)
 
 
 def _schema_module() -> Any:
@@ -220,6 +229,10 @@ def test_schema_registry_is_complete() -> None:
                 "consent/review-result-3.0.0.schema.json",
                 "consent/status-3.0.0.schema.json",
             }
+            else "2.10.0"
+            if path.endswith("-2.10.0.schema.json")
+            else "1.1.0"
+            if path == "service/isolation-report-1.1.0.schema.json"
             else "2.9.0"
             if path.endswith("-2.9.0.schema.json")
             else "2.8.0"
@@ -535,21 +548,35 @@ def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
 
 
 def test_released_version_manifest_2_3_retains_the_0_3_0_inventory() -> None:
-    """v0.3.0 shipped 2.3.0; the inventory after it (receipt-result 1.4.1) is reported by 2.3.1."""
+    """v0.3.0 shipped 2.3.0; main reported receipt-result 1.4.1 in 2.3.1, and this build's
+    inventory is reported by 2.4.0."""
 
     document = _version_manifest_document("2.3.0")
     assert document["properties"]["schema_version"]["const"] == "2.3.0"
     assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 342
     requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["control-hello"] == "2.9.0"
+    assert "server-target-status" not in requests
     assert requests["receipt-result"] == "1.4.0"
 
 
-def test_live_version_manifest_2_3_1_tracks_the_current_inventory() -> None:
-    from finishup.version import REVIEWED_RESOURCE_COUNT
+def test_released_version_manifest_2_3_1_retains_main_s_receipt_result_1_4_1_inventory() -> None:
+    """main (#1348) reported its inventory with receipt-result 1.4.1 in 2.3.1, frozen here."""
 
     document = _version_manifest_document("2.3.1")
-
     assert document["properties"]["schema_version"]["const"] == "2.3.1"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 344
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["receipt-result"] == "1.4.1"
+    assert "server-target-status" not in requests
+
+
+def test_live_version_manifest_2_4_tracks_the_current_inventory() -> None:
+    from finishup.version import REVIEWED_RESOURCE_COUNT
+
+    document = _version_manifest_document("2.4.0")
+
+    assert document["properties"]["schema_version"]["const"] == "2.4.0"
     counts = _version_manifest_consts(document, "resource_counts")
     assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
     assert sum(int(count) for name, count in counts.items() if name != "total") == int(
@@ -566,8 +593,9 @@ def test_live_version_manifest_2_3_1_tracks_the_current_inventory() -> None:
     assert requests["start-request"] == "1.1.0"
     # The sized reviewer exchange bound (#1118).
     assert requests["privacy-policy"] == "1.3.0"
-    # The closing-line pattern a unicode-mode ECMAScript engine compiles.
-    assert requests["receipt-result"] == "1.4.1"
+    # The closing-line pattern a unicode-mode ECMAScript engine compiles: 1.4.1 on main, and
+    # 1.5.0 here, which carries it too.
+    assert requests["receipt-result"] == "1.5.0"
     assert events["session_opened"] == "1.2.0"
 
 

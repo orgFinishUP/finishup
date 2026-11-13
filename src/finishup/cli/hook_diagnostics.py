@@ -158,6 +158,24 @@ _REASONS: Final = frozenset(
         "auto_attach_mapping_write_failed",
         "auto_attach_recovery_busy",
         "auto_attach_binding_ambiguous",
+        # This computer refused the selected server before anything was sent (ADR-051 decision
+        # 8): zero-network, or a target confirmed under an older disclosure; any other remote
+        # root, since this release reaches no server on another machine.
+        "target_reauthorization_required",
+        "target_root_is_remote",
+        "zero_network_remote_selected",
+        # ADR-051 decision 8 (2026-11-07, round 4): a repository whose privacy policy on this
+        # computer allows no network use is held from the selected server elsewhere until the
+        # owner decides, or kept here as they chose; its observations wait in the outbox.
+        "repository_egress_held",
+        "repository_egress_kept",
+        # ADR-052: a connection to a server elsewhere ended because the selection, the server
+        # record or the key it was made under changed.
+        "server_authorization_changed",
+        # ADR-052: what the selected server offers or needs changed since the owner consented,
+        # or it requires a level they did not agree to; refused before that server did any work.
+        "server_profile_changed",
+        "server_level_unavailable",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
