@@ -88,17 +88,20 @@ async def copy_claim(record: ServerTarget, worktree: str) -> WorkspaceClaim:
     return workspace_claim_for_root(root, salt, normal)
 
 
-def copy_control_binding(claim: WorkspaceClaim) -> ClientWorkspaceBinding:
+def copy_control_binding(
+    claim: WorkspaceClaim, captured: AuthorizationCheck | None = None
+) -> ClientWorkspaceBinding:
     """The binding of a connection that only names ``claim``'s copy (``server code``, #1357).
 
-    No workspace agent, so the server can read or sync nothing over it; no check of its own, so
-    the shared gate alone admits it (the target record, this computer's zero-network policy, the
-    reauthorization and the consent; never the repository's hold); no worktree, so it registers
-    nothing with the target's helper. The connection is made directly and sends no request but
-    ``code_copy`` (``service.client``).
+    No workspace agent, so the server can read or sync nothing over it; as its own check only
+    ``captured`` (``authorization.CapturedTarget``: the target record is still the one the
+    command read, asked before the hello), never the repository's hold, so the shared gate (the
+    target record, this computer's zero-network policy, the reauthorization and the consent) and
+    that check admit it; no worktree, so it registers nothing with the target's helper. The
+    connection is made directly and sends no request but ``code_copy`` (``service.client``).
     """
 
-    return ClientWorkspaceBinding(claim, copy_control=True)
+    return ClientWorkspaceBinding(claim, authorization=captured, copy_control=True)
 
 
 async def remote_workspace_binding(

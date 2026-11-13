@@ -144,8 +144,8 @@ Holding the project or stopping only stops future updates: `finishup server code
 only way to delete what was sent, and it also deletes the excerpts tasks kept from it (see
 [Keeping a copy of your code on a server](servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2)).
 Listing and forgetting a copy still work while the project is held or kept on this computer, at
-level L1, or after its folder is gone: they send the server only the copy's id, never anything of
-the project. While this computer's own policy allows no network use, nothing reaches a server, so
+level L1, or after its folder is gone: they send the server only the copy's id, the one it
+already received when it asked for that copy, never anything of the project. While this computer's own policy allows no network use, nothing reaches a server, so
 a copy there can be neither listed nor deleted until that policy allows network use again; it stays
 until it expires there.
 

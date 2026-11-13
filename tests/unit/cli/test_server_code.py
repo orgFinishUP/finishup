@@ -897,6 +897,15 @@ class _Connection:
 
     def __init__(self, **options: object) -> None:
         _Connection.made.append(options)
+        # The binding's own check is asked before the hello, as the real connection asks it: a
+        # refusal there means the claim never left.
+        binding = options.get("workspace_binding")
+        check = getattr(binding, "authorization", None)
+        refusal = None if check is None else check.refusal()
+        if refusal is not None:
+            from finishup.ports.control import ControlError
+
+            raise ControlError("service_unavailable", retryable=True, phase=refusal)
         from finishup.client.authorization import Grant, consent_digest, identity_digest
         from finishup.config.paths import active_root
 
@@ -1138,9 +1147,10 @@ def _copy_bindings() -> list[object]:
         assert set(options) == {"workspace_binding"}, options
         binding = options["workspace_binding"]
         assert type(binding) is ClientWorkspaceBinding
-        assert binding.copy_control is True
-        assert binding.agent is None and binding.authorization is None
+        assert binding.copy_control is True and binding.agent is None
         assert binding.worktree is None and binding.repository_key is None
+        # Its one check: the target record is still the one the command read (never the hold).
+        assert type(binding.authorization).__name__ == "CapturedTarget"
         bindings.append(binding.claim)
     return bindings
 
@@ -1353,3 +1363,107 @@ def test_no_refusal_a_copy_command_can_meet_reads_as_a_server_fault(
     assert server_cli._DEFAULT_REMEDY not in server_cli.refusal_message(  # pyright: ignore[reportPrivateUsage]
         ServerCommandRefused(phase)
     )
+
+
+@pytest.mark.parametrize("recorded", [False, True], ids=["root", "claim"])
+def test_a_held_copy_is_named_by_what_its_sync_sent_never_by_another_worktree(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    connection: list[tuple[Path | None, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: bool,
+) -> None:
+    """Copied from worktree A, held, then asked from linked worktree B: the claim sent is the
+    one A's sync sent (the claim it recorded, or the claim on the folder it read), never B's
+    worktree digest, which that server never saw."""
+
+    from finishup.client.code_export import ExportDatabase
+
+    exported = _sent_from(remote, repository)
+    if recorded:
+        ExportDatabase(exported).remember_claim(_claim_of(remote, repository))  # type: ignore[arg-type]
+    linked = tmp_path / "linked"
+    git(repository, "worktree", "add", "-q", "-b", "other", str(linked))
+    _hold(remote, repository)
+    monkeypatch.chdir(linked)
+    for arguments in (("list",), ("forget",)):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code == 0, result.output
+    assert _copy_bindings() == [_claim_of(remote, repository)] * 2
+    assert _claim_of(remote, linked) != _claim_of(remote, repository)
+    assert not exported.exists()
+
+
+def test_a_held_copy_its_record_cannot_name_is_refused_and_nothing_is_sent(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    connection: list[tuple[Path | None, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record from before claims were kept, whose folder is gone: from another worktree of
+    the held repository nothing is sent; the owner reads what to do."""
+
+    linked = tmp_path / "linked"
+    git(repository, "worktree", "add", "-q", "-b", "other", str(linked))
+    exported = _sent_from(remote, linked)
+    git(repository, "worktree", "remove", "--force", str(linked))
+    assert not linked.exists()
+    _hold(remote, repository)
+    for arguments in (("list",), ("forget",)):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code == 20, result.output
+        assert result.output.startswith("repository_folder_missing: this repository is held")
+        assert "FinishUP sent nothing" in result.output
+    assert _Connection.made == [] and connection == []
+    assert exported.exists()
+    # Allowed again, it is no longer held: the worktree here names it, as any connection would.
+    _hold_released(repository)
+    done = _RUNNER.invoke(app, ["server", "code", "forget"])
+    assert done.exit_code == 0, done.output
+    assert _copy_bindings() == [_claim_of(remote, repository)]
+
+
+def _hold_released(worktree: Path) -> None:
+    import asyncio
+
+    from finishup.adapters.workspace_root import canonical_workspace_root
+    from finishup.client.everyday_policy import record_repository_report
+    from finishup.client.repository_hold import repository_key
+    from finishup.ports.control import WorkspaceLocator
+
+    top = os.path.realpath(worktree)
+    key = repository_key(asyncio.run(canonical_workspace_root(WorkspaceLocator(top))))
+    record_repository_report(key, top, no_network=False)
+
+
+def test_a_target_changed_after_the_command_read_it_never_receives_the_claim(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record the command read is the copy-control binding's own check, asked before the
+    hello: authorized again in between, the connection is refused before the claim leaves."""
+
+    exported = _sent_from(remote, repository)
+    _hold(remote, repository)
+
+    def authorize_again() -> None:
+        root = targets.target_root(remote.target_id)
+        with targets.registry_lock():
+            current = targets.read_target(root)
+            assert current is not None
+            targets.write_target(
+                root, targets.reauthorized(current, now="2031-01-01T00:00:00.000Z")
+            )
+
+    _meanwhile(monkeypatch, authorize_again)
+    result = _RUNNER.invoke(app, ["server", "code", "forget"])
+    assert result.exit_code != 0, result.output
+    assert "server_authorization_changed" in result.output
+    (options,) = _Connection.made
+    binding = options["workspace_binding"]
+    assert binding.authorization.refusal() == "server_authorization_changed"  # type: ignore[union-attr]
+    assert connection == [] and exported.exists()

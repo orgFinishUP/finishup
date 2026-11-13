@@ -73,7 +73,7 @@ def test_a_copy_control_binding_names_the_copy_and_nothing_else() -> None:
     assert binding.worktree is None and binding.repository_key is None
     assert "copy_control" not in repr(binding)
     with pytest.raises(ValueError, match="workspace_binding_invalid"):
-        ClientWorkspaceBinding(_CLAIM, authorization=SimpleNamespace(), copy_control=True)  # type: ignore[arg-type]
+        ClientWorkspaceBinding(_CLAIM, repository_key="sha256:" + "c" * 64, copy_control=True)
     with pytest.raises(ValueError, match="workspace_binding_invalid"):
         ClientWorkspaceBinding(_CLAIM, worktree="/srv/app", copy_control=True)
     with pytest.raises(TypeError, match="workspace_binding_invalid"):
@@ -97,6 +97,47 @@ async def test_the_copy_claim_is_the_claim_every_connection_of_this_computer_nam
         await copy_claim(
             cast(ServerTarget, SimpleNamespace(claim_salt="not base64!")), str(repository)
         )
+
+
+# --- the captured target: the record the command read, asked before the hello -------------------
+
+
+def test_the_captured_target_refuses_once_the_record_is_not_the_one_read(
+    remote: ServerTarget,
+) -> None:
+    from finishup.client import targets
+    from finishup.client.authorization import CapturedTarget
+
+    captured = CapturedTarget.of(remote)
+    binding = copy_control_binding(_CLAIM, captured)
+    assert binding.authorization is captured and captured.refusal() is None
+    root = targets.target_root(remote.target_id)
+    with targets.registry_lock():
+        current = targets.read_target(root)
+        assert current is not None
+        targets.write_target(root, targets.reauthorized(current, now="2031-01-01T00:00:00.000Z"))
+    assert captured.refusal() == "server_authorization_changed"
+    assert CapturedTarget("t_00000000", "x", "y").refusal() == "server_authorization_changed"
+
+
+def test_a_captured_target_of_another_target_is_refused_before_any_dial(
+    remote: ServerTarget,
+) -> None:
+    from finishup.client.authorization import CapturedTarget, bind_prebuilt_check
+
+    admitted = cast(Any, SimpleNamespace(grant=SimpleNamespace(target_id="t_another")))
+    with pytest.raises(TargetError, match="server_authorization_changed"):
+        bind_prebuilt_check(admitted, CapturedTarget.of(remote))
+    bound = bind_prebuilt_check(
+        cast(
+            Any,
+            SimpleNamespace(
+                grant=SimpleNamespace(target_id=remote.target_id), refusal=lambda: None
+            ),
+        ),
+        CapturedTarget.of(remote),
+    )
+    assert bound.refusal() is None
 
 
 # --- the admission: the shared gate, never the repository's hold -------------------------------

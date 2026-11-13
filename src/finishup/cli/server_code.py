@@ -17,10 +17,13 @@ before any lookup, prompt or write.
   way. ``server remove`` uses the same to offer forgetting before it removes a target.
 * Each of them reaches the server over copy control (#1357): a connection that carries the copy's
   claim (its keyed digest and its worktree's, the copy's id there) and nothing else, admitted by
-  the shared gate alone, so they work for a repository held from that server or kept on this
-  computer, at level L1, or gone from disk (named by the claim its sync recorded). A held or kept
-  repository this computer has no record of sending is answered here: its claim is never sent.
-  This computer's zero-network policy still refuses them before anything is sent.
+  the shared gate and the check that the target record is still the one read, never by the hold,
+  so they work for a repository held from that server or kept on this computer, at level L1, or
+  gone from disk. The copy is named by this computer's export record (the claim its sync
+  recorded, else the claim on the folder that sync read): the claim that server already saw. A
+  held or kept repository with no export record is answered here, and one whose record cannot
+  name it is refused: nothing else is ever sent for it. This computer's zero-network policy
+  still refuses them before anything is sent.
 * ``exclude add|remove|list`` keeps patterns out of this repository's copy. Adding only ever
   sends less, so any process may; removing sends more, so the owner confirms it on the trusted
   console.
@@ -154,8 +157,13 @@ async def _ask_server(
             claim = await copy_claim(record, worktree)
         except (RepositoryIdentityError, OSError):
             raise ServerCommandRefused("repository_invalid") from None
+    from finishup.client.authorization import CapturedTarget
+
+    # The record this command read, asked before the hello: a target replaced, removed,
+    # authorized again or consented to anew since is refused before the claim leaves.
     client = await connect_service(
-        ControlClientKind.CLI, workspace_binding=copy_control_binding(claim)
+        ControlClientKind.CLI,
+        workspace_binding=copy_control_binding(claim, CapturedTarget.of(record)),
     )
     try:
         _require_captured(record, client.authorization)
@@ -212,22 +220,48 @@ def _server_answer(
         raise ServerCommandRefused(error.reason) from None
 
 
-def _held_and_never_sent(record: ServerTarget, here: RepositoryHere) -> str | None:
-    """The hold phase when ``here``'s repository is held from ``record`` or kept on this computer
-    and this computer has no record of sending it a copy there; otherwise None.
+# A held or kept repository whose export record cannot name its copy: nothing is sent, so a
+# claim that server never saw (another worktree's) never leaves for it.
+_HELD_UNNAMED: Final = (
+    "this repository is held from that server, and this computer's record of the copy it sent "
+    "names no folder that still holds that repository, so FinishUP sent nothing; run this "
+    "command in the folder that copy was sent from, or allow the repository first ('finishup "
+    "server repositories add', confirmed in your terminal)"
+)
 
-    Then nothing is asked of the server: copy control would send a claim that names no copy it
-    could hold from this computer, and the hold forbids sending anything new of that repository.
+
+def _copy_here(
+    record: ServerTarget, here: RepositoryHere, action: str, *, json_output: bool
+) -> _Named | None:
+    """How the copy of ``here``'s repository is named there, or None once answered here.
+
+    This computer's export record names it when there is one (``_named``: the claim its sync
+    recorded, else the claim on the folder that sync read): exactly the claim that server
+    already saw, since an export folder exists only because it asked this computer for a copy
+    over a connection carrying that claim. A held or kept repository is never named otherwise:
+    with no export record it is answered here (nothing was sent, so nothing is asked), and with
+    one that cannot name it, refused. Any other repository with no usable record is named by the
+    worktree here, as every connection from it is.
     """
 
+    from finishup.client.code_export import export_record
     from finishup.client.code_sync import export_folder
     from finishup.client.repository_hold import decide
     from finishup.client.targets import target_root
 
     phase = decide(target_root(record.target_id), record.target_id, here.key).phase
-    if phase is None or export_folder(record.target_id, here.key).exists():
-        return None
-    return phase
+    item = export_record(export_folder(record.target_id, here.key))
+    if item is None:
+        if phase is not None:
+            _answer_never_sent(record, action, phase, json_output=json_output)
+            return None
+        return _Named(worktree=here.worktree)
+    named = _named(record, item)
+    if named.reason is None:
+        return named
+    if phase is None:
+        return _Named(worktree=here.worktree)
+    raise ServerCommandRefused(named.reason, message=_HELD_UNNAMED)
 
 
 def _answer_never_sent(record: ServerTarget, action: str, phase: str, *, json_output: bool) -> None:
@@ -296,11 +330,10 @@ def server_code_list(
         _list_all(record, json_output=json_output)
         return
     here = repository_here(repository)
-    held = _held_and_never_sent(record, here)
-    if held is not None:
-        _answer_never_sent(record, "status", held, json_output=json_output)
+    named = _copy_here(record, here, "status", json_output=json_output)
+    if named is None:
         return
-    answer = _server_answer(record, here.worktree, "status")
+    answer = _server_answer(record, named.worktree, "status", claim=named.claim)
     if json_output:
         import json
 
@@ -381,11 +414,10 @@ def server_code_forget(
         _forget_all(record, json_output=json_output)
         return
     here = repository_here(repository)
-    held = _held_and_never_sent(record, here)
-    if held is not None:
-        _answer_never_sent(record, "forget", held, json_output=json_output)
+    named = _copy_here(record, here, "forget", json_output=json_output)
+    if named is None:
         return
-    answer = _server_answer(record, here.worktree, "forget")
+    answer = _server_answer(record, named.worktree, "forget", claim=named.claim)
     forgot = _field(answer, "forgot")
     if _field(forgot, "complete") is not True:
         # Never a success while something of the copy is left there: say what was deleted,

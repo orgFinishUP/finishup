@@ -15261,13 +15261,16 @@ the manifest, `EVIDENCE_PROVENANCE`), `domain.code_exclusions` (`ALWAYS_EXCLUDED
 - Copy control (#1357): `server code list` and `forget` (with `--all`, and `server remove`'s forget)
   reach `code_copy` over a connection whose `ClientWorkspaceBinding` has `copy_control=True`
   (`client.remote_binding.copy_control_binding`): the hello carries the copy's claim
-  (`copy_claim`: the claim every connection of that repository sends, or the one its export record
-  kept) and no workspace agent, the binding carries no check, worktree or repository key, so the
-  shared gate alone admits it (never the repository hold: ADR-051 decision 8 as amended), the
-  connection is made directly (never through the helper's relay) and `ServiceClient.copy_only`
-  refuses every method but `code_copy` as `method_forbidden` before anything is sent. A held or kept
-  repository with no export record is answered on the client (`hold`, `server_asked: false`) and
-  sends nothing. The server is unchanged.
+  (named by the export record when there is one: the claim it kept, else `copy_claim` on its
+  `root`; otherwise `copy_claim` on the worktree here) and no workspace agent; the binding's only
+  check is `client.authorization.CapturedTarget` (the target record the command read, asked before
+  the hello) and it carries no worktree or repository key, so the shared gate and that check admit
+  it (never the repository hold: ADR-051 decision 8 as amended), the connection is made directly
+  (never through the helper's relay) and `ServiceClient.copy_only` refuses every method but
+  `code_copy` as `method_forbidden` before anything is sent. A held or kept repository with no
+  export record is answered on the client (`hold`, `server_asked: false`) and one whose record
+  cannot name the copy is refused with that record's reason; neither sends anything. The server is
+  unchanged.
 - Server events (bounded, closed tokens): `code_copy_sync_<outcome>`, `code_copy_expiry` and
   `code_snapshot_mismatch`; store refusal `code_copy_forgotten` (an upload begun before a forget).
 

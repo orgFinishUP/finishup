@@ -501,13 +501,15 @@ do; it ends with an error (`code_copy_forget_incomplete`) unless every one was f
 --all` shows each of them the same way (`code_copy_list_incomplete` unless every one was listed).
 
 These commands send the server only the copy's id: a keyed label for the project that names no
-folder, the one every request from this project already carries there. They send nothing of the
-project and let the server read nothing from it, so they work in every state the project can be
-in:
+folder, the same one that server already received when it asked this computer for that copy.
+They send nothing of the project and let the server read nothing from it, so they work in every
+state the project can be in:
 
 - **Held from that server, or kept on this computer.** The copy it already has can still be listed
   and deleted. If this computer has no record of sending that project a copy, FinishUP answers
-  on this computer and asks the server nothing.
+  on this computer and asks the server nothing. If its record no longer names a folder of the
+  project (a copy sent by an earlier FinishUP, from a folder since removed), FinishUP sends
+  nothing and says what to do: run the command in that folder, or allow the project first.
 - **At level L1** (`finishup server code level L1`). New copies stop; the one already there can be
   listed and deleted.
 - **Its folder deleted or moved.** `list --all` and `forget --all` name the copy by the id this

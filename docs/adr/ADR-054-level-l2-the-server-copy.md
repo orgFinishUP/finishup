@@ -313,14 +313,17 @@ server after the answer's own deletes.
 **Copy control** (amended 2026-11-13, issue #1357). The CLI reaches `code_copy` over a connection
 that names the copy and nothing else, so a copy can be listed and forgotten whatever became of its
 repository: held from that server or kept on this computer, at level L1, or gone from disk. Its
-binding (`ClientWorkspaceBinding(copy_control=True)`) carries the copy's claim, never a workspace
-agent, a check of its own, a worktree or a repository key: the shared gate alone admits it (the
-target record, zero-network, the reauthorization and the consent; never the repository hold of
-ADR-051 decision 8, as amended there), it is made directly (the helper's relay binds a claim to that
-hold, so it is never relayed and nothing registers with the helper), and the client refuses every
-method on it but `code_copy` (`method_forbidden`) before anything is sent. The claim is the one
-every connection of that repository sends (`remote_binding.copy_claim`), or the one the export
-record kept (decision 2) once the folder is gone. The server is unchanged: it already keys the
+binding (`ClientWorkspaceBinding(copy_control=True)`) carries the copy's claim and, as its only
+check, `authorization.CapturedTarget` (the target record is still the one the command read, asked
+before the hello); never a workspace agent, a worktree or a repository key. The shared gate and
+that check admit it (the target record, zero-network, the reauthorization and the consent; never
+the repository hold of ADR-051 decision 8, as amended there), it is made directly (the helper's
+relay binds a claim to that hold, so it is never relayed and nothing registers with the helper),
+and the client refuses every method on it but `code_copy` (`method_forbidden`) before anything is
+sent. Where this computer has an export record for the repository, the copy is named by it (the
+claim decision 2 kept, else `remote_binding.copy_claim` on the record's `root`), which is the
+claim that server already received; a held or kept repository is never named otherwise. Without
+a record, a repository that is not held is named by the worktree the command runs in. The server is unchanged: it already keys the
 copy by the claim's commitment, and it names no other repository. Ownership is what it was: the
 claim is keyed under the target's salt, which only this computer holds, and over REST it is
 namespaced by the authenticated principal.

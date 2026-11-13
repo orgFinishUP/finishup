@@ -534,24 +534,36 @@ def export_records(directory: Path) -> tuple[ExportRecord, ...]:
         names = sorted(os.listdir(directory))
     except OSError:
         raise ExportRefused("code_export_unsafe") from None
-    records: list[ExportRecord] = []
-    for name in names:
-        folder = directory / name
-        if not _FOLDER_NAME.match(name):
-            digest = hashlib.sha256(os.fsencode(name)).hexdigest()
-            records.append(ExportRecord(folder, digest[:8], None, False))
-            continue
-        record: _Record | None = None
-        try:
-            if stat.S_ISDIR(os.lstat(folder).st_mode):
-                record = _read_export_record(folder / _EXPORT_NAME)
-        except (OSError, ExportRefused):
-            record = None
-        if record is None:
-            records.append(ExportRecord(folder, name[:8], None, False))
-        else:
-            records.append(ExportRecord(folder, name[:8], record[3], True, record[5]))
-    return tuple(records)
+    return tuple(_record_of(directory / name) for name in names)
+
+
+def _record_of(folder: Path) -> ExportRecord:
+    name = folder.name
+    if not _FOLDER_NAME.match(name):
+        digest = hashlib.sha256(os.fsencode(name)).hexdigest()
+        return ExportRecord(folder, digest[:8], None, False)
+    record: _Record | None = None
+    try:
+        if stat.S_ISDIR(os.lstat(folder).st_mode):
+            record = _read_export_record(folder / _EXPORT_NAME)
+    except (OSError, ExportRefused):
+        record = None
+    if record is None:
+        return ExportRecord(folder, name[:8], None, False)
+    return ExportRecord(folder, name[:8], record[3], True, record[5])
+
+
+def export_record(folder: Path) -> ExportRecord | None:
+    """The export record of one export folder (as ``export_records`` reads it), or None when
+    there is no such folder. Nothing is created, changed or followed."""
+
+    try:
+        os.lstat(folder)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return ExportRecord(folder, folder.name[:8], None, False)
+    return _record_of(folder)
 
 
 # --- policy and request ---------------------------------------------------------------------------

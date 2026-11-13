@@ -480,10 +480,11 @@ class ClientWorkspaceBinding:
     its watch.
 
     ``copy_control`` (``server code list``/``forget``, #1357) names only the copy a server keeps
-    of the claimed repository (ADR-054): no agent, no check of its own and no worktree, so it is
-    admitted by the shared gate alone, never by the repository's hold, is made directly (never
-    relayed by the target's helper, whose relay binds a claim to that hold) and sends no request
-    but ``code_copy`` (``ServiceClient.copy_only``).
+    of the claimed repository (ADR-054): no agent and no worktree, and as its check only that the
+    target record is still the one the command read (``client.authorization.CapturedTarget``),
+    never the repository's hold, so the shared gate and that check admit it; it is made directly
+    (never relayed by the target's helper, whose relay binds a claim to that hold) and sends no
+    request but ``code_copy`` (``ServiceClient.copy_only``).
     """
 
     claim: WorkspaceClaim
@@ -506,10 +507,7 @@ class ClientWorkspaceBinding:
         if type(self.copy_control) is not bool:
             raise TypeError("workspace_binding_invalid")
         if self.copy_control and (
-            self.agent is not None
-            or self.authorization is not None
-            or self.worktree is not None
-            or self.repository_key is not None
+            self.agent is not None or self.worktree is not None or self.repository_key is not None
         ):
             # Copy control names the copy and nothing else (no workspace served, no hold bound).
             raise ValueError("workspace_binding_invalid")
