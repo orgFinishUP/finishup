@@ -546,7 +546,21 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     ),
     # #1162: absent unless the task has correctness advisories and the receipt is terminal.
     # #1240 D5: the closing line is absent when the conclusion is not a known token.
-    (ReceiptSuccessModel, frozenset({"agent_closing_prompt", "correctness_advisory_counts"})),
+    # ADR-051 decision D4: the workspace provenance is absent whenever the binding was read.
+    # ADR-054: the evidence account is absent unless the task's account is level L2's, and the
+    # account's unknown status unless it could not be given.
+    (
+        ReceiptSuccessModel,
+        frozenset(
+            {
+                "agent_closing_prompt",
+                "correctness_advisory_counts",
+                "evidence_provenance",
+                "evidence_provenance_unknown",
+                "workspace_provenance",
+            }
+        ),
+    ),
     (
         ReviewInputManifestModel,
         frozenset(
@@ -2375,6 +2389,15 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
     covered["ReceiptSuccessModel", "agent_closing_prompt"] = (
         "test_correctness_advisory_fields_omit_when_unset_and_refuse_null"
     )
+    covered["ReceiptSuccessModel", "workspace_provenance"] = (
+        "test_correctness_advisory_fields_omit_when_unset_and_refuse_null"
+    )
+    covered["ReceiptSuccessModel", "evidence_provenance"] = (
+        "test_correctness_advisory_fields_omit_when_unset_and_refuse_null"
+    )
+    covered["ReceiptSuccessModel", "evidence_provenance_unknown"] = (
+        "test_correctness_advisory_fields_omit_when_unset_and_refuse_null"
+    )
     covered["StatusHistoryItemV14Model", "review_input_manifest"] = (
         "test_nested_multi_agent_results_omit_unset_fields"
     )
@@ -2652,6 +2675,18 @@ def test_correctness_advisory_fields_omit_when_unset_and_refuse_null() -> None:
     assert "agent_closing_prompt" not in parsed.model_dump(mode="json", exclude_unset=True)
     with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
         ReceiptSuccessModel.model_validate({**receipt, "agent_closing_prompt": None})
+    # ADR-051 decision D4: an unknown workspace provenance likewise; absent when it was read.
+    assert "workspace_provenance" not in parsed.model_dump(mode="json", exclude_unset=True)
+    with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+        ReceiptSuccessModel.model_validate({**receipt, "workspace_provenance": None})
+    # ADR-054: a level-L2 evidence account likewise; absent for every other task.
+    assert "evidence_provenance" not in parsed.model_dump(mode="json", exclude_unset=True)
+    with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+        ReceiptSuccessModel.model_validate({**receipt, "evidence_provenance": None})
+    # And its unknown status: absent whenever the account was given.
+    assert "evidence_provenance_unknown" not in parsed.model_dump(mode="json", exclude_unset=True)
+    with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+        ReceiptSuccessModel.model_validate({**receipt, "evidence_provenance_unknown": None})
 
 
 def test_review_mode_omits_unset_reason_and_switch() -> None:

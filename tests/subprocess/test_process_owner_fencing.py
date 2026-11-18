@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import TypedDict, cast
 
+from credential_store_guard import NO_PLATFORM_CREDENTIAL_STORE
+
 _SERVICE_PROBE = "from finishup.service.daemon import main; main()"
 _CLIENT_PROBE = r"""
 import anyio, json, sys
@@ -85,6 +87,8 @@ def isolated_environment(root: Path) -> dict[str, str]:
         "PYTHONHASHSEED": "0",
         "TZ": "UTC",
         "_FINISHUP_TEST_INSTALLATION": os.fspath(installation),
+        # Built from scratch, so the suite's credential-store pin is not inherited: add it.
+        **NO_PLATFORM_CREDENTIAL_STORE,
     }
 
 

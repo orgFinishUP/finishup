@@ -28,6 +28,8 @@ _CODEC_ONLY_FAMILIES = frozenset(
     {
         "coordination_context_recorded",
         "coordination_disposition_recorded",
+        # ADR-054 (U20): service-written only; its codec and replay are covered by unit tests.
+        "content_forgotten",
     }
 )
 

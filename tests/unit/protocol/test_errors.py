@@ -327,11 +327,20 @@ receipt_json_shape_invalid
 receipt_semantic_withheld_items_not_canonical
 redaction_target_required
 ref_mirror_mismatch
+remote_auth_failed
+remote_identity_changed
+remote_incompatible
+remote_kind_unavailable
+remote_service_not_running
+remote_unreachable
+repository_egress_held
+repository_egress_kept
 repository_identity_mismatch
 repository_identity_required
 request_identity_conflict
 request_timeout
 requested_command_placeholder
+requires_server_host
 resolution_attempt_required
 response_fields_invalid
 response_projection_failed
@@ -358,9 +367,13 @@ schema_not_found
 schema_path_unsafe
 schema_reference_unresolved
 schema_version_mismatch
+selection_overridden
 selector_conflict
 semantic_provenance_json_shape_invalid
 semantic_redacted_values_invalid
+server_authorization_changed
+server_level_unavailable
+server_profile_changed
 service_draining
 service_generation_changed
 service_handshake_failed
@@ -377,6 +390,8 @@ start_lease_pending
 start_runtime_rebind_retry_ready
 start_state_inconsistent
 stored_result_shape_invalid
+target_reauthorization_required
+target_root_is_remote
 timestamp_not_utc
 timestamp_out_of_range
 timestamp_submillisecond_precision
@@ -387,7 +402,13 @@ unsorted_set_field
 unsupported_json_type
 unsupported_payload_type
 verification_criterion_not_in_task
+workspace_agent_refused
+workspace_agent_unavailable
+workspace_binding_conflict
+workspace_ref_not_portable
+workspace_ref_not_served
 workspace_task_exists
+zero_network_remote_selected
 """.splitlines()
 )
 
@@ -557,7 +578,12 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 356  # #1244 +4 delivery_*; #1190 review_mode_parent_is_check
+    # #1244 +4 delivery_*; #1190 review_mode_parent_is_check; ADR-051 +15 workspace/target/remote
+    # (zero_network_remote_selected, the maintainer's decision of 2026-11-07, and
+    # remote_kind_unavailable, the remote kinds this release keeps closed); +2 the repository hold
+    # and the owner's kept choice (2026-11-07, round 4); +1 server_authorization_changed (ADR-052).
+    # +1 workspace_ref_not_served, rule R (run u8).
+    assert len(source_values) == 377
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

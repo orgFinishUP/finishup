@@ -353,7 +353,7 @@ class TestCliProjection:
         model = PublicErrorModel.model_validate(
             {
                 "code": "SERVICE_UNAVAILABLE",
-                "message": "The local operation timed out and may still have committed.",
+                "message": "The operation timed out and may still have committed.",
                 "retryable": True,
                 "correlation_id": _CORRELATION_ID,
                 "safe_details": {
@@ -493,7 +493,8 @@ class TestLocalReasonRatchet:
 
         Its disposition was recorded on the protocol side as owned by a later sub-issue of #739,
         so it must resolve there and stay out of the local map, which the disjointness gate
-        enforces.
+        enforces. ADR-051's ``target_root_is_remote`` is the same shape: ``service run`` raises it
+        locally, and its directive is the protocol one every surface resolves.
         """
 
         from finishup.cli.exits import LOCAL_REASONS
@@ -504,7 +505,7 @@ class TestLocalReasonRatchet:
             if continuation_for_local_reason(reason) is None
             and local_reason_has_disposition(reason)
         }
-        assert through_protocol == {"service_draining"}
+        assert through_protocol == {"service_draining", "target_root_is_remote"}
 
     def test_a_new_local_reason_without_a_directive_fails_at_import(self) -> None:
         import finishup.cli.exits as exits
@@ -551,3 +552,298 @@ class TestLocalReasonRatchet:
     def test_non_string_input_is_refused(self) -> None:
         assert local_reason_has_disposition(None) is False
         assert local_reason_has_disposition("not_a_reason_at_all") is False
+
+
+class TestWorkspaceBindingAndServerTargetReasons:
+    """ADR-051: every binding, server-target and remote-connection reason carries a directive."""
+
+    _EXPECTED: dict[str, str] = {
+        "workspace_binding_conflict": "workspace_binding_correction",
+        "workspace_ref_not_portable": "workspace_handle_required",
+        "requires_server_host": "server_host_command_required",
+        "target_root_is_remote": "remote_target_no_local_service",
+        "target_reauthorization_required": "server_reauthorization_required",
+        "selection_overridden": "server_selection_overridden",
+        "remote_unreachable": "remote_server_test",
+        "remote_auth_failed": "remote_credential_repair",
+        "remote_identity_changed": "remote_identity_verify",
+        "remote_service_not_running": "remote_service_start_required",
+        "remote_incompatible": "remote_release_mismatch",
+        "zero_network_remote_selected": "zero_network_local_server_required",
+        "remote_kind_unavailable": "server_on_this_computer_required",
+        "repository_egress_held": "repository_send_decision_required",
+        "repository_egress_kept": "repository_kept_on_this_computer",
+        "server_authorization_changed": "server_connection_renew",
+    }
+
+    @pytest.mark.parametrize("reason", sorted(_EXPECTED))
+    def test_each_reason_is_registered_and_resolves_to_its_fixed_directive(
+        self, reason: str
+    ) -> None:
+        token = self._EXPECTED[reason]
+        assert reason in PROTOCOL_REASON_CODES
+        assert continuation_for_reason(reason) == token
+        assert REASON_CODE_CONTINUATIONS[reason] == token
+        entry = directive_for(token)
+        assert entry is not None
+        # Fixed repository text: no placeholder a caller value could fill, no host or path slot.
+        assert "{" not in entry.directive and "<" not in entry.directive
+        assert entry.directive.isascii()
+        # A CLI that raises the reason locally resolves it through the protocol side.
+        assert continuation_for_local_reason(reason) is None
+        assert local_reason_has_disposition(reason)
+        error = PublicOperationError(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            "The selected FinishUP server could not serve this request.",
+            True,
+            correlation_id=_CORRELATION_ID,
+            safe_details={"reason_code": reason},
+        )
+        assert error.safe_details == {"reason_code": reason, "continuation": token}
+
+    def test_the_workspace_agent_reasons_are_receipt_gaps_with_no_directive(self) -> None:
+        """ADR-051: an agent that refused or gave no answer is a check-time change gap with its
+        own fixed receipt sentence, never a public error, so it carries no directive; the two
+        tokens that once stood for one are gone from every registry (refusal-guide review)."""
+
+        for reason in ("workspace_agent_refused", "workspace_agent_unavailable"):
+            assert reason in PROTOCOL_REASON_CODES
+            assert reason not in REASON_CODE_CONTINUATIONS
+            assert continuation_for_reason(reason) is None
+            assert local_reason_has_disposition(reason)
+        for token in ("workspace_agent_reconnect", "workspace_agent_refusal_review"):
+            assert directive_for(token) is None
+            assert token not in CONTINUATION_TOKENS
+
+    def test_the_handle_directive_names_a_start_an_agent_can_send(self) -> None:
+        # An agent cannot know the connection's handle; it can send the pair, and the FinishUP
+        # MCP bridge and CLI put the handle in place of the path. The directive must not speak
+        # only of a path the start may never have sent.
+        entry = directive_for("workspace_handle_required")
+        assert entry is not None
+        assert "external_ref" in entry.directive
+        assert "canonical absolute workspace_ref" in entry.directive
+        assert "naming an absolute" not in entry.directive
+        assert entry.nudge is not None and "in place of" in entry.nudge
+
+    def test_remote_connection_phases_are_their_own_reason_codes(self) -> None:
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+        # ``remote_kind_unavailable`` refuses a command (``server add``, ``use``, ``login``), never
+        # a connection: a connection from a remote root keeps ``target_root_is_remote``.
+        assert "remote_kind_unavailable" not in REMOTE_CONNECTION_PHASES
+        assert REMOTE_CONNECTION_PHASES == frozenset(
+            reason
+            for reason in self._EXPECTED
+            if reason.startswith("remote_") and reason != "remote_kind_unavailable"
+        ) | {
+            "target_reauthorization_required",
+            "target_root_is_remote",
+            "zero_network_remote_selected",
+            "repository_egress_held",
+            "repository_egress_kept",
+            "server_authorization_changed",
+            "server_profile_changed",
+            "server_level_unavailable",
+        }
+        assert REMOTE_CONNECTION_PHASES <= PROTOCOL_REASON_CODES
+        for phase in REMOTE_CONNECTION_PHASES:
+            assert re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase)
+            assert continuation_for_reason(phase) is not None
+
+    @pytest.mark.parametrize(
+        ("phase", "token"),
+        [
+            ("server_profile_changed", "remote_reconsent"),
+            ("server_level_unavailable", "server_level_decision_required"),
+        ],
+    )
+    def test_a_changed_profile_or_level_asks_the_owner_and_never_agrees_for_them(
+        self, phase: str, token: str
+    ) -> None:
+        """ADR-052 (O5): only the owner agrees again, on their own terminal, with 'finishup
+        server use'; the agent never does it for them. A level above the consent is refused
+        before anything is sent; a changed profile may also be the server's own refusal of what
+        it was sent, so it says only that the server did no work for it (review of layer 3:
+        B2)."""
+
+        assert continuation_for_reason(phase) == token
+        entry = directive_for(token)
+        assert entry is not None and entry.nudge is not None
+        if phase == "server_profile_changed":
+            assert "before that server did any work for it" in entry.directive
+            assert "nothing" not in entry.directive
+        else:
+            assert "before anything was sent" in entry.directive
+        assert "finishup server use" in entry.nudge
+        assert "Never agree for them" in entry.nudge
+        assert "stays there" not in entry.directive
+
+    @pytest.mark.parametrize(
+        "token",
+        ["remote_server_test", "remote_credential_repair", "remote_service_start_required"],
+    )
+    def test_a_remote_failure_that_may_follow_a_sent_call_never_claims_nothing_was_recorded(
+        self, token: str
+    ) -> None:
+        # A connection can end, a key be revoked or the remote service stop while a call is in
+        # flight, after the server may already have recorded it; the directive says to repeat it
+        # under its original identity rules (the same request_id for a write), never that it is
+        # safe to treat as unsent.
+        entry = directive_for(token)
+        assert entry is not None
+        assert "nothing was recorded" not in entry.directive
+        assert "sent nothing" not in entry.directive
+        assert entry.directive.endswith("under its original identity rules.")
+
+    def test_the_zero_network_refusal_says_why_and_the_one_way_out(self) -> None:
+        # Maintainer decision of 2026-11-07: this computer's zero-network policy and a server
+        # elsewhere are never in force together; the refusal names why, that nothing was sent,
+        # and the one command that fixes it, and never tells an agent to do it for the owner.
+        entry = directive_for("zero_network_local_server_required")
+        assert entry is not None
+        assert "make no network connections" in entry.directive
+        assert "nothing was sent" in entry.directive
+        assert "'finishup server use local'" in entry.directive
+        assert entry.nudge is not None and "Never select a FinishUP server" in entry.nudge
+
+    def test_the_closed_remote_kinds_say_what_this_release_connects_to(self) -> None:
+        # Every kind is open from layer 5: the refusal of an address this release names none of
+        # says which servers are reached, that nothing was added, selected or sent, and the
+        # owner's way back, and never tells an agent to choose a server itself.
+        entry = directive_for("server_on_this_computer_required")
+        assert entry is not None
+        assert "connects to servers on this computer, over SSH and over HTTPS" in entry.directive
+        assert "nothing was added, selected or sent" in entry.directive
+        assert "'finishup server use local'" in entry.directive
+        assert entry.nudge == "Never select or add a FinishUP server for the owner."
+
+    def test_a_held_repository_asks_once_and_a_kept_one_never_asks_again(self) -> None:
+        # Maintainer decision of 2026-11-07, round 4: a repository whose privacy policy here
+        # allows no network use is held from a server elsewhere; the agent asks the user once,
+        # only the user allows it, and a decline is remembered with 'keep', which an agent may
+        # run. A kept repository is never asked about again. Both refuse a request before
+        # anything from the repository was sent, and say only that (never "nothing was sent",
+        # which could read as a hold over what that server received before; design v2 8.10).
+        held = directive_for("repository_send_decision_required")
+        assert held is not None and held.nudge is not None
+        assert "allows no network use" in held.directive
+        assert "this request was refused before anything from it was sent" in held.directive
+        assert "Ask the user once" in held.directive
+        assert "'finishup server repositories add'" in held.directive
+        assert held.nudge.startswith("Then repeat it.")
+        assert "'finishup server repositories keep'" in held.nudge
+        assert "do not ask again" in held.nudge and "Never run 'add'" in held.nudge
+        kept = directive_for("repository_kept_on_this_computer")
+        assert kept is not None and kept.nudge is not None
+        assert "kept on this computer" in kept.directive
+        assert "this request was refused before anything from it was sent" in kept.directive
+        assert "do not ask about it again" in kept.directive
+        for entry in (held, kept):
+            assert "nothing from it was sent" not in entry.directive
+        assert "Ask" not in kept.directive
+        assert "'finishup server repositories add'" in kept.nudge
+        for entry in (held, kept):
+            assert entry.guidance_uri is not None
+
+    def test_a_changed_authorization_says_sending_stopped_and_the_outcome_is_unknown(self) -> None:
+        # ADR-052: an open connection to a server elsewhere ends when what it was authorized
+        # under changes; it already sent something, so the words say FinishUP stopped sending and
+        # that what the server received stays there, never that nothing was sent (design v2 8.10).
+        # A request already sent is never resent (ADR-051: no replay across targets), so its
+        # outcome is unknown, and only later requests follow the selection (O1).
+        entry = directive_for("server_connection_renew")
+        assert entry is not None and entry.nudge is not None
+        assert "authorized under changed" in entry.directive
+        assert "stopped sending over it" in entry.directive
+        assert "what that server received stays there" in entry.directive
+        assert "may be recorded there; FinishUP never resends it" in entry.directive
+        assert "nothing" not in entry.directive
+        assert "same identity" not in entry.directive
+        assert entry.nudge.startswith("Later requests use the current selection")
+        assert "outcome is unknown" in entry.nudge
+        assert "Never change servers or keys." in entry.nudge
+        assert entry.guidance_uri is not None
+
+    def test_the_new_tokens_are_protocol_tokens_not_local_ones(self) -> None:
+        tokens = set(self._EXPECTED.values())
+        assert tokens <= CONTINUATION_TOKENS
+        assert len(tokens) == len(self._EXPECTED)
+        assert tokens <= set(REASON_CODE_CONTINUATIONS.values())
+
+    def test_a_selected_remote_root_points_to_this_computer_and_a_new_session(self) -> None:
+        # The way back from a selection is 'finishup server use local'; an open agent session's
+        # MCP bridge keeps the root it started with, so the owner starts a new one. A stale
+        # disclosure of an SSH server (open since layer 4) is confirmed again by the owner with
+        # 'finishup server use NAME' on their own terminal; an HTTPS or port one only later.
+        for token in ("remote_target_no_local_service", "server_reauthorization_required"):
+            entry = directive_for(token)
+            assert entry is not None
+            assert "Ask the owner to run 'finishup server use local'" in entry.directive
+            assert entry.directive.endswith("then start a new session.")
+            assert "with its name" not in entry.directive
+        remote = directive_for("remote_target_no_local_service")
+        assert remote is not None and "server use NAME" not in remote.directive
+        stale = directive_for("server_reauthorization_required")
+        assert stale is not None
+        assert "older disclosure" in stale.directive
+        assert "'finishup server use NAME' on their own terminal," in stale.directive
+
+    def test_a_remote_root_an_override_names_points_to_the_override(self) -> None:
+        # With an isolation variable or a pinned launcher naming the root, 'finishup server use
+        # local' answers selection_overridden: the way back is to clear that override. The token
+        # is attached by the client that knows its root's source, never through a reason code.
+        from finishup.client.targets import REMOTE_ROOT_OVERRIDE_CONTINUATION
+
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION == "remote_root_override_clear"
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION in CONTINUATION_TOKENS
+        assert REMOTE_ROOT_OVERRIDE_CONTINUATION not in set(REASON_CODE_CONTINUATIONS.values())
+        entry = directive_for(REMOTE_ROOT_OVERRIDE_CONTINUATION)
+        assert entry is not None
+        assert entry.directive.startswith("FINISHUP_ISOLATED_ROOT or a pinned launcher names")
+        assert "nothing was sent or started" in entry.directive
+        assert "unset it or use an unpinned launcher" in entry.directive
+        assert entry.directive.endswith("then start a new agent session.")
+        assert "Ask the owner to run 'finishup server use local'" not in entry.directive
+        assert entry.nudge is not None
+        assert "YOETZ_ISOLATED_ROOT" in entry.nudge
+        assert "'finishup server use local' cannot override" in entry.nudge
+
+    @pytest.mark.parametrize(
+        "phase",
+        [
+            "target_root_is_remote",
+            "target_reauthorization_required",
+            "zero_network_remote_selected",
+        ],
+    )
+    def test_a_remote_root_refusal_resolves_by_what_named_the_root(
+        self, phase: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import finishup.config.paths as paths
+        from finishup.client.targets import remote_root_continuation
+        from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+        for name in ISOLATED_ROOT_ENV_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: None)
+        # The saved selection (or nothing explicit): the phase's own registry continuation.
+        assert remote_root_continuation(phase) == REASON_CODE_CONTINUATIONS[phase]
+        # A pinned launcher, then an isolation variable under either spelling.
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: object())
+        assert remote_root_continuation(phase) == "remote_root_override_clear"
+        monkeypatch.setattr(paths, "read_runtime_pin", lambda: None)
+        for name in ISOLATED_ROOT_ENV_NAMES:
+            monkeypatch.setenv(name, "/srv/finishup-root")
+            assert remote_root_continuation(phase) == "remote_root_override_clear"
+            monkeypatch.delenv(name)
+
+    def test_any_other_reason_resolves_as_the_registry_does_whatever_named_the_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finishup.client.targets import remote_root_continuation
+        from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+
+        monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], "/srv/finishup-root")
+        for reason in ("remote_unreachable", "selection_overridden", "request_timeout"):
+            assert remote_root_continuation(reason) == continuation_for_reason(reason)

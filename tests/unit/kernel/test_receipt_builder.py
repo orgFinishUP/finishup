@@ -2140,6 +2140,8 @@ def test_a_rejection_accepted_row_stops_blocking_only_where_the_receipt_disclose
         ("changed_during_capture", "kept changing while it was read"),
         ("git_failed", "a Git command failed or ran out of time"),
         ("repository_mismatch", "named a different repository"),
+        # ADR-052: what a check records once its agent's authorization lapsed mid-task.
+        ("workspace_agent_unavailable", "gave no usable answer to the server's read"),
     ),
 )
 def test_check_time_change_unavailable_reason_is_a_plain_sentence_in_every_format(

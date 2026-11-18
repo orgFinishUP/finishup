@@ -115,6 +115,11 @@ class StatusOutcome:
     # Set only for an ``active`` read made for a post-compaction start (ADR-044): the facts the
     # same status result carried, plus the declared deliverables when the second read answered.
     recap: RecapFacts | None = None
+    # Set only for an ``unavailable`` read the shared authorization gate refused or ended
+    # (``client.authorization.AUTHORIZATION_REFUSALS``, ADR-052): ``zero_network_remote_selected``,
+    # ``target_reauthorization_required``, ``target_root_is_remote`` for any other remote root
+    # (ADR-051 decision 8), a held or kept repository, or ``server_authorization_changed``.
+    phase: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +169,90 @@ _LOCKED_CONTEXT: Final = (
     "FinishUP vault is locked for this mapped session; no live receipt can be promised."
     + render_hook_recovery_suffix("vault_locked")
 )
+
+
+def remote_refusal_context(phase: str) -> str:
+    """The hook text for a connection this computer refused before any dial (ADR-051 decision 8).
+
+    ``phase`` is one of ``targets.REMOTE_ROOT_REFUSALS`` (``zero_network_remote_selected``,
+    ``target_reauthorization_required``, or ``target_root_is_remote`` for any other remote root,
+    which this release does not connect to): not an outage of a service, so the text names the
+    closed reason, the directive of its way back (that nothing was sent, why, and what the owner
+    does: ``finishup server use local`` when the selection names the root, unsetting the variable
+    or using an unpinned launcher when one names it, ``targets.remote_root_continuation``) and its
+    continuation token, as MCP ``start`` and the CLI do, and never a hook budget that was not
+    spent or a service still to start.
+    """
+
+    from finishup.client.targets import remote_root_continuation
+    from finishup.protocol.recovery import directive_for
+
+    token = remote_root_continuation(phase)
+    directive = directive_for(token)
+    assert token is not None and directive is not None
+    nudge = "" if directive.nudge is None else f" {directive.nudge}"
+    return f"{_refusal_head(phase)} ({phase}). {directive.directive}{nudge} Continuation: {token}. "
+
+
+def _refusal_head(phase: str) -> str:
+    head = _REFUSAL_HEADS.get(phase)
+    if head is not None:
+        return head
+    if phase in _REFUSED_AFTER_SENDING:
+        # Also the server's own refusal of a hello or request it was sent: the shared summary
+        # says only that it did no work for it, never that nothing was sent.
+        from finishup.client.authorization import refusal_summary
+
+        summary = refusal_summary(phase) or ""
+        return summary[:1].upper() + summary[1:]
+    return _REFUSAL_HEAD
+
+
+_REFUSAL_HEAD: Final = "FinishUP refused the selected server's connection before anything was sent"
+# A phase that may come after something was sent, whose head is the shared summary.
+_REFUSED_AFTER_SENDING: Final = frozenset({"server_profile_changed"})
+_UNREACHED_HEAD: Final = "FinishUP could not reach the selected server elsewhere"
+# A connection whose authorization changed (ADR-052) had sent things before it ended; a server
+# that could not be reached through its transport refused nothing itself.
+_REFUSAL_HEADS: Final[dict[str, str]] = {
+    "remote_unreachable": _UNREACHED_HEAD,
+    "remote_auth_failed": "The selected server elsewhere refused this computer's credentials",
+    "remote_identity_changed": (
+        "FinishUP did not connect: the selected server elsewhere could not be verified"
+    ),
+    "remote_service_not_running": (
+        "The selected server elsewhere is reachable, but its FinishUP service is not running"
+    ),
+    "remote_incompatible": "The selected server elsewhere runs another FinishUP release",
+    "server_authorization_changed": (
+        "FinishUP ended the selected server's connection before sending more"
+    ),
+}
+
+
+def unavailable_context(phase: str | None) -> str:
+    """The SessionStart text for an unavailable service; a refusal before any dial names itself.
+
+    ``phase`` is set only when this computer refused the selected server before anything was sent
+    (``targets.REMOTE_ROOT_REFUSALS``, ADR-051 decision 8); every other unavailable read keeps
+    the plain text. A repository held from the selected server elsewhere, or kept on this
+    computer, is checked first and named with its own text (round 5's hold).
+    """
+
+    if phase in {"repository_egress_held", "repository_egress_kept"}:
+        # A repository held from the selected server elsewhere, or kept on this computer (ADR-051
+        # decision 8): named with the same text on every host, in its mapped-session form.
+        from finishup.client.repository_hold import hook_context
+
+        return hook_context(phase, "mapped")
+    from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+    if phase in REMOTE_CONNECTION_PHASES:
+        # Every other refusal of the shared gate (ADR-052): zero-network, an older disclosure,
+        # a remote root, a changed profile or level, or a changed authorization; or a server
+        # elsewhere that could not be reached (its own repair).
+        return remote_refusal_context(phase).rstrip()
+    return _UNAVAILABLE_CONTEXT
 
 
 def _stale_mapping_context(
@@ -350,6 +439,9 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "request_timeout": "retry",
         "service_draining": "retry",
         "service_generation_changed": "retry",
+        # A request on a connection bound to an older server-profile revision (ADR-052): the client
+        # ends the connection with phase ``server_profile_changed``; the hook reports it unavailable.
+        "server_profile_changed": "unavailable",
         "read_projection_failed": "retry",
         "response_projection_failed": "retry",
         "privacy_projection_unavailable": "retry",
@@ -1543,7 +1635,9 @@ async def _read_status(
     """Read the mapped session's status through a repository-bound connection.
 
     Without an explicit ``connect`` the real connector is bound to
-    ``workspace_locator`` so the daemon's repository fence can admit the read.
+    ``workspace_locator`` so the daemon's repository fence can admit the read. A selected server
+    this computer refused before anything was sent (ADR-051 decision 8) keeps that refusal's
+    closed reason, so the context names it.
     """
 
     client: _StatusClient | None = None
@@ -1593,7 +1687,12 @@ async def _read_status(
         )
         return StatusOutcome("active", mapping=updated, recap=facts)
     except ControlError as error:
-        return StatusOutcome(_CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"))
+        from finishup.protocol.errors import REMOTE_CONNECTION_PHASES
+
+        return StatusOutcome(
+            _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"),
+            phase=error.phase if error.phase in REMOTE_CONNECTION_PHASES else None,
+        )
     except Exception:
         return StatusOutcome("unavailable")
     finally:
@@ -1611,6 +1710,30 @@ async def _read_status(
 # #209-#213 hook-latency loop. The MCP bridge (`finishup mcp serve`) starts for the same Codex
 # session, knows its own serving route from its argv, and emits the `registration_drift`
 # diagnostic for free; that is the single emitter. See docs/runbooks/codex-integration.md.
+
+
+def _refresh_repository_report(
+    locator: str | None, payload: Mapping[str, JsonValue], *, deadline: float
+) -> None:
+    """The observe pass's own session-start report refresh, for a resume or compact re-ground.
+
+    Canonicalized as the observe pass names the worktree; bounded by what is left of ``deadline``
+    (half a second at most). Never raises.
+    """
+
+    if locator is None:
+        return
+    with contextlib.suppress(Exception):
+        from finishup.adapters.workspace_binding import canonical_workspace_locator
+        from finishup.cli import observe_hooks
+
+        observe_hooks._refresh_repository_report(  # pyright: ignore[reportPrivateUsage]
+            "SessionStart",
+            payload,
+            canonical_workspace_locator(locator),
+            skip_service=False,
+            deadline=deadline,
+        )
 
 
 def handle_session_start(
@@ -1774,6 +1897,10 @@ def handle_session_start(
                 return 0
 
             selection = resolve_session_workspace(workspace, payload)
+            # ADR-051 decision 8: before the status read connects, this computer's FinishUP is
+            # asked about the session's repository when its report is missing or stale, so a
+            # repository just found to allow no network use is held in this very pass.
+            _refresh_repository_report(selection.locator, payload, deadline=entered + 2.1)
 
             async def _run() -> StatusOutcome:
                 return await _read_status(
@@ -1896,7 +2023,9 @@ def handle_session_start(
                     stdout,
                 )
                 return 0
-            _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
+            _stdout_json(
+                _context_output("SessionStart", unavailable_context(outcome.phase)), stdout
+            )
             return 0
     except Exception as exc:
         _note_oversize_hook_ingress(exc, "SessionStart", workspace=workspace, _state=_state)

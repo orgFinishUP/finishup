@@ -703,3 +703,15 @@ def test_tampered_store_lock_rows_are_dropped_on_read(tmp_path: Path) -> None:
     assert len(cast(tuple[object, ...], summary["store_lock_events"])) == 1
     reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
     assert reasons["store_lock_timeout"]["count"] == 1
+
+
+@pytest.mark.parametrize("reason", ["repository_egress_held", "repository_egress_kept"])
+def test_a_held_or_kept_repository_is_a_closed_diagnostic_reason(
+    tmp_path: Path, reason: str
+) -> None:
+    """ADR-051 decision 8 (2026-11-07, round 4): a SessionStart or drain that found the session's
+    repository held from the server elsewhere, or kept here, names it; no path rides with it."""
+
+    record_hook_diagnostic(reason, "SessionStart", _state=tmp_path)
+    row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text("utf-8"))
+    assert row["reason"] == reason

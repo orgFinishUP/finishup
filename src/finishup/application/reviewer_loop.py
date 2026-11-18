@@ -63,12 +63,23 @@ from finishup.adapters.task_input_read import ReadDeadline
 from finishup.application.reviewer_broker import ReadExchangeFull, ReviewerBroker
 from finishup.domain.reviewer_reads import MAX_REVIEWER_EXCHANGES
 from finishup.ports.semantic import Deadline, ReviewStepRefused, SemanticJudgment
+from finishup.ports.workspace_agent import WorkspaceAgentUnavailable
 from finishup.protocol.canonical import JsonValue, canonical_encode
 
-__all__ = ["ReviewOutcome", "ReviewerLoop", "ReviewerModel", "ReviewerModelError", "Turn"]
+__all__ = [
+    "WORKSPACE_AGENT_UNAVAILABLE_ENDING",
+    "ReadStop",
+    "ReviewOutcome",
+    "ReviewerLoop",
+    "ReviewerModel",
+    "ReviewerModelError",
+    "Turn",
+]
 
 # Five read attempts, the final judgment and one format repair, on the original deadline.
 MAX_MODEL_TURNS: Final = MAX_REVIEWER_EXCHANGES
+# The ending of a review whose read a claim-bound task's workspace agent did not answer (ADR-051).
+WORKSPACE_AGENT_UNAVAILABLE_ENDING: Final = "workspace_agent_unavailable"
 LOCAL_READ_SECONDS: Final = 5.0
 FORMAT_ERROR: Final = (
     "format_error: {code}. Reply with exactly one read action or final_judgment that matches the "
@@ -84,6 +95,27 @@ FINAL_PHASE: Final = "FinishUP: read allowance or time reserve reached. Return f
 # #1242: a read whose action left no room for its result is not served; the notice takes the
 # final-phase notice's place (it is no longer, so the room every read keeps for that carries it).
 READ_NOT_SERVED: Final = "FinishUP: read not served, no room left. Return final_judgment now."
+
+
+class ReadStop:
+    """One read's stop on the loop's clock.
+
+    Called, it answers whether the stop has passed: the ``expired`` every trusted reader takes.
+    ``seconds_left`` is the time until it, so a read answered elsewhere (a claim-bound task's
+    workspace agent, ADR-051) gives its answer no more time than a local read would still run.
+    """
+
+    __slots__ = ("_clock", "_stop_at")
+
+    def __init__(self, clock: Callable[[], float], stop_at: float) -> None:
+        self._clock = clock
+        self._stop_at = stop_at
+
+    def __call__(self) -> bool:
+        return self._clock() >= self._stop_at
+
+    def seconds_left(self) -> float:
+        return self._stop_at - self._clock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,13 +275,9 @@ class ReviewerLoop:
                 left = self.remaining() - self.reserve
                 if left <= 0:
                     return self.exit("deadline")  # the model's turn spent the read's time
-                stop_at = self.clock() + min(LOCAL_READ_SECONDS, left)
+                stop = ReadStop(self.clock, self.clock() + min(LOCAL_READ_SECONDS, left))
                 try:
-                    observation = await self.broker.execute(
-                        reply,
-                        lambda: self.clock() >= stop_at,
-                        self.messages[-1].content,
-                    )
+                    observation = await self.broker.execute(reply, stop, self.messages[-1].content)
                 except ReadExchangeFull as e:
                     if not e.verdict_fits:
                         # The read action alone outgrew the room its exchange has under the cap:
@@ -269,6 +297,10 @@ class ReviewerLoop:
             return self.exit("deadline")
         except ReviewStepRefused:
             return self.exit("step_refused")
+        except WorkspaceAgentUnavailable:
+            # A claim-bound task's read got no answer from its workspace agent (ADR-051): the
+            # review ends unfinished under that closed reason, never with a judgment.
+            return self.exit(WORKSPACE_AGENT_UNAVAILABLE_ENDING)
 
     def remaining(self) -> float:
         """Seconds left; the deadline is checked after every await, never consumed late."""

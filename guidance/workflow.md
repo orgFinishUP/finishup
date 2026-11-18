@@ -411,7 +411,7 @@ Continue authorized implementation and focused verification through completion. 
 completed work from an unmet required review; never silently substitute local-check coverage
 for required AI-powered review. If required review is unavailable or fails, report completed
 implementation/structural checks separately from the unmet requirement and do not claim overall
-completion. Describe local ledger writes separately from product-file changes.
+completion. Describe FinishUP ledger writes separately from product-file changes.
 
 ## Errors and continuations
 
@@ -427,7 +427,12 @@ continuation that is a correction rather than a retry: the schema validator reje
 before any write, so correct the named field and submit the corrected body once under a new
 `request_id`; do not resend it unchanged, and do not treat the rejection as an ambiguous write.
 A timed-out `start` carries `start_timeout_same_identity`: replay the exact start once with the
-same `request_id`, as the recovery table's lost-start branch requires. Read
+same `request_id`, as the recovery table's lost-start branch requires. With a FinishUP server on
+another machine, a connection serves only the repository worktree it was started in; a `start`
+naming another folder is refused `workspace_ref_not_served` and nothing is sent. Under
+`workspace_not_served_tell_user` (an MCP connection), tell the user in one line and carry on
+without FinishUP for that folder; under `workspace_folder_run_required` (a command), run the
+command from the named folder. Never name another folder to get a task started. Read
 [Recovery](coverage-and-receipts.md#recovery) only when an error, outage, or inherited
 unavailability requires it. Delegates inheriting `terminal_unavailable` make no FinishUP calls; only
 the coordinator performs a named repair.

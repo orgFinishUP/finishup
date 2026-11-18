@@ -462,6 +462,16 @@ _DIRECTIVES: Final = (
         nudge="Agents must not loop on this; report it and let the owner retry.",
     ),
     RecoveryDirective(
+        token="ceremony_retry_shortly",
+        directive=(
+            "The service is still finishing its latest unlock or the credential-store check "
+            "after it, so nothing changed. Run the same command again in a moment, once; if it "
+            "is refused again, report it."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="The vault is open or opening: do not unlock it again or restart the service for this.",
+    ),
+    RecoveryDirective(
         token="vault_unlock_required",
         directive=(
             "The vault must be unlocked before this ceremony can run, and nothing was changed. "
@@ -737,6 +747,285 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
         nudge="Never match a FinishUP process by name or path to stop it.",
     ),
+    # --- workspace binding, server targets and remote connections (ADR-051) ----------------
+    RecoveryDirective(
+        token="workspace_binding_correction",
+        directive=(
+            "This request names its workspace in a form this connection cannot use (a client: "
+            "handle without a claim, or a path and a claim together), so nothing was recorded. "
+            "Name it by its absolute root and send it once under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The FinishUP MCP bridge and CLI choose the right form for the selected server.",
+    ),
+    RecoveryDirective(
+        token="workspace_handle_required",
+        directive=(
+            "This server names a new session's workspace only by this connection's client: "
+            "handle, so the start was refused before any write. Send it once under a NEW "
+            "request_id with an external_ref and the canonical absolute workspace_ref."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The FinishUP MCP bridge and CLI send the handle in place of that path.",
+    ),
+    # Rule R (run u8): with a server elsewhere the connection's own folder decides the
+    # repository and the worktree, so a start naming another folder was refused in the client.
+    RecoveryDirective(
+        token="workspace_folder_run_required",
+        directive=(
+            "This command's connection serves only the repository worktree it runs in, so the "
+            "start naming another folder was not sent. Run the command from the folder "
+            "workspace_ref names, under a NEW request_id."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never name another folder to reach a task; the folder decides what is read.",
+    ),
+    RecoveryDirective(
+        token="workspace_not_served_tell_user",
+        directive=(
+            "This FinishUP connection serves only the repository worktree its host started it in, "
+            "so the start naming another folder was not sent. Tell the user in one line, then "
+            "carry on without FinishUP for that folder."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Do not retry with another path or search for a substitute.",
+    ),
+    RecoveryDirective(
+        token="server_host_command_required",
+        directive=(
+            "This command changes the FinishUP server's own state, so it runs only on the machine "
+            "that hosts the server, and nothing was changed here. Run it on the server host, or "
+            "select a local server, then run it again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    # A root that names a server elsewhere, chosen by the saved selection, refused here: a kind
+    # this release does not reach, a record that cannot be read, or any server elsewhere for this
+    # computer's own setup, menu and first run. 'finishup server use local'
+    # switches new processes; an open agent session keeps the root it started with.
+    RecoveryDirective(
+        token="remote_target_no_local_service",
+        directive=(
+            "The selected FinishUP server is elsewhere, and setup here never acts on one (nor on "
+            "one whose record cannot be read), so nothing was sent or started. Ask the owner to "
+            "run 'finishup server use local', then start a new session."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select a FinishUP server for the owner, or start a service for this.",
+    ),
+    # The same root named by an isolation variable or a pinned launcher, which outranks the
+    # selection: 'finishup server use local' answers ``selection_overridden`` there.
+    RecoveryDirective(
+        token="remote_root_override_clear",
+        directive=(
+            "FINISHUP_ISOLATED_ROOT or a pinned launcher names a FinishUP server elsewhere that "
+            "this computer refused, so nothing was sent or started. Ask the owner to unset it or "
+            "use an unpinned launcher, then start a new agent session."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "YOETZ_ISOLATED_ROOT counts too; 'finishup server use local' cannot override either. "
+            "Never change them for the owner."
+        ),
+    ),
+    # A server elsewhere (SSH, HTTPS or a port, layer 5) is confirmed again with 'finishup server
+    # use NAME' on the owner's own terminal; the other way on is local.
+    RecoveryDirective(
+        token="server_reauthorization_required",
+        directive=(
+            "The selected FinishUP server was authorized under an older disclosure, so nothing "
+            "was sent to it. Ask the owner to run 'finishup server use local', or 'finishup server "
+            "use NAME' on their own terminal, then start a new session."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select or authorize a FinishUP server for the owner.",
+    ),
+    RecoveryDirective(
+        token="zero_network_local_server_required",
+        directive=(
+            "This computer's FinishUP is set to make no network connections, so nothing was sent "
+            "to the selected FinishUP server elsewhere. Ask the owner to run 'finishup server use "
+            "local' in their own terminal, then restart this session."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select a FinishUP server or change the privacy policy for the owner.",
+    ),
+    # A repository whose privacy policy on this computer allows no network use, while a server
+    # elsewhere is selected (ADR-051 decision 8, maintainer decision of 2026-11-07, round 4): held
+    # until the user decides; asked once; kept here, without asking again, once they decline.
+    RecoveryDirective(
+        token="repository_send_decision_required",
+        directive=(
+            "This repository's policy here allows no network use, so this request was refused "
+            "before anything from it was sent to the selected server elsewhere. Ask the user once; "
+            "only they can allow it ('finishup server repositories add')."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Then repeat it. If they decline, run 'finishup server repositories keep'; do not ask "
+            "again. Never run 'add' for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="repository_kept_on_this_computer",
+        directive=(
+            "This repository's work is kept on this computer, as the user chose, so this request "
+            "was refused before anything from it was sent to the selected server elsewhere. "
+            "Continue without FinishUP for it; do not ask about it again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Only the user changes this, with 'finishup server repositories add' in their own terminal.",
+    ),
+    # A connection to a server elsewhere ended because what it was authorized under changed
+    # (ADR-052): the selection, the server's record or key, this computer's policy or a
+    # repository's hold. It had sent something, so it says FinishUP stopped sending and that what
+    # the server received stays there (design v2 section 8.10). A request it had sent has an
+    # unknown outcome there and is never resent, since the server selected now may be another
+    # (ADR-051: no replay across targets); later requests run under the current selection or
+    # name the refusal that now applies.
+    RecoveryDirective(
+        token="server_connection_renew",
+        directive=(
+            "What this connection to a server elsewhere was authorized under changed, so FinishUP "
+            "stopped sending over it; what that server received stays there. A request already "
+            "sent may be recorded there; FinishUP never resends it."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Later requests use the current selection; tell the user a sent write's outcome is "
+            "unknown. Never change servers or keys."
+        ),
+    ),
+    # What the selected server elsewhere offers or needs (its profile) changed since the owner
+    # consented (ADR-052, design v2 section 2.3): refused before that server did any work for the
+    # request, by this client before anything was sent or by the server itself; only the owner
+    # agrees again, on their own terminal. A request already sent over a connection the server
+    # refused this way ends as ``server_connection_renew`` instead (review of layer 3: B2).
+    RecoveryDirective(
+        token="remote_reconsent",
+        directive=(
+            "What the selected FinishUP server elsewhere offers or needs changed since the owner "
+            "agreed to use it, so this request was refused before that server did any work for "
+            "it. Only the owner can agree again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with that server's name in their own "
+            "terminal. Never agree for them."
+        ),
+    ),
+    # The same phase while this computer's copy of that server's profile still agrees with the
+    # consent: the server names a revision this computer has not fetched, so whether the owner
+    # must agree again is not known yet. Attached by ``targets.remote_root_continuation``, never
+    # through a reason code (ADR-052 decision 10).
+    RecoveryDirective(
+        token="remote_profile_checking",
+        directive=(
+            "The selected FinishUP server elsewhere changed what it offers, so this request was "
+            "refused before that server did any work for it. FinishUP is checking what changed; "
+            "repeat the same request in a few seconds."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "If the next refusal says remote_reconsent, only the owner agrees again; if this one "
+            "repeats, tell them. Never agree for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="server_level_decision_required",
+        directive=(
+            "The selected FinishUP server elsewhere requires more of this computer than the owner "
+            "agreed to for this repository, so FinishUP refused this request before anything was "
+            "sent. Only the owner decides."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Ask them to run 'finishup server use' with its name, or 'finishup server use local'. "
+            "Never agree for them."
+        ),
+    ),
+    RecoveryDirective(
+        token="server_on_this_computer_required",
+        directive=(
+            "This FinishUP release connects to servers on this computer, over SSH and over HTTPS; "
+            "that one is none of them, so nothing was added, selected or sent. Ask the owner to "
+            "run 'finishup server use local', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never select or add a FinishUP server for the owner.",
+    ),
+    RecoveryDirective(
+        token="server_selection_overridden",
+        directive=(
+            "An environment variable or a runtime pin chooses the FinishUP root, so the saved "
+            "server selection is not in effect. Unset the override in this shell, or use a shell "
+            "without it, when the saved selection is wanted."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="remote_server_test",
+        directive=(
+            "The selected FinishUP server could not be reached, or the connection to it ended. "
+            "Run 'finishup server test' to see which step failed, then repeat this request under "
+            "its original identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never fall back to another server or a local service for this request.",
+    ),
+    RecoveryDirective(
+        token="remote_direct_slow",
+        directive=(
+            "The selected server could not be reached in time in the direct style, where each "
+            "program opens its own connection: slow on a slow network. Ask the owner to run "
+            "'finishup server set NAME --style relay', then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge=(
+            "Never change the style or switch servers for the owner; 'finishup server test' shows "
+            "whether it is up and how slow."
+        ),
+    ),
+    RecoveryDirective(
+        token="remote_credential_repair",
+        directive=(
+            "The selected FinishUP server refused this client's credentials. Ask the owner to run "
+            "'finishup server login' for an HTTPS server, or to load the SSH key for an SSH "
+            "server, then repeat this request under its original identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never paste a key or credential into chat or a request body.",
+    ),
+    RecoveryDirective(
+        token="remote_identity_verify",
+        directive=(
+            "The selected server's identity no longer matches the one recorded when it was "
+            "added, so FinishUP did not connect and sent nothing. Ask the owner to verify the "
+            "server another way, then remove and re-add the target."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never disable host-key or certificate checks to get past this.",
+    ),
+    RecoveryDirective(
+        token="remote_service_start_required",
+        directive=(
+            "The selected server is reachable, but its FinishUP service is not running. Ask the "
+            "owner to start it on the server host, then repeat this request under its original "
+            "identity rules."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never match a FinishUP process by name or path to stop or start it.",
+    ),
+    RecoveryDirective(
+        token="remote_release_mismatch",
+        directive=(
+            "This client and the selected FinishUP server run different releases, so they cannot "
+            "talk and nothing was recorded. Ask the owner to install the same FinishUP release on "
+            "both machines, then repeat this request."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="A FinishUP service on another machine is never replaced from the client.",
+    ),
 )
 
 RECOVERY_DIRECTIVES: Final[Mapping[str, RecoveryDirective]] = MappingProxyType(
@@ -799,6 +1088,8 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "ceremony_busy": "ceremony_in_progress",
         # Recent confirmations did not succeed (#1073): wait up to five minutes, retry once.
         "reauthentication_rate_limited": "ceremony_retry_after_wait",
+        # A rotation refused while the service is ready or unlocking and still finishing that.
+        "credential_store_check_in_progress": "ceremony_retry_shortly",
         "ceremony_service_unavailable": "local_service_unavailable",
         "ceremony_unsupported": "ceremony_refusal_terminal",
         "chat_user_attestation_invalid": "consent_relay_correction",
@@ -891,6 +1182,11 @@ LOCAL_REASON_CONTINUATION_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
 # reason code cannot land with nothing to say.
 REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
     {
+        # ADR-051: why a claim-bound check could not see the change. Recorded as check-time
+        # change gaps, never raised as an error, so no directive could reach an agent; each gap's
+        # fixed receipt sentence names the computer and the command that help.
+        "workspace_agent_refused",
+        "workspace_agent_unavailable",
         # #1244 (D12): a refused delivery continuation. The message names the one read to make
         # instead (the original status read, or current status); a directive adds nothing.
         "delivery_cursor_expired",
@@ -1150,7 +1446,7 @@ REASON_REMEDIES: Final[Mapping[str, str]] = MappingProxyType(
             "nothing was recorded. Send the same call once more, then report the correlation_id."
         ),
         "bridge_invoke_failed": (
-            "The bridge failed while calling the local service. A write (start, publish_work, "
+            "The bridge failed while calling the FinishUP service. A write (start, publish_work, "
             "check other than an inspection, respond, receipt) may or may not be recorded: replay the same request_id "
             "(never a new one); replay is idempotent and returns the stored result when the "
             "write committed. A read changed nothing: repeat it. Report the correlation_id."

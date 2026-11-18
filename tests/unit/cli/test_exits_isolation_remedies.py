@@ -129,6 +129,14 @@ def test_a_pin_naming_a_root_that_is_gone_gets_an_action_for_a_pinned_runtime(
     assert "recreate the instance" in remedy
     assert "'finishup instance dispose --root <root>' with the root given when" in remedy
     assert "provisioned to remove the stale pin" in remedy
+    # ...and the server selection (ADR-051) its own: a server removed or damaged since it was
+    # chosen, or since an open agent session started with it (SRV-1).
+    assert (
+        "If this runtime is not pinned either, the FinishUP server chosen on this computer, or "
+        "the one an open agent session started with, was removed or its folder is damaged: run "
+        "'finishup server use local' (or 'finishup server use NAME'), then restart open agent "
+        "sessions"
+    ) in remedy
     text = _refusal_text("isolation_root_invalid")
     assert text.startswith(f"isolation_root_invalid: {remedy}")
     assert str(tmp_path) not in text

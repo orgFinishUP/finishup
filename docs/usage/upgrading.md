@@ -45,7 +45,9 @@ Unused old runtime copies are cleaned up automatically when a new process starts
 cleanup, `finishup upgrade --prune-runtimes` removes only copies no process is using. It does not stop
 sessions or remove settings, task data or credentials. Before uninstalling FinishUP, close its host
 sessions, stop its service through the supported lifecycle, and run this cleanup so unused release
-copies do not remain after the package manager removes the launcher. Uninstalling the package keeps
+copies do not remain after the package manager removes the launcher. If you added named local
+servers with `finishup server add`, stop each one's service with `finishup server disconnect NAME`
+too; otherwise it keeps running until it has been idle for a while. Uninstalling the package keeps
 your data; see [Where your data lives](#where-your-data-lives).
 
 Run `finishup upgrade` again with the same host target options to continue with host refresh. Do not
@@ -212,7 +214,11 @@ The Linux paths assume the default `XDG_*` locations. An installation started wi
 `FINISHUP_ISOLATED_ROOT` (or `YOETZ_ISOLATED_ROOT`) keeps everything under that root instead. If you
 chose system secure storage, the operating system keyring also holds entries under the service names
 `yoetz.vault-root.v1` and `yoetz.auto-unlock.v1`; both the old and the new name use these same
-entries.
+entries. The API key of an HTTPS server you added (`finishup server add`, `finishup server login`)
+is kept there too, under `yoetz.server-credential.v1` with the server's `t_` id as the account (or,
+where no keyring is usable, in a file inside the folders above); `finishup server remove` and
+`finishup server logout` delete it (when the keyring cannot be used, they say that the key stays),
+and deleting the folders does not.
 
 Deleting these folders permanently deletes your FinishUP tasks, receipts and vault, and nothing in
 FinishUP can recover them afterwards. Back them up first if you may want them again.
@@ -249,3 +255,13 @@ command's preview before applying it. Repair keeps your ChatGPT sign-in, model, 
 timeout, retries, and privacy permissions, and never signs in again on its own. Updating your
 everyday Codex later does not affect the evaluator: FinishUP uses its own verified copy of the admitted
 release. See [Providers](providers.md#keeping-the-evaluator-working-when-codex-updates).
+
+## Open sessions keep the rules they started with
+
+A FinishUP process that was already running when you upgraded keeps the older release's rules
+until it restarts: an open agent session's FinishUP tools, a terminal interface or a menu left
+open, and on a server you run, a `finishup service rest run` under your supervisor. Restart them
+after an upgrade, as after `finishup server use`, so they apply the new rules (for example the
+privacy rules for servers elsewhere). A client and an HTTPS server it uses must speak the same
+version of FinishUP's HTTPS interface: upgrade both, or a request is refused
+(`remote_incompatible`).

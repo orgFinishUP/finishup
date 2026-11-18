@@ -420,6 +420,155 @@ that inspection. Windows executables and the Windows-side IDE with Remote WSL ar
 unverified surfaces; an accessible Windows launcher is not a Linux IDE identity. Layout and
 failure details are in the [Cursor runbook](cursor-integration.md#linux-and-wsl).
 
+## A FinishUP server on a headless host (ADR-051)
+
+Operator facts for running a FinishUP service, the everyday server or a named local server
+(`finishup server add NAME --local`), on a headless Linux or WSL 2 host, for example one you log in
+to over SSH (the [servers guide](../usage/servers.md) is the user-facing page; the decisions are in
+[ADR-051](../adr/ADR-051-client-server-cut-and-server-targets.md)). Such a host can also serve
+clients on other machines over SSH or over HTTPS (the next two sections). Evidence state: none of
+the platform notes below has a recorded acceptance run yet, and a cell is claimed only from that
+evidence.
+
+- **Unattended restarts.** Setup's generated passphrase in owner-only file custody (no platform
+  store is usable on most headless hosts; ADR-008, 2026-10-19) lets a restarted service come back
+  `ready`. A human-passphrase vault stays `locked` after every restart until the owner runs
+  `finishup service unlock` on that host. On Linux the service's session-event monitor has no
+  login1 subscription today and reports itself unavailable without locking, so session-lock and
+  suspend relock do not apply on such a host; idle relock still does.
+- **The runtime directory must outlive the login.** By default the service's endpoints live under
+  `$XDG_RUNTIME_DIR` (`/run/user/<uid>`), which systemd-logind removes at the user's last logout
+  unless lingering is enabled. A service started from an SSH login then keeps its lock but loses
+  its socket. Either enable lingering (`loginctl enable-linger <user>`, which needs a systemd login
+  manager) or run the service from its own isolated root (`FINISHUP_ISOLATED_ROOT`, a provisioned
+  instance or a named local server), whose endpoints live beneath that root. `finishup service
+  endpoint --json`, run on the host, reports the endpoint, the absolute launcher, the release,
+  whether the runtime directory is tied to the login session, and linger state.
+- **Supervision is yours.** The service stops after 7,200 idle seconds and has no native systemd or
+  launchd installer (deferred). A per-user supervisor may run the foreground `finishup service run`
+  from the absolute launcher; `finishup service start` is the idempotent on-demand start.
+- **WSL 2.** The distribution stops when idle or on `wsl --shutdown`, taking the service with it;
+  with systemd enabled in `/etc/wsl.conf` lingering works as on Linux. State must stay on the
+  distribution's own disk (see [Where state may live](#where-state-may-live)).
+
+## SSH servers (ADR-051, ADR-052 layer 4)
+
+Operator facts for using a FinishUP server on another machine over SSH; the user-facing steps are
+in the [servers guide](../usage/servers.md#add-a-server-on-another-machine-ssh), the decisions in
+[ADR-052](../adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md)
+decisions 13 to 19. Evidence state: the OpenSSH paths below ran for real on Linux x86-64 (the
+capability tests against a private, unprivileged `sshd`, and an end-to-end run of the CLI, both on
+one machine over loopback), and every SSH cell of the [acceptance matrix](acceptance-matrix.md)
+(relay and direct, L1 and L2) passed on Linux at layer 7. **WSL 2 and macOS are untested** at either
+end, and no host session (Codex, Claude Code, Cursor) has run against an SSH server: gaps with
+owners in the matrix's [gaps](acceptance-matrix.md#gaps-and-owners).
+
+- **On the client.** The OpenSSH client (`ssh` on `PATH`; none is `remote_unreachable`) and a key
+  login to the server account that runs FinishUP. FinishUP runs OpenSSH with `BatchMode=yes`, so a
+  passphrase-protected key must be in the agent (`ssh-add`) or the connection is
+  `remote_auth_failed`; nothing is ever prompted except OpenSSH's host-key question at `server add`
+  or `server use` on the owner's own terminal. FinishUP never writes `known_hosts`. The user's own
+  `~/.ssh/config` applies to every `ssh` FinishUP starts.
+- **On the server.** The same FinishUP release, installed at `~/.local/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin` or `/usr/bin` (or given with `--remote-launcher ABS`), set up there, its vault
+  unlocked there when it needs it. `sshd` must allow stream-local forwarding to the client:
+  `AllowStreamLocalForwarding` `yes` (the OpenSSH default) or `local`, and `DisableForwarding`
+  off. The SSH login must be the account that runs the server's FinishUP: the service's peer-UID
+  check admits that user only.
+- **An endpoint that outlives the login.** The server's default endpoint is in
+  `$XDG_RUNTIME_DIR`, removed at the account's last logout without linger; `server add` warns when
+  the server reports that (`service endpoint --json`: `runtime_dir_session_bound` true and linger
+  not enabled). Enable linger for that account (`loginctl enable-linger <user>`) or run the
+  server's FinishUP from its own isolated root and add it with `--remote-root ABS`. A stopped
+  server service is started on a client's demand over SSH (`service start` through the recorded
+  launcher): by the helper at most once per 30 seconds in the relay style, once per connection
+  attempt in the direct style, never for a background agent.
+- **Check a connection.** `finishup server status NAME` shows the style and the helper's last
+  phase ("Connection: relay (…)", "Helper: running; last ready."; JSON
+  `target.connection.helper`); `finishup server test NAME` probes over the real transport. A
+  failure names its closed phase and continuation (`remote_unreachable` → `server test`,
+  `remote_auth_failed` → load the key, `remote_identity_changed` → verify the host key another
+  way, `remote_service_not_running` → start it on the server, `remote_incompatible` → the same
+  release on both). The helper's own records are beneath the target's client root
+  (`state/helper-status.json`, `log/helper.stderr`).
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper (it moves the
+  target's owner-only stop epoch, which the helper reads within a second; no process is signalled)
+  and ends the OpenSSH master (`ssh -O exit`); the server's FinishUP keeps running. Never stop a
+  helper or an `ssh` process by pattern: `ps`-matching `finishup` or `ssh` also hits the owner's
+  other sessions. `server remove NAME` stops both and removes only this computer's record.
+- **Suspend and network changes.** The master's keep-alive (`ServerAliveInterval=15`,
+  `ServerAliveCountMax=3`) notices a dead connection within about 45 seconds, or the next channel
+  failure does, and the helper restarts it; a hook spends only its own deadline and fails open
+  naming `remote_unreachable`.
+- **WSL 2: untested** (gap, owner: the maintainer, on a Windows machine with WSL 2; see the
+  [acceptance matrix](acceptance-matrix.md#gaps-and-owners)). No run of the helper or of SSH is
+  recorded inside a distribution at either end; do not claim a WSL 2 cell until one is recorded. A distribution
+  that stops (idle or `wsl --shutdown`) stops every process in it, a helper or a server service
+  included.
+
+## HTTPS servers (ADR-053, layer 5)
+
+Operator facts for serving a FinishUP over HTTPS and for using one; the user-facing steps are in
+the [servers guide](../usage/servers.md#add-an-https-server), the decisions in
+[ADR-053](../adr/ADR-053-rest-v1-public-contract.md) and ADR-052 decisions 20 to 23. Evidence
+state: both server edges ran for real on Linux x86-64 (the REST conformance kit, 18 cases, nine
+per edge over real TLS from a throwaway CA, and an end-to-end run of the CLI, both on one machine
+over loopback), and every `https` and `local_port` cell of the
+[acceptance matrix](acceptance-matrix.md) (both edges, relay and direct, L1 and L2) passed on Linux
+at layer 7. **WSL 2 and macOS are untested** at either end, and no host session (Codex, Claude Code,
+Cursor) has run against an HTTPS server: gaps with owners in the matrix's
+[gaps](acceptance-matrix.md#gaps-and-owners).
+
+- **On the server.** Keys first: `finishup service api-key create --label L --scope
+  agent|operator [--output-file F]` on the server's own terminal (a key is shown once, or written
+  to a new 0600 file; `api-key list` and `revoke KEY_ID` manage them). Then `finishup service rest
+  run --listen HOST:PORT --tls-cert F --tls-key F` in the foreground; the key file must be the
+  owner's and 0600. There is no native systemd unit: run it from the absolute launcher under a
+  per-user supervisor (a `systemd --user` service, for example) and stop it by the PID the
+  supervisor started, never by pattern. The default gateway edge holds no vault and reaches the
+  service over its owner-only control socket, so that socket must outlive the login exactly as for
+  SSH (linger, or an isolated root; see above); it starts the service on a client's request. `--edge
+  native` runs the service itself in that process: stop a running service first
+  (`service_already_running`), and a passphrase vault is unlocked there with `finishup service
+  unlock` after it starts.
+- **Behind a reverse proxy.** `--behind-proxy` serves plain HTTP, and only on a loopback address
+  (`rest_proxy_not_loopback` otherwise): the proxy on the same host terminates TLS. FinishUP trusts
+  no forwarded-for header, so its per-peer bounds (64 connections; the unauthenticated budget of 20
+  requests, refilled 5 per second) count the proxy as one peer; the total is 256 connections,
+  shrunk to a quarter of the process's descriptor budget. A long-poll waits at most 25 seconds,
+  under the 60-second idle timeout common proxies apply.
+- **The audit.** `rest-audit.jsonl` in the server root's log folder: one canonical JSON line per
+  request with closed tokens only (the route, the status or refusal, the key id, a call's method
+  and outcome; never a body, header value, key, label or address), rotated once at 8 MiB to
+  `rest-audit.jsonl.1`. A refused request no key authenticated is written at most once per reason
+  per minute, with a `suppressed` count.
+- **On the client.** `finishup server add NAME https://HOST[:PORT][/BASE]` (or `--port PORT` for
+  this computer's loopback) trusts the system store by default: Python's default verify paths,
+  which on Linux are the distribution's CA bundle. A private CA is given with `--ca-file F`
+  (absolute or relative to the working directory; its bytes are part of the consent: the file is
+  read once per connection and those bytes are compared with the consented ones before anything,
+  the key included, is sent, so a replaced file is `remote_identity_changed` until
+  `finishup server use NAME` asks again; it must hold PEM certificates), a self-signed server with `--tls-pin sha256:<64 hex>` (the leaf
+  certificate's DER digest). Proxy variables (`HTTPS_PROXY` and the rest) are ignored and
+  redirects are never followed. The key is stored in the system credential store, or, where none
+  is usable (most headless hosts), in the owner-only file `<target root>/config/credential`.
+- **Check a connection.** `finishup server status NAME` shows the style, whether a key is stored
+  (`API key: keyring|file|none`) and the helper's last phase; `finishup server test NAME` probes
+  over the real transport. A key stored by `login` while the server did not answer sends nothing
+  until `finishup server use NAME` checks it (`server_profile_changed` until then). A failure names
+  its closed phase and continuation (`remote_unreachable`, `remote_auth_failed` → `finishup server
+  login NAME`,
+  `remote_identity_changed` → verify the certificate another way, `remote_service_not_running`,
+  `remote_incompatible` → the same release on both).
+- **Stop one.** `finishup server disconnect NAME` stops this computer's helper through its stop
+  epoch (no process is signalled);
+  `finishup server logout NAME` deletes the key and stops it too; `finishup server remove NAME`
+  removes only this computer's record and key. The server's own edge and service keep running.
+- **WSL 2: untested** (gap, owner: the maintainer, on a Windows machine with WSL 2; see the
+  [acceptance matrix](acceptance-matrix.md#gaps-and-owners)). No run of the REST edge or of an HTTPS client is
+  recorded inside a distribution. A listener inside WSL 2 is reached from Windows or the network
+  only as WSL's own networking forwards it; check that before claiming any cell.
+
 ## Setup and vault acceptance still owned by #737
 
 Use `setup status --next --operation local|review|connection` to identify the next prerequisite

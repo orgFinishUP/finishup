@@ -30,11 +30,12 @@ def _schema_eighteen() -> apsw.Connection:
     db = _schema_sixteen()
     run_migrations(db, BUNDLE_MIGRATIONS[:17], maintenance=None)  # type: ignore[arg-type]
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    # 0019 (#1239) then rebuilds only events, which this step-table test does not read.
+    # 0019 (#1239) and 0020 (ADR-054) then rebuild only events, which this step-table test does
+    # not read.
     assert (report.from_version, report.to_version, report.applied_versions) == (
         17,
-        19,
-        ("0018", "0019"),
+        20,
+        ("0018", "0019", "0020"),
     )
     db.execute("PRAGMA foreign_keys = OFF")  # isolate the CHECKs; the control rows prove it
     return db

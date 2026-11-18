@@ -12,7 +12,39 @@ from builders import clock as clock_builder_module
 from builders import events as event_builder_module
 from builders import ids as id_builder_module
 from builders import operations as operation_builder_module
+from credential_store_guard import cached_platform_stores, forget_cached_backend, pin_fail_backend
 from fixture_loader import FixtureLoader, build_fixture_loader
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Pin keyring to its fail backend before any test can load a credential store.
+
+    Set in the environment, so it holds in this process and in every child process that inherits
+    it: no test reaches the developer's platform credential store (``credential_store_guard``).
+    """
+
+    del config
+    pin_fail_backend()
+
+
+@pytest.fixture(autouse=True)
+def _no_platform_credential_store() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Fail the test that left a platform credential store in keyring's process-wide cache.
+
+    keyring caches the first backend it loads, so a test that discovered one would hand it to
+    every later test in the process (and, on macOS, store test keys in the login keychain). The
+    cache is dropped before failing, so only the test that loaded it fails.
+    """
+
+    yield
+    found = cached_platform_stores()
+    if found:
+        forget_cached_backend()
+        pytest.fail(
+            f"this test loaded a platform credential store ({', '.join(found)}); inject a "
+            "stand-in instead (see tests/credential_store_guard.py)",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -72,8 +104,9 @@ def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
 ) -> None:
     """Keep setup's per-configuration lock files out of the developer's real state directory.
 
-    ``host_config_lock`` (#1058) keys a lock file under ``state_dir()``; every test that applies
-    a host connection would otherwise create one in the machine's own FinishUP state.
+    ``host_config_lock`` (#1058) keys a lock file under the installation's own state directory
+    (``installation_state_dir()``); every test that applies a host connection would otherwise
+    create one in the machine's own FinishUP state.
     """
 
     try:
@@ -82,7 +115,7 @@ def _isolated_host_config_locks(  # pyright: ignore[reportUnusedFunction]
         return
     root = tmp_path_factory.mktemp("host-config-locks")
     root.chmod(0o700)
-    monkeypatch.setattr(host_projects_module, "state_dir", lambda: Path(root))
+    monkeypatch.setattr(host_projects_module, "installation_state_dir", lambda: Path(root))
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +154,92 @@ def _isolated_command_identity_key() -> Iterator[None]:  # pyright: ignore[repor
     saved = task_facts_module._COMMAND_IDENTITY_KEY[0]  # pyright: ignore[reportPrivateUsage]
     yield
     task_facts_module.register_command_identity_key(saved)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_server_selection() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Resolve the server selection afresh in every test (ADR-051).
+
+    ``active_root()`` memoizes the selection once per process, as an MCP bridge must; a test that
+    rebases the ambient directories or writes a selection would otherwise leak its answer into
+    the next test in the same process.
+    """
+
+    try:
+        from finishup.config.paths import reset_selection_memo
+    except ImportError:
+        yield
+        return
+    reset_selection_memo()
+    yield
+    reset_selection_memo()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_server_selection_read(  # pyright: ignore[reportUnusedFunction]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the zero-network item from reading the developer's real server selection (ADR-051).
+
+    After a privacy policy change, and on the setup, server, menu and terminal surfaces, FinishUP
+    reads the owner-only selection file and, when it names a remote server, asks this computer's
+    running service for its policy. A test that builds no ambient home of its own would read the
+    machine's real selection and could reach a live service, so the read answers "no selection"
+    unless a test puts ``read_selection_on_disk`` back (the zero-network tests do, in their own
+    ambient home). The import is inside the fixture for the dependency-free collection reason
+    above.
+    """
+
+    try:
+        import finishup.cli.zero_network_selection as zero_network_module
+    except ImportError:
+        return
+    monkeypatch.setattr(zero_network_module, "_selection_on_disk", lambda: None)
+    # After every privacy change made on this computer, its policy is read again so it can be
+    # remembered (maintainer decision, 2026-11-07); a test reaches no real service for it unless
+    # it puts ``_read_after_change`` back with its own stand-in for the service.
+    monkeypatch.setattr(zero_network_module, "_after_change_state", lambda: "unreadable")
+
+    # The same for each repository's own policy (2026-11-07, round 4): after a change, and for the
+    # owner's 'server' commands, a repository is read again only through a test's own stand-in.
+    def _no_repository_read(_worktree: str) -> str:
+        return "unreadable"
+
+    monkeypatch.setattr(zero_network_module, "_repository_reader", _no_repository_read)
+    try:
+        import finishup.client.everyday_repository as everyday_repository_module
+    except ImportError:
+        return
+
+    async def _no_live_read(*_args: object, **_kwargs: object) -> object:
+        return everyday_repository_module.EverydayReads("unreadable", "unreadable")
+
+    # A session start asks this computer's FinishUP about the session's repository only through a
+    # test's own stand-in for the service.
+    monkeypatch.setattr(everyday_repository_module, "_live_read", _no_live_read)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_everyday_policy_marker(  # pyright: ignore[reportUnusedFunction]
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep what this computer last reported about network use out of the real state directory.
+
+    The marker (``finishup.client.everyday_policy``, ADR-051 decision 8) lives beside the server
+    registry in the everyday state directory; the connection check reads it before every hop to a
+    remote server, and a policy read writes it. Each test gets its own private folder, so a real
+    marker never refuses a test's connection and no test writes one. A test of the real location
+    puts ``_ambient_marker_path`` back inside an ambient home of its own.
+    """
+
+    try:
+        import finishup.client.everyday_policy as everyday_policy_module
+    except ImportError:
+        return
+    root = tmp_path_factory.mktemp("everyday-policy")
+    root.chmod(0o700)
+    marker = Path(root) / everyday_policy_module.MARKER_NAME
+    monkeypatch.setattr(everyday_policy_module, "_location", lambda: marker)
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +286,33 @@ def _isolated_rejected_finishup_calls(  # pyright: ignore[reportUnusedFunction]
     root = tmp_path_factory.mktemp("rejected-yoetz-calls")
     root.chmod(0o700)
     monkeypatch.setattr(rejections_module, "state_dir", lambda: Path(root))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_openssh(  # pyright: ignore[reportUnusedFunction]
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never run the real OpenSSH from a test outside ``tests/capability`` (ADR-052).
+
+    SSH servers are open from layer 4: a test that reaches an SSH target's transport without a
+    stand-in would otherwise run ``ssh`` against a test host name (a DNS lookup, a connection).
+    The product finds ``ssh`` through ``ssh_transport.resolve_ssh``; here it answers that none is
+    installed, so the attempt fails closed as ``remote_unreachable``. A test that stands in for
+    OpenSSH passes its own program, or patches this resolver itself; the capability tests run the
+    real one against a private ``sshd``.
+    """
+
+    if "capability" in request.path.parts:
+        return
+    try:
+        import finishup.client.ssh_transport as ssh_transport
+    except ImportError:
+        return
+
+    def no_openssh() -> str:
+        raise ssh_transport.UpstreamUnavailable("remote_unreachable")
+
+    monkeypatch.setattr(ssh_transport, "resolve_ssh", no_openssh)
 
 
 @pytest.fixture(scope="session")

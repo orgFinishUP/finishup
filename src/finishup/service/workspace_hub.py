@@ -1,0 +1,1004 @@
+"""The service's registry of client workspace agents and its bounded callback channel (ADR-051).
+
+A client that works with this service from another machine claims its workspace instead of
+naming a path, and may offer a workspace agent on the same control connection
+(``workspace_agent`` in its hello). The daemon registers such a connection here under the
+``client:`` handle it derived from the claim, and unregisters it when the connection closes.
+
+``WorkspaceAgentHub.call`` sends one catalog operation (``finishup.ports.workspace_agent``) to an
+agent that holds the handle, through that connection's own write lock, and awaits the correlated
+``workspace_reply``. Every wait is bounded: for an agent to appear (5 s inside a live control call,
+30 s for background work), for a call slot on the agent's connection, and for the reply. Every
+failure is a typed ``WorkspaceAgentUnavailable`` with a closed reason; nothing here logs or raises
+a path, an argument or anything the agent sent besides its closed reply reason.
+
+A call is bounded by the control call it serves, when it serves one: the daemon enters
+``workspace_call_deadline`` around each handler, so a workspace call never waits past the
+handler's own deadline, and a handler that is cancelled or times out cancels the workspace calls
+it left behind, including those blocked in a worker thread. The agent is told the time that is
+left once the call holds a slot, and the reply is awaited for that long after the frame is
+written. A frame is never cut off part-way: the write runs to its end even when the caller stops
+waiting, and the daemon ends a connection whose write was interrupted.
+
+A handle names one worktree (the server derives it from the claim's commitment and its worktree
+digest), so every channel under one handle serves the same tree. A channel whose claim names
+another worktree is never admitted under a handle that already has a live one.
+
+Which agent answers (ADR-052, design v2 section 8.5): each call goes to exactly one channel, so a
+connection's agent and the helper's never compete. An agent declares its ``role``: ``connection``
+(the agent of the connection in front of the workspace) or ``background`` (the helper's, which
+stays when the connections that started work have gone). A live control call goes to the agent
+its own connection offered, else the newest live background agent, else the newest connection
+agent. Background work (a detached review, a verification sweep, a timer) goes to the newest
+live background agent, else the newest connection agent, so a client with no helper is still
+answered as before.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import contextlib
+import re
+import threading
+import time
+from collections.abc import Awaitable, Callable, Generator
+from contextvars import ContextVar
+from typing import Any, Final
+
+from finishup.domain.receipts import CLIENT_ATTESTED
+from finishup.observability.logging import record_bounded_event_without_raising
+from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
+from finishup.ports.workspace_agent import (
+    MAX_WORKSPACE_DEADLINE_MS,
+    MAX_WORKSPACE_FRAME_BYTES,
+    WorkspaceAgentUnavailable,
+    WorkspaceCodecError,
+    WorkspaceOperation,
+    operation_spec,
+    workspace_handle_valid,
+)
+from finishup.protocol.canonical import canonical_encode
+from finishup.protocol.ids import IdKind, new_id
+
+__all__ = [
+    "BACKGROUND_AGENT_WAIT_SECONDS",
+    "INLINE_AGENT_WAIT_SECONDS",
+    "MAX_CALLS_PER_CHANNEL",
+    "MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL",
+    "WorkspaceAgentChannel",
+    "WorkspaceAgentHub",
+    "WorkspaceCallWriter",
+    "call_deadline_remaining",
+    "in_live_call",
+    "live_call_scope",
+    "workspace_call_deadline",
+]
+
+# How long a call waits for an agent connection for its workspace to appear.
+INLINE_AGENT_WAIT_SECONDS: Final = 5.0
+BACKGROUND_AGENT_WAIT_SECONDS: Final = 30.0
+# Calls one agent connection serves at once, and the argument bytes they may hold in flight.
+MAX_CALLS_PER_CHANNEL: Final = 4
+MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL: Final = 2 * MAX_WORKSPACE_FRAME_BYTES
+# Room past a call's own deadline for its reply frame to arrive and be read.
+_REPLY_GRACE_SECONDS: Final = 1.0
+# Less time than this left for a call is no time at all: it is not sent.
+_MIN_CALL_SECONDS: Final = 0.001
+# Operations that read and change nothing on the client: one whose connection dropped before it
+# answered is sent once more to another live connection of the same claim. An approved check may
+# already have run, so it is never sent twice.
+_REPLAYABLE_OPERATIONS: Final = frozenset(
+    operation
+    for operation in WorkspaceOperation
+    if operation
+    not in {
+        WorkspaceOperation.RUN_APPROVED_CHECK,
+        # A prepared snapshot lives in the one helper agent that built it (ADR-054).
+        WorkspaceOperation.CODE_SYNC_PREPARE,
+        WorkspaceOperation.CODE_SYNC_READ,
+    }
+)
+# Operations only the target's helper answers, through its background agent (ADR-054): the
+# connection's own agent never declares them. A client whose connection is up may still be
+# bringing its helper's background agent up, so a call waits (within its bound) for one rather
+# than being refused at once (design v2 section 4.2: a check waits, bounded, for its snapshot).
+_HELPER_OPERATIONS: Final = frozenset(
+    {WorkspaceOperation.CODE_SYNC_PREPARE, WorkspaceOperation.CODE_SYNC_READ}
+)
+# Operations a newer background agent takes over: a call still unanswered on a background channel
+# is sent again, with the time it has left, to a background channel of the same handle that
+# declares it and registered after it (a helper replaced, restarted or reconnected: the older
+# agent may be one that stopped polling and is still registered at the edge until its lease ends).
+# The older channel is left open; its late answer is dropped as unmatched. The same reads as a
+# replay: an approved check may already have run, so it is never sent twice. A code-sync prepare
+# is taken over too (ADR-054): the snapshot is built by the agent that answers it, and the sync's
+# reads go to that agent while it is registered (``_sync_channels``), even once a newer one is.
+# A read is not taken over: its snapshot lives only in the agent that prepared it.
+_SUPERSEDABLE_OPERATIONS: Final = _REPLAYABLE_OPERATIONS | {WorkspaceOperation.CODE_SYNC_PREPARE}
+# How many prepared syncs the hub remembers the answering channel of (their reads go there).
+_MAX_SYNC_CHANNELS: Final = 64
+_COMPONENT: Final = "service.workspace_hub"
+_WORKTREE_DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
+
+type WorkspaceCallWriter = Callable[[WorkspaceCall], Awaitable[None]]
+
+
+class _CallScope:
+    """What the work below serves, set by the daemon around each dispatched control call.
+
+    ``live``: a live control call (the caller's connection is open and waiting), which waits the
+    shorter bound for an agent; background work (verification supervisors, sweeps, recovered
+    jobs) runs outside any scope and waits longer. Work a call left running once it returned (the
+    detached review its caller stopped waiting for, a timer it set) is background too: ``live``
+    holds only while this scope, and the scope it was entered in, are still open. ``channel``: the
+    agent the serving connection itself offered, preferred for its own handle while the call is
+    live. ``deadline``: the handler's own deadline on the monotonic clock, past which no
+    workspace call it makes may wait. The cancel hooks are those of blocking calls in flight
+    under this scope; ``cancel`` runs them from any thread.
+    """
+
+    __slots__ = (
+        "_cancelled",
+        "_channel",
+        "_guard",
+        "_hooks",
+        "_live",
+        "_open",
+        "_parent",
+        "deadline",
+    )
+
+    def __init__(
+        self,
+        *,
+        live: bool,
+        channel: WorkspaceAgentChannel | None,
+        deadline: float | None = None,
+        parent: _CallScope | None = None,
+    ) -> None:
+        self._live = live
+        self._channel = channel
+        self._parent = parent
+        self.deadline = deadline
+        self._guard = threading.Lock()
+        self._hooks: dict[object, Callable[[], object]] = {}
+        self._cancelled = False
+        self._open = True
+
+    def __repr__(self) -> str:
+        return "_CallScope(<redacted>)"
+
+    @property
+    def live(self) -> bool:
+        """Whether the work below serves a live control call that is still waiting for it."""
+
+        with self._guard:
+            if not (self._live and self._open):
+                return False
+        return self._parent is None or self._parent.live
+
+    @property
+    def channel(self) -> WorkspaceAgentChannel | None:
+        """The serving connection's own agent, while the call it serves is live."""
+
+        return self._channel if self.live else None
+
+    @property
+    def cancelled(self) -> bool:
+        with self._guard:
+            return self._cancelled
+
+    def deadline_now(self) -> float | None:
+        """The deadline a call made now keeps; None once the scope's own work has ended.
+
+        A task the handler started copies this scope with its context; once the handler is done,
+        what that task does is no longer bounded or cancelled by the call the handler served.
+        """
+
+        with self._guard:
+            return self.deadline if self._open else None
+
+    def attach(self, hook: Callable[[], object]) -> object | None:
+        """Register ``hook`` to run on cancellation; None when the scope is already cancelled."""
+
+        token = object()
+        with self._guard:
+            if self._cancelled:
+                return None
+            if self._open:
+                self._hooks[token] = hook
+        return token
+
+    def detach(self, token: object) -> None:
+        with self._guard:
+            self._hooks.pop(token, None)
+
+    def close(self) -> None:
+        """The scope's work ended normally: calls still in flight are no longer its own."""
+
+        with self._guard:
+            self._open = False
+            self._hooks.clear()
+
+    def cancel(self) -> None:
+        """The scope's work was cancelled or ran out of time: abandon its calls in flight."""
+
+        with self._guard:
+            if not self._open:
+                return
+            self._cancelled = True
+            self._open = False
+            hooks = tuple(self._hooks.values())
+            self._hooks.clear()
+        for hook in hooks:
+            hook()
+
+
+_SCOPE: ContextVar[_CallScope | None] = ContextVar("finishup_workspace_call_scope", default=None)
+
+
+@contextlib.contextmanager
+def live_call_scope(channel: WorkspaceAgentChannel | None = None) -> Generator[None]:
+    """Mark the work below as serving a live control call (the shorter agent wait).
+
+    ``channel`` is the agent the serving connection itself offered, if any: a call for its handle
+    goes to it ahead of any other live channel for that handle.
+    """
+
+    if channel is not None and type(channel) is not WorkspaceAgentChannel:
+        raise TypeError("workspace_agent_channel_invalid")
+    scope = _CallScope(live=True, channel=channel)
+    token = _SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        # The call has returned: whatever it left running is background work from now on.
+        scope.close()
+        _SCOPE.reset(token)
+
+
+def in_live_call() -> bool:
+    scope = _SCOPE.get()
+    return scope is not None and scope.live
+
+
+def call_deadline_remaining() -> float | None:
+    """Seconds left before the deadline of the control call the work below serves (never
+    negative), or None: no call deadline bounds it (background work, a call without one)."""
+
+    scope = _SCOPE.get()
+    deadline = None if scope is None else scope.deadline_now()
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+@contextlib.contextmanager
+def workspace_call_deadline(deadline_at: float | None = None) -> Generator[None]:
+    """Bound the workspace calls of the handler below by its deadline, and cancel them with it.
+
+    ``deadline_at`` is the handler's deadline on the running loop's clock (None for a handler
+    with no deadline, which is still cancelled with its call). A workspace call made below never
+    waits past it, and is not sent when no time is left. When the handler is cancelled or times
+    out, every workspace call it left in flight is cancelled at once, a blocking one included, so
+    no worker thread or agent slot stays held for a caller that has gone. The live-call facts
+    (the shorter agent wait, the serving connection's agent) are kept from the enclosing scope for
+    as long as its call is live: a handler still running after that call returned (a detached
+    check whose caller stopped waiting) waits as background work does.
+    """
+
+    parent = _SCOPE.get()
+    deadline: float | None = None
+    if deadline_at is not None:
+        deadline = time.monotonic() + (deadline_at - asyncio.get_running_loop().time())
+    scope = _CallScope(
+        live=parent is not None and parent.live,
+        channel=None if parent is None else parent.channel,
+        deadline=deadline,
+        parent=parent,
+    )
+    token = _SCOPE.set(scope)
+    try:
+        yield
+    except (asyncio.CancelledError, TimeoutError):
+        scope.cancel()
+        raise
+    finally:
+        scope.close()
+        _SCOPE.reset(token)
+
+
+def _record(operation: str, reason: str) -> None:
+    record_bounded_event_without_raising(component=_COMPONENT, operation=operation, reason=reason)
+
+
+def _within(seconds: float, deadline: float | None) -> float:
+    """``seconds``, but no further than ``deadline`` (monotonic); an exhausted one is refused."""
+
+    if deadline is None:
+        return seconds
+    left = deadline - time.monotonic()
+    if left < _MIN_CALL_SECONDS:
+        raise WorkspaceAgentUnavailable("deadline_exceeded")
+    return min(seconds, left)
+
+
+def _retrieve(write: asyncio.Future[None]) -> None:
+    """Consume a shielded write's outcome nobody waits for any more (the daemon ends the stream)."""
+
+    if not write.cancelled():
+        write.exception()
+
+
+class WorkspaceAgentChannel:
+    """One agent-declaring control connection: its handle, its offer and its pending calls.
+
+    ``writer`` writes one ``workspace_call`` frame under the connection's write lock. The channel
+    holds no stream itself; the daemon owns the connection and closes the channel with it.
+    """
+
+    __slots__ = (
+        "_bytes",
+        "_changed",
+        "_pending",
+        "_pending_bytes",
+        "closed",
+        "declaration",
+        "handle",
+        "service_generation",
+        "service_instance_id",
+        "worktree",
+        "writer",
+    )
+
+    def __init__(
+        self,
+        *,
+        handle: str,
+        declaration: WorkspaceAgentDeclaration,
+        service_instance_id: str,
+        service_generation: str,
+        writer: WorkspaceCallWriter,
+        worktree: str | None = None,
+    ) -> None:
+        if not workspace_handle_valid(handle):
+            raise ValueError("workspace_handle_invalid")
+        if type(declaration) is not WorkspaceAgentDeclaration:
+            raise TypeError("workspace_agent_invalid")
+        if not callable(writer):
+            raise TypeError("workspace_call_writer_invalid")
+        if worktree is not None and (
+            type(worktree) is not str or _WORKTREE_DIGEST.fullmatch(worktree) is None
+        ):
+            raise ValueError("workspace_worktree_invalid")
+        self.handle = handle
+        # The claim's keyed worktree digest, when the connection's hello carried one.
+        self.worktree = worktree
+        self.declaration = declaration
+        self.service_instance_id = service_instance_id
+        self.service_generation = service_generation
+        self.writer = writer
+        self.closed = False
+        self._pending: dict[str, asyncio.Future[WorkspaceReply]] = {}
+        self._pending_bytes: dict[str, int] = {}
+        self._bytes = 0
+        self._changed = asyncio.Condition()
+
+    def __repr__(self) -> str:
+        return "WorkspaceAgentChannel(<redacted>)"
+
+    def declares(self, operation: WorkspaceOperation) -> bool:
+        return operation.value in self.declaration.operations
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def _has_room(self, size: int) -> bool:
+        if len(self._pending) >= MAX_CALLS_PER_CHANNEL:
+            return False
+        # One call alone may always use the whole bound; it was bounded by its own spec.
+        return not self._pending or self._bytes + size <= MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL
+
+    async def _reserve(self, call_id: str, size: int) -> asyncio.Future[WorkspaceReply]:
+        async with self._changed:
+            await self._changed.wait_for(lambda: self.closed or self._has_room(size))
+            if self.closed:
+                raise WorkspaceAgentUnavailable("agent_disconnected")
+            future: asyncio.Future[WorkspaceReply] = asyncio.get_running_loop().create_future()
+            self._pending[call_id] = future
+            self._pending_bytes[call_id] = size
+            self._bytes += size
+            return future
+
+    async def _release(self, call_id: str) -> None:
+        async with self._changed:
+            self._pending.pop(call_id, None)
+            self._bytes -= self._pending_bytes.pop(call_id, 0)
+            self._changed.notify_all()
+
+    def deliver(self, reply: WorkspaceReply) -> bool:
+        """Resolve the pending call ``reply`` answers; False for one nothing awaits."""
+
+        future = self._pending.get(reply.call_id)
+        if future is None or future.done():
+            return False
+        future.set_result(reply)
+        return True
+
+    async def close(self) -> None:
+        """Fail every pending call and wake every waiter; idempotent."""
+
+        async with self._changed:
+            self.closed = True
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(WorkspaceAgentUnavailable("agent_disconnected"))
+            self._changed.notify_all()
+
+
+class WorkspaceAgentHub:
+    """Live agent channels keyed by workspace handle, and the one way to call them."""
+
+    __slots__ = (
+        "_background_wait",
+        "_changed",
+        "_channels",
+        "_code_copies",
+        "_inline_wait",
+        "_loop",
+        "_lock",
+        "_sync_channels",
+    )
+
+    def __init__(
+        self,
+        *,
+        inline_wait_seconds: float = INLINE_AGENT_WAIT_SECONDS,
+        background_wait_seconds: float = BACKGROUND_AGENT_WAIT_SECONDS,
+    ) -> None:
+        for bound in (inline_wait_seconds, background_wait_seconds):
+            if type(bound) is not float or not 0.0 <= bound <= 300.0:
+                raise ValueError("workspace_agent_wait_invalid")
+        self._inline_wait = inline_wait_seconds
+        self._background_wait = background_wait_seconds
+        self._channels: dict[str, list[WorkspaceAgentChannel]] = {}
+        # (handle, sync_id) -> the channel that answered that code-sync prepare: the snapshot its
+        # reads name lives only there. Oldest first; bounded by ``_MAX_SYNC_CHANNELS``.
+        self._sync_channels: dict[tuple[str, str], WorkspaceAgentChannel] = {}
+        self._changed: asyncio.Condition | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock = threading.Lock()
+        # Level L2 (ADR-054): the service's copy puller, when it keeps copies; None otherwise.
+        self._code_copies: Any = None
+
+    def __repr__(self) -> str:
+        return "WorkspaceAgentHub(<redacted>)"
+
+    # --- registration (event loop) -----------------------------------------------------------
+
+    @property
+    def code_copies(self) -> Any:  # noqa: ANN401 - ``service.code_copy.CodeCopies`` or None
+        """The service's copy puller (level L2), when this service keeps copies; else None."""
+
+        return self._code_copies
+
+    def attach_code_copies(self, copies: object) -> None:
+        """Attach the copy puller once, at composition (``service.code_copy.CodeCopies``)."""
+
+        self._code_copies = copies
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Bind the event loop blocking callers reach the hub through; the first binding wins."""
+
+        current = loop if loop is not None else asyncio.get_running_loop()
+        with self._lock:
+            if self._loop is None or self._loop.is_closed():
+                self._loop = current
+                self._changed = None
+
+    def _condition(self) -> asyncio.Condition:
+        if self._changed is None:
+            self._changed = asyncio.Condition()
+        return self._changed
+
+    async def register(
+        self,
+        *,
+        handle: str,
+        declaration: WorkspaceAgentDeclaration,
+        service_instance_id: str,
+        service_generation: str,
+        writer: WorkspaceCallWriter,
+        worktree: str | None = None,
+    ) -> WorkspaceAgentChannel:
+        """Admit one agent-declaring connection under its claim's handle.
+
+        ``worktree`` is the claim's keyed worktree digest. A handle names one worktree, so a
+        connection whose digest differs from a live channel's under the same handle is refused
+        (``ValueError("workspace_agent_worktree_conflict")``; the daemon closes it) rather than
+        ever answering another worktree's calls.
+        """
+
+        self.bind_loop()
+        channel = WorkspaceAgentChannel(
+            handle=handle,
+            declaration=declaration,
+            service_instance_id=service_instance_id,
+            service_generation=service_generation,
+            writer=writer,
+            worktree=worktree,
+        )
+        condition = self._condition()
+        async with condition:
+            live = [item for item in self._channels.get(handle, ()) if not item.closed]
+            if worktree is not None and any(
+                item.worktree is not None and item.worktree != worktree for item in live
+            ):
+                _record("workspace_agent_registered", "worktree_conflict")
+                raise ValueError("workspace_agent_worktree_conflict")
+            self._channels.setdefault(handle, []).append(channel)
+            condition.notify_all()
+        _record("workspace_agent_registered", "registered")
+        return channel
+
+    async def unregister(self, channel: WorkspaceAgentChannel) -> None:
+        """Remove a closed connection's channel and fail its pending calls; idempotent."""
+
+        if type(channel) is not WorkspaceAgentChannel:
+            raise TypeError("workspace_agent_channel_invalid")
+        was_open = not channel.closed
+        await channel.close()
+        for key in [key for key, item in self._sync_channels.items() if item is channel]:
+            del self._sync_channels[key]
+        condition = self._condition()
+        async with condition:
+            live = self._channels.get(channel.handle)
+            if live is not None:
+                remaining = [item for item in live if item is not channel]
+                if remaining:
+                    self._channels[channel.handle] = remaining
+                else:
+                    self._channels.pop(channel.handle, None)
+            condition.notify_all()
+        if was_open:
+            _record("workspace_agent_unregistered", "disconnected")
+
+    def deliver(self, channel: WorkspaceAgentChannel, reply: WorkspaceReply) -> None:
+        """Route one reply the channel's connection sent; a reply nothing awaits is dropped."""
+
+        if type(reply) is not WorkspaceReply:
+            raise TypeError("workspace_reply_invalid")
+        if not channel.deliver(reply):
+            # A reply after its call's deadline, or one for a call this service never sent.
+            _record("workspace_reply", "unmatched")
+
+    def has_agent(self, handle: str) -> bool:
+        return any(not channel.closed for channel in self._channels.get(handle, ()))
+
+    async def close(self) -> None:
+        """Fail every pending call on every channel (service shutdown)."""
+
+        for channels in tuple(self._channels.values()):
+            for channel in tuple(channels):
+                await self.unregister(channel)
+
+    # --- calls ----------------------------------------------------------------------------------
+
+    def _live_channel(
+        self,
+        handle: str,
+        operation: WorkspaceOperation,
+        preferred: WorkspaceAgentChannel | None = None,
+    ) -> WorkspaceAgentChannel | None:
+        if (
+            preferred is not None
+            and not preferred.closed
+            and preferred.handle == handle
+            and preferred.declares(operation)
+            and any(channel is preferred for channel in self._channels.get(handle, ()))
+        ):
+            # The serving connection's own agent: the one in front of the caller's worktree.
+            return preferred
+        live = [channel for channel in self._channels.get(handle, ()) if not channel.closed]
+        declaring = [channel for channel in live if channel.declares(operation)]
+        background = [channel for channel in declaring if channel.declaration.role == "background"]
+        if background:
+            # The helper's agent (ADR-052): it answers every call no connection's own agent
+            # takes, live or background, so a connection's agent is never raced for it.
+            return background[-1]
+        if declaring:
+            # Every channel under a handle serves its one worktree; the newest connection is the
+            # agent most likely still in front of it.
+            return declaring[-1]
+        if live and (
+            operation not in _HELPER_OPERATIONS
+            or any(channel.declaration.role == "background" for channel in live)
+        ):
+            # A helper's background agent that does not declare it never will (a client at L1).
+            raise WorkspaceAgentUnavailable("operation_not_declared")
+        return None
+
+    def _newer_background(
+        self, channel: WorkspaceAgentChannel, operation: WorkspaceOperation
+    ) -> WorkspaceAgentChannel | None:
+        """The newest live background channel of ``channel``'s handle that declares ``operation``
+        and registered after ``channel``; None while there is none (or ``channel`` is gone)."""
+
+        channels = self._channels.get(channel.handle, ())
+        later = False
+        newest: WorkspaceAgentChannel | None = None
+        for item in channels:
+            if item is channel:
+                later = True
+            elif (
+                later
+                and not item.closed
+                and item.declaration.role == "background"
+                and item.declares(operation)
+            ):
+                newest = item
+        return newest
+
+    async def _await_newer_background(
+        self, channel: WorkspaceAgentChannel, operation: WorkspaceOperation
+    ) -> WorkspaceAgentChannel:
+        condition = self._condition()
+        async with condition:
+            while True:
+                newer = self._newer_background(channel, operation)
+                if newer is not None:
+                    return newer
+                await condition.wait()
+
+    async def _exchange_or_supersede(
+        self,
+        asked: list[WorkspaceAgentChannel],
+        operation: WorkspaceOperation,
+        wire: dict[str, Any],
+        size: int,
+        timeout_seconds: float,
+    ) -> WorkspaceReply:
+        """``_exchange`` on ``asked[-1]``; a supersedable call on a background channel goes on,
+        with the time it has left, on a newer background channel registered meanwhile (appended
+        to ``asked``, so a caller knows which channel it last asked).
+
+        A newer agent of the helper's role for the same handle is the one certain sign that the
+        one asked may be stale: an agent whose helper stopped without unregistering stays
+        registered at its edge until its lease ends, and nothing answers it meanwhile. The
+        call's deadline is unchanged; the older channel is left open.
+        """
+
+        channel = asked[-1]
+        if operation not in _SUPERSEDABLE_OPERATIONS or channel.declaration.role != "background":
+            return await self._exchange(channel, operation, wire, size, timeout_seconds)
+        loop = asyncio.get_running_loop()
+        until = loop.time() + timeout_seconds
+        while True:
+            left = until - loop.time()
+            if left < _MIN_CALL_SECONDS:
+                raise WorkspaceAgentUnavailable("deadline_exceeded")
+            channel = asked[-1]
+            exchange = asyncio.ensure_future(self._exchange(channel, operation, wire, size, left))
+            newer = asyncio.ensure_future(self._await_newer_background(channel, operation))
+            try:
+                await asyncio.wait((exchange, newer), return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                exchange.cancel()
+                newer.cancel()
+                await asyncio.gather(exchange, newer, return_exceptions=True)
+                raise
+            if exchange.done():
+                newer.cancel()
+                await asyncio.gather(newer, return_exceptions=True)
+                return exchange.result()
+            # Its slot is released and its answer, if one ever comes, is dropped as unmatched.
+            exchange.cancel()
+            await asyncio.gather(exchange, return_exceptions=True)
+            _record("workspace_call", "superseded")
+            asked.append(newer.result())
+
+    def _other_live_channel(
+        self, handle: str, operation: WorkspaceOperation, asked: list[WorkspaceAgentChannel]
+    ) -> WorkspaceAgentChannel | None:
+        """Another live connection that declares ``operation`` for ``handle``, right now (none
+        already ``asked``)."""
+
+        live = [
+            channel
+            for channel in self._channels.get(handle, ())
+            if not channel.closed
+            and channel.declares(operation)
+            and not any(channel is item for item in asked)
+        ]
+        return live[-1] if live else None
+
+    async def _channel_for(
+        self,
+        handle: str,
+        operation: WorkspaceOperation,
+        wait_seconds: float,
+        preferred: WorkspaceAgentChannel | None = None,
+    ) -> WorkspaceAgentChannel:
+        condition = self._condition()
+        try:
+            async with asyncio.timeout(max(0.0, wait_seconds)):
+                async with condition:
+                    while True:
+                        channel = self._live_channel(handle, operation, preferred)
+                        if channel is not None:
+                            return channel
+                        await condition.wait()
+        except TimeoutError:
+            if any(not channel.closed for channel in self._channels.get(handle, ())):
+                # The client is there, but no helper agent of it came to answer: not offline.
+                raise WorkspaceAgentUnavailable("operation_not_declared") from None
+            raise WorkspaceAgentUnavailable("no_agent") from None
+
+    async def call(
+        self,
+        handle: str,
+        operation: WorkspaceOperation,
+        arguments: object,
+        *,
+        timeout_seconds: float,
+        background: bool | None = None,
+    ) -> Any:  # noqa: ANN401 - the operation's own result type (``WorkspaceOperationSpec``)
+        """Run one catalog operation on the client's agent for ``handle``; its decoded result.
+
+        ``timeout_seconds`` bounds the agent's answer once the call is sent; the wait for an
+        agent connection is bounded separately (``background`` picks the longer wait; by default
+        it is decided by whether this work serves a live control call).
+        """
+
+        return await self._call(
+            handle,
+            operation,
+            arguments,
+            timeout_seconds=timeout_seconds,
+            background=background,
+            scope=_SCOPE.get(),
+        )
+
+    async def _call(
+        self,
+        handle: str,
+        operation: WorkspaceOperation,
+        arguments: object,
+        *,
+        timeout_seconds: float,
+        background: bool | None,
+        scope: _CallScope | None,
+    ) -> Any:  # noqa: ANN401 - the operation's own result type
+        spec = operation_spec(operation)
+        if spec is None or not workspace_handle_valid(handle):
+            raise ValueError("workspace_call_invalid")
+        if type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= (
+            MAX_WORKSPACE_DEADLINE_MS / 1000
+        ):
+            raise ValueError("workspace_call_timeout_invalid")
+        self.bind_loop()
+        try:
+            wire = spec.encode_arguments(arguments)
+        except WorkspaceCodecError:
+            _record("workspace_call", "arguments_invalid")
+            raise WorkspaceAgentUnavailable("arguments_invalid") from None
+        size = len(canonical_encode(wire))
+        if background is None:
+            background = scope is None or not scope.live
+        wait = self._background_wait if background else self._inline_wait
+        preferred = None if scope is None else scope.channel
+        # The control call this one serves bounds it as a whole: the agent wait and the answer.
+        deadline = None if scope is None else scope.deadline_now()
+        try:
+            channel = self._sync_channel(handle, spec.operation, arguments) or (
+                await self._channel_for(handle, spec.operation, _within(wait, deadline), preferred)
+            )
+            asked = [channel]
+            try:
+                reply = await self._exchange_or_supersede(
+                    asked, spec.operation, wire, size, _within(timeout_seconds, deadline)
+                )
+            except WorkspaceAgentUnavailable as exc:
+                # Several connections of one client may serve a handle's one worktree (ADR-051):
+                # when the one asked drops mid-call and another is live now, a read is asked
+                # there once more.
+                other = self._other_live_channel(handle, spec.operation, asked)
+                if (
+                    exc.reason != "agent_disconnected"
+                    or spec.operation not in _REPLAYABLE_OPERATIONS
+                    or other is None
+                ):
+                    raise
+                reply = await self._exchange(
+                    other, spec.operation, wire, size, _within(timeout_seconds, deadline)
+                )
+        except WorkspaceAgentUnavailable as exc:
+            _record("workspace_call", exc.reason)
+            raise
+        if reply.outcome != "ok":
+            reason = {
+                "unavailable": "agent_unavailable",
+                "refused": "agent_refused",
+                "failed": "agent_failed",
+            }[reply.outcome]
+            _record("workspace_call", reason)
+            raise WorkspaceAgentUnavailable(reason, reply.reason)
+        try:
+            decoded = spec.decode_result(reply.result)
+        except WorkspaceCodecError:
+            _record("workspace_call", "reply_invalid")
+            raise WorkspaceAgentUnavailable("reply_invalid") from None
+        if spec.operation is WorkspaceOperation.CODE_SYNC_PREPARE:
+            self._remember_sync(handle, getattr(decoded, "sync_id", None), asked[-1])
+        # What the agent answered is the client's attestation, never a read of this machine.
+        _record("workspace_evidence", CLIENT_ATTESTED)
+        return decoded
+
+    def _remember_sync(self, handle: str, sync_id: object, channel: WorkspaceAgentChannel) -> None:
+        """Remember which channel answered a prepare (none for an unchanged copy)."""
+
+        if type(sync_id) is not str:
+            return
+        self._sync_channels.pop((handle, sync_id), None)
+        self._sync_channels[(handle, sync_id)] = channel
+        while len(self._sync_channels) > _MAX_SYNC_CHANNELS:
+            del self._sync_channels[next(iter(self._sync_channels))]
+
+    def _sync_channel(
+        self, handle: str, operation: WorkspaceOperation, arguments: object
+    ) -> WorkspaceAgentChannel | None:
+        """For a code-sync read, the channel that answered the prepare it names, while that
+        channel is registered and open; None otherwise (the usual choice then applies)."""
+
+        if operation is not WorkspaceOperation.CODE_SYNC_READ:
+            return None
+        sync_id = getattr(arguments, "sync_id", None)
+        if type(sync_id) is not str:
+            return None
+        channel = self._sync_channels.get((handle, sync_id))
+        if channel is None or channel.closed:
+            return None
+        if not any(item is channel for item in self._channels.get(handle, ())):
+            return None
+        return channel
+
+    async def _exchange(
+        self,
+        channel: WorkspaceAgentChannel,
+        operation: WorkspaceOperation,
+        wire: dict[str, Any],
+        size: int,
+        timeout_seconds: float,
+    ) -> WorkspaceReply:
+        """One call on ``channel``: a slot, the frame, and the reply, within ``timeout_seconds``.
+
+        The slot and the write share the call's time; the agent is then told what is left
+        (``deadline_ms``), and the reply is awaited that long after the frame is fully written,
+        plus a grace for the reply frame, so an answer the agent gives in its time is never
+        dropped as late. The write is shielded: a caller that stops waiting never cuts a frame
+        off part-way, which would leave the connection out of step.
+        """
+
+        loop = asyncio.get_running_loop()
+        call_id = new_id(IdKind.CONTROL_RPC)
+        deadline = loop.time() + timeout_seconds
+        try:
+            async with asyncio.timeout_at(deadline):
+                future = await channel._reserve(call_id, size)  # pyright: ignore[reportPrivateUsage]
+        except TimeoutError:
+            raise WorkspaceAgentUnavailable("agent_busy") from None
+        try:
+            left = deadline - loop.time()
+            if left < _MIN_CALL_SECONDS:
+                raise WorkspaceAgentUnavailable("deadline_exceeded")
+            deadline_ms = max(1, min(MAX_WORKSPACE_DEADLINE_MS, int(left * 1000)))
+            call = WorkspaceCall(
+                kind="workspace_call",
+                protocol_version="1.0",
+                call_id=call_id,
+                service_instance_id=channel.service_instance_id,
+                service_generation=channel.service_generation,
+                operation=operation.value,
+                arguments=wire,  # pyright: ignore[reportArgumentType]
+                deadline_ms=deadline_ms,
+            )
+            write = asyncio.ensure_future(channel.writer(call))
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await asyncio.shield(write)
+            except TimeoutError:
+                # The frame is still being written (a slow peer, or a long result ahead of it on
+                # the connection); it finishes, and the answer will come too late to be awaited.
+                write.add_done_callback(_retrieve)
+                raise WorkspaceAgentUnavailable("deadline_exceeded") from None
+            except asyncio.CancelledError:
+                write.add_done_callback(_retrieve)
+                raise
+            except Exception:
+                # The connection could not take the frame: the peer is gone.
+                raise WorkspaceAgentUnavailable("agent_disconnected") from None
+            try:
+                async with asyncio.timeout(deadline_ms / 1000 + _REPLY_GRACE_SECONDS):
+                    return await future
+            except TimeoutError:
+                raise WorkspaceAgentUnavailable("deadline_exceeded") from None
+        finally:
+            await channel._release(call_id)  # pyright: ignore[reportPrivateUsage]
+
+    def call_blocking(
+        self,
+        handle: str,
+        operation: WorkspaceOperation,
+        arguments: object,
+        *,
+        timeout_seconds: float,
+    ) -> Any:  # noqa: ANN401 - the operation's own result type
+        """``call`` from a worker thread; never from the hub's own event loop thread.
+
+        A synchronous adapter runs in a worker thread (``asyncio.to_thread``); it waits here for
+        the loop to finish the call. The total wait is bounded by the agent wait, the call's
+        timeout for its slot and send and again for its answer, and a grace, after which the call
+        is cancelled. Inside a handler's ``workspace_call_deadline`` it is also bounded by the
+        handler's deadline, and it returns at once, ``call_cancelled``, when the handler is
+        cancelled or runs out of time.
+        """
+
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            _record("workspace_call", "hub_unavailable")
+            raise WorkspaceAgentUnavailable("hub_unavailable")
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            # Waiting here would block the very loop that must deliver the reply.
+            _record("workspace_call", "hub_unavailable")
+            raise WorkspaceAgentUnavailable("hub_unavailable")
+        # The worker thread runs in a copy of its caller's context: what that call serves.
+        scope = _SCOPE.get()
+        background = scope is None or not scope.live
+        wait = self._background_wait if background else self._inline_wait
+        if scope is not None and scope.cancelled:
+            # The control call this one serves is already gone: nothing is sent for it.
+            _record("workspace_call", "call_cancelled")
+            raise WorkspaceAgentUnavailable("call_cancelled")
+        deadline = None if scope is None else scope.deadline_now()
+        bound = wait + 2 * timeout_seconds + 2 * _REPLY_GRACE_SECONDS
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left < _MIN_CALL_SECONDS:
+                _record("workspace_call", "deadline_exceeded")
+                raise WorkspaceAgentUnavailable("deadline_exceeded")
+            bound = min(bound, left + 2 * _REPLY_GRACE_SECONDS)
+        future = asyncio.run_coroutine_threadsafe(
+            self._call(
+                handle,
+                operation,
+                arguments,
+                timeout_seconds=timeout_seconds,
+                background=background,
+                scope=scope,
+            ),
+            loop,
+        )
+        attached = None if scope is None else scope.attach(future.cancel)
+        try:
+            if scope is not None and attached is None:
+                # The control call this one serves went away meanwhile: abandon this one too.
+                future.cancel()
+            return future.result(bound)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            _record("workspace_call", "deadline_exceeded")
+            raise WorkspaceAgentUnavailable("deadline_exceeded") from None
+        except concurrent.futures.CancelledError:
+            if scope is not None and scope.cancelled:
+                _record("workspace_call", "call_cancelled")
+                raise WorkspaceAgentUnavailable("call_cancelled") from None
+            raise WorkspaceAgentUnavailable("agent_disconnected") from None
+        finally:
+            if scope is not None and attached is not None:
+                scope.detach(attached)

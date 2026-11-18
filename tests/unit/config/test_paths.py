@@ -161,3 +161,42 @@ def test_windows_drive_and_vm_share_transports_are_refused_like_a_network_share(
     local = tmp_path / "home" / "finishup"
     local.mkdir(mode=0o700, parents=True)
     verify_private_local_bundle(local, _probe=probe)
+
+
+def test_a_mount_table_is_resolved_once_until_it_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each folder verified looks its mount up in the same table: its mount points are resolved
+    once (dozens of lstat chains each time were most of a warm status read), a changed table is
+    resolved again, and the answer stays the deepest mount the path is beneath (never a sibling
+    whose name only starts the same)."""
+
+    from finishup.config import paths as paths_module
+
+    resolved: list[str] = []
+    original = Path.resolve
+
+    def counting(self: Path, strict: bool = False) -> Path:
+        resolved.append(str(self))
+        return original(self, strict=strict)
+
+    monkeypatch.setattr(paths_module, "_resolved_mount_table", None)
+    monkeypatch.setattr(Path, "resolve", counting)
+    base = original(tmp_path)
+    table = (
+        f"rootfs / ext4 rw 0 0\nserver {base / 'share'} nfs rw 0 0\n"
+        f"tmpfs {base / 'share' / 'local'} tmpfs rw 0 0\n"
+    )
+    lookup = paths_module._linux_mount_fstype  # pyright: ignore[reportPrivateUsage]
+
+    assert lookup(base / "share" / "a", table) == "nfs"
+    assert lookup(base / "share" / "local" / "b", table) == "tmpfs"
+    assert lookup(base / "share", table) == "nfs"
+    assert lookup(base / "shared", table) == "ext4"
+    assert lookup(base / "elsewhere", table) == "ext4"
+    assert len(resolved) == 3
+
+    moved = table + f"server {base / 'elsewhere'} cifs rw 0 0\n"
+    assert lookup(base / "elsewhere" / "c", moved) == "cifs"
+    assert lookup(base / "share" / "a", moved) == "nfs"
+    assert len(resolved) == 7

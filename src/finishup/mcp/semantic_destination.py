@@ -20,6 +20,12 @@ prove that a dispatch happened. It is stamped "read once at bridge startup": the
 has one immutable route profile (ADR-018 decision 1) and reads configuration once, so a route
 change after startup is reflected only after the host restarts the bridge; the live authority for
 what a particular check did is that check's recorded ``semantic_status`` and provider attempt.
+
+A bridge whose root is a FinishUP server elsewhere (a remote target, ADR-051) renders none of this
+computer's configuration: that server decides AI-powered review under its own settings and keeps
+the ledger, so the passage says so and names the server only by its target id and transport, both
+closed tokens, never by a host name (the ADR-018 amendment proposed by ADR-051). A target record
+that cannot be read may name such a server, so it fails closed to the same wording.
 """
 
 from __future__ import annotations
@@ -31,6 +37,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal
 
+from finishup.client.targets import (
+    REMOTE_KINDS,
+    ServerTarget,
+    TargetError,
+    TargetRecordUnreadable,
+    active_target_record,
+)
 from finishup.config.load import load_config, parse_minimal_safe_config
 from finishup.config.models import (
     OWNER_DECLARED_ENDPOINT_PROFILE_ID,
@@ -49,11 +62,12 @@ __all__ = [
     "MAX_DISCLOSURE_ENCODED_BYTES",
     "SemanticDestinationDisclosure",
     "SemanticDestinationKind",
+    "disclose_remote_destination",
     "disclose_semantic_destination",
     "read_semantic_destination_disclosure",
 ]
 
-type SemanticDestinationKind = Literal["unknown", "none", "external"]
+type SemanticDestinationKind = Literal["unknown", "none", "external", "remote"]
 
 # The exact host each bundled endpoint profile stands for. This table is the disclosure's own
 # closed catalog; a unit test locks it to the adapter catalogs that actually dial these hosts
@@ -106,6 +120,21 @@ _PAYLOAD_BOUND: Final = (
     "ledger on this machine."
 )
 _SNAPSHOT_BOUND: Final = " This configuration snapshot may differ from the live service."
+# The bridge's root is a FinishUP server elsewhere (ADR-051): that server, not this computer's
+# configuration, decides AI-powered review, and the task's ledger is kept there.
+_REMOTE_SETTINGS: Final = (
+    " That server decides AI-powered review under its own settings, and this computer's "
+    "AI-powered review settings do not apply; the task's ledger is kept on that server."
+)
+_SELECTION_BOUND: Final = " This selection may differ from the server a later call reaches."
+_TARGET_ID: Final = re.compile(r"^t_[0-9a-f]{8}$", re.ASCII)
+_UNREADABLE_TARGET_SENTENCE: Final = (
+    DISCLOSURE_PREFIX
+    + "decided by the selected FinishUP server, whose target record could not be read, so it "
+    + "is taken to be a server elsewhere."
+    + _REMOTE_SETTINGS
+    + _SELECTION_BOUND
+)
 _UNKNOWN_SENTENCE: Final = (
     DISCLOSURE_PREFIX
     + "unknown, because the configuration was absent or invalid. A policy-route check may reach "
@@ -121,7 +150,7 @@ class SemanticDestinationDisclosure:
     sentence: str
 
     def __post_init__(self) -> None:
-        if self.kind not in {"unknown", "none", "external"}:
+        if self.kind not in {"unknown", "none", "external", "remote"}:
             raise ValueError("semantic_destination_kind_invalid")
         if type(self.sentence) is not str or not self.sentence.startswith(DISCLOSURE_PREFIX):
             raise ValueError("semantic_destination_sentence_invalid")
@@ -213,6 +242,56 @@ def disclose_semantic_destination(
     return SemanticDestinationDisclosure("external", sentence + _PAYLOAD_BOUND + _SNAPSHOT_BOUND)
 
 
+def disclose_remote_destination(target: ServerTarget | None) -> SemanticDestinationDisclosure:
+    """Render the passage for a bridge whose root is a FinishUP server elsewhere (ADR-051).
+
+    That server decides AI-powered review under its own settings, so nothing of this computer's
+    configuration is rendered. ``target`` is the selected remote record, named only by its
+    generated target id and its transport, never by its host, user, address or the owner's name
+    for it. ``None`` stands for a record that could not be read, and a record whose tokens are not
+    the closed shapes renders like one: the same wording without them.
+    """
+
+    if target is None:
+        return SemanticDestinationDisclosure("remote", _UNREADABLE_TARGET_SENTENCE)
+    if type(target) is not ServerTarget:
+        raise TypeError("target_wrong_type")
+    if not target.is_remote:
+        raise ValueError("target_not_remote")
+    if _TARGET_ID.fullmatch(target.target_id) is None or target.kind not in REMOTE_KINDS:
+        return SemanticDestinationDisclosure("remote", _UNREADABLE_TARGET_SENTENCE)
+    return SemanticDestinationDisclosure(
+        "remote",
+        DISCLOSURE_PREFIX
+        + f"decided by the selected FinishUP server elsewhere (target {target.target_id}, "
+        + f"transport {target.kind})."
+        + _REMOTE_SETTINGS
+        + _SELECTION_BOUND,
+    )
+
+
+def _remote_root_disclosure() -> SemanticDestinationDisclosure | None:
+    """The passage when this process's root is a FinishUP server elsewhere; ``None`` when local.
+
+    A root whose target record cannot be read may be such a server, so it fails closed to that
+    wording, never to this computer's configuration (``TargetRecordUnreadable``, or any failure
+    to read it). A root that cannot be resolved at all (a plain ``TargetError``) is left to the
+    configuration read, as before, which resolves the same root.
+    """
+
+    try:
+        record = active_target_record()
+    except TargetRecordUnreadable:
+        return disclose_remote_destination(None)
+    except TargetError:
+        return None
+    except Exception:
+        return disclose_remote_destination(None)
+    if record is None or not record.is_remote:
+        return None
+    return disclose_remote_destination(record)
+
+
 def read_semantic_destination_disclosure(
     env: Mapping[str, str] | None = None,
 ) -> SemanticDestinationDisclosure:
@@ -221,9 +300,16 @@ def read_semantic_destination_disclosure(
     Mirrors ``_bridge_logging_config`` in ``mcp/server.py``: an unreadable or invalid
     configuration must never keep the bridge from serving, and here it must not be guessed at
     either, so every failure renders as unknown.
+
+    When this process's root (``active_root``, whatever ``env`` names) is a FinishUP server
+    elsewhere, or its target record cannot be read, no configuration is read: the passage says
+    that server decides AI-powered review (``disclose_remote_destination``).
     """
 
     try:
+        remote = _remote_root_disclosure()
+        if remote is not None:
+            return remote
         selected_env = os.environ if env is None else env
         if parse_minimal_safe_config(selected_env, {}).config_path_used is None:
             return disclose_semantic_destination(None)

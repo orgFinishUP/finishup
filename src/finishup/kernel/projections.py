@@ -10,12 +10,14 @@ from types import MappingProxyType
 from typing import Final, Protocol, cast
 
 from finishup.domain.events import (
+    CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION,
     PAYLOAD_TYPES,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     CheckChangeShownFiles,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
+    ContentForgottenPayload,
     CoordinationContextRecordedPayload,
     CoordinationDispositionRecordedPayload,
     CoordinationObligationDeclaredPayload,
@@ -102,6 +104,7 @@ __all__ = [
     "PlanProjectionRecord",
     "ProjectionRecord",
     "ProjectionState",
+    "ContentForgottenMarker",
     "STANDING_POSITION_KINDS",
     "StandingPosition",
     "empty_projection_state",
@@ -802,6 +805,46 @@ _TRUSTED_PRIOR: ContextVar[ProjectionState | None] = ContextVar(
 )
 
 
+_MARKER_TIME: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$", re.ASCII)
+
+
+@dataclass(frozen=True, slots=True)
+class ContentForgottenMarker:
+    """The task's latest service-written ``content_forgotten`` event (ADR-054, owner ruling U20).
+
+    The content the task read from a server copy was forgotten at ``source_frontier``: from then
+    on every projection masks the quoted excerpts of each check that tested an earlier frontier
+    (and of the findings it returned), while the findings and checks themselves stay. ``at`` is
+    the event's ``occurred_at``; ``payload`` its reason, erased-object count and the evidence
+    account it recorded, or ``None`` when that payload is unreadable (the masking still holds).
+    """
+
+    source_event_id: EventId
+    source_frontier: int
+    at: str
+    payload: ContentForgottenPayload | None
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "source_event_id", event_id(self.source_event_id))
+        except ValueError as exc:
+            raise _invalid() from exc
+        if (
+            type(self.source_frontier) is not int
+            or not 1 <= self.source_frontier <= _MAX_SQLITE_SIGNED_INTEGER
+            or type(self.at) is not str
+            or _MARKER_TIME.fullmatch(self.at) is None
+            or (self.payload is not None and type(self.payload) is not ContentForgottenPayload)
+        ):
+            raise _invalid()
+
+    def masks(self, subject_sequence: int, recorded_sequence: int) -> bool:
+        """Whether an excerpt is forgotten: recorded before the forget, or for a check of a
+        frontier before it (a check in flight when the content was forgotten)."""
+
+        return min(subject_sequence, recorded_sequence) < self.source_frontier
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionState:
     frontier: int
@@ -846,6 +889,9 @@ class ProjectionState:
         )
     )
     pending_missing_for_assessment: PendingMissingForAssessment | None = None
+    # ADR-054 (U20): the latest ``content_forgotten`` marker. A pinned view built after the forget
+    # may carry a marker past its own frontier: the forget masks every view built after it.
+    content_forgotten: ContentForgottenMarker | None = None
 
     def __post_init__(self) -> None:
         if type(self.frontier) is not int or not 0 <= self.frontier <= _MAX_SQLITE_SIGNED_INTEGER:
@@ -882,6 +928,10 @@ class ProjectionState:
         if self.pending_missing_for_assessment is not None and (
             type(self.pending_missing_for_assessment) is not PendingMissingForAssessment
             or self.pending_missing_for_assessment.source_frontier > self.frontier
+        ):
+            raise _invalid()
+        if self.content_forgotten is not None and (
+            type(self.content_forgotten) is not ContentForgottenMarker
         ):
             raise _invalid()
 
@@ -1593,6 +1643,15 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
             "source_check_event_id": pending.source_check_event_id,
             "source_frontier": canonical_integer_string(pending.source_frontier),
         }
+    if state.content_forgotten is not None:
+        # Written only once a ledger records the family, so every other snapshot keeps its bytes.
+        marker = state.content_forgotten
+        snapshot["content_forgotten"] = {
+            "at": marker.at,
+            "payload": None if marker.payload is None else encode_payload(marker.payload),
+            "source_event_id": marker.source_event_id,
+            "source_frontier": canonical_integer_string(marker.source_frontier),
+        }
     return snapshot
 
 
@@ -1619,6 +1678,7 @@ _SNAPSHOT_KEYS: Final = frozenset(
         "coordination_dispositions",
         "coordination_declarations",
         "pending_missing_for_assessment",
+        "content_forgotten",
     }
 )
 _REQUIRED_SNAPSHOT_KEYS: Final = _SNAPSHOT_KEYS - {
@@ -1626,6 +1686,7 @@ _REQUIRED_SNAPSHOT_KEYS: Final = _SNAPSHOT_KEYS - {
     "coordination_dispositions",
     "coordination_declarations",
     "pending_missing_for_assessment",
+    "content_forgotten",
 }
 _RECORD_KEYS: Final = frozenset(
     {"payload", "payload_digest", "redacted", "source_event_id", "source_frontier"}
@@ -2091,6 +2152,31 @@ def _contradictions_from_snapshot(
     return result
 
 
+def _content_forgotten_from_snapshot(value: JsonValue | None) -> ContentForgottenMarker | None:
+    if value is None:
+        return None
+    source = _snapshot_object(
+        value,
+        required=frozenset({"at", "payload", "source_event_id", "source_frontier"}),
+        optional=frozenset(),
+    )
+    payload = source["payload"]
+    return ContentForgottenMarker(
+        source_event_id=cast(EventId, source["source_event_id"]),
+        source_frontier=_snapshot_uint(source["source_frontier"]),
+        at=cast(str, source["at"]),
+        payload=None
+        if payload is None
+        else cast(
+            ContentForgottenPayload,
+            decode_payload(
+                EventSchema("content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION),
+                cast(DomainJsonValue, payload),
+            ),
+        ),
+    )
+
+
 def projection_from_snapshot(value: JsonValue) -> ProjectionState:
     """Decode and revalidate one exact generation-1 projection snapshot."""
 
@@ -2105,6 +2191,7 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
                     "coordination_dispositions",
                     "coordination_declarations",
                     "pending_missing_for_assessment",
+                    "content_forgotten",
                 }
             ),
         )
@@ -2180,6 +2267,7 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
             pending_missing_for_assessment=_pending_missing_from_snapshot(
                 source.get("pending_missing_for_assessment")
             ),
+            content_forgotten=_content_forgotten_from_snapshot(source.get("content_forgotten")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         if type(exc) is ValueError and str(exc) == "invalid_projection_state":

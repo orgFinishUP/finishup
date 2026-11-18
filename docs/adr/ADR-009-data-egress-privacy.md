@@ -1901,3 +1901,109 @@ exact bytes in every sink and a new case may carry both spellings, as the amendm
 **Hosts and surfaces.** The behaviour is service-side and identical on Codex, Claude Code and
 Cursor. The CLI, MCP, hooks, the terminal interface and the receipt renderings (JSON, markdown,
 text) read the same records.
+
+## Amendment proposed by ADR-051 (2026-11-05): the FinishUP server hop
+
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) defines how a
+client will use a FinishUP service on another machine that the same owner runs. Once it is
+accepted, this record changes as follows. **In layer 1 the hop is defined but never taken**
+(narrowed 2026-11-08): the remote kinds are closed (`remote_kind_unavailable`), a remote root is
+refused before any dial, and no channel or endpoint is added to what this record permits. Of the
+rules below only the owner-only record of what this computer's everyday service last reported is
+kept up to date in layer 1; the rest is the contract the layers that open a remote kind implement.
+**Layer 4 takes the hop for SSH servers** (ADR-052): over OpenSSH only, through the target's helper
+(relay) or a direct `ssh -W` stream, after the shared gate, the consent to the server's profile and
+the repository hold; no other channel or endpoint is added, and HTTPS and port servers stay closed.
+**Layer 5 takes it for HTTPS and port servers** ([ADR-053](ADR-053-rest-v1-public-contract.md)):
+over REST v1 only, through the same helper (relay) or each process's own REST connection
+(direct), after the same gate, consent and hold; the one request made before authentication is
+the bounded discovery of `server add`, which carries no credential and no task content.
+
+- **A distinct hop, outside the five channels.** Traffic between a FinishUP client and the
+  owner's own FinishUP server is the *FinishUP server hop*. It is not `llm_inference` and not one
+  of the four non-LLM channels, and enabling it enables none of them. It carries the ordinary
+  control traffic (task statements, published work, evidence, check, respond and receipt
+  traffic), observation rows (with the native content captured under the client's observation
+  consent and content profiles, sent as a local service would receive it and named in the
+  disclosure), the workspace claim digest, and the workspace evidence the server asks the
+  client's workspace agent for within each operation's existing bound. It never carries
+  a vault secret, a provider credential, or human-control or secret-ingress traffic.
+- **Authorization.** Each remote target is authorized by the owner on the trusted foreground
+  console with a versioned disclosure and a typed confirmation, recorded in the target record; a
+  new disclosure version requires a fresh confirmation. Agents cannot add or select a remote
+  target. This is a trusted-console decision, not a vault-reauthenticated ceremony, because a
+  client machine may have no vault; ADR-051 records that limit.
+- **Never in force together with the zero-network state.** Decision 10 holds for the hop:
+  this computer's zero-network policy and a selected remote target are never in force together
+  (maintainer decision of 2026-11-07, replacing the 2026-11-06 choice to let the owner keep the
+  target, ADR-051 decision 8). Adding or selecting a remote target is refused while this
+  computer's set-up installation reports an effective policy that does not permit network egress,
+  or, when that policy cannot be read, last reported one; any other unreadable policy refuses too
+  (`network_policy_unreadable`). A computer whose own FinishUP was never set up has no policy of
+  its own, and the server's policy governs the work sent to it. A change that would make this
+  computer's machine-scope policy zero-network while a remote target is selected is decided
+  before it is applied: on the trusted console the owner switches to this computer's everyday
+  FinishUP and makes the change, or cancels it and keeps the target (Enter, end of input and
+  Ctrl-C cancel; FinishUP never switches on its own); without that console, for a
+  machine-readable answer or for a relayed decision, the change is refused with
+  `zero_network_remote_selected` and `finishup server use local` as the one remedy. As the last
+  line of defence, every client connection to a remote target is refused before anything is sent
+  while this computer last reported the zero-network state, so a process whose selection predates
+  the change sends nothing. The client remembers each report of this computer's machine-scope
+  policy (the zero-network check, `privacy show`, every privacy change made here) in an
+  owner-only marker beside the server registry, outside the vault, holding only whether it was
+  zero-network and when; the connection check reads that marker, never the service, and the
+  displays read the live policy first and fall back to it. **Honest limits:** a connection already
+  open when the policy changes is not cut by this check (it is refused at its next connection);
+  a marker that cannot be read counts as no record until the next report replaces it; and after
+  an upgrade from a release without the marker, nothing is remembered until this computer's
+  policy is next reported. Apart from such a target, the FinishUP-owned process set in the
+  zero-network state still permits only the exact endpoints decision 10 lists.
+- **Policy authority sits on the server.** The server's own effective policy, repository grants
+  and never-send fence decide every AI-powered review disclosure from there, exactly as they do
+  locally; the client's profile does not widen or narrow them. Workspace evidence reaches the
+  server as the agent read it, and the server applies minimization, redaction and the never-send
+  scan before any egress, as for a service read. A claim-bound repository's rows are keyed by its
+  claim commitment.
+- **Local sinks (decision 3).** `agent_context` and `local_human_view` remain non-egress sinks on
+  the client machine; with a remote target, the content they receive has first crossed the
+  owner-authorized hop from the server.
+
+## Amendment proposed by ADR-052 (2026-11-09): a repository whose grant forbids network egress holds the server hop
+
+[ADR-052](ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md) (layer 2 of the
+unified client/server model) and ADR-051 decision 8's subsection *A repository whose policy on
+this computer allows no network use* add one rule to the FinishUP server hop above: while a server
+elsewhere is selected, a repository whose own grant on this computer composes to no network egress
+is held from that server by default — nothing FinishUP reads or claims for it is sent there — until
+the owner allows it for that target (`finishup server repositories add`, trusted console, typed
+name) or keeps it on this computer (`keep`). Unknown is not held; the hold is the last step of one
+authorization gate checked before any claim, dial or sync and watched while a connection is open.
+The hold covers FinishUP's own reads and claims for the repository, not what an agent in another
+folder reads and its hooks capture (the maintainer's addendum of 2026-11-07). No remote kind is
+open in layer 2, so the hold is built but reached only in process; its reads and records stay
+dormant until a server elsewhere is recorded.
+
+## Amendment proposed by ADR-054 (layer 6): a copy of the code on the server (level L2)
+
+[ADR-054](ADR-054-level-l2-the-server-copy.md) adds one kind of content to the FinishUP server hop
+above, at level L2 only: a sanitized copy of a repository's git-visible files (never its history),
+sent by the target's helper when the server pulls it. It travels the server hop under the same
+gate; it is not a new channel, and enabling it enables none of the five channels.
+
+- **Offer and consent.** A copy goes only to a server whose owner's `[server.code_copy]` table
+  offers level L2, and only after this computer's owner consents at L2 on the trusted console,
+  with a retention that server offers (ADR-054 decisions 9 and 16).
+- **Zero network and the hold refuse before any export.** Every sync runs the gate again (zero
+  network, the disclosure, the kind, the consent verdict, the repository's hold) before any file
+  is read or any object written, and a refused sync never falls back to a copy already kept
+  (ADR-054 decisions 2, 4 and 12).
+- **What is held out.** The always-excluded credential names (ADR-031's and more), the server's
+  exclusions and the owner's own list, files over the size cap, and files whose contents match a
+  known secret format until the owner allows those exact bytes; the names of what is held out are
+  sent, never their contents. Names and scans are not a secret guarantee.
+- **Only forget removes what was sent.** Holding a repository, zero network, narrowing to L1,
+  choosing another server or removing it stop future sends only. Forget (`finishup server code
+  forget`, its `--all`, or `server remove`'s question) deletes the copy, its snapshots and the
+  excerpts tasks derived from it, which keep a "content forgotten" marker; backups of the server's
+  folder are not managed (ADR-054 decisions 7 and 15).

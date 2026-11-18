@@ -218,8 +218,26 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
 - Live Git/filesystem artifact inspection during import review; v0.1 compares recorded evidence
   only.
 - Chunked import/object formats above the exact 4 MiB source/object cap.
-- Remote service exposure. *(Narrowed 2026-09-05: this bullet formerly also deferred Codex
-  app-server integration and additional first-party harnesses. The exact digest-bound Codex
+- Remote service exposure. *(Moved 2026-11-05, narrowed 2026-11-08: single-owner FinishUP
+  servers — several named local servers, HTTPS servers on localhost ports, a server on another
+  machine over SSH, and web-hosted servers over HTTPS — and the client workspace agent that lets
+  such a server read the agent's working tree are decided by
+  [ADR-051](adr/ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903), which
+  delivers them in layers. Layer 1 opens named local servers only; layer 4 opens a server on
+  another machine over SSH (ADR-052: the helper, relay and direct styles); layer 5 opens HTTPS
+  servers, on the web and on ports of this computer, over REST v1
+  ([ADR-053](adr/ADR-053-rest-v1-public-contract.md): the gateway and native server edges, API
+  keys with scopes and principals, discovery and the official origin preset), so they leave this
+  deferral. The compatibility window (U18, design v2 question Q5) is decided there: the REST API
+  manifest, of which the core server serves exactly its own release's (a window of one).
+  Layer 2 ([ADR-052](adr/ADR-052-shared-authorization-generations-gate-and-consent-envelopes.md))
+  adds the shared authorization gate, generations, consent-envelope types and the repository
+  egress hold, all closed with the kinds; its remaining follow-ups (the helper's background
+  agents and the direct clients carrying the authorization, profile binding, sync under the gate,
+  a receipt count of fenced reads, and the lifecycle acceptance rows) are listed there by layer.
+  Multi-user or team hosting, remote human-control ceremonies and the rest of the multi-user
+  bullet below stay deferred.)* *(Narrowed 2026-09-05: this bullet
+  formerly also deferred Codex app-server integration and additional first-party harnesses. The exact digest-bound Codex
   app-server subscription evaluator ships (`src/finishup/adapters/providers/codex_app_server.py`,
   issue #480, E-007 status 2026-09-04), and Claude Code and Cursor ship as first-party harness
   adapters (`src/finishup/adapters/integrations/claude_code_integration.py`,
@@ -237,12 +255,19 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   because the `status` result they cause discloses only what that call would already have returned
   under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
   cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
-  Remote service exposure remains deferred. No adapter silently installs or configures hooks;
-  every hook install goes through the host's explicit plugin ceremony.
+  Remote service exposure is decided for single-owner servers by ADR-051 (Proposed); SSH servers
+  open in layer 4, HTTPS and port servers in layer 5 (ADR-053); host registrations are unchanged by
+  it. No adapter
+  silently installs or configures hooks; every hook install goes through the host's explicit plugin
+  ceremony.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
 - Launchd/systemd convenience installers, multi-user service hosting, remote control, and
   independent concurrent service writers; the single-user persistent local service and
-  authenticated local IPC are v0.1 requirements.
+  authenticated local IPC are v0.1 requirements. *(2026-11-05: ADR-051 (Proposed) defines how
+  one owner will reach their own FinishUP service on another machine over SSH or HTTPS through the
+  ordinary control channel; layer 4 opens SSH and layer 5 HTTPS (ADR-053; key principals keep
+  each key's claims apart, groundwork only). Multi-user hosting, remote unlock,
+  consent and owner-view ceremonies, and the native installers stay deferred here.)*
 - Standalone public `finishup doctor` CLI command and support-bundle schema. *(2026-09-05: the
   terminal interface's read-only `/doctor` report and `finishup service diagnostics` (one durable
   owner-only diagnostic record by correlation id) ship next to `version --json` and the startup

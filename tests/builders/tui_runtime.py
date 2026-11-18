@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+from finishup.cli.policy_server import PolicyServer
+from finishup.cli.server import REMOTE_KIND_UNAVAILABLE
 from finishup.tui.models import (
     CheckMode,
     Detection,
@@ -26,6 +28,8 @@ from finishup.tui.models import (
     ProviderPosture,
     ReadinessLayer,
     ReceiptSummary,
+    ServerRow,
+    ServerSwitch,
     StatusSnapshot,
     TaskStatusPage,
     VaultPosture,
@@ -33,6 +37,9 @@ from finishup.tui.models import (
     WorkItem,
 )
 from finishup.tui.runtime import RuntimeError_
+
+# What the real runtime says when ``/server`` is asked to use a remote record (``server use``).
+REMOTE_USE_REFUSED = f"{REMOTE_KIND_UNAVAILABLE}; the selected server is unchanged"
 
 DESKTOP = HarnessOption(
     executable_path="/Applications/Codex.app/Contents/MacOS/codex",
@@ -160,6 +167,43 @@ class FakeRuntime:
     progress_reads: list[str] = field(default_factory=lambda: [])
     task_views: list[tuple[str, str]] = field(default_factory=lambda: [])
     receipts: list[tuple[str, str, bool]] = field(default_factory=lambda: [])
+    # Server targets (ADR-051): ``local`` plus any named targets, the header indicator, and the
+    # names ``use_server`` was asked to select.
+    servers: tuple[ServerRow, ...] = (ServerRow("local", "local", None, None, True),)
+    server_selected: str | None = None
+    server_uses: list[str] = field(default_factory=lambda: [])
+    server_error: RuntimeError_ | None = None
+    # What a switch says of the remote server it left (``finishup server use``), and whether that
+    # connection did not close.
+    server_left_lines: tuple[str, ...] = ()
+    server_left_open: bool = False
+    # The phase a remote root is refused with before anything is sent (ADR-051), which first-run
+    # setup reads before it looks for agents; ``None`` for a server on this computer.
+    remote_refusal: str | None = None
+    # How often the interface looked for agents (``detect``).
+    detections: int = 0
+    # The zero-network item (ADR-051 decision 8): lines ``/server`` shows, and how often it was read.
+    zero_network: tuple[str, ...] = ()
+    zero_network_title: str = "This computer is zero-network: the selected server is refused"
+    zero_network_reads: int = 0
+    # This repository held from, or kept here for, the selected server elsewhere (ADR-051
+    # decision 8, round 4): the lines ``/server`` shows, its title, how often it was read, and
+    # what ``server repositories add`` answers when the interface hands the terminal over.
+    repository_hold: tuple[str, ...] = ()
+    repository_hold_title: str = "This repository's work is held from the selected server"
+    repository_hold_reads: int = 0
+    repository_allows: int = 0
+    repository_allow_result: tuple[str, bool] = ("t_9f8e7d6c", True)
+    repository_allow_error: BaseException | None = None
+    # The remote server whose privacy policy a questionnaire changes (ADR-051 decision 8), how
+    # often the interface read it, and whether the owner switches away from it during the
+    # questionnaire (the zero-network choice offers that), after which it reads as ``None``.
+    policy_server: PolicyServer | None = None
+    policy_server_reads: int = 0
+    switch_servers_during_privacy: bool = False
+    # What the questionnaire answers instead of its configured report: a report, or an error.
+    privacy_report: object | None = None
+    privacy_error: RuntimeError_ | None = None
 
     def project_root(self) -> Path:
         return Path("/tmp/project")
@@ -179,6 +223,7 @@ class FakeRuntime:
         return self.harnesses
 
     async def detect(self) -> Detection:
+        self.detections += 1
         return Detection(
             project_root="/tmp/project",
             project_name="project",
@@ -210,6 +255,12 @@ class FakeRuntime:
         from finishup.cli.privacy_setup import PrivacySetupReport
 
         self.credential_probes.append(credential_probe)
+        if self.switch_servers_during_privacy:
+            self.policy_server = None
+        if self.privacy_error is not None:
+            raise self.privacy_error
+        if self.privacy_report is not None:
+            return self.privacy_report
 
         # ``None`` means the CLI opens on its recommendation; the fake resolves it the same way
         # the real one does so the interface cannot be tested against a rule of its own. The
@@ -484,6 +535,67 @@ class FakeRuntime:
 
     async def service_stop(self) -> str:
         return "draining"
+
+    def remote_root_refusal(self) -> str | None:
+        return self.remote_refusal
+
+    def server_indicator(self) -> str | None:
+        return self.server_selected
+
+    async def refresh_zero_network_item(self) -> tuple[str, ...]:
+        self.zero_network_reads += 1
+        return self.zero_network
+
+    def zero_network_heading(self) -> str:
+        return self.zero_network_title
+
+    async def refresh_repository_hold_item(self) -> tuple[str, ...]:
+        self.repository_hold_reads += 1
+        return self.repository_hold
+
+    def repository_hold_heading(self) -> str:
+        return self.repository_hold_title
+
+    async def allow_repository_here(self) -> tuple[str, bool]:
+        self.repository_allows += 1
+        if self.repository_allow_error is not None:
+            raise self.repository_allow_error
+        if self.repository_allow_result[1]:
+            self.repository_hold = ()
+        return self.repository_allow_result
+
+    def selected_policy_server(self) -> PolicyServer | None:
+        self.policy_server_reads += 1
+        return self.policy_server
+
+    async def server_rows(self) -> tuple[tuple[ServerRow, ...], tuple[str, ...]]:
+        if self.server_error is not None:
+            raise self.server_error
+        lines = tuple(
+            f"{'*' if row.selected else ' '} {row.name}  {row.kind}  {row.target_id or '-'}"
+            for row in self.servers
+        )
+        return self.servers, lines
+
+    async def server_status_lines(self, name: str | None = None) -> tuple[str, ...]:
+        return (f"Server: {name or 'local'} (local); chosen by: ambient", "State: ready")
+
+    async def use_server(self, name: str) -> ServerSwitch:
+        if self.server_error is not None:
+            raise self.server_error
+        self.server_uses.append(name)
+        row = next(row for row in self.servers if row.name == name)
+        if row.remote:
+            # As the real runtime (``finishup server use``): the remote kinds are closed in this
+            # release, so a remote row is refused and the selection stays as it was.
+            raise RuntimeError_("remote_kind_unavailable", REMOTE_USE_REFUSED)
+        self.servers = tuple(replace(item, selected=item.name == name) for item in self.servers)
+        self.server_selected = None if row.target_id is None else f"{row.kind} {row.target_id}"
+        return ServerSwitch(
+            "everyday" if row.target_id is None else f"{row.kind} {row.target_id}",
+            self.server_left_lines,
+            self.server_left_open,
+        )
 
     async def status_snapshot(self) -> StatusSnapshot:
         return StatusSnapshot(

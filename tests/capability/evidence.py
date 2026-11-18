@@ -51,6 +51,7 @@ __all__ = [
     "codex_profiles_frozen",
     "live_codex_authorized",
     "live_keyring_authorized",
+    "live_platform_keyring",
     "live_provider_authorized",
     "record_and_write",
     "runtime_capability_context",
@@ -681,6 +682,26 @@ def live_keyring_authorized() -> bool:
     """Return True only when the approved live OS-keyring capability job opts in."""
 
     return os.environ.get("FINISHUP_LIVE_KEYRING", "").strip().lower() in {"1", "true", "yes"}
+
+
+def live_platform_keyring() -> object:
+    """The credential store keyring would choose on this machine, for an authorized live cell.
+
+    The suite pins keyring to its fail backend (``tests/credential_store_guard.py``), so a live
+    keyring cell asks for the real store here, explicitly, ignoring that pin and without filling
+    keyring's process-wide cache: a configuration file still decides, then the viable backend of
+    highest priority, as keyring itself chooses without the environment variable.
+    """
+
+    if not live_keyring_authorized():
+        raise CapabilityEvidenceError("live_keyring_not_authorized")
+    from keyring import backend, core
+    from keyring.backends.fail import Keyring as FailKeyring
+
+    configured = core.load_config()
+    if configured is not None:
+        return configured
+    return max(backend.get_all_keyring(), key=backend.by_priority, default=FailKeyring())
 
 
 def codex_profiles_frozen() -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import ctypes
 import json
 import os
@@ -9,7 +10,8 @@ import re
 import stat
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -26,10 +28,17 @@ __all__ = [
     "LEGACY_ISOLATED_ROOT_ENV",
     "RUNTIME_PIN_NAME",
     "RUNTIME_PIN_SCHEMA",
+    "SERVERS_DIR_NAME",
+    "SERVER_SELECTION_NAME",
+    "SERVER_SELECTION_SCHEMA",
+    "SERVER_TARGET_FILE_NAME",
     "InstallationNaming",
     "IsolationBinding",
     "PathSafetyError",
     "RuntimePin",
+    "active_root",
+    "ambient_installation_dirs",
+    "ambient_registry_dirs",
     "bundle_root",
     "cache_dir",
     "catalog_path",
@@ -37,12 +46,16 @@ __all__ = [
     "ensure_owner_only_dir",
     "existing_owner_only_dir",
     "installation_naming",
+    "installation_state_dir",
     "isolated_root",
     "isolated_root_variable",
     "isolation_binding",
     "log_dir",
     "read_runtime_pin",
+    "reset_selection_memo",
     "runtime_dir",
+    "selection_override",
+    "selection_override_active",
     "runtime_pin_path",
     "service_generation_path",
     "setup_marker_path",
@@ -80,7 +93,22 @@ _MAX_RUNTIME_PIN_BYTES: Final = 4_096
 _INSTALLATION_ID: Final = re.compile(
     r"^ins_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.ASCII
 )
-type IsolationBinding = Literal["ambient", "environment", "runtime_pin", "environment_and_pin"]
+# The owner-only server selection (ADR-051): the lowest-precedence root source, below the
+# isolation variable and the runtime pin. It lives in the ambient config directory and names one
+# target root beneath ``<ambient state dir>/servers/``; ``finishup.client.targets`` writes it, and
+# this module only reads it (``json`` and ``os`` only, so a hook pays nothing more).
+SERVER_SELECTION_NAME: Final = "server-selection.json"
+SERVER_SELECTION_SCHEMA: Final = "yoetz.server-selection/1"
+SERVERS_DIR_NAME: Final = "servers"
+SERVER_TARGET_FILE_NAME: Final = "target.json"
+_MAX_SELECTION_BYTES: Final = 1_024
+# ``finishup.client.targets`` owns the record; these bound the service's own minimal read of it.
+_MAX_TARGET_RECORD_BYTES: Final = 8_192
+_SERVER_TARGET_KINDS: Final = frozenset({"local", "local_port", "ssh", "https"})
+_TARGET_ID: Final = re.compile(r"^t_[0-9a-f]{8}$", re.ASCII)
+type IsolationBinding = Literal[
+    "ambient", "environment", "runtime_pin", "environment_and_pin", "selection"
+]
 # Which platform-directory application name the ambient roots use (ADR-048): ``finishup`` for a
 # new installation, ``legacy_yoetz`` for one first installed as Yoetz and adopted in place.
 type InstallationNaming = Literal["finishup", "legacy_yoetz"]
@@ -418,12 +446,269 @@ def isolated_root(*, _probe: _PathProbe | None = None) -> Path | None:
     return _validated_isolated_root(str(pin.isolated_root), probe)
 
 
+# Per-process memo of the selected target root, keyed by the selection file path. The MCP bridge
+# reads the selection once per process, so it never switches servers mid-session; a hook is a
+# fresh process and follows a new selection at once.
+_SELECTION_MEMO: dict[str, Path | None] = {}
+# ``selection_override``'s answer, ``(selection file path, root)``, for the context that entered
+# it only: a worker thread started by ``asyncio.to_thread`` (or anyio's) sees its caller's, and no
+# other thread or task ever does. The process memo above is never changed by an override.
+_SELECTION_OVERRIDE: contextvars.ContextVar[tuple[str, Path | None] | None] = (
+    contextvars.ContextVar("finishup_selection_override", default=None)
+)
+
+
+def reset_selection_memo() -> None:
+    """Forget the memoized selection (``finishup server use`` and tests call this)."""
+
+    _SELECTION_MEMO.clear()
+
+
+# Set once by ``finishup service run --ambient-root``: this process never reads the selection.
+_selection_ignored: bool = False
+
+
+def ignore_server_selection() -> None:
+    """Resolve the server selection as absent for the rest of this process (ADR-051).
+
+    A client whose own root is the everyday installation starts its service with
+    ``finishup service run --ambient-root``, which calls this before anything resolves a path. The
+    service then serves the everyday installation its spawner uses, never a target that a
+    selection written after the spawner resolved its root names. The isolation variable and the
+    runtime pin still outrank this, exactly as they outrank the selection; nothing undoes it
+    within the process, and ``reset_selection_memo`` leaves it in force.
+    """
+
+    global _selection_ignored
+    _selection_ignored = True
+
+
+def ambient_registry_dirs(*, _probe: _PathProbe | None = None) -> tuple[Path, Path]:
+    """Return ``(ambient config dir, ambient state dir)``, where the server registry lives.
+
+    These are the everyday installation's platform directories, independent of any isolation
+    root or selection: target roots live beneath ``<state>/servers/`` and the selection file in
+    ``<config>``. Raises ``installation_root_ambiguous`` like every other ambient path.
+    """
+
+    dirs = _ambient_dirs(_probe_or_default(_probe))
+    return Path(dirs.user_config_dir), Path(dirs.user_state_dir)
+
+
+def ambient_installation_dirs() -> tuple[Path, ...]:
+    """Every platform directory the everyday installation may use, under both names (ADR-048).
+
+    The data, configuration, cache, state, log and runtime directories of the ambient
+    installation as ``finishup`` and as the legacy ``yoetz``, whatever root this process uses and
+    whether or not they exist. Nothing is read, validated or created: the answer only names
+    directories a caller keeps reads out of (the workspace agent's own-directory fence, ADR-051),
+    so a selected or isolated root never makes the everyday installation readable.
+    """
+
+    found: list[Path] = []
+    for app_name in (APP_NAME, LEGACY_APP_NAME):
+        dirs = _platform_dirs(app_name)
+        found.extend(
+            Path(directory)
+            for directory in (
+                dirs.user_data_dir,
+                dirs.user_config_dir,
+                dirs.user_cache_dir,
+                dirs.user_state_dir,
+                dirs.user_log_dir,
+                dirs.user_runtime_dir,
+            )
+        )
+    return tuple(dict.fromkeys(found))
+
+
+def _read_selection(path: Path, probe: _PathProbe) -> str | None:
+    """Return the selected target id, ``None`` when no selection file exists, or fail closed."""
+
+    try:
+        facts = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if (
+        not stat.S_ISREG(facts.st_mode)
+        or (hasattr(facts, "st_uid") and facts.st_uid != probe.effective_uid)
+        or stat.S_IMODE(facts.st_mode) & 0o077
+        or facts.st_size > _MAX_SELECTION_BYTES
+    ):
+        raise PathSafetyError("isolation_root_invalid")
+    try:
+        parsed: object = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if not isinstance(parsed, dict):
+        raise PathSafetyError("isolation_root_invalid")
+    fields = cast(dict[object, object], parsed)
+    target_id = fields.get("target_id")
+    if (
+        set(fields) != {"schema", "target_id"}
+        or fields.get("schema") != SERVER_SELECTION_SCHEMA
+        or type(target_id) is not str
+        or not _TARGET_ID.match(target_id)
+    ):
+        raise PathSafetyError("isolation_root_invalid")
+    return target_id
+
+
+def _require_target_record(root: Path | None) -> Path | None:
+    """``root`` while it still holds its ``target.json``; ``isolation_root_invalid`` otherwise."""
+
+    if root is None:
+        return None
+    try:
+        marker = (root / SERVER_TARGET_FILE_NAME).lstat()
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if not stat.S_ISREG(marker.st_mode):
+        raise PathSafetyError("isolation_root_invalid")
+    return root
+
+
+def _selected_root(probe: _PathProbe) -> Path | None:
+    """Return the validated root the owner-only selection file names, memoized per process.
+
+    No selection file means the ambient installation, exactly as before. A selection that is
+    malformed, foreign-owned, or names a missing or unsafe root fails closed with
+    ``isolation_root_invalid`` (or the root's own path-safety reason); it never falls back to the
+    everyday service silently. Ambiguous ambient naming reads no selection: every ambient path
+    already fails closed with ``installation_root_ambiguous`` there.
+
+    The memo keeps a process on the target it started with (an MCP bridge never switches between
+    servers on this computer; one whose connection to a server elsewhere ended because its
+    authorization changed resets it with ``reset_selection_memo``, ADR-052), never on one removed
+    since: every answer, remembered or overridden, still needs the root's record,
+    and once ``finishup server remove`` deleted it the answer fails closed exactly as a fresh read
+    would. No path helper therefore recreates a removed target's folder (SRV-1).
+    """
+
+    if probe.installation_naming == "ambiguous" or _selection_ignored:
+        return None
+    dirs = probe.platform_dirs
+    path = Path(dirs.user_config_dir) / SERVER_SELECTION_NAME
+    key = str(path)
+    override = _SELECTION_OVERRIDE.get()
+    if override is not None and override[0] == key:
+        return _require_target_record(override[1])
+    if key in _SELECTION_MEMO:
+        return _require_target_record(_SELECTION_MEMO[key])
+    target_id = _read_selection(path, probe)
+    root: Path | None = None
+    if target_id is not None:
+        root = _require_target_record(
+            _validated_isolated_root(
+                str(Path(dirs.user_state_dir) / SERVERS_DIR_NAME / target_id), probe
+            )
+        )
+    _SELECTION_MEMO[key] = root
+    return root
+
+
+def server_target_kind(root: Path, *, _probe: _PathProbe | None = None) -> str | None:
+    """The kind the server target record in ``root`` names; ``None`` when ``root`` holds none.
+
+    The service's own minimal check (ADR-051): it may not import the client's target registry
+    (``finishup.client.targets`` validates the whole record), yet must never run in a remote
+    target's root. Only an owner-only regular file holding a JSON object whose ``kind`` is one of
+    the closed target kinds is answered; anything else fails closed with
+    ``isolation_root_invalid``, and the caller treats that as possibly remote.
+    """
+
+    probe = _probe_or_default(_probe)
+    path = root / SERVER_TARGET_FILE_NAME
+    try:
+        facts = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if (
+        not stat.S_ISREG(facts.st_mode)
+        or (hasattr(facts, "st_uid") and facts.st_uid != probe.effective_uid)
+        or stat.S_IMODE(facts.st_mode) & 0o077
+        or facts.st_size > _MAX_TARGET_RECORD_BYTES
+    ):
+        raise PathSafetyError("isolation_root_invalid")
+    try:
+        parsed: object = json.loads(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    kind = cast(dict[object, object], parsed).get("kind") if isinstance(parsed, dict) else None
+    if type(kind) is not str or kind not in _SERVER_TARGET_KINDS:
+        raise PathSafetyError("isolation_root_invalid")
+    return kind
+
+
+@contextmanager
+def selection_override(root: Path | None, *, _probe: _PathProbe | None = None) -> Generator[None]:
+    """Resolve the selection as ``root`` (``None``: the everyday install) inside this block.
+
+    ``finishup server`` uses this to start, stop, or probe one named target from a process whose
+    own selection names another; the block ends with the previous answer restored. It changes
+    nothing on disk and never outranks the isolation variable or the runtime pin. ``root`` must
+    be a validated target root.
+
+    The answer holds for this context only (a ``contextvars`` variable): the code inside the
+    block, an event loop it runs (``asyncio.run``/``anyio.run`` copy the context) and the worker
+    threads that loop starts through ``asyncio.to_thread``. Another thread, a terminal
+    interface's event loop or a concurrent block in another worker never sees it, and blocks
+    that end out of order never leave this process resolving another block's root. A thread
+    started without the context (``threading.Thread``, ``run_in_executor``) resolves this
+    process's own selection.
+    """
+
+    probe = _probe_or_default(_probe)
+    key = str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)
+    token = _SELECTION_OVERRIDE.set((key, root))
+    try:
+        yield
+    finally:
+        _SELECTION_OVERRIDE.reset(token)
+
+
+def selection_override_active(*, _probe: _PathProbe | None = None) -> bool:
+    """Whether a ``selection_override`` block decides this context's selection now.
+
+    Such a block names its root on purpose (one named target, probed or stopped from a process
+    whose own selection names another): the selection file does not, so an authorization made
+    under it is bound to that root, not to the selection (ADR-052).
+    """
+
+    probe = _probe_or_default(_probe)
+    key = str(Path(probe.platform_dirs.user_config_dir) / SERVER_SELECTION_NAME)
+    override = _SELECTION_OVERRIDE.get()
+    return override is not None and override[0] == key
+
+
+def active_root(*, _probe: _PathProbe | None = None) -> Path | None:
+    """Return the root this process uses, or ``None`` for the everyday ambient installation.
+
+    Precedence (ADR-051 amending ADR-026/ADR-028): ``FINISHUP_ISOLATED_ROOT`` (or its legacy
+    spelling), then the runtime pin — both through ``isolated_root()``, unchanged — then the
+    owner-only server selection, then ambient. A pinned test instance therefore never sees the
+    selection. Every identity root (config, bundle, state, runtime endpoints, cache, logs) derives
+    from this answer; ``isolated_root()`` keeps meaning "explicitly isolated" for the call sites
+    that stamp registrations and launch lines, so a selection is never written into a host.
+    """
+
+    probe = _probe_or_default(_probe)
+    explicit = isolated_root(_probe=probe)
+    if explicit is not None:
+        return explicit
+    return _selected_root(probe)
+
+
 def isolation_binding(*, _probe: _PathProbe | None = None) -> IsolationBinding:
-    """Name which source selected the isolation root, after validating it."""
+    """Name which source selected the root, after validating it."""
 
     probe = _probe_or_default(_probe)
     if isolated_root(_probe=probe) is None:
-        return "ambient"
+        return "ambient" if _selected_root(probe) is None else "selection"
     from_environment = isolated_root_variable() is not None
     from_pin = read_runtime_pin(_probe=probe) is not None
     if from_environment and from_pin:
@@ -436,7 +721,7 @@ def bundle_root(*, _data_dir: Path | None = None, _probe: _PathProbe | None = No
 
     probe = _probe_or_default(_probe)
     if _data_dir is None:
-        isolated = isolated_root(_probe=probe)
+        isolated = active_root(_probe=probe)
         if isolated is not None:
             return isolated / "data"
         return Path(_ambient_dirs(probe).user_data_dir)
@@ -462,7 +747,7 @@ def config_file_path(*, _probe: _PathProbe | None = None) -> Path:
     """Return the sole default user configuration file path."""
 
     probe = _probe_or_default(_probe)
-    isolated = isolated_root(_probe=probe)
+    isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "config" / "config.toml"
     return Path(_ambient_dirs(probe).user_config_dir) / "config.toml"
@@ -472,7 +757,7 @@ def cache_dir(*, _probe: _PathProbe | None = None) -> Path:
     """Return the platform-native or isolated user cache directory."""
 
     probe = _probe_or_default(_probe)
-    isolated = isolated_root(_probe=probe)
+    isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "cache"
     return Path(_ambient_dirs(probe).user_cache_dir)
@@ -482,9 +767,25 @@ def state_dir(*, _probe: _PathProbe | None = None) -> Path:
     """Return the platform-native or isolated user state directory."""
 
     probe = _probe_or_default(_probe)
-    isolated = isolated_root(_probe=probe)
+    isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "state"
+    return Path(_ambient_dirs(probe).user_state_dir)
+
+
+def installation_state_dir(*, _probe: _PathProbe | None = None) -> Path:
+    """Return this installation's own state directory, whichever server it selected.
+
+    An explicit isolation root's (the variable or the runtime pin), else the everyday ambient
+    installation's: never a server selection's (ADR-051). Host-registration bookkeeping lives here
+    (the host-configuration lock and its membership record): registrations never follow the
+    selection, so two setup processes that resolved different targets still share one lock.
+    """
+
+    probe = _probe_or_default(_probe)
+    explicit = isolated_root(_probe=probe)
+    if explicit is not None:
+        return explicit / "state"
     return Path(_ambient_dirs(probe).user_state_dir)
 
 
@@ -492,7 +793,7 @@ def log_dir(*, _probe: _PathProbe | None = None) -> Path:
     """Return the platform-native or isolated user log directory."""
 
     probe = _probe_or_default(_probe)
-    isolated = isolated_root(_probe=probe)
+    isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "log"
     return Path(_ambient_dirs(probe).user_log_dir)
@@ -507,7 +808,7 @@ def runtime_dir(*, _probe: _PathProbe | None = None) -> Path:
     """
 
     probe = _probe_or_default(_probe)
-    isolated = isolated_root(_probe=probe)
+    isolated = active_root(_probe=probe)
     if isolated is not None:
         return isolated / "run"
     return Path(_ambient_dirs(probe).user_runtime_path)
@@ -669,8 +970,23 @@ def _decode_mount_field(value: str) -> str:
     return result
 
 
-def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
-    matches: list[tuple[int, str]] = []
+type _MountPoints = tuple[tuple[Path, str], ...]
+
+# The last mount table read and its mount points, each resolved once. Every store opened, and
+# every connection to an isolated root's service, verifies its folder, and resolving each of the
+# computer's mount points again for each folder was most of a warm status read's time (a lstat
+# chain per mount point, dozens of them). The table's own text is the key: a mount or unmount is
+# another text and is resolved afresh. The kernel names each mount point by its current path, so
+# the same text resolves the same way.
+_resolved_mount_table: tuple[str, _MountPoints] | None = None
+
+
+def _resolved_mount_points(mount_table: str) -> _MountPoints:
+    global _resolved_mount_table
+    remembered = _resolved_mount_table
+    if remembered is not None and remembered[0] == mount_table:
+        return remembered[1]
+    points: list[tuple[Path, str]] = []
     for line in mount_table.splitlines():
         fields = line.split()
         if len(fields) < 3:
@@ -680,8 +996,20 @@ def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
             resolved_mount = mount_point.resolve(strict=False)
         except OSError:
             resolved_mount = mount_point
-        if _is_beneath(path, resolved_mount):
-            matches.append((len(resolved_mount.parts), fields[2]))
+        points.append((resolved_mount, fields[2]))
+    resolved = tuple(points)
+    _resolved_mount_table = (mount_table, resolved)
+    return resolved
+
+
+def _linux_mount_fstype(path: Path, mount_table: str) -> str | None:
+    # ``_is_beneath`` without a raised error per mount point: the path or one of its parents.
+    beneath = {path, *path.parents}
+    matches = [
+        (len(mount_point.parts), filesystem)
+        for mount_point, filesystem in _resolved_mount_points(mount_table)
+        if mount_point in beneath
+    ]
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]

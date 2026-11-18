@@ -334,7 +334,7 @@ def _plugin_json() -> bytes:
         "name": "finishup",
         "version": __version__,
         "description": (
-            "FinishUP local work ledger plugin: skill, MCP server, and lifecycle hooks. "
+            "FinishUP work ledger plugin: skill, MCP server, and lifecycle hooks. "
             "Automatic activation is not claimed without exact-host capability evidence."
         ),
         "skills": "./skills/",

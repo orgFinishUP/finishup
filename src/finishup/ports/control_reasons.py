@@ -24,6 +24,9 @@ CONTROL_ERROR_REASONS: Final = frozenset(
         "read_projection_failed",
         "privacy_audit_unreadable",
         "service_generation_changed",
+        # A request on a connection bound to a server-profile revision the service no longer
+        # issues (ADR-052): refused before any work.
+        "server_profile_changed",
         "endpoint_unsafe",
         "invalid_request",
         "coordination_invalid",

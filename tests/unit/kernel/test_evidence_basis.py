@@ -65,7 +65,9 @@ from finishup.kernel.evidence_basis import (
     evidence_view_json,
     evidence_view_refs,
 )
+from finishup.kernel.forgotten_content import FORGOTTEN_EXCERPT
 from finishup.kernel.projections import (
+    ContentForgottenMarker,
     LatestTestedState,
     projection_from_snapshot,
     projection_snapshot,
@@ -1111,3 +1113,32 @@ def test_decision_line_without_obligations_keeps_reviewer_and_advice_counts() ->
     )
     # The receipt's short form has only obligation counts, so it stays empty here.
     assert decision_status_line(state, records, reviewer=False) == ""
+
+
+@pytest.mark.parametrize(("forgotten_at", "masked"), [(31, True), (5, False)])
+def test_a_forgotten_copy_masks_the_quoted_assessment_snippet_only(
+    forgotten_at: int, masked: bool
+) -> None:
+    """ADR-054 (U20): once the task's copy content is forgotten, assessments quote none of it.
+
+    The assessment row stays, with its verdict, refs and applicability; only the snippet a check
+    of an earlier frontier quoted reads as the fixed forgotten text (supported rows must carry
+    one). A check of later work keeps its quote.
+    """
+
+    case, records = _case()
+    marker = ContentForgottenMarker(evt(50), forgotten_at, "2026-11-10T10:00:00.000Z", None)
+    plain = evidence_basis_by_obligation(
+        build_evidence_view(case.projection, records, freshness=(), tracked_runs=())
+    )[str(obl(1))].assessments[0]
+    shown = evidence_basis_by_obligation(
+        build_evidence_view(
+            replace(case.projection, content_forgotten=marker),
+            records,
+            freshness=(),
+            tracked_runs=(),
+        )
+    )[str(obl(1))].assessments[0]
+    assert plain.snippet == "The probe passed"
+    assert shown.snippet == (FORGOTTEN_EXCERPT if masked else "The probe passed")
+    assert shown.model_copy(update={"snippet": plain.snippet}) == plain

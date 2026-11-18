@@ -112,7 +112,9 @@ def _service_status_fast_path(arguments: list[str]) -> int | None:
     except KeyboardInterrupt:
         stderr("cancelled")
         return 130
-    except Exception:
+    except (Exception, asyncio.CancelledError):
+        # An interrupt reaches here as KeyboardInterrupt; a cancellation that still escapes the
+        # run is a defect, named as one and never printed as a traceback.
         stderr("internal_error: the command could not be completed")
         return 70
 

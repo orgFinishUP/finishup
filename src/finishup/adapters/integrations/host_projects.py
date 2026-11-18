@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
-from finishup.config.paths import PathSafetyError, state_dir
+from finishup.config.paths import PathSafetyError, installation_state_dir
 
 __all__ = [
     "CONNECTED_PROJECTS_FILE",
@@ -247,7 +247,8 @@ def lock_path_for(config_root: Path) -> Path:
     """The private lock file for one host configuration root (#1058 round 3).
 
     It lives under this FinishUP installation's own state directory, which exists before any host
-    hierarchy does, keyed by the resolved target path, so a first setup into a configuration
+    hierarchy does and never follows a server selection (ADR-051: registrations stay with the
+    installation), keyed by the resolved target path, so a first setup into a configuration
     root that does not exist yet can lock, and unrelated roots never share a lock. The key is
     the resolved path in Unicode NFC and case-folded: a case-insensitive or normalising
     filesystem (macOS) reaches one root through several spellings, and each must find the same
@@ -258,7 +259,7 @@ def lock_path_for(config_root: Path) -> Path:
     target = os.path.realpath(os.path.abspath(os.path.expanduser(config_root)))
     key = unicodedata.normalize("NFC", target).casefold()
     digest = hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()
-    return state_dir() / _LOCK_DIRECTORY / f"{digest}.lock"
+    return installation_state_dir() / _LOCK_DIRECTORY / f"{digest}.lock"
 
 
 def witness_path_for(config_root: Path) -> Path:

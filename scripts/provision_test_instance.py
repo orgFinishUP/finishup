@@ -12,10 +12,25 @@ One instance is one directory tree beneath a short, owner-private base outside e
 modified working tree unless ``--allow-dirty``), installs it into the runtime with ``uv``, and lets
 the snapshot's own ``finishup instance create --bind-runtime`` seal the root. Because the runtime is
 pinned, ``<base>/<tag>/runtime/bin/finishup`` resolves that root even when a host or shell drops the
-environment variable, and never the everyday installation. ``dispose`` stops only the service
-holding that root's singleton, removes the root through ``finishup instance dispose``, then removes
-the runtime and wheel. Repeating ``dispose`` is a no-op. Nothing here touches the everyday install,
-host configuration, or vaults.
+environment variable, and never the everyday installation.
+
+``dispose`` never leaves a launcher that has lost its pin, which would run ambient and reach the
+everyday install (issue #1350):
+
+1. It checks first and changes nothing on a refusal. The launcher must be pinned to this root, the
+   root marked disposable, and no process but the instance's own service may use the runtime:
+   a host's bridge or hook, or any command running it (``runtime_in_use``).
+2. It withdraws the launchers: ``runtime/bin`` is renamed in one step, so no registered path can
+   start the runtime any more, while the pin stays. The check then runs again before anything is
+   stopped.
+3. It stops only the service holding that root's singleton and removes the root through the
+   runtime's own ``dispose_instance``, keeping the pin. A typed refusal, which comes before any
+   deletion, puts the launchers back, still pinned.
+4. It prunes the retained runtimes, then removes the withdrawn launchers, the runtime with its pin,
+   and the wheel.
+
+Repeating ``dispose`` is a no-op, and it finishes a disposal an earlier run left part done.
+Nothing here touches the everyday install, host configuration, or vaults.
 
 An instance built from a revision before the FinishUP rename ships only the legacy ``yoetz``
 launcher and package and reads ``YOETZ_ISOLATED_ROOT`` (ADR-028 upgrade tests). Every command
@@ -29,9 +44,11 @@ This is contributor tooling; the shipped product surface is ``finishup instance`
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -54,6 +71,16 @@ _RUNTIME_LAUNCHERS: Final = (("finishup", "finishup"), ("yoetz", "yoetz"))
 # Product variable prefixes a snapshot command must not inherit: FinishUP and legacy (ADR-048).
 _ENV_PREFIXES: Final = ("FINISHUP_", "YOETZ_")
 _ISOLATED_ROOT_ENV_NAMES: Final = ("FINISHUP_ISOLATED_ROOT", "YOETZ_ISOLATED_ROOT")
+# Frozen legacy identifier (ADR-048): the runtime pin's file name inside the runtime prefix.
+_PIN_NAME: Final = "yoetz-instance-pin.json"
+# Where ``dispose`` moves ``runtime/bin`` before anything is removed (issue #1350): no host
+# registration names this path, and the interpreter still finds the runtime from here.
+_WITHDRAWN_BIN: Final = ".bin-withdrawn"
+# The lifecycles ``finishup instance dispose`` removes (ADR-028 decision 4).
+_DISPOSABLE_LIFECYCLES: Final = frozenset({"persistent", "disposable"})
+_PINNED_BINDINGS: Final = frozenset({"runtime_pin", "environment_and_pin"})
+_GENERATION: Final = re.compile(r"[0-9a-f]{64}\Z")
+_LEASE_NAME: Final = ".in-use"
 
 
 class ProvisionError(Exception):
@@ -87,11 +114,14 @@ def _clean_env(home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def _runtime_launcher(runtime: Path) -> tuple[Path, str] | None:
-    """Return the runtime's launcher and its package: ``bin/finishup``, else ``bin/yoetz``."""
+def _runtime_launcher(runtime: Path, directory: str = "bin") -> tuple[Path, str] | None:
+    """Return the runtime's launcher and its package: ``bin/finishup``, else ``bin/yoetz``.
+
+    ``directory`` is ``bin``, or the withdrawn copy of it during a disposal.
+    """
 
     for name, package in _RUNTIME_LAUNCHERS:
-        launcher = runtime / "bin" / name
+        launcher = runtime / directory / name
         if launcher.is_file():
             return launcher, package
     return None
@@ -356,37 +386,586 @@ def command_status(args: argparse.Namespace) -> dict[str, object]:
     layout = _layout(_validate_base(Path(args.base).expanduser()), _validate_tag(args.tag))
     provenance = _read_provenance(layout["provenance"])
     found = _runtime_launcher(layout["runtime"])
+    if layout["root"].exists() and found is None:
+        # An earlier dispose withdrew the launchers (or already removed them) and stopped part
+        # way: nothing can start this instance; dispose again to finish. No launcher is run here.
+        return {"tag": args.tag, "state": "disposing", "provenance": provenance}
+    if found is not None and not (layout["runtime"] / _PIN_NAME).is_file():
+        # Its launcher lost its pin (left by a dispose before issue #1350's fix) and would run
+        # ambient: never run it, dispose to remove it.
+        return {"tag": args.tag, "state": "unpinned", "provenance": provenance}
     if provenance is None or found is None:
         return {"tag": args.tag, "state": "absent"}
     status = _snapshot_command(found[0], ["instance", "status"], _clean_env())
     return {"tag": args.tag, "state": "present", "provenance": provenance, "instance": status}
 
 
+def _held_leases(releases: Path) -> list[Path]:
+    """The retained runtimes' lease files some process holds (``adapters.release_runtime``).
+
+    Every serving process of the runtime (an MCP bridge, a hook, the service) runs from a retained
+    copy and holds that copy's lease shared for its whole life. A brief non-blocking exclusive try
+    tells held from free and is released at once; it never waits and never removes anything.
+    """
+
+    held: list[Path] = []
+    if not releases.is_dir():
+        return held
+    for generation in sorted(releases.iterdir()):
+        if not _GENERATION.match(generation.name):
+            continue
+        lease = generation / _LEASE_NAME
+        try:
+            descriptor = os.open(lease, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            held.append(lease)
+            continue
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(lease)
+                continue
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+    return held
+
+
+def _processes_using(root: Path, *, proc: Path = Path("/proc")) -> dict[int, set[str]] | None:
+    """Every process with a file under ``root`` open or mapped, with those files.
+
+    ``None`` when this computer cannot say. Linux reads ``/proc/<pid>/fd`` and ``/proc/<pid>/maps``
+    of the operator's own processes; elsewhere (macOS) ``lsof +D``. A process that runs the
+    runtime maps its extension modules, so this sees commands that hold no lease, and the
+    leases themselves are open files. Another account's processes are not seen; they cannot
+    open these owner-only files. Detection only: no process is ever signalled from this.
+    """
+
+    prefix = os.path.realpath(root) + os.sep
+    found: dict[int, set[str]] = {}
+    if (proc / "self" / "fd").is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            paths: set[str] = set()
+            try:
+                descriptors = list((entry / "fd").iterdir())
+            except OSError:
+                continue
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor)
+                except OSError:
+                    continue
+                if target.startswith(prefix):
+                    paths.add(target)
+            try:
+                with (entry / "maps").open(encoding="utf-8", errors="replace") as maps:
+                    for line in maps:
+                        fields = line.rstrip("\n").split(maxsplit=5)
+                        if len(fields) == 6 and fields[5].startswith(prefix):
+                            paths.add(fields[5])
+            except OSError:
+                pass
+            if paths:
+                found[int(entry.name)] = paths
+        return found
+    lsof = shutil.which("lsof") or ("/usr/sbin/lsof" if Path("/usr/sbin/lsof").is_file() else None)
+    if lsof is None:
+        return None
+    listed = _run([lsof, "-n", "-P", "-F", "pn", "+D", str(root)], timeout=180)
+    if listed.returncode not in {0, 1}:
+        return None
+    pid: int | None = None
+    for line in listed.stdout.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None and line[1:].startswith(prefix):
+            found.setdefault(pid, set()).add(line[1:])
+    return found
+
+
+def _process_tree(pid: int) -> set[int] | None:
+    """``pid`` and its descendants (``ps``), or ``None`` when ``ps`` cannot list them."""
+
+    listed = _run(["ps", "-A", "-o", "pid=", "-o", "ppid="], timeout=30)
+    if listed.returncode != 0:
+        return None
+    children: dict[int, list[int]] = {}
+    for line in listed.stdout.decode("ascii", errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    tree, pending = {pid}, [pid]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in tree:
+                tree.add(child)
+                pending.append(child)
+    return tree
+
+
+_IN_USE: Final = (
+    "runtime_in_use: a host session still runs this instance (an MCP bridge, a hook, or another "
+    "FinishUP process); nothing was stopped or removed, and the instance is still in place and "
+    "pinned. Close that host session, or remove FinishUP from that host, then dispose again"
+)
+_UNVERIFIABLE: Final = (
+    "runtime_in_use_unverifiable: this computer cannot show which programs use this instance's "
+    "runtime (no readable /proc, no lsof, a listing that timed out, or a held lease no visible "
+    "process accounts for); nothing was stopped or removed. Make /proc readable or lsof "
+    "available, close the instance's host sessions, stop its service with the instance's "
+    "launcher (service stop), then dispose again"
+)
+# After the launchers were withdrawn by this run or an earlier one: nothing can start the instance.
+_IN_USE_WITHDRAWN: Final = (
+    "runtime_in_use: a process still uses this instance's runtime (an MCP bridge, a hook, or "
+    "another FinishUP process). Its launchers are withdrawn, so nothing can start it, and nothing "
+    "was stopped or removed. Close that process (stop the instance's service as the "
+    "test-instances runbook says for withdrawn launchers), then dispose again"
+)
+_UNVERIFIABLE_WITHDRAWN: Final = (
+    "runtime_in_use_unverifiable: this computer cannot show which programs use this instance's "
+    "runtime. Its launchers are withdrawn, so nothing can start it, and nothing was stopped or "
+    "removed. Make /proc readable or lsof available, then dispose again (the test-instances "
+    "runbook, Dispose, says how)"
+)
+# After the launchers were withdrawn: the state is gone (or going), so a copy still running fails
+# closed (its own pin names the removed root), and nothing can start the instance again.
+_STILL_RUNNING: Final = (
+    "runtime_in_use: a process that started before this disposal still runs a copy of the "
+    "instance's runtime. The instance's launchers are withdrawn, so nothing can start it, and "
+    "that copy cannot reach any other install. Close it, then dispose again to remove the rest"
+)
+
+
+def _service_pid(status: dict[str, object]) -> int | None:
+    holder = status.get("service_holder")
+    pid = cast(dict[str, object], holder).get("pid") if isinstance(holder, dict) else None
+    return pid if type(pid) is int else None
+
+
+def _refuse_in_use(
+    tag_root: Path, releases: Path, status: dict[str, object], *, withdrawn: bool = False
+) -> None:
+    """Refuse while any process but the instance's own service uses the runtime.
+
+    In use: any process with a file of the instance (its runtime or a retained copy) open or
+    mapped, which covers bridges, hooks and upgrades (they hold a retained copy's lease) and
+    commands that serve nothing (they map the runtime's modules). The instance's service and its
+    descendants are the one exception: disposal stops it. Every held lease must be accounted for
+    by a process seen holding it, else the answer is unverifiable. What this cannot see: a
+    process of another account, and one that starts after the check (the launchers are withdrawn
+    next, then this check runs again).
+    """
+
+    in_use, unverifiable = (
+        (_IN_USE_WITHDRAWN, _UNVERIFIABLE_WITHDRAWN) if withdrawn else (_IN_USE, _UNVERIFIABLE)
+    )
+    pid = _service_pid(status)
+    users = _processes_using(tag_root)
+    held = _held_leases(releases)
+    if users is None:
+        # Without a way to enumerate, nothing can be shown to be unused.
+        raise _fail(in_use if held and pid is None else unverifiable)
+    allowed = {os.getpid()}
+    if pid is not None:
+        tree = _process_tree(pid)
+        if tree is None:
+            raise _fail(unverifiable)
+        allowed |= tree
+    if set(users) - allowed:
+        raise _fail(in_use)
+    seen = {path for paths in users.values() for path in paths}
+    unaccounted = [lease for lease in held if os.path.realpath(lease) not in seen]
+    if unaccounted and set(_held_leases(releases)) & set(unaccounted):
+        raise _fail(unverifiable)
+
+
+def _pinned_to(runtime: Path) -> tuple[str, str] | None:
+    """The root and installation id the runtime's pin names, read as a file, never run."""
+
+    try:
+        parsed = json.loads((runtime / _PIN_NAME).read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    fields = cast(dict[str, object], parsed)
+    root, installation = fields.get("isolated_root"), fields.get("installation_id")
+    if type(root) is not str or type(installation) is not str:
+        return None
+    return root, installation
+
+
+def _lock_held(lock: Path) -> bool:
+    try:
+        descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _dispose_bootstrap(package: str) -> str:
+    """``dispose_instance`` with the runtime's own package, keeping the pin (issue #1350).
+
+    The pin is the only thing between the runtime and the everyday install, so it goes with the
+    runtime itself, last; ``runtime_prefix`` names the withdrawn launcher folder, which has none.
+    A typed refusal (exit 3) is raised before anything is deleted; any other failure may follow
+    deletion.
+    """
+
+    return (
+        "import json,sys; from pathlib import Path; "
+        f"from {package}.cli.instance import dispose_instance; "
+        f"from {package}.config.installation import InstanceIdentityError; "
+        f"from {package}.config.paths import PathSafetyError\n"
+        "a = json.loads(sys.argv[1])\n"
+        "try:\n"
+        "    r = dispose_instance(root=Path(a['root']), runtime_prefix=Path(a['prefix']), "
+        "retain_logs=Path(a['logs']) if a['logs'] else None)\n"
+        "except InstanceIdentityError as e:\n"
+        "    print(json.dumps({'refused': e.reason})); sys.exit(3)\n"
+        "except PathSafetyError as e:\n"
+        "    print(json.dumps({'refused': e.reason_code})); sys.exit(3)\n"
+        "print(json.dumps(r))"
+    )
+
+
+def _refusal_token(stdout: bytes) -> str:
+    try:
+        parsed = json.loads(stdout)
+    except ValueError:
+        return "dispose_failed"
+    token = cast(dict[str, object], parsed).get("refused") if isinstance(parsed, dict) else None
+    return token if isinstance(token, str) and token.isidentifier() else "dispose_failed"
+
+
+_PROGRESS: Final = ".disposing.json"
+
+
+def _write_progress(path: Path, body: dict[str, object]) -> None:
+    """Write the progress record atomically and durably: a temporary file, synced, renamed."""
+
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.unlink(missing_ok=True)
+    encoded = json.dumps(body, sort_keys=True).encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    folder = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(folder)
+    finally:
+        os.close(folder)
+
+
+def _read_progress(path: Path) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    return cast(dict[str, object], parsed) if isinstance(parsed, dict) else None
+
+
+def _progress_valid(record: dict[str, object] | None, state: Path) -> bool:
+    """Whether ``record`` is this disposal's whole record for the very folder at ``state``."""
+
+    if record is None or record.get("state") != str(state):
+        return False
+    installation = record.get("installation_id")
+    identity = record.get("identity")
+    current = _directory_identity(state)
+    return (
+        type(installation) is str
+        and bool(installation)
+        and isinstance(identity, list)
+        and current is not None
+        and identity == list(current)
+    )
+
+
+def _directory_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        facts = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(facts.st_mode):
+        return None
+    return facts.st_dev, facts.st_ino
+
+
+def _check_logs_destination(
+    logs: Path, tag_root: Path, installation_id: object, *, withdrawn: bool = False
+) -> None:
+    """Refuse, before anything is stopped, a ``--retain-logs`` folder disposal would reject or
+    delete: what ``dispose_instance`` requires of it (an existing parent, an owner-only folder
+    if it exists, no copy of these logs yet), and outside the tree being removed."""
+
+    problem = None
+    resolved_tag = tag_root.resolve()
+    if logs == resolved_tag or logs.is_relative_to(resolved_tag):
+        problem = "it lies inside the instance, which disposal removes"
+    elif not logs.parent.is_dir():
+        problem = "its parent folder does not exist"
+    elif logs.exists():
+        facts = logs.lstat()
+        if (
+            not stat.S_ISDIR(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or stat.S_IMODE(facts.st_mode) != 0o700
+        ):
+            problem = "it exists and is not a folder only you can read and write (mode 700)"
+        elif (logs / str(installation_id)).exists():
+            problem = "it already holds a copy of this instance's logs"
+    elif not os.access(logs.parent, os.W_OK | os.X_OK):
+        problem = "it cannot be created in its parent folder"
+    if problem is not None:
+        done = (
+            "the instance's launchers are withdrawn, so nothing can start it, and nothing else "
+            "was changed; dispose again with a usable folder or without --retain-logs"
+            if withdrawn
+            else "nothing was changed"
+        )
+        raise _fail(f"retain_logs_invalid: --retain-logs cannot be used: {problem}; {done}")
+
+
+def _status_of(command: list[str]) -> dict[str, object]:
+    """The instance's own ``instance status``; a timeout is an unverifiable refusal."""
+
+    try:
+        return _snapshot_command(
+            Path(command[0]), [*command[1:], "instance", "status"], _clean_env()
+        )
+    except subprocess.TimeoutExpired:
+        raise _fail(_UNVERIFIABLE) from None
+
+
+def _checked(
+    tag_root: Path, releases: Path, status: dict[str, object], *, withdrawn: bool = False
+) -> None:
+    """``_refuse_in_use``, with an enumeration that times out read as unverifiable."""
+
+    try:
+        _refuse_in_use(tag_root, releases, status, withdrawn=withdrawn)
+    except subprocess.TimeoutExpired:
+        raise _fail(_UNVERIFIABLE_WITHDRAWN if withdrawn else _UNVERIFIABLE) from None
+
+
+def _verify_status(status: dict[str, object], runtime: Path, state: Path) -> None:
+    if status.get("mode") != "isolated" or status.get("binding") not in _PINNED_BINDINGS:
+        raise _fail("instance_not_pinned: the launcher is not pinned to this instance")
+    if _pinned_to(runtime) != (str(state), status.get("installation_id")):
+        raise _fail("instance_not_pinned: the launcher is pinned to another root")
+    if status.get("lifecycle") not in _DISPOSABLE_LIFECYCLES:
+        raise _fail("instance_not_disposable: the root is not a disposable instance")
+
+
 def command_dispose(args: argparse.Namespace) -> dict[str, object]:
     layout = _layout(_validate_base(Path(args.base).expanduser()), _validate_tag(args.tag))
     if not layout["root"].exists():
         return {"tag": args.tag, "state": "absent", "disposed": False}
-    found = _runtime_launcher(layout["runtime"])
-    disposer = [str(found[0])] if found is not None else [sys.executable, "-m", "finishup"]
-    dispose_args = [*disposer, "instance", "dispose", "--root", str(layout["state"]), "--json"]
-    if args.retain_logs is not None:
-        dispose_args += ["--retain-logs", str(Path(args.retain_logs).expanduser().resolve())]
-    result = _run(dispose_args, env=_clean_env())
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
-        raise _fail("instance_dispose_failed: the root was left in place")
-    outcome = json.loads(result.stdout)
-    retained_root = layout["runtime"].parent / f".{layout['runtime'].name}-releases"
-    if retained_root.exists():
-        # Newer installed processes keep read-only runtime copies. The instance's service is
-        # already stopped above; use the runtime's own lease-aware cleanup before removal.
+    # One disposal of a tag at a time: an exclusive lock on the tag folder itself.
+    guard = os.open(layout["root"], os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _fail(
+                "dispose_in_progress: another dispose of this instance is running; nothing was "
+                "changed. Wait for it to finish"
+            ) from None
+        return _dispose_locked(layout, args)
+    finally:
+        os.close(guard)
+
+
+def _dispose_locked(layout: dict[str, Path], args: argparse.Namespace) -> dict[str, object]:
+    runtime, state = layout["runtime"], layout["state"]
+    bin_dir, withdrawn = runtime / "bin", runtime / _WITHDRAWN_BIN
+    releases = runtime.parent / f".{runtime.name}-releases"
+    progress = layout["root"] / _PROGRESS
+    marker = state / "state" / "instance-identity.json"
+    logs = None if args.retain_logs is None else Path(args.retain_logs).expanduser().resolve()
+    if bin_dir.exists() and withdrawn.exists():
+        raise _fail("instance_layout_invalid: both the launchers and a withdrawn copy exist")
+    found = _runtime_launcher(runtime)
+    resumed = found is None and withdrawn.exists()
+    began = progress.exists()
+    status: dict[str, object] = {}
+    if found is not None:
+        if _pinned_to(runtime) is not None and state.exists():
+            # 1. Check, changing nothing: pinned to this root, disposable, used by no host.
+            status = _status_of([str(found[0])])
+            _verify_status(status, runtime, state)
+            if logs is not None:
+                _check_logs_destination(logs, layout["root"], status.get("installation_id"))
+            _checked(layout["root"], releases, status)
+        # Otherwise the launcher lost its pin, or names a root that is gone, in an earlier dispose:
+        # it is never run, only withdrawn.
+        # 2. Withdraw the launchers in one rename; the pin stays until the runtime goes.
+        os.rename(bin_dir, withdrawn)
+        if not status and state.exists():
+            # An unpinned launcher beside a live state: withdrawn at once (it would run ambient).
+            # The identity marker names the installation; a record bound to this folder lets a
+            # retry finish once nothing uses the runtime; nothing is stopped or removed before.
+            identity = _read_progress(marker)
+            installation = None if identity is None else identity.get("installation_id")
+            if type(installation) is str and not _progress_valid(_read_progress(progress), state):
+                _write_progress(
+                    progress,
+                    {
+                        "state": str(state),
+                        "installation_id": installation,
+                        "identity": list(_directory_identity(state) or ()),
+                    },
+                )
+            if logs is not None:
+                _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
+            _checked(layout["root"], releases, {}, withdrawn=True)
+        if status:
+            try:
+                # A process that started before the rename is seen now; nothing is stopped yet.
+                _checked(layout["root"], releases, status)
+                _write_progress(
+                    progress,
+                    {
+                        "state": str(state),
+                        "installation_id": status.get("installation_id"),
+                        "identity": list(_directory_identity(state) or ()),
+                    },
+                )
+            except BaseException:
+                # Nothing was stopped or removed: drop this run's progress record, put them back.
+                progress.unlink(missing_ok=True)
+                os.rename(withdrawn, bin_dir)
+                raise
+    elif resumed and state.exists() and marker.is_file():
+        # A disposal an earlier run began: check again before anything is stopped or removed.
+        # The launchers stay withdrawn, as the earlier run left them.
+        ran_before = _runtime_launcher(runtime, _WITHDRAWN_BIN)
+        recorded = _read_progress(progress)
+        if (
+            _pinned_to(runtime) is not None
+            and ran_before is not None
+            and (withdrawn / "python").exists()
+        ):
+            status = _status_of([str(withdrawn / "python"), "-I", "-m", ran_before[1]])
+            _verify_status(status, runtime, state)
+            installation: object = status.get("installation_id")
+        elif _progress_valid(recorded, state):
+            # The runtime cannot be asked (its pin or interpreter is damaged), but the run that
+            # began this disposal verified it and recorded so; the users check still applies.
+            assert recorded is not None
+            installation = recorded.get("installation_id")
+        else:
+            raise _fail(
+                "instance_not_pinned: the withdrawn runtime cannot be checked, and no earlier "
+                "run recorded that it was; nothing was stopped or removed"
+            )
+        if logs is not None:
+            _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
+        _checked(layout["root"], releases, status, withdrawn=True)
+        if not _progress_valid(recorded, state):
+            # An earlier run stopped before its record was complete, or it is damaged: write
+            # it before any deletion, so another interruption can still be finished.
+            _write_progress(
+                progress,
+                {
+                    "state": str(state),
+                    "installation_id": installation,
+                    "identity": list(_directory_identity(state) or ()),
+                },
+            )
+    elif not resumed and state.exists() and marker.is_file():
+        # No launcher at all, withdrawn or not (removed by hand, or an older layout): nothing can
+        # run ambient, but the state is still checked before anything is stopped or removed.
+        identity = _read_progress(marker)
+        installation = None if identity is None else identity.get("installation_id")
+        if logs is not None:
+            _check_logs_destination(logs, layout["root"], installation, withdrawn=True)
+        _checked(layout["root"], releases, {}, withdrawn=True)
+    elif resumed and _held_leases(releases) and not state.exists():
+        raise _fail(_STILL_RUNNING)
+    ran = _runtime_launcher(runtime, _WITHDRAWN_BIN)
+    python = withdrawn / "python"
+    outcome: object = {"disposed": False, "state": "absent"}
+    if state.exists() and not marker.is_file():
+        # A disposal this script began stopped while it removed the root, after the identity
+        # marker went. Finish it, but only for the very folder its progress record names.
+        if not _progress_valid(_read_progress(progress), state) or state.is_symlink():
+            raise _fail(
+                "instance_not_disposable: the root has no identity, and no disposal of this very "
+                "folder was begun here; check it and remove it by hand if it is the instance's"
+            )
+        if _lock_held(state / "state" / "service.lock"):
+            raise _fail("instance_service_running: a service still holds the remaining root")
+        try:
+            users = _processes_using(layout["root"])
+        except subprocess.TimeoutExpired:
+            raise _fail(_UNVERIFIABLE_WITHDRAWN) from None
+        if users is None:
+            raise _fail(_UNVERIFIABLE_WITHDRAWN)
+        if set(users) - {os.getpid()} or _held_leases(releases):
+            raise _fail(_STILL_RUNNING)
+        shutil.rmtree(state)
+        outcome = {"disposed": True, "state": "removed", "resumed": True}
+    elif state.exists():
+        # 3. Stop the root's own service and remove the root, keeping the pin.
+        package = "finishup" if ran is None else ran[1]
+        disposer = [str(python), "-I"] if python.exists() else [sys.executable]
+        request = {
+            "root": str(state),
+            "prefix": str(withdrawn),
+            "logs": None if logs is None else str(logs),
+        }
+        result = _run(
+            [*disposer, "-c", _dispose_bootstrap(package), json.dumps(request)], env=_clean_env()
+        )
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
+            token = _refusal_token(result.stdout)
+            if (
+                result.returncode == 3
+                and not resumed
+                and not began
+                and _pinned_to(runtime) is not None
+                and withdrawn.exists()
+            ):
+                # A typed refusal comes before anything is deleted, and no earlier run began one.
+                os.rename(withdrawn, bin_dir)
+                progress.unlink(missing_ok=True)
+                raise _fail(
+                    f"instance_dispose_failed: {token}: the instance is still in place and "
+                    "pinned; its launchers are back"
+                )
+            raise _fail(
+                f"instance_dispose_incomplete: {token}: part of the instance may be removed; its "
+                "launchers stay withdrawn, so nothing can start it. Dispose again"
+            )
+        outcome = json.loads(result.stdout)
+    if releases.exists() and python.exists():
+        # 4. Newer installed processes keep read-only runtime copies; prune with the runtime's
+        # own lease-aware cleanup, then remove everything, the withdrawn launchers first.
         cleaned = _run(
-            [
-                str(layout["runtime"] / "bin" / "python"),
-                "-I",
-                "-c",
-                _prune_bootstrap("finishup" if found is None else found[1]),
-            ],
+            [str(python), "-I", "-c", _prune_bootstrap("finishup" if ran is None else ran[1])],
             env=_clean_env(),
             timeout=60,
         )
@@ -397,9 +976,19 @@ def command_dispose(args: argparse.Namespace) -> dict[str, object]:
             raise _fail("runtime_cleanup_failed: retained runtimes were left in place")
         values = cast(list[object], counts)
         if len(values) != 2 or type(values[1]) is not int or values[1] != 0:
-            raise _fail("runtime_in_use: close this instance's host sessions and retry disposal")
+            raise _fail(_STILL_RUNNING)
+    elif _held_leases(releases):
+        raise _fail(_STILL_RUNNING)
+    if withdrawn.exists():
+        shutil.rmtree(withdrawn)
     shutil.rmtree(layout["root"])
-    return {"tag": args.tag, "state": "removed", "disposed": True, "instance": outcome}
+    return {
+        "tag": args.tag,
+        "state": "removed",
+        "disposed": True,
+        "launchers_withdrawn": True,
+        "instance": outcome,
+    }
 
 
 def _prune_bootstrap(package: str) -> str:
@@ -459,6 +1048,14 @@ def main(argv: list[str] | None = None) -> int:
         result = handlers[args.command](args)
     except ProvisionError as error:
         sys.stderr.write(f"{error}\n")
+        return 2
+    except subprocess.TimeoutExpired:
+        advice = (
+            "dispose again to finish, or run status to see what is left"
+            if args.command == "dispose"
+            else "nothing was removed by this command; run it again"
+        )
+        sys.stderr.write(f"timeout: a step of this command did not finish in time; {advice}\n")
         return 2
     sys.stdout.write(
         (json.dumps(result, indent=2, sort_keys=True) if args.json else _render(result)) + "\n"

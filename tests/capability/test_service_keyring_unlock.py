@@ -18,6 +18,7 @@ from tests.capability.evidence import (
     Observation,
     bytes_digest,
     live_keyring_authorized,
+    live_platform_keyring,
     record_and_write,
     runtime_capability_context,
 )
@@ -240,7 +241,7 @@ def test_live_os_keyring_requires_presence_intersection(tmp_path: Path) -> None:
         return
 
     memory = LocalSecretMemory()
-    source = OSVaultRootKeySource(memory)
+    source = OSVaultRootKeySource(memory, backend=live_platform_keyring())
     probe = asyncio.run(source.probe(_INSTALLATION_ID))
     memory.close()
     _ = probe.state  # probe identity recorded; pristine create still requires presence cell

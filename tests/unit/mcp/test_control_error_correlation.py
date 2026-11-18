@@ -306,6 +306,24 @@ def test_bridge_from_before_an_update_asks_to_reopen_instead_of_restarting(
     assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
 
 
+def test_bridge_from_before_an_update_of_a_remote_helper_asks_to_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server elsewhere: a newer build of this release now runs its helper (same version, so
+    the version cannot tell): this older bridge asks to reopen, never ``service restart``."""
+
+    monkeypatch.setattr(bridge, "service_holder_identity", lambda: None)
+    monkeypatch.setattr(bridge, "newer_helper_build_holds_selection", lambda: True)
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_incompatible", retryable=True, correlation_id=_CORRELATION),
+        request_id=_REQUEST,
+        operation="status",
+    )
+    message = cast(str, _error_of(result)["message"])
+    assert "reopen this session" in message
+    assert "finishup service restart" not in message
+
+
 def test_absent_service_maps_to_supervisor_copy_and_control_class_reason(
     diagnostic_root: Path,
 ) -> None:
@@ -527,3 +545,106 @@ def test_start_timeout_names_a_slow_start_not_a_supervisor_or_lifecycle_command(
     found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
     assert len(found) == 1
     _assert_no_leakage(error, found)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["target_root_is_remote", "zero_network_remote_selected", "target_reauthorization_required"],
+)
+def test_a_refused_remote_root_names_its_continuation_never_a_local_service(phase: str) -> None:
+    """MCP names a remote root's refusal and its continuation, never 'finishup service run'.
+
+    The phase is kept where an agent reads it: in the final structured details (the normalizer
+    admits exactly the three remote-root phases) and in the native text, which never carries the
+    free-form message.
+    """
+
+    from finishup.protocol.recovery import continuation_for_reason, directive_for
+
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    continuation = continuation_for_reason(phase)
+    assert continuation is not None
+    error = _error_of(result)
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["safe_details"] == {
+        "continuation": continuation,
+        "phase": phase,
+        "reason_code": "service_unavailable",
+    }
+    text = cast(str, getattr(result.content[0], "text"))
+    assert f" Reason: service_unavailable (phase: {phase})." in text
+    directive = directive_for(continuation)
+    assert directive is not None
+    assert f"Continuation: {continuation}. {directive.directive}" in text
+    assert "service run" not in json.dumps(result.structuredContent) + text
+
+
+@pytest.mark.parametrize("phase", ["target_root_is_remote", "target_reauthorization_required"])
+def test_a_bridge_whose_root_an_isolation_variable_names_points_to_that_override(
+    phase: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """'finishup server use local' cannot change a root an isolation variable names (it answers
+    selection_overridden), so the bridge names the override's way back instead."""
+
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES
+    from finishup.protocol.recovery import directive_for
+
+    monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(tmp_path))
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_unavailable", retryable=True, phase=phase),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    error = _error_of(result)
+    assert error["safe_details"] == {
+        "continuation": "remote_root_override_clear",
+        "phase": phase,
+        "reason_code": "service_unavailable",
+    }
+    directive = directive_for("remote_root_override_clear")
+    assert directive is not None
+    text = cast(str, getattr(result.content[0], "text"))
+    assert f" Reason: service_unavailable (phase: {phase})." in text
+    assert f"Continuation: remote_root_override_clear. {directive.directive}" in text
+    assert "Ask the owner to run 'finishup server use local'" not in text
+
+
+def test_every_remote_connection_phase_is_admitted_and_nothing_else() -> None:
+    """Every remote connection phase is admitted as a detail (ADR-052): the gate's refusals (the
+    three remote-root refusals, the repository hold and the owner's kept choice, a changed
+    authorization, a changed profile or level) and, since SSH servers open (layer 4), the five
+    transport outages, each with its own repair. Any other remote-looking token stays out."""
+
+    from finishup.protocol.errors import (
+        AUTHORIZATION_REFUSAL_PHASES,
+        REMOTE_CONNECTION_PHASES,
+        REMOTE_ROOT_REFUSAL_PHASES,
+        normalize_safe_details,
+    )
+
+    assert REMOTE_ROOT_REFUSAL_PHASES == frozenset(
+        {"target_reauthorization_required", "target_root_is_remote", "zero_network_remote_selected"}
+    )
+    assert AUTHORIZATION_REFUSAL_PHASES == REMOTE_ROOT_REFUSAL_PHASES | {
+        "repository_egress_held",
+        "repository_egress_kept",
+        "server_authorization_changed",
+        "server_profile_changed",
+        "server_level_unavailable",
+    }
+    assert REMOTE_CONNECTION_PHASES - AUTHORIZATION_REFUSAL_PHASES == {
+        "remote_auth_failed",
+        "remote_identity_changed",
+        "remote_incompatible",
+        "remote_service_not_running",
+        "remote_unreachable",
+    }
+    for phase in REMOTE_CONNECTION_PHASES:
+        assert normalize_safe_details({"phase": phase}).get("phase") == phase
+    for other in ("remote_host_key_unconfirmed", "remote_kind_unavailable", "lab.example"):
+        assert normalize_safe_details({"phase": other}).get("phase") is None

@@ -147,3 +147,35 @@ cross-user/system-wide service mode, TCP/network control, concurrent independent
 client-side direct-storage fallback are out of scope. Native autostart integration may be added
 only through explicit platform packaging specs; its absence must not weaken the foreground service
 contract.
+
+## Amendment proposed by ADR-051 (2026-11-05, narrowed 2026-11-08 to layer 1)
+
+[ADR-051](ADR-051-client-server-cut-and-server-targets.md) (Proposed, issue #903) amends this
+record as follows once it is accepted. The single-writer core, the generation fences and the
+ownership mechanism above are unchanged: each target still has exactly one service and one writer
+authority.
+
+- **Named single-owner targets.** "One persistent, per-user local FinishUP service" becomes one
+  service *per target*. The default target is the ambient local service, exactly as today. The
+  owner may add named local targets, each its own ADR-028 persistent instance root with its own
+  service, vault and ledger. Every client process talks to the one target the owner selected;
+  none opens storage or a key backend on any machine.
+- **Attachment.** Endpoint discovery stays deterministic, but it may now also follow the
+  owner-only selection file (ADR-051 decision 2), the lowest-precedence root source. A
+  caller-supplied path still never selects a service; owner-written target configuration alone
+  does.
+- **Remote targets stay closed in layer 1.** The target record keeps the remote kinds (a service
+  the same owner runs on another machine, reached over SSH or HTTPS), but none can be added or
+  selected until its layer of ADR-051 opens it (`remote_kind_unavailable`), and a remote root is
+  refused before any dial. The rules for them below are the contract those layers implement:
+  a remote edge may authenticate a bearer credential (an HTTPS API key) or an SSH login, and
+  neither ever *selects* the service; a claim-bound connection carries no path at all; for a
+  remote target the hook spool and the observation outbox stay on the client, which drains them
+  over the ordinary control channel (`observation_ingest` on a claim-bound connection), the
+  server's sweeper ignores roots it does not own, and the spool writer still gains no bundle
+  writer, key handle, decrypted object or network route of its own.
+- **Deferred work, unchanged in layer 1.** "Distributed service access" and "TCP/network control"
+  stay out of scope until a remote layer of ADR-051 lands; then they leave the list only for
+  single-owner servers the owner hosts, reached through the owner-authorized route ADR-051
+  defines. Cross-user or system-wide service mode, concurrent independent writers and client-side
+  direct-storage fallback stay out of scope.

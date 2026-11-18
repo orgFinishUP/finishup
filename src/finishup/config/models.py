@@ -13,10 +13,23 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from finishup.domain.code_exclusions import ALWAYS_EXCLUDED, valid_pattern
 from finishup.domain.privacy import ProviderDataUseProfile
+from finishup.protocol.canonical import canonical_encode
+from finishup.protocol.consent_envelope import (
+    EnvelopeError,
+    Retention,
+    exclusions_to_json,
+    retention_from_token,
+)
 from finishup.protocol.models import MAX_FINDINGS_LIMIT
 
 __all__ = [
+    "CODE_COPY_MAX_BYTES",
+    "CODE_COPY_MAX_FILE_BYTES_DEFAULT",
+    "CODE_COPY_MAX_REPO_BYTES_DEFAULT",
+    "CODE_COPY_RETENTION_DEFAULT",
+    "CODE_COPY_RETENTION_OPTIONS_DEFAULT",
     "CODEX_FINAL_OUTPUT_LIMIT_DEFAULT",
     "CODEX_OUTPUT_LIMIT_MAX",
     "CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT",
@@ -43,6 +56,8 @@ __all__ = [
     "ProviderProfileConfig",
     "SemanticFallbackConfig",
     "SemanticPolicy",
+    "ServerCodeCopyConfig",
+    "ServerConfig",
     "StorageConfig",
     "VerificationConfig",
     "FinishUpConfig",
@@ -682,6 +697,126 @@ class LocalModelProfileConfig(StrictConfigModel):
         return value
 
 
+# Level L2 (ADR-054): what ``[server.code_copy]`` offers when its owner turns it on without naming
+# the rest. The per-checkout cap is the largest bundle a sync admits (``BundleLimits``), so a tree
+# within it never fails as an oversized bundle instead of ``code_copy_too_large``; the per-file
+# cap is the one the test servers offer. Both stay within ``CodeCopyOffer``'s own bounds.
+CODE_COPY_MAX_BYTES: Final = 1 << 40
+CODE_COPY_MAX_REPO_BYTES_DEFAULT: Final = 67_108_864
+CODE_COPY_MAX_FILE_BYTES_DEFAULT: Final = 16_777_216
+CODE_COPY_RETENTION_OPTIONS_DEFAULT: Final = ("task_close", "days:30", "until_forgotten")
+CODE_COPY_RETENTION_DEFAULT: Final = "days:30"
+# The profile's limits (``protocol.server_profile``): at most 16 retention options; at most 256
+# patterns in ``exclusions.always`` (the offer's together with ``ALWAYS_EXCLUDED``), which this
+# table also keeps to half a profile's 64 KiB, so the profile and every consent made to it fit.
+_CODE_COPY_MAX_RETENTION_OPTIONS: Final = 16
+_CODE_COPY_MAX_PATTERNS: Final = 256
+_CODE_COPY_MAX_PATTERN_BYTES: Final = 32_768
+_CODE_COPY_KEYS: Final = frozenset(
+    {
+        "enabled",
+        "max_repo_bytes",
+        "max_file_bytes",
+        "retention",
+        "retention_default",
+        "exclusions",
+    }
+)
+
+
+class ServerCodeCopyConfig(StrictConfigModel):
+    """``[server.code_copy]``: the copy of code this server offers to keep (level L2, ADR-054).
+
+    ``enabled = false`` (the default) offers nothing, exactly as a file without the table. When
+    enabled, the server offers: the caps a sync is held to (``max_repo_bytes`` per checkout,
+    ``max_file_bytes`` per file); the retention options a client chooses among (``task_close``,
+    ``until_forgotten`` or ``days:N``) and ``retention_default``, the one a client that names
+    none is given; and ``exclusions``, patterns this server always leaves out on top of the
+    client's own always-excluded list. Level L2 is offered only while it is released. Every value
+    is checked whether or not the table is enabled.
+    """
+
+    enabled: bool = False
+    max_repo_bytes: int = Field(
+        default=CODE_COPY_MAX_REPO_BYTES_DEFAULT, ge=1, le=CODE_COPY_MAX_BYTES
+    )
+    max_file_bytes: int = Field(
+        default=CODE_COPY_MAX_FILE_BYTES_DEFAULT, ge=1, le=CODE_COPY_MAX_BYTES
+    )
+    retention: tuple[str, ...] = Field(
+        default=CODE_COPY_RETENTION_OPTIONS_DEFAULT,
+        min_length=1,
+        max_length=_CODE_COPY_MAX_RETENTION_OPTIONS,
+    )
+    retention_default: str = CODE_COPY_RETENTION_DEFAULT
+    exclusions: tuple[str, ...] = Field(default=(), max_length=_CODE_COPY_MAX_PATTERNS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _reject_unknown(value, _CODE_COPY_KEYS)
+        source = dict(_mapping(value))
+        for key in ("retention", "exclusions"):
+            # A TOML array arrives as a list, which strict validation refuses for a tuple.
+            if type(source.get(key)) is list:
+                source[key] = tuple(cast(list[object], source[key]))
+        return source
+
+    @model_validator(mode="after")
+    def _validate_offer(self) -> ServerCodeCopyConfig:
+        if self.max_file_bytes > self.max_repo_bytes:
+            raise ConfigError("config_value_invalid", safe_name="max_file_bytes")
+        options = self.retention_options()
+        if len(set(options)) != len(options):
+            raise ConfigError("config_value_invalid", safe_name="retention")
+        if _retention_of_token(self.retention_default, "retention_default") not in options:
+            raise ConfigError("config_value_invalid", safe_name="retention_default")
+        patterns = self.exclusions
+        if len(set(patterns)) != len(patterns) or not all(
+            valid_pattern(pattern) and "\x7f" not in pattern for pattern in patterns
+        ):
+            raise ConfigError("config_value_invalid", safe_name="exclusions")
+        always = frozenset({*patterns, *ALWAYS_EXCLUDED})
+        if (
+            len(always) > _CODE_COPY_MAX_PATTERNS
+            or len(canonical_encode(exclusions_to_json(always))) > _CODE_COPY_MAX_PATTERN_BYTES
+        ):
+            raise ConfigError("config_value_invalid", safe_name="exclusions")
+        return self
+
+    def retention_options(self) -> tuple[Retention, ...]:
+        """The retention options offered, in the order the owner wrote them."""
+
+        return tuple(_retention_of_token(token, "retention") for token in self.retention)
+
+    def retention_choice(self) -> Retention:
+        """The retention a client that names none is given (``retention_default``)."""
+
+        return _retention_of_token(self.retention_default, "retention_default")
+
+
+def _retention_of_token(token: str, key: str) -> Retention:
+    try:
+        return retention_from_token(token)
+    except EnvelopeError:
+        raise ConfigError("config_value_invalid", safe_name=key) from None
+
+
+class ServerConfig(StrictConfigModel):
+    """``[server]``: what this service offers a FinishUP client on another computer.
+
+    A ``[server]`` table without ``code_copy`` is valid and offers nothing more than level L1.
+    """
+
+    code_copy: ServerCodeCopyConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _reject_unknown(value, frozenset({"code_copy"}))
+        return value
+
+
 class NetworkPolicy(str, Enum):  # noqa: UP042 - frozen composition vocabulary
     DENIED = "denied"
     CANDIDATE_EXTERNAL = "candidate_external"
@@ -747,6 +882,8 @@ class FinishUpConfig(StrictConfigModel):
     external_runtime: ExternalRuntimeProfileConfig | None = None
     local_model: LocalModelProfileConfig | None = None
     semantic_fallback: SemanticFallbackConfig | None = None
+    # Config 1.4.0 (ADR-054): absent, or present with no ``code_copy``, offers level L1 only.
+    server: ServerConfig = Field(default_factory=ServerConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -765,6 +902,7 @@ class FinishUpConfig(StrictConfigModel):
                 "external_runtime",
                 "local_model",
                 "semantic_fallback",
+                "server",
             }
         )
         _reject_unknown(value, allowed)

@@ -15,6 +15,7 @@ from typing import Final
 
 __all__ = [
     "CLOSING_PROMPT_PATTERN",
+    "PUBLISHED_CLOSING_PROMPT_PATTERN",
     "closing_prompt",
     "declined_note_count",
     "safe_closing_prompt",
@@ -28,7 +29,21 @@ _CONCLUSIONS: Final = (
 _COUNT: Final = r"(?:0|[1-9][0-9]{0,18})"
 _LEAD: Final = "Tell the user in your final message: receipt conclusion "
 _NAME_EACH: Final = "; name each note not answered or declined"
-CLOSING_PROMPT_PATTERN: Final = (
+# ECMAScript's syntax characters and ``/``: the only characters a JSON Schema pattern escapes. A
+# pattern is ECMA-262 there, and an engine in unicode mode refuses any other escape, such as the
+# ``\ `` ``re.escape`` writes for a space (Cursor dropped every tool over it).
+_SYNTAX: Final = frozenset("^$\\.*+?()[]{}|/")
+
+
+def _literal(text: str) -> str:
+    """``text`` as a pattern that matches it exactly, in Python's ``re`` and in ECMAScript."""
+
+    return "".join("\\" + character if character in _SYNTAX else character for character in text)
+
+
+# The same line as receipt-result 1.3.0 and 1.4.0 shipped it, with ``re.escape``'s escaped spaces:
+# those published schemas keep their bytes. It accepts exactly the strings the pattern below does.
+PUBLISHED_CLOSING_PROMPT_PATTERN: Final = (
     "^"
     + re.escape(_LEAD)
     + "(?:"
@@ -36,6 +51,15 @@ CLOSING_PROMPT_PATTERN: Final = (
     + ")"
     + rf"(?:; reviewer notes: {_COUNT}, not answered: {_COUNT}(?:, declined: {_COUNT})?)?"
     + rf"(?:{re.escape(_NAME_EACH)})?\.$"
+)
+CLOSING_PROMPT_PATTERN: Final = (
+    "^"
+    + _literal(_LEAD)
+    + "(?:"
+    + "|".join(_CONCLUSIONS)
+    + ")"
+    + rf"(?:; reviewer notes: {_COUNT}, not answered: {_COUNT}(?:, declined: {_COUNT})?)?"
+    + rf"(?:{_literal(_NAME_EACH)})?\.$"
 )
 _LINE: Final = re.compile(CLOSING_PROMPT_PATTERN, re.ASCII)
 # The receipt Summary's reviewer-note tally (``kernel.correctness_advisories``

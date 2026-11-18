@@ -402,7 +402,10 @@ def test_permanent_install_and_two_pinned_snapshots_coexist_and_dispose_independ
         assert disposed["state"] == "removed"
         instance_outcome = cast(dict[str, object], disposed["instance"])
         assert instance_outcome["service_stopped"] is True
-        assert instance_outcome["runtime_pin_removed"] is True
+        # Issue #1350: the pin is never removed on its own; it goes with the runtime, after the
+        # launchers were withdrawn, so no launcher of this snapshot ever ran unpinned.
+        assert instance_outcome["runtime_pin_removed"] is False
+        assert disposed["launchers_withdrawn"] is True
         assert a_service.wait(timeout=40) is not None
         assert not (base / "a").exists()
         assert _identity_snapshot(permanent_state) == permanent_before

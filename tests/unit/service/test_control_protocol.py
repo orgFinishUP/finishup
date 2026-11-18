@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import struct
 from collections.abc import Buffer
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -24,8 +26,13 @@ from finishup.ports.control import (
     RepositoryPrivacyContext,
     ServiceState,
     ServiceStatus,
+    WorkspaceAgentDeclaration,
+    WorkspaceCall,
+    WorkspaceClaim,
     WorkspaceLocator,
+    WorkspaceReply,
 )
+from finishup.ports.workspace_agent import workspace_handle_for_claim
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.errors import PublicErrorCode
 from finishup.protocol.schemas import (
@@ -33,6 +40,7 @@ from finishup.protocol.schemas import (
     load_schema_catalog,
     validate_schema_instance,
 )
+from finishup.protocol.server_profile import ServerProfileRevision
 from finishup.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_ACTIVE_REQUESTS_PER_SESSION,
@@ -45,13 +53,21 @@ from finishup.service.control_protocol import (
     client_handshake,
     decode_control_frame,
     encode_control_frame,
+    is_workspace_call_frame,
+    is_workspace_reply_frame,
     parse_control_request,
     parse_control_result,
+    parse_workspace_call,
+    parse_workspace_reply,
     public_error_code_for_control_reason,
     read_control_frame,
     schema_for_method,
     server_handshake,
+    workspace_call_frame,
+    workspace_reply_frame,
     write_control_frame,
+    write_workspace_call,
+    write_workspace_reply,
 )
 
 _SERVICE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -304,6 +320,70 @@ def test_session_admission_cap_duplicate_and_result_correlation() -> None:
     with pytest.raises(ControlProtocolError) as lost:
         session.correlate(result)
     _assert_reason(lost, "correlation_mismatch")
+
+
+def _cancel(sequence: int, target: int) -> ControlCancelRequest:
+    return ControlCancelRequest(
+        kind="cancel",
+        protocol_version="1.0",
+        rpc_id=_rpc_id(sequence),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        target_rpc_id=_rpc_id(target),
+    )
+
+
+def _answered(sequence: int) -> ControlResult:
+    return ControlResult(
+        protocol_version="1.0",
+        rpc_id=_rpc_id(sequence),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        method=ControlMethod.SERVICE_STATUS,
+        outcome="ok",
+        body=_status(),
+    )
+
+
+def test_a_cancel_that_crossed_its_calls_answer_is_a_no_op_and_the_session_goes_on() -> None:
+    """Layer-5 review: a peer that cancels a call whose answer was already on its way (a REST
+    edge's DELETE on an agent's shared connection) changes nothing: the session stays usable for
+    its other calls. A cancel naming a call the session never had is still a mismatch, and only
+    the newest answered calls are remembered."""
+
+    from finishup.service.control_protocol import MAX_FINISHED_CALLS_REMEMBERED
+
+    session = ControlSession(
+        protocol_version="1.0",
+        client_kind=ControlClientKind.CLI,
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        allowed_methods=tuple(sorted(ControlMethod, key=lambda item: item.value.encode("ascii"))),
+        peer_identity=object(),
+        connection_nonce="1" * 64,
+    )
+    session.admit(_status_call(1))
+    session.admit(_status_call(2))
+    assert session.is_running(_rpc_id(1))
+    session.correlate(_answered(1))
+    assert not session.is_running(_rpc_id(1))
+    session.admit(_cancel(100, 1))  # crossed the answer: admitted, nothing to cancel
+    assert session.is_running(_rpc_id(2))
+    session.admit(_cancel(101, 2))  # still running: cancelled as before
+    session.correlate(_answered(2))
+    with pytest.raises(ControlProtocolError) as never_sent:
+        session.admit(_cancel(102, 999))
+    _assert_reason(never_sent, "correlation_mismatch")
+    for sequence in range(3, 3 + MAX_FINISHED_CALLS_REMEMBERED):
+        session.admit(_status_call(sequence))
+        session.correlate(_answered(sequence))
+    with pytest.raises(ControlProtocolError) as forgotten:
+        session.admit(_cancel(103, 1))
+    _assert_reason(forgotten, "correlation_mismatch")
+    session.admit(_cancel(104, 2 + MAX_FINISHED_CALLS_REMEMBERED))
+    session.close()
+    with pytest.raises(ControlProtocolError):
+        session.admit(_cancel(105, 2 + MAX_FINISHED_CALLS_REMEMBERED))
 
 
 def test_wire_frames_convert_to_exact_typed_request_and_result() -> None:
@@ -814,6 +894,10 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
         # The refusal is emitted by the active 2.7 service.  The released 2.5/2.6
         # hello-result schemas remain byte-frozen and cannot describe the new project method.
         validate_schema_instance("control-hello-result", "2.7.0", result)
+        # ADR-052: the unreleased ``server_profile`` method stays out of it, so the released
+        # 2.9.0 peer still decodes it and names ``manifest_mismatch`` (#436).
+        validate_schema_instance("control-hello-result", "2.9.0", result)
+        assert "server_profile" not in cast(tuple[str, ...], result["allowed_methods"])
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 
@@ -920,3 +1004,726 @@ def test_transport_failed_is_a_retryable_public_service_code() -> None:
         is PublicErrorCode.SERVICE_UNAVAILABLE
     )
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST
+
+
+# --- ADR-051: workspace claims, the session binding, and workspace-agent frames -------------
+
+_COMMITMENT = "hmac-sha256:" + "0123456789abcdef" + "e" * 48
+_WORKTREE = "sha256:" + "d" * 64
+_CLAIM_HANDLE = workspace_handle_for_claim(_COMMITMENT, _WORKTREE)
+
+
+def _claim() -> WorkspaceClaim:
+    return WorkspaceClaim("git_common_root", "sha256:" + "c" * 64, _WORKTREE)
+
+
+def _claim_context() -> RepositoryPrivacyContext:
+    return RepositoryPrivacyContext(_COMMITMENT, "client_claim", workspace_handle=_CLAIM_HANDLE)
+
+
+def _agent() -> WorkspaceAgentDeclaration:
+    return WorkspaceAgentDeclaration(("capture", "read_task_base"), 6_291_456)
+
+
+def test_a_claim_bound_handshake_records_binding_handle_and_agent_without_a_path() -> None:
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+        seen: list[WorkspaceClaim] = []
+
+        async def resolve_claim(claim: WorkspaceClaim) -> RepositoryPrivacyContext:
+            seen.append(claim)
+            return _claim_context()
+
+        async def no_locator(_locator: WorkspaceLocator) -> RepositoryPrivacyContext:
+            raise AssertionError("a claim-bound hello must never resolve a path")
+
+        client_session, server_session = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.MCP_BRIDGE,
+                "0.1.0",
+                workspace_claim=_claim(),
+                workspace_agent=_agent(),
+            ),
+            server_handshake(
+                server,
+                client_peer,
+                _status(),
+                repository_context_resolver=no_locator,
+                claim_context_resolver=resolve_claim,
+            ),
+        )
+        assert seen == [_claim()]
+        for session in (client_session, server_session):
+            assert session.workspace_binding == "client_claim"
+            assert session.workspace_handle == _CLAIM_HANDLE
+            assert session.workspace_agent == _agent()
+            # The worktree digest rides beside the claim; neither is ever rendered.
+            assert session.workspace_worktree == _WORKTREE
+            assert "c" * 64 not in repr(session) and "d" * 64 not in repr(session)
+        assert server_session.repository_privacy_context == _claim_context()
+        assert client_session.repository_privacy_context is None
+        assert "c" * 64 not in repr(_claim()) and "d" * 64 not in repr(_claim())
+
+    asyncio.run(exercise())
+
+
+def test_a_claim_without_a_claim_resolver_is_bound_but_has_no_context_or_handle() -> None:
+    """A daemon that wires no claim resolver yet still names the binding honestly."""
+
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+        client_session, server_session = await asyncio.gather(
+            client_handshake(client, ControlClientKind.CLI, "0.1.0", workspace_claim=_claim()),
+            server_handshake(server, client_peer, _status()),
+        )
+        for session in (client_session, server_session):
+            assert session.workspace_binding == "client_claim"
+            assert session.workspace_handle is None
+            assert session.workspace_agent is None
+            assert session.repository_privacy_context is None
+
+    asyncio.run(exercise())
+
+
+def test_locator_and_unbound_hellos_keep_their_shape_and_name_their_binding() -> None:
+    """Local behavior: the hello is unchanged; the answer adds only the binding."""
+
+    class _Recording(_MemoryStream):
+        def __init__(self, peer_identity: object) -> None:
+            super().__init__(peer_identity)
+            self.frames: list[bytes] = []
+
+        async def send_all(self, data: Buffer) -> None:
+            self.frames.append(bytes(data))
+            await super().send_all(data)
+
+    async def exercise(locator: WorkspaceLocator | None, binding: str) -> None:
+        client_peer = object()
+        client = _Recording(object())
+        server = _Recording(client_peer)
+        client.other, server.other = server, client
+        client_session, server_session = await asyncio.gather(
+            client_handshake(client, ControlClientKind.CLI, "0.1.0", workspace_locator=locator),
+            server_handshake(server, client_peer, _status()),
+        )
+        hello = decode_control_frame(client.frames[0])
+        expected: set[str] = {
+            "protocol_version",
+            "client_kind",
+            "client_version",
+            "connection_nonce",
+            "schema_manifest_digest",
+            "presentation_context",
+        } | ({"workspace_locator"} if locator is not None else set())
+        assert set(hello) == expected
+        answer = decode_control_frame(server.frames[0])
+        assert answer["workspace_binding"] == binding
+        assert "workspace_handle" not in answer
+        assert client_session.workspace_binding == server_session.workspace_binding == binding
+        assert client_session.workspace_handle is None
+
+    asyncio.run(exercise(WorkspaceLocator("/private/raw-repository"), "local_path"))
+    asyncio.run(exercise(None, "none"))
+
+
+def test_a_hello_with_both_a_locator_and_a_claim_is_refused_before_any_binding() -> None:
+    async def exercise() -> None:
+        client, _server, _peer = _stream_pair()
+        with pytest.raises(ValueError, match="workspace_binding_conflict"):
+            await client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_locator=WorkspaceLocator("/private/raw-repository"),
+                workspace_claim=_claim(),
+            )
+        with pytest.raises(ValueError, match="workspace_binding_conflict"):
+            await client_handshake(client, ControlClientKind.CLI, "0.1.0", workspace_agent=_agent())
+        assert client.other is not None and client.other._chunks.empty()  # pyright: ignore[reportPrivateUsage]
+
+        for extra in (
+            {
+                "workspace_locator": {"schema_version": "1.0.0", "path": "/private/raw"},
+                "workspace_claim": {
+                    "schema_version": "1.0.0",
+                    "identity_kind": "directory",
+                    "digest": "sha256:" + "d" * 64,
+                    "worktree": _WORKTREE,
+                },
+            },
+            {
+                "workspace_agent": {
+                    "schema_version": "1.0.0",
+                    "operations": ["capture"],
+                    "max_reply_bytes": 1024,
+                }
+            },
+        ):
+            client, server, client_peer = _stream_pair()
+
+            async def never(_value: object) -> RepositoryPrivacyContext:
+                raise AssertionError("a conflicting hello resolves nothing")
+
+            await write_control_frame(client, {**_hello(), **extra})
+            with pytest.raises(ControlProtocolError) as refused:
+                await server_handshake(
+                    server,
+                    client_peer,
+                    _status(),
+                    repository_context_resolver=never,
+                    claim_context_resolver=never,
+                )
+            _assert_reason(refused, "workspace_binding_conflict")
+            assert server.closed
+            assert client._chunks.empty()  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(exercise())
+    assert (
+        public_error_code_for_control_reason("workspace_binding_conflict")
+        is PublicErrorCode.INVALID_REQUEST
+    )
+
+
+def test_a_claim_resolver_must_answer_a_claim_identity() -> None:
+    async def exercise(context: object) -> BaseException:
+        client, server, client_peer = _stream_pair()
+
+        async def resolve(_claim: WorkspaceClaim) -> RepositoryPrivacyContext:
+            if isinstance(context, BaseException):
+                raise context
+            return cast(RepositoryPrivacyContext, context)
+
+        hello = asyncio.create_task(
+            client_handshake(client, ControlClientKind.CLI, "0.1.0", workspace_claim=_claim())
+        )
+        with pytest.raises(ControlProtocolError) as failed:
+            await server_handshake(server, client_peer, _status(), claim_context_resolver=resolve)
+        client.close_inbound()
+        await asyncio.gather(hello, return_exceptions=True)
+        return failed.value
+
+    path_identity = RepositoryPrivacyContext(_COMMITMENT, "directory")
+    assert cast(ControlProtocolError, asyncio.run(exercise(path_identity))).reason == (
+        "protocol_mismatch"
+    )
+    fault = asyncio.run(exercise(RuntimeError("/private/claim-store: boom")))
+    assert isinstance(fault, HandshakeServiceFault)
+    assert fault.refusal is None
+    assert "claim-store" not in f"{fault!r} {fault}"
+
+
+def test_the_client_refuses_an_answer_that_names_another_binding() -> None:
+    import finishup.service.control_protocol as proto
+
+    async def exercise(binding: str | None, handle: str | None, claim: bool) -> str:
+        client, server, _peer = _stream_pair()
+
+        async def answer() -> None:
+            await read_control_frame(server)
+            result = proto._hello_result_wire(  # pyright: ignore[reportPrivateUsage]
+                _status(),
+                proto._allowed_for(ControlClientKind.CLI),  # pyright: ignore[reportPrivateUsage]
+                workspace_binding=cast(Any, binding),
+                workspace_handle=handle,
+            )
+            # Written raw, as a peer that ignores the contract would: this service's own encoder
+            # refuses a handle outside ``client_claim``.
+            payload = canonical_encode(result)
+            await server.send_all(struct.pack(">I", len(payload)) + payload)
+
+        task = asyncio.create_task(answer())
+        with pytest.raises(ControlProtocolError) as refused:
+            await client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_claim=_claim() if claim else None,
+            )
+        await task
+        return refused.value.reason
+
+    assert asyncio.run(exercise(None, None, False)) == "protocol_mismatch"
+    assert asyncio.run(exercise("local_path", None, False)) == "protocol_mismatch"
+    assert asyncio.run(exercise("none", None, True)) == "protocol_mismatch"
+    # A handle on a session this client did not claim: a well-formed claim answer, sent to a
+    # hello that carried no claim, is refused by the client's own guard.
+    assert asyncio.run(exercise("client_claim", _CLAIM_HANDLE, False)) == "protocol_mismatch"
+    # A handle outside a claim breaks the 2.10.0 contract itself: neither side can frame it.
+    for binding in ("none", "local_path"):
+        assert asyncio.run(exercise(binding, _CLAIM_HANDLE, False)) == "frame_invalid"
+        with pytest.raises(ControlProtocolError) as unframed:
+            encode_control_frame(
+                proto._hello_result_wire(  # pyright: ignore[reportPrivateUsage]
+                    _status(),
+                    proto._allowed_for(ControlClientKind.CLI),  # pyright: ignore[reportPrivateUsage]
+                    workspace_binding=cast(Any, binding),
+                    workspace_handle=_CLAIM_HANDLE,
+                )
+            )
+        assert unframed.value.reason == "frame_invalid"
+
+
+def test_the_manifest_mismatch_answer_keeps_the_frozen_hello_result_shape() -> None:
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+        hello = _hello()
+        hello["schema_manifest_digest"] = "sha256:" + "a" * 64
+        await write_control_frame(client, hello)
+        with pytest.raises(ControlProtocolError):
+            await server_handshake(server, client_peer, _status())
+        result = await read_control_frame(client)
+        assert "workspace_binding" not in result
+        validate_schema_instance("control-hello-result", "2.9.0", result)
+
+    asyncio.run(exercise())
+
+
+def test_session_binding_facts_are_validated_together() -> None:
+    base: dict[str, Any] = {
+        "protocol_version": "1.0",
+        "client_kind": ControlClientKind.CLI,
+        "service_instance_id": _SERVICE_ID,
+        "service_generation": "1",
+        "allowed_methods": tuple(sorted(ControlMethod, key=lambda item: item.value.encode())),
+        "peer_identity": object(),
+        "connection_nonce": "1" * 64,
+    }
+    claim_context = _claim_context()
+    path_context = RepositoryPrivacyContext(_COMMITMENT, "git_common_root")
+    ControlSession(**base, workspace_binding="local_path", repository_privacy_context=path_context)
+    ControlSession(
+        **base,
+        workspace_binding="client_claim",
+        repository_privacy_context=claim_context,
+        workspace_handle=_CLAIM_HANDLE,
+        workspace_agent=_agent(),
+    )
+    invalid_cases: tuple[dict[str, Any], ...] = (
+        {"workspace_binding": "remote"},
+        {"workspace_binding": "none", "repository_privacy_context": path_context},
+        {"workspace_binding": "local_path", "repository_privacy_context": claim_context},
+        {"workspace_binding": "client_claim", "repository_privacy_context": path_context},
+        {"workspace_binding": "local_path", "workspace_handle": _CLAIM_HANDLE},
+        {"workspace_binding": "client_claim", "workspace_handle": "client:XYZ"},
+        {
+            "workspace_binding": "client_claim",
+            "repository_privacy_context": claim_context,
+            "workspace_handle": "client:ffffffffffffffff",
+        },
+        {"workspace_binding": "local_path", "workspace_agent": _agent()},
+        {"workspace_binding": "local_path", "workspace_worktree": _WORKTREE},
+        {"workspace_binding": "client_claim", "workspace_worktree": "sha256:" + "D" * 64},
+        {
+            # The handle of another worktree of the same repository is not this session's.
+            "workspace_binding": "client_claim",
+            "repository_privacy_context": claim_context,
+            "workspace_handle": workspace_handle_for_claim(_COMMITMENT, "sha256:" + "f" * 64),
+        },
+    )
+    for invalid in invalid_cases:
+        with pytest.raises(ValueError):
+            ControlSession(**base, **invalid)
+    with pytest.raises(ValueError, match="repository_identity_kind_invalid"):
+        RepositoryPrivacyContext(
+            _COMMITMENT,
+            "client_claim",
+            WorkspaceLocator("/private/raw-repository"),
+            workspace_handle=_CLAIM_HANDLE,
+        )
+    # A claim-bound identity always names its worktree's handle, and only it does.
+    for kind, handle in (
+        ("client_claim", None),
+        ("client_claim", "client:XYZ"),
+        ("git_common_root", _CLAIM_HANDLE),
+    ):
+        with pytest.raises(ValueError, match="workspace_handle_invalid"):
+            RepositoryPrivacyContext(_COMMITMENT, cast(Any, kind), workspace_handle=handle)
+
+
+def _workspace_call(arguments: dict[str, JsonValue] | None = None) -> WorkspaceCall:
+    return WorkspaceCall(
+        kind="workspace_call",
+        protocol_version="1.0",
+        call_id=_rpc_id(41),
+        service_instance_id=_SERVICE_ID,
+        service_generation="1",
+        operation="read_task_base",
+        arguments=JsonObject(arguments or {"workspace": _CLAIM_HANDLE}),
+        deadline_ms=5_000,
+    )
+
+
+def test_workspace_call_and_reply_frames_round_trip_through_the_stream() -> None:
+    async def exercise() -> None:
+        client, server, _peer = _stream_pair()
+        call = _workspace_call()
+        await write_workspace_call(server, call)
+        received = await read_control_frame(client)
+        assert is_workspace_call_frame(received) and not is_workspace_reply_frame(received)
+        assert parse_workspace_call(received) == call
+        with pytest.raises(ControlProtocolError) as not_a_result:
+            parse_control_result(received)
+        _assert_reason(not_a_result, "frame_invalid")
+
+        reply = WorkspaceReply(
+            kind="workspace_reply",
+            protocol_version="1.0",
+            call_id=call.call_id,
+            outcome="ok",
+            result={"commit": "a" * 40, "object_format": "sha1"},
+            reason=None,
+        )
+        await write_workspace_reply(client, reply)
+        answered = await read_control_frame(server)
+        assert is_workspace_reply_frame(answered)
+        assert parse_workspace_reply(answered) == reply
+        with pytest.raises(ControlProtocolError) as not_a_call:
+            parse_control_request(answered)
+        _assert_reason(not_a_call, "frame_invalid")
+
+        unavailable = WorkspaceReply(
+            kind="workspace_reply",
+            protocol_version="1.0",
+            call_id=call.call_id,
+            outcome="unavailable",
+            result=None,
+            reason="not_git",
+        )
+        wire = workspace_reply_frame(unavailable)
+        assert wire["result"] is None and wire["reason"] == "not_git"
+        assert parse_workspace_reply(decode_control_frame(encode_control_frame(wire))) == (
+            unavailable
+        )
+        assert set(workspace_call_frame(call)) == {
+            "arguments",
+            "call_id",
+            "deadline_ms",
+            "kind",
+            "operation",
+            "protocol_version",
+            "service_generation",
+            "service_instance_id",
+        }
+
+    asyncio.run(exercise())
+
+
+def test_workspace_replies_are_closed_by_outcome() -> None:
+    def reply(outcome: str, result: JsonValue, reason: str | None) -> WorkspaceReply:
+        return WorkspaceReply(
+            kind="workspace_reply",
+            protocol_version="1.0",
+            call_id=_rpc_id(42),
+            outcome=cast(Any, outcome),
+            result=result,
+            reason=reason,
+        )
+
+    reply("ok", None, None)
+    reply("refused", None, "root_not_admitted")
+    reply("failed", None, "internal_error")
+    for outcome, result, reason in (
+        ("ok", None, "not_git"),
+        ("unavailable", {"partial": True}, "not_git"),
+        ("unavailable", None, "root_not_admitted"),
+        ("refused", None, "not_git"),
+        ("failed", None, "not_git"),
+        ("unavailable", None, "/private/path"),
+        ("lost", None, None),
+    ):
+        with pytest.raises(ValueError):
+            reply(outcome, result, reason)
+    for frame in (
+        {
+            "kind": "workspace_reply",
+            "protocol_version": "1.0",
+            "call_id": _rpc_id(42),
+            "outcome": "refused",
+            "result": None,
+            "reason": "not_git",
+        },
+        {
+            "kind": "workspace_reply",
+            "protocol_version": "1.0",
+            "call_id": _rpc_id(42),
+            "outcome": "ok",
+            "result": None,
+        },
+    ):
+        with pytest.raises(ControlProtocolError) as invalid:
+            encode_control_frame(frame)
+        _assert_reason(invalid, "frame_invalid")
+    with pytest.raises(ValueError, match="workspace_operation_invalid"):
+        replace_call = dict(
+            kind="workspace_call",
+            protocol_version="1.0",
+            call_id=_rpc_id(43),
+            service_instance_id=_SERVICE_ID,
+            service_generation="1",
+            operation="rm_rf",
+            arguments=JsonObject({}),
+            deadline_ms=1,
+        )
+        WorkspaceCall(**cast(Any, replace_call))
+
+
+def test_workspace_frames_may_use_the_whole_frame_and_no_more() -> None:
+    large = "A" * (2 * MAX_ORDINARY_CONTROL_FRAME_BYTES)
+    reply = {
+        "kind": "workspace_reply",
+        "protocol_version": "1.0",
+        "call_id": _rpc_id(44),
+        "outcome": "ok",
+        "result": large,
+        "reason": None,
+    }
+    encoded = encode_control_frame(reply)
+    assert len(encoded) > MAX_ORDINARY_CONTROL_FRAME_BYTES
+    assert decode_control_frame(encoded)["result"] == large
+    call = workspace_call_frame(_workspace_call({"blob": large}))
+    assert decode_control_frame(encode_control_frame(call))["arguments"] == {"blob": large}
+    with pytest.raises(ControlProtocolError) as too_large:
+        encode_control_frame({**reply, "result": "A" * MAX_CONTROL_FRAME_BYTES})
+    _assert_reason(too_large, "frame_too_large")
+    # Every other frame keeps the ordinary 1 MiB bound.
+    import finishup.service.control_protocol as proto
+
+    oversized = b"x" * (MAX_ORDINARY_CONTROL_FRAME_BYTES + 1)
+    for kind in ("call", "cancel"):
+        with pytest.raises(ControlProtocolError) as ordinary:
+            proto._validate_frame_size(oversized, JsonObject({"kind": kind}))  # pyright: ignore[reportPrivateUsage]
+        _assert_reason(ordinary, "frame_too_large")
+
+
+def test_the_workspace_agent_declaration_is_closed_and_sorted() -> None:
+    _agent()
+    for operations, size in (
+        ((), 1024),
+        (("read_task_base", "capture"), 1024),
+        (("capture", "capture"), 1024),
+        (("capture", "rm_rf"), 1024),
+        (("capture",), 0),
+        (("capture",), MAX_CONTROL_FRAME_BYTES + 1),
+    ):
+        with pytest.raises(ValueError):
+            WorkspaceAgentDeclaration(operations, size)
+    for digest in ("sha256:" + "C" * 64, "hmac-sha256:" + "c" * 64, ""):
+        with pytest.raises(ValueError, match="workspace_claim_digest_invalid"):
+            WorkspaceClaim("directory", digest, _WORKTREE)
+        with pytest.raises(ValueError, match="workspace_claim_worktree_invalid"):
+            WorkspaceClaim("directory", "sha256:" + "c" * 64, digest)
+    with pytest.raises(ValueError, match="workspace_claim_identity_kind_invalid"):
+        WorkspaceClaim(cast(Any, "client_claim"), "sha256:" + "c" * 64, _WORKTREE)
+
+
+# --- ADR-052: the server-profile revision on the claim-bound hello ----------------------------
+
+_REVISION = ServerProfileRevision("0" * 32, 4, "sha256:" + "a" * 64)
+_OTHER_REVISION = ServerProfileRevision("0" * 32, 5, "sha256:" + "b" * 64)
+
+
+def _profile_exchange(
+    presented: ServerProfileRevision | None,
+    current: ServerProfileRevision | None,
+    *,
+    claim: bool = True,
+) -> tuple[list[object], list[WorkspaceClaim], list[bytes]]:
+    """One handshake; the outcome of each side, the claims keyed, and the frames the service sent."""
+
+    sent: list[bytes] = []
+
+    class _Recording(_MemoryStream):
+        async def send_all(self, data: Buffer) -> None:
+            sent.append(bytes(data))
+            await super().send_all(data)
+
+    async def exercise() -> tuple[list[object], list[WorkspaceClaim]]:
+        client_peer = object()
+        client = _MemoryStream(object())
+        server = _Recording(client_peer)
+        client.other, server.other = server, client
+        keyed: list[WorkspaceClaim] = []
+
+        async def resolve_claim(value: WorkspaceClaim) -> RepositoryPrivacyContext:
+            keyed.append(value)
+            return _claim_context()
+
+        outcomes = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_claim=_claim() if claim else None,
+                workspace_agent=_agent() if claim else None,
+                server_profile=presented,
+            ),
+            server_handshake(
+                server,
+                client_peer,
+                _status(),
+                claim_context_resolver=resolve_claim,
+                profile_revision=lambda: current,
+            ),
+            return_exceptions=True,
+        )
+        return list(outcomes), keyed
+
+    outcomes, keyed = asyncio.run(exercise())
+    return outcomes, keyed, sent
+
+
+def test_a_claim_bound_hello_under_the_current_revision_is_admitted_and_bound_to_it() -> None:
+    outcomes, keyed, sent = _profile_exchange(_REVISION, _REVISION)
+
+    client_session, server_session = cast(list[ControlSession], outcomes)
+    assert client_session.server_profile == server_session.server_profile == _REVISION
+    assert client_session.workspace_handle == _CLAIM_HANDLE
+    assert keyed == [_claim()]
+    answer = decode_control_frame(sent[0])
+    assert answer["server_profile"] == {
+        "issuer": "0" * 32,
+        "revision": 4,
+        "profile_digest": "sha256:" + "a" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    ("presented", "current"),
+    [(_REVISION, _OTHER_REVISION), (None, _REVISION), (_REVISION, None)],
+    ids=["stale", "claim_without_revision", "service_issues_none"],
+)
+def test_a_claim_bound_hello_under_any_other_revision_is_not_admitted_before_any_work(
+    presented: ServerProfileRevision | None, current: ServerProfileRevision | None
+) -> None:
+    outcomes, keyed, sent = _profile_exchange(presented, current)
+
+    client_outcome, server_outcome = outcomes
+    assert isinstance(client_outcome, ControlProtocolError)
+    assert client_outcome.reason == "server_profile_changed"
+    assert isinstance(server_outcome, ControlProtocolError)
+    assert server_outcome.reason == "server_profile_changed"
+    # Nothing was keyed (no claim commitment, no handle, no agent) and one answer was sent: the
+    # service's current revision, with no binding.
+    assert keyed == []
+    assert len(sent) == 1
+    answer = decode_control_frame(sent[0])
+    assert "workspace_binding" not in answer and "workspace_handle" not in answer
+    assert ("server_profile" in answer) is (current is not None)
+
+
+def test_a_remote_hello_with_no_claim_is_still_held_to_its_revision() -> None:
+    admitted, _keyed, _sent = _profile_exchange(_REVISION, _REVISION, claim=False)
+    refused, _keyed, _sent = _profile_exchange(_REVISION, _OTHER_REVISION, claim=False)
+
+    assert cast(list[ControlSession], admitted)[1].server_profile == _REVISION
+    assert isinstance(refused[0], ControlProtocolError)
+    assert refused[0].reason == "server_profile_changed"
+
+
+def test_a_local_hello_names_no_revision_and_is_answered_without_one() -> None:
+    outcomes, keyed, sent = _profile_exchange(None, _REVISION, claim=False)
+
+    client_session, server_session = cast(list[ControlSession], outcomes)
+    assert client_session.server_profile is None and server_session.server_profile is None
+    assert keyed == []
+    assert "server_profile" not in decode_control_frame(sent[0])
+
+
+def test_a_remote_client_refuses_an_answer_that_names_no_revision() -> None:
+    """A service that issues no revisions (no resolver) admits the hello; the client does not
+    take a session the server never bound to its consent."""
+
+    async def exercise() -> list[object]:
+        client, server, client_peer = _stream_pair()
+        return list(
+            await asyncio.gather(
+                client_handshake(
+                    client,
+                    ControlClientKind.CLI,
+                    "0.1.0",
+                    workspace_claim=_claim(),
+                    server_profile=_REVISION,
+                ),
+                server_handshake(server, client_peer, _status()),
+                return_exceptions=True,
+            )
+        )
+
+    client_outcome = asyncio.run(exercise())[0]
+    assert isinstance(client_outcome, ControlProtocolError)
+    assert client_outcome.reason == "server_profile_changed"
+
+
+def test_a_background_agent_declares_its_role_and_a_connection_agent_sends_none() -> None:
+    async def exercise(role: str) -> tuple[ControlSession, bytes]:
+        frames: list[bytes] = []
+
+        class _Recording(_MemoryStream):
+            async def send_all(self, data: Buffer) -> None:
+                frames.append(bytes(data))
+                await super().send_all(data)
+
+        client_peer = object()
+        client = _Recording(object())
+        server = _MemoryStream(client_peer)
+        client.other, server.other = server, client
+        declaration = WorkspaceAgentDeclaration(("capture",), 1_024, role=cast(Any, role))
+        _client_session, server_session = await asyncio.gather(
+            client_handshake(
+                client,
+                ControlClientKind.CLI,
+                "0.1.0",
+                workspace_claim=_claim(),
+                workspace_agent=declaration,
+            ),
+            server_handshake(server, client_peer, _status()),
+        )
+        return server_session, frames[0]
+
+    background, hello = asyncio.run(exercise("background"))
+    assert background.workspace_agent is not None
+    assert background.workspace_agent.role == "background"
+    agent_wire = cast(dict[str, JsonValue], decode_control_frame(hello)["workspace_agent"])
+    assert agent_wire["role"] == "background"
+    connection, hello = asyncio.run(exercise("connection"))
+    assert (
+        connection.workspace_agent is not None and connection.workspace_agent.role == "connection"
+    )
+    assert "role" not in cast(dict[str, JsonValue], decode_control_frame(hello)["workspace_agent"])
+    with pytest.raises(ValueError, match="workspace_agent_role_invalid"):
+        WorkspaceAgentDeclaration(("capture",), 1_024, role=cast(Any, "both"))
+
+
+def test_the_server_profile_method_and_its_refusal_are_on_the_wire() -> None:
+    request: dict[str, JsonValue] = {
+        "kind": "call",
+        "protocol_version": "1.0",
+        "rpc_id": _rpc_id(7),
+        "service_instance_id": _SERVICE_ID,
+        "service_generation": "1",
+        "method": "server_profile",
+        "body": {},
+    }
+    validate_schema_instance("control-request", "2.10.0", cast(JsonValue, request))
+    profile = json.loads(
+        (Path(__file__).parents[3] / "fixtures/service/server-profile.case.json").read_bytes()
+    )["valid"][0]["document"]
+    ok = {
+        "protocol_version": "1.0",
+        "rpc_id": _rpc_id(7),
+        "service_instance_id": _SERVICE_ID,
+        "service_generation": "1",
+        "method": "server_profile",
+        "outcome": "ok",
+        "body": profile,
+    }
+    validate_schema_instance("control-result", "2.10.0", cast(JsonValue, ok))
+    refused = {**ok, "method": "status", "outcome": "error"}
+    refused["body"] = {"code": "server_profile_changed", "retryable": False}
+    validate_schema_instance("control-result", "2.10.0", cast(JsonValue, refused))
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance(
+            "control-result", "2.10.0", cast(JsonValue, {**ok, "body": {"release": "0.1.0"}})
+        )
+    assert ControlMethod.SERVER_PROFILE.value == "server_profile"

@@ -4,23 +4,32 @@ Every rendered value must be a closed catalog token, a ``Literal`` configuration
 already-validated hostname; absent or invalid configuration must stay unknown; a fallback must be
 disclosed beside the primary; strict instructions must stay byte-identical; and the passage must
 fit the reviewed instructions budgets at its longest possible shape.
+
+When the bridge's root is a FinishUP server elsewhere (ADR-051), or its target record cannot be
+read, the passage names that server, which decides AI-powered review under its own settings, and
+none of this computer's configuration. Every test that reads through the process's root runs in an
+ambient home of its own, so the developer's real server selection never decides it.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import pytest
 
+from builders.server_targets import ambient_home
 from finishup.adapters.providers.factory import (
     CHAT_COMPLETIONS_ENDPOINT_PROFILES,
     RESPONSES_ENDPOINT_PROFILE_IDS,
     chat_completions_profile_from_provider_config,
 )
 from finishup.adapters.providers.openai_responses_factory import openai_profile_from_provider_config
+from finishup.client import targets
+from finishup.config import paths
 from finishup.config.models import (
     CODEX_SUBSCRIPTION_PROVIDER_ID,
     OWNER_DECLARED_ENDPOINT_PROFILE_ID,
@@ -34,6 +43,7 @@ from finishup.config.models import (
     VerificationConfig,
 )
 from finishup.config.write import PROVIDER_PRESETS, codex_subscription_runtime, fireworks_provider
+from finishup.mcp import semantic_destination
 from finishup.mcp import server as bridge
 from finishup.mcp.descriptors import (
     ADVERTISED_SURFACE_BUDGET,
@@ -259,6 +269,15 @@ def test_missing_configuration_stays_unknown() -> None:
     assert "only the local ledger" not in disclosure.sentence
 
 
+@pytest.fixture
+def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """An ambient home of the test's own: no server selected until the test selects one."""
+
+    with ambient_home(monkeypatch) as root:
+        yield root
+
+
+@pytest.mark.usefixtures("home")
 def test_read_from_environment_renders_unknown_for_invalid_and_external_for_valid(
     tmp_path: Path,
 ) -> None:
@@ -290,6 +309,7 @@ def test_read_from_environment_renders_unknown_for_invalid_and_external_for_vali
     assert str(tmp_path) not in disclosure.sentence
 
 
+@pytest.mark.usefixtures("home")
 def test_a_disclosure_that_cannot_render_within_its_bound_reads_unknown_not_a_bridge_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -440,6 +460,7 @@ def test_bridge_runtime_carries_the_disclosure_on_the_policy_route_only() -> Non
         bridge.build_bridge_runtime("policy", semantic_destination=cast(Any, "provider openai"))
 
 
+@pytest.mark.usefixtures("home")
 @pytest.mark.parametrize("contents", [None, "invalid = [", 'profile = "not-a-profile"'])
 def test_failed_config_read_never_promises_local_only(tmp_path: Path, contents: str | None) -> None:
     config = tmp_path / "selected.toml"
@@ -451,3 +472,130 @@ def test_failed_config_read_never_promises_local_only(tmp_path: Path, contents: 
     assert "only the local ledger" not in disclosure.sentence
     assert "cannot reach" not in disclosure.sentence
     assert str(config) not in disclosure.sentence
+
+
+_FIREWORKS_CONFIG: Final = (
+    'schema_version = "1"\nprofile = "local-openai"\n[provider]\n'
+    'provider_id = "fireworks"\nendpoint_profile_id = "fireworks-responses"\n'
+    'endpoint_profile_version = "1.0.0"\nmodel = "accounts/fireworks/models/m"\n'
+    'capability_profile = "fireworks-responses/1.0.0"\n'
+)
+# This computer's configuration names an external reviewer; for a local root the passage stays
+# exactly what it was before a server could be elsewhere.
+_LOCAL_FIREWORKS_SENTENCE: Final = (
+    DISCLOSURE_PREFIX
+    + "provider fireworks (endpoint profile fireworks-responses, host api.fireworks.ai) over "
+    "HTTPS with the owner's vault-held API credential. The payload is a review packet composed "
+    "from this ledger under the owner's standing privacy policy with no repository handle; every "
+    "other operation writes only the local ledger on this machine. This configuration snapshot "
+    "may differ from the live service."
+)
+
+
+def _fireworks_env(tmp_path: Path) -> dict[str, str]:
+    path = tmp_path / "fireworks.toml"
+    path.write_text(_FIREWORKS_CONFIG, encoding="utf-8")
+    return {"FINISHUP_CONFIG": str(path)}
+
+
+def _select_remote(kind: targets.TargetKind) -> targets.ServerTarget:
+    with targets.registry_lock():
+        if kind == "ssh":
+            record, _root = targets.new_remote_target(
+                "lab-server", "ssh", user="owner", host="lab.example", port=2222
+            )
+        elif kind == "local_port":
+            record, _root = targets.new_remote_target(
+                "port-server", "local_port", base_url="https://127.0.0.1:8443"
+            )
+        else:
+            record, _root = targets.new_remote_target(
+                "web-server", "https", base_url="https://finishup.example"
+            )
+    targets.write_selection(record)
+    return record
+
+
+def _assert_names_the_server_elsewhere(disclosure: SemanticDestinationDisclosure) -> None:
+    _assert_honest(disclosure)
+    assert disclosure.kind == "remote"
+    assert "That server decides AI-powered review under its own settings" in disclosure.sentence
+    assert "this computer's AI-powered review settings do not apply" in disclosure.sentence
+    assert "the task's ledger is kept on that server" in disclosure.sentence
+    assert "only the local ledger" not in disclosure.sentence
+    assert "on this machine" not in disclosure.sentence
+    assert "api.fireworks.ai" not in disclosure.sentence
+    # Never longer than the longest local passage, so every reviewed budget above still holds.
+    assert len(disclosure.sentence.encode("utf-8")) <= len(
+        _longest_disclosure().sentence.encode("utf-8")
+    )
+
+
+@pytest.mark.parametrize("kind", ["ssh", "https", "local_port"])
+def test_a_remote_root_names_the_server_elsewhere_not_this_computers_review_settings(
+    home: Path, tmp_path: Path, kind: targets.TargetKind
+) -> None:
+    """ADR-051: the selected server elsewhere decides AI-powered review under its own settings.
+
+    The bridge read this computer's configuration anyway and told the agent that every other
+    operation wrote only the local ledger on this machine, which the server elsewhere keeps.
+    """
+
+    record = _select_remote(kind)
+    disclosure = read_semantic_destination_disclosure(_fireworks_env(tmp_path))
+    _assert_names_the_server_elsewhere(disclosure)
+    assert (
+        f"decided by the selected FinishUP server elsewhere (target {record.target_id}, "
+        f"transport {kind})."
+    ) in disclosure.sentence
+    # Named by its generated id and transport only: never its name, host, user, port or address.
+    for private in (record.name, "lab.example", "finishup.example", "127.0.0.1", "2222", "8443"):
+        assert private not in disclosure.sentence
+    # The bridge starting under this selection serves exactly that passage.
+    runtime = bridge.build_bridge_runtime("policy")
+    assert runtime.instructions.endswith(" " + disclosure.sentence + "\n")
+    assert bridge.build_bridge_runtime("strict").instructions == server_instructions("strict")
+
+
+def test_an_unreadable_target_record_fails_closed_to_the_server_elsewhere(
+    home: Path, tmp_path: Path
+) -> None:
+    record = _select_remote("ssh")
+    record_file = targets.target_root(record.target_id) / paths.SERVER_TARGET_FILE_NAME
+    record_file.write_text("{}", encoding="utf-8")
+    paths.reset_selection_memo()
+    with pytest.raises(targets.TargetRecordUnreadable):
+        targets.active_target_record()
+    disclosure = read_semantic_destination_disclosure(_fireworks_env(tmp_path))
+    _assert_names_the_server_elsewhere(disclosure)
+    assert "whose target record could not be read" in disclosure.sentence
+    assert record.target_id not in disclosure.sentence
+
+
+def test_a_local_root_keeps_this_computers_destination_byte_for_byte(
+    home: Path, tmp_path: Path
+) -> None:
+    env = _fireworks_env(tmp_path)
+    everyday = read_semantic_destination_disclosure(env)
+    assert everyday.kind == "external"
+    assert everyday.sentence == _LOCAL_FIREWORKS_SENTENCE
+    with targets.registry_lock():
+        record, _root = targets.new_local_target("work")
+    targets.write_selection(record)
+    assert paths.isolation_binding() == "selection"
+    named_local = read_semantic_destination_disclosure(env)
+    assert named_local == everyday
+
+
+def test_the_remote_passage_renders_only_closed_tokens(home: Path) -> None:
+    disclose = semantic_destination.disclose_remote_destination
+    unreadable = disclose(None)
+    _assert_names_the_server_elsewhere(unreadable)
+    assert "whose target record could not be read" in unreadable.sentence
+    with pytest.raises(TypeError, match="target_wrong_type"):
+        disclose(cast(Any, "t_0123abcd"))
+    with targets.registry_lock():
+        local, _root = targets.new_local_target("work")
+    with pytest.raises(ValueError, match="target_not_remote"):
+        disclose(local)
+    assert SemanticDestinationDisclosure("remote", DISCLOSURE_PREFIX + "x").kind == "remote"

@@ -15,6 +15,8 @@ from typing import cast
 
 import pytest
 
+from credential_store_guard import NO_PLATFORM_CREDENTIAL_STORE
+
 _PREVIEW_CANARY = b"privacy-preview-sensitive-canary"
 _SECRET_CANARY = b"policy-secret-canary-2026"
 # Every widening dimension staged by the policy probe below has to be legible on the terminal
@@ -219,6 +221,7 @@ def _base_env() -> dict[str, str]:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
         "VIRTUAL_ENV": sys.prefix,
+        **NO_PLATFORM_CREDENTIAL_STORE,
     }
 
 

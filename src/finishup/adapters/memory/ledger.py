@@ -19,9 +19,11 @@ from finishup.domain.events import (
     DEFERRED_CHECK_EVENT_SCHEMA_VERSION,
     FINDING_EVENT_SCHEMA_VERSION,
     FINDING_SNIPPET_EVENT_SCHEMA_VERSION,
+    KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION,
     REVIEW_CHECK_EVENT_SCHEMA_VERSION,
     REVIEWER_CHECK_EVENT_SCHEMA_VERSION,
     SEMANTIC_EVENT_SCHEMA_VERSION,
+    STATUS_HISTORY_OMITTED_FAMILIES,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -77,7 +79,10 @@ from finishup.domain.findings import (
     semantic_provenance_to_json,
 )
 from finishup.domain.privacy import DisclosureProvenance, SourceAuthorship, authorship_provenance
-from finishup.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
+from finishup.domain.receipts import (
+    CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    OutsideReadsKeptBack,
+)
 from finishup.domain.values import (
     Actor,
     ActorType,
@@ -124,6 +129,12 @@ from finishup.kernel.finding_resolution import (
     finding_resolution_explanation,
 )
 from finishup.kernel.finding_todo import duplicate_link_target, finding_todo_state
+from finishup.kernel.forgotten_content import (
+    forgotten_finding,
+    forgotten_verified_row,
+    latest_content_forgotten,
+    with_forgotten_content,
+)
 from finishup.kernel.observed_failures import (
     observed_event_ids_from_records,
     observed_run_facts,
@@ -132,6 +143,7 @@ from finishup.kernel.plan_drift import plan_drift_signals
 from finishup.kernel.plan_scope import current_plan_scope
 from finishup.kernel.projections import (
     PROJECTION_VERSION,
+    ContentForgottenMarker,
     EvidenceProjectionRecord,
     ProjectionState,
     empty_projection_state,
@@ -658,6 +670,27 @@ class MemoryLedgerState:
         head_digest: str,
     ) -> None:
         self.writers[writer] = _WriterState(task, session, next_sequence, head_digest)
+
+
+def _forgotten_check_result(
+    result: CheckCommitResult, marker: ContentForgottenMarker | None
+) -> CheckCommitResult:
+    """A check result read after the content its check quoted was forgotten (ADR-054, U20).
+
+    The verdict, findings, counts and every structural field stay; the review summary, the
+    verified rows' snippets and the findings' challenge snippets read as absent.
+    """
+
+    if marker is None or not marker.masks(
+        result.subject_frontier.sequence, result.result_frontier.sequence
+    ):
+        return result
+    return replace(
+        result,
+        review_summary=None,
+        verified=tuple(forgotten_verified_row(row) for row in result.verified),
+        findings=tuple(forgotten_finding(finding) for finding in result.findings),
+    )
 
 
 def _case_dependency_digest(case: DeterministicCase) -> str:
@@ -1761,6 +1794,11 @@ def _projection_items(
         result_history: list[StatusHistoryItemModel | StatusHistoryItemV14Model] = []
         for row in records:
             if row.session_id != session:
+                continue
+            if type(row) is AcceptedEvent and row.schema.name in STATUS_HISTORY_OMITTED_FAMILIES:
+                # ADR-054 (U20): the released status-result contracts (1.4.0, 1.5.0) cannot name
+                # this service-written family, so a history row would fail their closed summary
+                # codes. The task projection carries its marker, which receipts render instead.
                 continue
             manifest = (
                 None
@@ -2884,8 +2922,10 @@ class MemoryLedgerAdapter:
                 unchanged_prefix = len(records) >= len(previous) and all(
                     old is new for old, new in zip(previous, records, strict=False)
                 )
+                # ADR-054 (U20): so does a recorded forget, which masks every later view.
                 redaction = any(
-                    row.schema.name == "redaction_recorded" for row in records[len(previous) :]
+                    row.schema.name in {"redaction_recorded", "content_forgotten"}
+                    for row in records[len(previous) :]
                 )
                 if not unchanged_prefix or redaction:
                     state.query_cache.clear()
@@ -2947,6 +2987,10 @@ class MemoryLedgerAdapter:
             else projection
             if query.requested_frontier == Frontier(projection.frontier, projection.head_digest)
             else replay(prefix)
+        )
+        # ADR-054 (U20): a view pinned before a recorded forget shows its excerpts masked too.
+        effective_projection = with_forgotten_content(
+            effective_projection, latest_content_forgotten(records)
         )
         effective = Frontier(effective_projection.frontier, effective_projection.head_digest)
         if effective != query.requested_frontier:
@@ -3235,7 +3279,12 @@ class MemoryLedgerAdapter:
             if prior[0].operation_kind is not OperationKind.CHECK:
                 return None
             result = self._state.check_results.get((writer_id, operation_id))
-        return None if result is None else replace(result, outcome="replayed")
+            forgotten = self._state.projection.content_forgotten
+        return (
+            None
+            if result is None
+            else _forgotten_check_result(replace(result, outcome="replayed"), forgotten)
+        )
 
     async def reclaim_operation(
         self, writer_id: str, operation_id: str, request_digest: str
@@ -4394,6 +4443,7 @@ class MemoryLedgerAdapter:
         semantic_route_required: bool | None = None,
         deliverable_states: tuple[DeliverableState, ...] = (),
         review_mode: CheckReviewMode | None = None,
+        outside_reads_kept_back: OutsideReadsKeptBack | None = None,
         correctness_advisories: tuple[JsonObject, ...] = (),
         reviewer: JsonObject | None = None,
     ) -> CheckCommitResult:
@@ -4514,6 +4564,7 @@ class MemoryLedgerAdapter:
             semantic_redacted_values=semantic_redacted_values,
             semantic_route_required=semantic_route_required,
             review_mode=review_mode,
+            outside_reads_kept_back=outside_reads_kept_back,
             deliverable_states=deliverable_states,
             review_input_manifest=review_input_manifest,
             correctness_advisories=correctness_advisories,
@@ -4567,7 +4618,10 @@ class MemoryLedgerAdapter:
             # pre-edit deferral reason. That check still carries review_mode and totals, so the
             # reason is chosen before the 1.4.0 review-output rule.
             check_schema_version = (
-                REVIEWER_CHECK_EVENT_SCHEMA_VERSION
+                # ADR-051 decision 5: 1.7.0 is chosen exactly for the kept-back counts.
+                KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION
+                if check_payload.outside_reads_kept_back is not None
+                else REVIEWER_CHECK_EVENT_SCHEMA_VERSION
                 if check_payload.reviewer is not None
                 or correctness_advisories
                 or check_payload.semantic_reason is SemanticReason.ROUND_LIMIT_UNASSESSABLE
@@ -4745,7 +4799,7 @@ class MemoryLedgerAdapter:
             }
             self._state.operations[key] = (terminal, None)
             self._state.check_results[key] = result
-            return result
+            return _forgotten_check_result(result, self._state.projection.content_forgotten)
 
     async def fail_check_if_current(
         self, lease: OperationLease, failure: PublicOperationError

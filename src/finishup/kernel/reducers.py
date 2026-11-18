@@ -78,6 +78,11 @@ from finishup.kernel.finding_resolution import (
     next_standing_position,
     reopen_findings_resolved_by,
 )
+from finishup.kernel.forgotten_content import (
+    content_forgotten_marker,
+    mask_finding_record,
+    mask_projection_findings,
+)
 from finishup.kernel.later_material import (
     LaterMaterialClass,
     classify_later_material,
@@ -1416,6 +1421,7 @@ def reduce_event(
     gaps = set(state.coverage_gaps)
     latest = state.latest_tested_state
     pending_missing = state.pending_missing_for_assessment
+    forgotten = state.content_forgotten
     unknown_count = state.unknown_event_count
     stale = state.freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
 
@@ -1531,8 +1537,13 @@ def reduce_event(
             )
         elif family == "finding_recorded":
             key = _locator_id(accepted, finding_id)
-            findings[key] = _finding_record(
-                accepted, None if payload is None else cast(FindingRecordedPayload, payload)
+            # ADR-054 (U20): a finding a check of a frontier before a recorded forget returned
+            # (an in-flight check committed after it) shows no quoted excerpt either.
+            findings[key] = mask_finding_record(
+                forgotten,
+                _finding_record(
+                    accepted, None if payload is None else cast(FindingRecordedPayload, payload)
+                ),
             )
             finding_retirement.on_finding_recorded(
                 findings,
@@ -1710,6 +1721,16 @@ def reduce_event(
                             redacted_object_id=target_object,
                         )
                     gaps.add(f"redacted_object:{target_object}")
+        elif family == "content_forgotten":
+            # ADR-054 (U20): the service recorded that the content this task read from a server
+            # copy was forgotten. Only the service's coordinator writes it; any other author is a
+            # corrupt record. Every finding recorded so far loses its quoted excerpt; the finding
+            # itself, its state and every count stay.
+            marker = content_forgotten_marker(accepted)
+            if marker is None:
+                raise _corrupt()
+            forgotten = marker
+            findings = mask_projection_findings(findings, forgotten)
         elif family in _LINEAGE_EVENT_FAMILIES:
             # These events carry service-owned lifecycle/manifest facts.  Their projection is
             # intentionally structural no-op: the catalog owns lifecycle state and the pure
@@ -1794,6 +1815,7 @@ def reduce_event(
         unknown_event_count=unknown_count,
         coverage_gaps=coverage_gaps,
         pending_missing_for_assessment=pending_missing,
+        content_forgotten=forgotten,
     )
 
 

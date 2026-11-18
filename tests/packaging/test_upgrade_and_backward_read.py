@@ -163,9 +163,10 @@ def test_each_migration_family_has_contiguous_versions(installed: _Installed) ->
         "0017",
         "0018",
         "0019",
+        "0020",
     ]
     assert payload["catalog_current"] == 7
-    assert payload["bundle_current"] == 19
+    assert payload["bundle_current"] == 20
 
 
 def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Installed) -> None:
@@ -196,6 +197,8 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 "0018",
                 # 0019 (#1239) rebuilds events exactly as 0014 did, below.
                 "0019",
+                # 0020 (ADR-054, U20 content_forgotten) rebuilds events the same way, below.
+                "0020",
             ),
         ),
     ):
@@ -232,6 +235,13 @@ def test_migration_ddl_contains_only_reviewed_table_rebuilds(installed: _Install
                 copy = "INSERT INTO EVENTS_V19_NEW ("
                 drop = "DROP TABLE EVENTS;"
                 rename = "ALTER TABLE EVENTS_V19_NEW RENAME TO EVENTS;"
+                assert upper.count(drop) == 1
+                assert upper.index(copy) < upper.index(drop) < upper.index(rename)
+                upper = upper.replace(drop, "", 1)
+            if (family, version) == ("bundle", "0020"):
+                copy = "INSERT INTO EVENTS_V20_NEW ("
+                drop = "DROP TABLE EVENTS;"
+                rename = "ALTER TABLE EVENTS_V20_NEW RENAME TO EVENTS;"
                 assert upper.count(drop) == 1
                 assert upper.index(copy) < upper.index(drop) < upper.index(rename)
                 upper = upper.replace(drop, "", 1)
@@ -297,7 +307,7 @@ def test_fresh_catalog_and_bundle_initialize_at_current_schema_version(
         "catalog_state": "current",
         "catalog_version": 7,
         "bundle_state": "current",
-        "bundle_version": 19,
+        "bundle_version": 20,
     }
 
 

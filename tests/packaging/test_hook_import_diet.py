@@ -44,6 +44,39 @@ _FORBIDDEN: Final = (
     "finishup.domain.events",
     "finishup.application.recommendations",
     "finishup.application.package_update",
+    # ADR-051: a hook never loads a network client, the credential store, or a target runtime.
+    # A transport an approach adds for HTTPS targets loads lazily, only for such a target.
+    "httpx",
+    "keyring",
+    "finishup.client.connector",
+    "finishup.client.transports",
+    "finishup.client.credentials",
+    "finishup.client.target_runtime",
+    # ADR-052 (design v2 section 8.9): the SSH helper, its discovery and profile refresh, and its
+    # runtime never load on a hook's path; a hook dials through ``client.helper_status`` and
+    # ``client.ssh_transport`` only, lazily, for a server elsewhere.
+    "finishup.client.helper",
+    "finishup.client.helper_runtime",
+    "finishup.client.ssh_discovery",
+    # ADR-053 (layer 5): the REST client, its mapping and its discovery load only for an HTTPS or
+    # port target in the direct style; the REST edge (routes, listeners, keys, the gateway) and
+    # its HTTP server never load in a client at all.
+    "finishup.client.rest_client",
+    "finishup.client.rest_stream",
+    "finishup.client.rest_discovery",
+    "finishup.rest",
+    "finishup.rest.app",
+    "finishup.rest.listener",
+    "finishup.gateway",
+    "starlette",
+    "uvicorn",
+    # ADR-054 (layer 6, design v2 section 8.9): level L2's exporter, its content scan, the helper's
+    # sync responder and the server's copy store never load on a hook's path: hooks never sync.
+    "finishup.client.code_export",
+    "finishup.client.code_secrets",
+    "finishup.client.code_sync",
+    "finishup.service.code_copy",
+    "finishup.service.code_store",
 )
 # Drift ceiling: the measured set after the diet is well under this, so a
 # future eager import shows up here even if it is not on the named list.
@@ -96,6 +129,36 @@ def test_observe_hooks_module_import_set_is_bounded() -> None:
         f"the hook import graph grew to {len(loaded)} modules; every one of them "
         "is paid on every tool call"
     )
+
+
+def test_client_targets_module_is_hook_safe() -> None:
+    """ADR-051: a hook may read the server selection and target records; that costs no more."""
+
+    loaded = set(_modules("import finishup.client.targets"))
+    offenders = sorted(loaded & set(_FORBIDDEN))
+    assert not offenders, f"finishup.client.targets eagerly imported {offenders}"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "finishup.client.everyday_policy",
+        "finishup.client.repository_hold",
+        "finishup.client.everyday_repository",
+        "finishup.client.authorization",
+        "finishup.client.helper_status",
+        "finishup.client.ssh_transport",
+    ],
+)
+def test_the_repository_hold_modules_are_hook_safe(module: str) -> None:
+    """ADR-051 decision 8 (2026-11-07, round 4): a SessionStart hook reads and records what this
+    computer's FinishUP said about the session's repository; importing the modules costs no more
+    than the target records (the service client loads only when a read runs). The shared
+    authorization gate a hook asks before any dial (ADR-052) is as light."""
+
+    loaded = set(_modules(f"import {module}"))
+    offenders = sorted(loaded & set(_FORBIDDEN))
+    assert not offenders, f"{module} eagerly imported {offenders}"
 
 
 def test_finishup_application_package_import_is_lazy() -> None:
@@ -266,3 +329,22 @@ def test_required_startup_hooks_keep_the_import_diet(
         json.loads(completed.stdout.decode("utf-8"))
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_service_client_path_to_an_ssh_server_stays_off_the_helper() -> None:
+    """ADR-052, design v2 section 8.9: what a hook loads when it connects (the service client)
+    reaches an SSH server's helper or ``ssh -W`` stream through the light modules only; the
+    helper process, discovery and the profile refresh are never imported on that path."""
+
+    loaded = set(
+        _modules(
+            "import finishup.service.client as client\n"
+            "import finishup.client.helper_status, finishup.client.ssh_transport"
+        )
+    )
+    for module in (
+        "finishup.client.helper",
+        "finishup.client.helper_runtime",
+        "finishup.client.ssh_discovery",
+    ):
+        assert module not in loaded, module

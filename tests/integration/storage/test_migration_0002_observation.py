@@ -72,6 +72,7 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
         "0017",
         "0018",
         "0019",
+        "0020",
     )
     assert report.applied_versions == tuple(item.version for item in BUNDLE_MIGRATIONS[1:])
     assert bundle.execute("PRAGMA user_version").fetchone() == (

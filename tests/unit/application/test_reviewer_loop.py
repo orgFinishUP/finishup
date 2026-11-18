@@ -38,7 +38,9 @@ from finishup.application.reviewer_broker import ReadElement, ReadRoot, Reviewer
 from finishup.application.reviewer_loop import (
     FINAL_FORMAT_ERROR,
     FINAL_PHASE,
+    LOCAL_READ_SECONDS,
     READ_NOT_SERVED,
+    ReadStop,
     ReviewerLoop,
     ReviewerModelError,
     Turn,
@@ -1014,6 +1016,42 @@ async def test_no_label_or_name_carries_what_admission_did_not_scan(tmp_path: Pa
         encoded = canonical_encode(result)
         assert name.encode() not in encoded and not scan_exact_bytes(encoded)
         assert result["status"] in {"ok", "denied"}
+
+
+@pytest.mark.anyio
+async def test_a_listing_asks_a_batched_refusal_once_for_all_its_children(tmp_path: Path) -> None:
+    """ADR-051: an agent-answered ignore rule costs one probe per listing, not one per entry."""
+
+    for name in ("ordinary.txt", "ignored.txt", "other.txt"):
+        (tmp_path / name).write_text("a")
+    asked: list[tuple[str, ...]] = []
+    single: list[str] = []
+    stops: list[Callable[[], bool]] = []
+
+    def per_path(path: str) -> bool:
+        single.append(path)  # never asked: the batched rule answers for this root
+        return False
+
+    def batched(paths: tuple[str, ...], expired: Callable[[], bool]) -> frozenset[str]:
+        asked.append(paths)
+        stops.append(expired)
+        return frozenset(path for path in paths if path == "ignored.txt")
+
+    root = ReadRoot("w1", str(tmp_path.resolve()), refuse=per_path, refuse_many=batched)
+    listing = _read("read_file", root_id="w1", path=".", mode="list", cursor=None)
+    loop, _broker, _model, _ = _setup(listing, _FINAL, roots=(root,))
+    (result,) = _observations((await loop.run()).history)
+    assert cast(list[JsonValue], _data(result)["entries"]) == [
+        {"name": "ordinary.txt", "kind": "file"},
+        {"name": "other.txt", "kind": "file"},
+    ]
+    # The listed directory itself, then every entry at once: never one probe per entry.
+    assert asked == [("",), ("ignored.txt", "ordinary.txt", "other.txt")]
+    assert single == []
+    # Each probe is bounded by the read's own stop, which knows the time it leaves (ADR-051).
+    assert len(stops) == 2 and stops[0] is stops[1]
+    stop = stops[0]
+    assert isinstance(stop, ReadStop) and 0 < stop.seconds_left() <= LOCAL_READ_SECONDS
 
 
 @pytest.mark.anyio

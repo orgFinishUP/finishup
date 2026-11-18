@@ -102,7 +102,7 @@ def test_disable_proposes_and_requires_the_trusted_decision(
         proposed.append(candidate)
         return "ppr_10000000-0000-4000-8000-000000000009"
 
-    async def decide(proposal_id: str) -> object:
+    async def decide(proposal_id: str, **_kwargs: object) -> object:
         decided.append(proposal_id)
         return SimpleNamespace(status="committed")
 
@@ -125,7 +125,7 @@ def test_disable_declined_at_the_ceremony_changes_nothing(
     async def propose(*_: object, **__: object) -> str:
         return "ppr_10000000-0000-4000-8000-000000000009"
 
-    async def decide(_proposal_id: str) -> object:
+    async def decide(_proposal_id: str, **_kwargs: object) -> object:
         return SimpleNamespace(status="denied")
 
     monkeypatch.setattr(setup, "_interactive_terminal", lambda: True)
@@ -249,7 +249,7 @@ def test_machine_default_enable_tightens_and_disable_needs_the_ceremony(
         proposed.append(candidate)
         return "ppr_10000000-0000-4000-8000-000000000009"
 
-    async def decide(_proposal_id: str) -> object:
+    async def decide(_proposal_id: str, **_kwargs: object) -> object:
         return SimpleNamespace(status="committed")
 
     monkeypatch.setattr(setup, "_interactive_terminal", lambda: False)

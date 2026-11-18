@@ -22,6 +22,7 @@ from finishup.domain.coordination import (
     WorkState,
     project_id,
 )
+from finishup.domain.evidence_provenance import EvidenceProvenance, evidence_provenance_from_json
 from finishup.domain.findings import (
     FINDING_KIND_TRAITS,
     MAX_RECORDED_VERDICTS,
@@ -41,7 +42,11 @@ from finishup.domain.findings import (
     semantic_provenance_from_json,
     semantic_provenance_to_json,
 )
-from finishup.domain.receipts import SEMANTIC_REVIEW_ITEM_WITHHELD_GAP, ReceiptConclusion
+from finishup.domain.receipts import (
+    SEMANTIC_REVIEW_ITEM_WITHHELD_GAP,
+    OutsideReadsKeptBack,
+    ReceiptConclusion,
+)
 from finishup.domain.reviewer_reads import reviewer_record_from_wire
 from finishup.domain.values import (
     ActionId,
@@ -268,6 +273,10 @@ __all__ = [
     "WorkClosedPayload",
     "ContactExpectationDeclaredPayload",
     "MAX_DECLARED_QUIET_SECONDS",
+    "CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION",
+    "STATUS_HISTORY_OMITTED_FAMILIES",
+    "ContentForgottenPayload",
+    "is_content_forgotten_record",
     "WorkWrittenOffPayload",
     "UnknownEvent",
     "WritePolicy",
@@ -323,6 +332,10 @@ DEFERRED_CHECK_EVENT_SCHEMA_VERSION: Final = "1.5.0"
 # record is present, or for a requested review stopped at its unassessability cap (#1149).
 # 1.4.0 and 1.5.0 readers reject the field/reason, so neither rides an older version.
 REVIEWER_CHECK_EVENT_SCHEMA_VERSION: Final = "1.6.0"
+# 1.7.0 (ADR-051 decision 5, open question 2 closed 2026-11-07) is 1.6.0 plus the optional
+# ``outside_reads_kept_back`` counts and is chosen exactly when they are present; 1.6.0 and older
+# readers reject the field, so it never rides an older version.
+KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION: Final = "1.7.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 # 1.3.0 (unreleased on the 0.3 line) also admits the optional review-dialogue fields of issue #905
@@ -428,7 +441,12 @@ EVENT_FAMILIES: Final = (
     "work_cancelled",
     "work_written_off",
     "contact_expectation_declared",
+    "content_forgotten",
 )
+# ADR-054: service-written families the released status-result history contracts (1.4.0, 1.5.0)
+# cannot name in their closed summary codes. Status history omits their rows; the projection
+# carries what they record (``content_forgotten``: its marker, which receipts render).
+STATUS_HISTORY_OMITTED_FAMILIES: Final = frozenset({"content_forgotten"})
 
 
 class RuntimeProfile(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -1002,6 +1020,7 @@ def _locator_key_kind(schema: EventSchema) -> str:
                         REVIEW_CHECK_EVENT_SCHEMA_VERSION,
                         DEFERRED_CHECK_EVENT_SCHEMA_VERSION,
                         REVIEWER_CHECK_EVENT_SCHEMA_VERSION,
+                        KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION,
                     }
                 )
                 or (
@@ -1614,6 +1633,47 @@ class ContactExpectationDeclaredPayload:
         _bounded_integer(self.expected_quiet_seconds, 1, MAX_DECLARED_QUIET_SECONDS)
         if self.reason_code is not None:
             object.__setattr__(self, "reason_code", _lineage_token(self.reason_code))
+
+
+# ADR-054 (owner ruling U20): the service-written record that the repository content a task read
+# from a server copy was forgotten. A new family, so every other ledger keeps its exact bytes.
+CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION: Final = "1.0.0"
+_FORGET_ID_RE: Final = re.compile(r"^[0-9a-f]{32}$", re.ASCII)
+_MAX_OBJECTS_ERASED: Final = 1_000_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class ContentForgottenPayload:
+    """The content a task derived from a server copy was forgotten (ADR-054, U20).
+
+    Only the service writes it, after a copy is forgotten by its owner or expires: excerpts the
+    task recorded from that content read as absent in every projection from here on, and the
+    task's standalone content objects are erased. ``forget_id`` is the forget's random 32-hex
+    identity (a retry of the same forget records nothing new); ``objects_erased`` how many
+    objects the erasure set out to delete; ``provenance`` the task's evidence account when it was
+    forgotten (counts per closed token and fenced reads; never a snapshot or a marker), so the
+    ledger keeps which kinds of evidence were read after the content is gone.
+    """
+
+    forget_id: str
+    reason: Literal["owner", "expired"]
+    source: Literal["server_copy"]
+    objects_erased: int
+    provenance: EvidenceProvenance
+
+    def __post_init__(self) -> None:
+        if type(self.forget_id) is not str or _FORGET_ID_RE.fullmatch(self.forget_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.reason not in {"owner", "expired"} or self.source != "server_copy":
+            raise ProtocolValueError("invalid_event_value_type")
+        _bounded_integer(self.objects_erased, 0, _MAX_OBJECTS_ERASED)
+        provenance = self.provenance
+        if (
+            type(provenance) is not EvidenceProvenance
+            or provenance.snapshot is not None
+            or provenance.content_forgotten is not None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -3559,6 +3619,9 @@ class CheckRecordedPayload:
     # ADR-049 (1.4.0 only): the conversation review mode this check ran in and why. Absent on
     # checks that predate it and where the owner's conversation setting could not be read.
     review_mode: CheckReviewMode | None = None
+    # ADR-051 decision 5 (1.7.0 only): how many task inputs and declared tests a claim-bound
+    # check's listed mode kept from review. Absent everywhere else, so those checks keep bytes.
+    outside_reads_kept_back: OutsideReadsKeptBack | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -3723,6 +3786,11 @@ class CheckRecordedPayload:
             raise ProtocolValueError("invalid_event_value_type")
         if self.review_mode is not None and type(self.review_mode) is not CheckReviewMode:
             raise ProtocolValueError("invalid_event_value_type")
+        if (
+            self.outside_reads_kept_back is not None
+            and type(self.outside_reads_kept_back) is not OutsideReadsKeptBack
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
         object.__setattr__(
             self, "deliverable_states", validate_deliverable_states(self.deliverable_states)
         )
@@ -3785,6 +3853,7 @@ type EventPayload = (
     | ChildWrittenOffPayload
     | WorkClosedPayload
     | ContactExpectationDeclaredPayload
+    | ContentForgottenPayload
     | WorkAbandonedPayload
     | WorkCancelledPayload
     | WorkWrittenOffPayload
@@ -3851,6 +3920,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("check_recorded", REVIEW_CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", DEFERRED_CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", REVIEWER_CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
+        EventSchema("check_recorded", KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         **{
             EventSchema("check_recorded", version): CheckRecordedPayload
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -3882,6 +3952,9 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema(
             "contact_expectation_declared", LINEAGE_EVENT_SCHEMA_VERSION
         ): ContactExpectationDeclaredPayload,
+        EventSchema(
+            "content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION
+        ): ContentForgottenPayload,
     }
 )
 
@@ -4741,6 +4814,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "reviewer",
                     "correctness_advisories",
                     "totals",
+                    "outside_reads_kept_back",
                 }
             ),
         ),
@@ -4838,6 +4912,10 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
             frozenset({"expected_quiet_seconds"}),
             frozenset({"reason_code"}),
         ),
+        "content_forgotten": (
+            frozenset({"forget_id", "reason", "source", "objects_erased", "provenance"}),
+            frozenset(),
+        ),
         "work_abandoned": (
             frozenset({"service_stamped"}),
             frozenset({"reason_code"}),
@@ -4890,9 +4968,15 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         _validate_event_schema_payload(schema, finding)
         return finding
     required, optional = _PAYLOAD_SHAPES[schema.name]
-    if schema.name == "check_recorded" and schema.version != REVIEWER_CHECK_EVENT_SCHEMA_VERSION:
+    if schema.name == "check_recorded" and schema.version not in {
+        REVIEWER_CHECK_EVENT_SCHEMA_VERSION,
+        KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION,
+    }:
         # #1118: an older check version never carried the reviewer record; its reader refuses it.
         optional = optional - {"reviewer", "correctness_advisories"}
+    if schema.name == "check_recorded" and schema.version != KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION:
+        # ADR-051 decision 5: only 1.7.0 carries the counts listed mode kept back.
+        optional = optional - {"outside_reads_kept_back"}
     if schema.name == "evidence_recorded" and schema.version != SCHEMA_VERSION:
         optional = frozenset({*optional, "digest_binding"})
     if schema == EventSchema("result_recorded", RESULT_VERIFICATION_SCHEMA_VERSION):
@@ -4944,6 +5028,18 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "work_closed":
         return WorkClosedPayload(reason_code=cast(str | None, _optional(source, "reason_code")))
+    if schema.name == "content_forgotten":
+        try:
+            provenance = evidence_provenance_from_json(_field(source, "provenance"))
+        except ValueError as exc:
+            raise ProtocolValueError("invalid_event_value_type") from exc
+        return ContentForgottenPayload(
+            forget_id=cast(str, _field(source, "forget_id")),
+            reason=cast(Literal["owner", "expired"], _field(source, "reason")),
+            source=cast(Literal["server_copy"], _field(source, "source")),
+            objects_erased=cast(int, _field(source, "objects_erased")),
+            provenance=provenance,
+        )
     if schema.name == "contact_expectation_declared":
         return ContactExpectationDeclaredPayload(
             expected_quiet_seconds=cast(int, _field(source, "expected_quiet_seconds")),
@@ -5354,6 +5450,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 DeliverableState.from_wire(item)
                 for item in _array(_optional(source, "deliverable_states") or ())
             ),
+            outside_reads_kept_back=(
+                None
+                if (kept_back := _optional(source, "outside_reads_kept_back")) is None
+                else OutsideReadsKeptBack.from_wire(kept_back)
+            ),
             totals=(
                 None
                 if _optional(source, "totals") is None
@@ -5564,6 +5665,17 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         result = {"child_task_id": value.child_task_id}
         _optional_value(result, "reason_code", value.reason_code)
         return _json_object(result)
+    if payload_type is ContentForgottenPayload:
+        value = cast(ContentForgottenPayload, payload)
+        return _json_object(
+            {
+                "forget_id": value.forget_id,
+                "reason": value.reason,
+                "source": value.source,
+                "objects_erased": value.objects_erased,
+                "provenance": value.provenance.to_json(),
+            }
+        )
     if payload_type is ContactExpectationDeclaredPayload:
         value = cast(ContactExpectationDeclaredPayload, payload)
         result: dict[str, object] = {"expected_quiet_seconds": value.expected_quiet_seconds}
@@ -5943,6 +6055,13 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             result, "deliverable_states", tuple(item.as_wire() for item in value.deliverable_states)
         )
         _optional_value(result, "totals", value.totals)
+        _optional_value(
+            result,
+            "outside_reads_kept_back",
+            None
+            if value.outside_reads_kept_back is None
+            else cast(JsonValue, value.outside_reads_kept_back.as_wire()),
+        )
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)
@@ -6034,10 +6153,20 @@ def _validate_event_schema_payload(
             or bool(payload.deliverable_states)
             or payload.review_mode is not None
         )
-        # 1.6.0 exists exactly for the reviewer record (#1118), so that gate is first. 1.5.0 exists
-        # only for the pre-edit deferral reason. A deferred check still carries review_mode and
-        # totals, so that gate is next: those fields do not promote it to 1.4.0.
+        # 1.7.0 exists exactly for the kept-back counts (ADR-051 decision 5) and is a superset
+        # of 1.6.0, so that gate is first. 1.6.0 exists exactly for the reviewer record (#1118).
+        # 1.5.0 exists only for the pre-edit deferral reason. A deferred check still carries
+        # review_mode and totals, so that gate is next: those fields do not promote it to 1.4.0.
         if (
+            payload.outside_reads_kept_back is not None
+            or schema.version == KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION
+        ):
+            if (
+                schema.version != KEPT_BACK_CHECK_EVENT_SCHEMA_VERSION
+                or payload.outside_reads_kept_back is None
+            ):
+                raise ProtocolValueError("invalid_event_schema")
+        elif (
             payload.reviewer is not None
             or payload.correctness_advisories
             or payload.semantic_reason is SemanticReason.ROUND_LIMIT_UNASSESSABLE
@@ -6564,6 +6693,23 @@ def redaction_targets(
         events.update(record.projection_locator.redaction_target_event_ids)
         objects.update(record.projection_locator.redaction_target_object_ids)
     return frozenset(events), frozenset(objects)
+
+
+def is_content_forgotten_record(record: LedgerRecord) -> bool:
+    """Whether ``record`` is a service-written ``content_forgotten`` event (ADR-054, U20).
+
+    Only the service's coordinator writes the family, with its observation stamp; agents cannot
+    publish it. A record of the family without that stamp is not one (replay refuses it as
+    corrupt), and an unknown version of the name never is.
+    """
+
+    return (
+        type(record) is AcceptedEvent
+        and record.schema
+        == EventSchema("content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION)
+        and (record.payload is None or type(record.payload) is ContentForgottenPayload)
+        and is_observation_authored(record)
+    )
 
 
 def is_lineage_service_stamped(record: LedgerRecord) -> bool:

@@ -106,6 +106,74 @@ def _background_advice() -> dict[str, JsonValue] | None:
         return None
 
 
+def _zero_network_selection() -> dict[str, JsonValue] | None:
+    """The zero-network item (ADR-051 decision 8) as a readiness fact, with its continuation.
+
+    A remote server still selected while this computer's policy forbids network use, or last
+    reported so: every readiness operation reports it, because hooks and agent sessions are
+    refused before anything is sent there until the owner switches.
+    """
+
+    from finishup.cli.zero_network_selection import find_zero_network_selection
+
+    item = find_zero_network_selection()
+    if item is None:
+        return None
+    fact = item.fact()
+    fact["next_command"] = continuation(["server", "use", "local"])
+    return fact
+
+
+def _repository_hold(project: Path) -> dict[str, JsonValue] | None:
+    """This project's repository held from the selected server elsewhere, or kept here for it
+    (ADR-051 decision 8, round 4), as a readiness fact with its continuation; from the records
+    alone."""
+
+    from finishup.cli.zero_network_selection import find_repository_hold
+
+    item = find_repository_hold(project)
+    if item is None:
+        return None
+    fact = item.fact()
+    fact["line"] = item.line()
+    fact["next_command"] = continuation(["server", "repositories", "add"], project=project)
+    return fact
+
+
+def _repository_hold_line(fact: JsonValue) -> str | None:
+    if not isinstance(fact, dict):
+        return None
+    line = fact.get("line")
+    return line if isinstance(line, str) else None
+
+
+def _server_selection_line(fact: JsonValue) -> str | None:
+    from finishup.cli.zero_network_selection import REMOTE_SELECTED
+
+    if not isinstance(fact, dict):
+        return None
+    state = (
+        f"this computer last reported, at {fact.get('last_reported_at')}, that it forbids all "
+        "network use"
+        if fact.get("policy_read") == "last_reported"
+        else "this computer forbids all network use"
+    )
+    if fact.get("reason") == REMOTE_SELECTED:
+        what = (
+            f"{state}, so FinishUP refuses the selected server {fact.get('target_id')} "
+            f"({fact.get('kind')}): hooks, commands and agent sessions send nothing to it"
+        )
+    else:
+        what = (
+            f"{state}, and the server selection could not be read ({fact.get('detail')}), so "
+            "whether a server on another machine is still selected is not known"
+        )
+    return (
+        f"{what}. To keep working on this computer's everyday FinishUP, run "
+        f"{fact.get('next_command')}, then restart open agent sessions"
+    )
+
+
 def setup_next(
     *,
     operation: SetupOperation,
@@ -170,6 +238,13 @@ def _setup_next(
         advice = _background_advice()
         if advice is not None:
             facts["background_advice"] = advice
+    zero_network = _zero_network_selection()
+    if zero_network is not None:
+        facts["server_selection"] = zero_network
+    else:
+        held = _repository_hold(project)
+        if held is not None:
+            facts["repository_hold"] = held
     arguments = cast(list[str] | None, facts.pop("arguments", None))
     reason = cast(SetupReadinessReason, str(facts.pop("reason", "ready")))
     selected_home: str | None = None
@@ -219,6 +294,13 @@ def _setup_next(
     elif operation == "connection":
         reason = "host_selection_required"
         arguments = ["setup", "status"]
+    next_command = None if arguments is None else continuation(arguments, project=project)
+    if zero_network is not None:
+        # ADR-051 decision 8: until the owner switches, hooks, commands and agent sessions are
+        # refused before anything is sent to the selected server, so every other step (a service
+        # restart the refused connection seemed to call for, a host connection) waits for the
+        # switch. The fact names it; the top-level step is the same command.
+        next_command = cast(str, zero_network["next_command"])
     report = SetupReadiness(
         # Frozen legacy identifier (ADR-048): machine-readable report tag agents parse.
         schema="yoetz.setup-readiness/1",
@@ -226,18 +308,22 @@ def _setup_next(
         reason=reason,
         project=str(project),
         inspected_config_root=selected_home,
-        next_command=None if arguments is None else continuation(arguments, project=project),
+        next_command=next_command,
         facts=facts,
     )
     from finishup.cli.provider_status import background_advice_human_line
 
     advice_line = background_advice_human_line(facts.get("background_advice"))
+    server_line = _server_selection_line(facts.get("server_selection")) or _repository_hold_line(
+        facts.get("repository_hold")
+    )
     typer.echo(
         report.model_dump_json(by_alias=True)
         if json_output
         else (
             reason.replace("_", " ")
             + ("" if advice_line is None else "\nBackground AI-powered advice: " + advice_line)
+            + ("" if server_line is None else "\nServer: " + server_line)
             + (
                 "\nNext: " + report.next_command
                 if report.next_command

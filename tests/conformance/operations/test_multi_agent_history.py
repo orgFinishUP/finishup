@@ -9,7 +9,7 @@ from typing import cast
 import pytest
 
 from builders.replay import replay_records
-from finishup.domain.events import EVENT_FAMILIES
+from finishup.domain.events import EVENT_FAMILIES, STATUS_HISTORY_OMITTED_FAMILIES
 from finishup.ports.ledger import ProjectionQuery
 from finishup.protocol.canonical import JsonValue
 from finishup.protocol.models import StatusHistoryItemModel
@@ -59,7 +59,19 @@ async def test_history_reads_accepted_lineage_and_coordination_events(
             db.close()
 
 
-@pytest.mark.parametrize("family", EVENT_FAMILIES)
+# ADR-054: the service-written families the released history contracts cannot name; status
+# history omits their rows (tests/integration/service/test_content_forgetting.py).
+_HISTORY_FAMILIES = tuple(
+    family for family in EVENT_FAMILIES if family not in STATUS_HISTORY_OMITTED_FAMILIES
+)
+
+
+def test_only_the_service_written_forget_family_is_omitted_from_history() -> None:
+    assert STATUS_HISTORY_OMITTED_FAMILIES == {"content_forgotten"}
+    assert STATUS_HISTORY_OMITTED_FAMILIES < set(EVENT_FAMILIES)
+
+
+@pytest.mark.parametrize("family", _HISTORY_FAMILIES)
 def test_history_wire_admits_every_registered_event_family(family: str) -> None:
     record = replay_records("lineage-event-families")[0]
     item = StatusHistoryItemModel.model_validate(
@@ -86,4 +98,4 @@ def test_packaged_history_schema_covers_registered_events() -> None:
         assert isinstance(value, Mapping)
         value = value[key]
     assert isinstance(value, tuple)
-    assert set(value) == {*EVENT_FAMILIES, "opaque_unknown"}
+    assert set(value) == {*_HISTORY_FAMILIES, "opaque_unknown"}

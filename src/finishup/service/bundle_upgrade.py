@@ -77,10 +77,11 @@ __all__ = [
 ]
 
 BUNDLE_UPGRADE_SOURCE_VERSION: Final = 12
-BUNDLE_UPGRADE_TARGET_VERSION: Final = 19
-# Development v17 bundles apply 0018 (bounded reviewer read corrections, #1173) and 0019; v18
-# bundles apply only 0019 (the declared quiet-period family, #1239).
-BUNDLE_UPGRADE_SOURCE_VERSIONS: Final = (12, 13, 14, 15, 16, 17, 18)
+BUNDLE_UPGRADE_TARGET_VERSION: Final = 20
+# Development v17 bundles apply 0018 (bounded reviewer read corrections, #1173), 0019 and 0020; v18
+# bundles apply 0019 (the declared quiet-period family, #1239) and 0020; v19 bundles (v0.3.0) apply
+# only 0020 (the content_forgotten family, ADR-054).
+BUNDLE_UPGRADE_SOURCE_VERSIONS: Final = (12, 13, 14, 15, 16, 17, 18, 19)
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = (
     "0013",
@@ -90,6 +91,7 @@ _REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = (
     "0017",
     "0018",
     "0019",
+    "0020",
 )
 _LEASE_SECONDS: Final = 60
 _MIGRATION_PHASE_ORDER: Final[tuple[str, ...]] = (
@@ -493,9 +495,9 @@ def _stream_table_digest(
 ) -> tuple[str, int]:
     """Digest one table using a bounded cursor and explicit ordering where it matters.
 
-    The only table rebuilt by 0014 and 0019 (``events``) and the object inventory use their stable key
-    ordering.  Other tables are unchanged by the migration and are scanned in SQLite's native
-    b-tree order, so the digest does not retain their rows merely to sort them in Python.
+    The only table rebuilt by 0014, 0019 and 0020 (``events``) and the object inventory use their
+    stable key ordering.  Other tables are unchanged by the migration and are scanned in SQLite's
+    native b-tree order, so the digest does not retain their rows merely to sort them in Python.
     """
 
     projection = "*"

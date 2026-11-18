@@ -595,14 +595,16 @@ def test_installed_macos_keyring_guard_succeeds_on_a_pristine_bundle_root(
     tmp_path: Path,
 ) -> None:
     """#565: the real installed macOS backend is supported and its guard opens before any
-    service has created the bundle root. The guard never touches the keychain itself."""
+    service has created the bundle root. The guard never touches the keychain itself.
 
-    import keyring
+    The backend is the installed class, constructed here rather than discovered: the suite pins
+    keyring to its fail backend (``tests/credential_store_guard.py``), and constructing the class
+    asks the keychain nothing."""
 
-    store = AutoUnlockPassphraseStore(tmp_path.resolve() / "data", backend=keyring.get_keyring())
-    if store._backend_id != "keyring.backends.macOS.Keyring":  # pyright: ignore[reportPrivateUsage]
-        pytest.skip("macOS keychain backend is not the installed default here")
+    from keyring.backends.macOS import Keyring as MacOSKeyring
 
+    store = AutoUnlockPassphraseStore(tmp_path.resolve() / "data", backend=MacOSKeyring())
+    assert store._backend_id == "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
     assert store.available is True
     with store.staged_initialization_guard():
         pass

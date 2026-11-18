@@ -5,6 +5,10 @@ is [`docs/protocol/data-egress-and-privacy.md`](../protocol/data-egress-and-priv
 [ADR-009](../adr/ADR-009-data-egress-privacy.md). This page is the operator's view: what the
 defaults are, and what changes when you turn something on.
 
+Throughout this page, "your machine" is the machine that runs your FinishUP service. A
+[named local server](servers.md) you added is a second FinishUP on this computer with its own
+privacy policy, records and receipts; while it is in use, the commands on this page act on it.
+
 ## Two defaults, deliberately separate
 
 An unconfigured installation is **external-LLM-egress-free and local-only**. No task content
@@ -126,6 +130,29 @@ and an endpoint profile. It never means "send everything available."
 Enabling one channel authorizes no other. Telemetry, crash diagnostics, update checks, and
 capability testing have their own separate policies. `local_only` governs LLM disclosure and can
 coexist with a separately consented bounded structural non-LLM channel.
+
+A project's own privacy policy also governs FinishUP servers elsewhere (over SSH or HTTPS). Only a
+project whose policy on this computer allows no network use **at all** is held from such a server:
+nothing FinishUP reads or claims for it is sent until you allow it from your own terminal or keep it
+on this computer (see [FinishUP servers](servers.md)). **Private** does not by itself hold a project:
+its package update checks are on by default, which permits network use, so a Private project with
+them on is not held — once you select a server elsewhere it is sent to that server and, at level L2,
+a copy of it is kept there, with no separate question for the project. To hold a project, turn its
+package update checks off (and add no AI-powered review) so its policy permits no network use.
+A server elsewhere reads your project only through FinishUP on this computer, while it works,
+unless its owner offers to keep a copy of your code (level L2) and you agree on your own terminal.
+A copy holds the files git can see, never the project's history, minus credential file names, the
+server's and your own exclusions, and files whose contents match known secret formats until you
+allow them; the names of the files left out are sent, never their contents. FinishUP checks this project's hold and this
+computer's network policy again before every update, and sends nothing if either refuses.
+Holding the project or stopping only stops future updates: `finishup server code forget` is the
+only way to delete what was sent, and it also deletes the excerpts tasks kept from it (see
+[Keeping a copy of your code on a server](servers.md#keeping-a-copy-of-your-code-on-a-server-level-l2)).
+Listing and forgetting a copy still work while the project is held or kept on this computer, at
+level L1, or after its folder is gone: they send the server only the copy's id, the one it
+already received when it asked for that copy, never anything of the project. While this computer's own policy allows no network use, nothing reaches a server, so
+a copy there can be neither listed nor deleted until that policy allows network use again; until
+then it stays as its retention says, and one kept until forgotten stays until it is forgotten.
 
 **True zero-network mode** is the composite of `local_only`, the global ceiling off, and all five
 network channels disabled. Even then, exact release-profiled local IPC is permitted for the FinishUP

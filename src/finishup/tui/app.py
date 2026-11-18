@@ -21,7 +21,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
 from textual import events, on
 from textual.app import App, ComposeResult, SuspendNotSupported
@@ -86,6 +86,9 @@ from finishup.tui.widgets.views import (
     TextEntryView,
     ViewDismissed,
 )
+
+if TYPE_CHECKING:
+    from finishup.cli.policy_server import PolicyServer
 
 __all__ = ["FinishUpTui"]
 
@@ -338,8 +341,24 @@ class FinishUpTui(App[int]):
         return self._stack[-1] if self._stack else None
 
     async def on_mount(self) -> None:
-        self.header_widget.set_state(version=__version__, project=str(self.runtime.project_root()))
+        # First run while this process's root is a server elsewhere stops before anything live
+        # is read or written (ADR-051, layer 1): not even this computer's policy is asked, since
+        # that read records what it answers, so "Nothing was changed" holds. The header then
+        # shows only what the target record says.
+        refused = self.first_run and self._remote_root_refused()
+        if not refused:
+            # Before any command can run: whether a remote server is still selected while this
+            # computer forbids network use, or last reported so (ADR-051 decision 8), for the
+            # header and ``/server``.
+            await self.runtime.refresh_zero_network_item()
+        self.header_widget.set_state(
+            version=__version__,
+            project=str(self.runtime.project_root()),
+            server=self.runtime.server_indicator(),
+        )
         self.composer.focus_input()
+        if refused:
+            return
         self._flow = self.run_worker(
             self._first_run_flow() if self.first_run else self._resume_flow(),
             name="flow",
@@ -539,6 +558,7 @@ class FinishUpTui(App[int]):
             "privacy": self.command_privacy,
             "provider": self.command_provider,
             "service": self.command_service,
+            "server": self.command_server,
             "doctor": self.command_doctor,
             "help": self.command_help,
             "quit": self.command_quit,
@@ -546,12 +566,35 @@ class FinishUpTui(App[int]):
         handler = handlers.get(name)
         if handler is None:
             return
+        if not self._server_host_allows(name):
+            return
         try:
             await handler()
         except asyncio.CancelledError:
             raise
         except RuntimeError_ as error:
             self._report(error)
+
+    def _server_host_allows(self, name: str) -> bool:
+        """Refuse a server-host command while a remote server target is selected (ADR-051)."""
+
+        from finishup.cli.command_scope import (
+            ServerHostRequired,
+            require_server_host,
+            server_host_refusal_line,
+        )
+
+        try:
+            require_server_host(f"/{name}")
+        except ServerHostRequired as error:
+            self.say(
+                Level.BLOCKED,
+                f"/{name} runs on the FinishUP server host",
+                (server_host_refusal_line(error),),
+                details=(f"reason={error.reason}", f"target={error.target_id}"),
+            )
+            return False
+        return True
 
     def _report(self, error: RuntimeError_) -> None:
         from finishup.cli.render import render_local_recovery_lines
@@ -568,7 +611,38 @@ class FinishUpTui(App[int]):
     # First run
     # ------------------------------------------------------------------
 
+    def _remote_root_refused(self) -> bool:
+        """Stop first-run setup at its entry while this process's root is a server elsewhere.
+
+        Every connection from such a root is refused before anything is sent (ADR-051, layer 1),
+        so setup names that phase and its registry directive before it looks for agents, asks
+        anything or changes anything, as ``finishup setup run`` does. ``on_mount`` asks this
+        before any live read or write, this computer's policy read included; the phase comes from
+        the target record and the last-reported policy marker alone. The interface stays open.
+        """
+
+        phase = self.runtime.remote_root_refusal()
+        if phase is None:
+            return False
+        from finishup.client.targets import remote_root_continuation
+        from finishup.protocol.recovery import directive_for
+
+        directive = directive_for(remote_root_continuation(phase))
+        body = () if directive is None else (directive.directive,)
+        details = [f"reason={phase}"]
+        if directive is not None:
+            details.append(f"continuation={directive.token}")
+        self.say(
+            Level.BLOCKED,
+            "Setup did not start: the selected FinishUP server is refused before anything is sent",
+            body,
+            details=details,
+        )
+        self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+        return True
+
     async def _first_run_flow(self) -> None:
+        # A remote root never gets here: ``on_mount`` refused it first.
         detection = await self.runtime.detect()
         self._detection = detection
         self.say(Level.ACTIVE, "", render_welcome(self.body_width))
@@ -833,7 +907,7 @@ class FinishUpTui(App[int]):
         """
 
         try:
-            report = await self.hand_over_terminal(
+            report = await self._hand_over_privacy(
                 lambda: self.runtime.run_privacy_setup("private", conversation_review="local_only")
             )
         except SuspendNotSupported:
@@ -854,6 +928,38 @@ class FinishUpTui(App[int]):
             )
 
         return getattr(report, "outcome", "failed") in {"configured", "unchanged"}
+
+    async def _hand_over_privacy(self, operation: Callable[[], Awaitable[object]]) -> object:
+        """Hand the terminal to the trusted questionnaire, then name the server it changed.
+
+        With a server on another machine, a port or the web selected, the questionnaire changes
+        that server's policy, not this computer's (ADR-051 decision 8). It said so on the
+        handed-over terminal; this says it again here, by generated id and closed kind only, with
+        a waiting proposal's id and expiry. The server is read before the hand-over and kept: the
+        owner may switch servers during the questionnaire, and the change stays that server's. A
+        questionnaire that raised ``RuntimeError_`` is named as unconfirmed before the error goes
+        on to the caller; ``SuspendNotSupported`` means nothing ran, so nothing is said.
+        """
+
+        server = self.runtime.selected_policy_server()
+        try:
+            report = await self.hand_over_terminal(operation)
+        except RuntimeError_:
+            self._say_policy_server(server, None)
+            raise
+        self._say_policy_server(server, report)
+        return report
+
+    def _say_policy_server(self, server: PolicyServer | None, report: object | None) -> None:
+        """One message naming ``server`` and what the questionnaire did to its policy.
+
+        ``report`` is ``None`` when the questionnaire raised. Nothing is said for this computer's
+        server.
+        """
+
+        if server is not None:
+            line = server.result_line(report)
+            self.say(Level.ACTIVE, "Privacy policy of the selected FinishUP server", (line,))
 
     async def _choose_harnesses(
         self,
@@ -1499,6 +1605,7 @@ class FinishUpTui(App[int]):
             project=middle_truncate(str(self.runtime.project_root()), 48),
             harness=state,
             privacy=privacy.summary,
+            server=self.runtime.server_indicator(),
         )
         self.footer_widget.set_state(right=self._footer_right(privacy.summary, vault.ready))
 
@@ -2183,7 +2290,7 @@ class FinishUpTui(App[int]):
         """Suspend and let the trusted CLI ceremony own the decision end to end."""
 
         try:
-            report = await self.hand_over_terminal(lambda: self.runtime.run_privacy_setup(recipe))
+            report = await self._hand_over_privacy(lambda: self.runtime.run_privacy_setup(recipe))
         except SuspendNotSupported:
             self.say(
                 Level.UNPROVEN,
@@ -2420,7 +2527,7 @@ class FinishUpTui(App[int]):
             # ADR-049 review round 1: a first-run answer that adds AI-powered review lists the
             # AI recipes (Assisted review by default), never the Private recommendation a
             # subscription reviewer gets on its own.
-            report = await self.hand_over_terminal(
+            report = await self._hand_over_privacy(
                 lambda: (
                     self.runtime.run_privacy_setup(
                         None, conversation_review=conversation_review, ai_review_add_on=True
@@ -2809,7 +2916,7 @@ class FinishUpTui(App[int]):
             return
         try:
             # Authorize the exact provider channel before any credential-bearing probe can run.
-            report = await self.hand_over_terminal(
+            report = await self._hand_over_privacy(
                 lambda: self.runtime.run_privacy_setup(
                     None,
                     offer_recommended=conversation_review not in _ADD_ON_ANSWERS,
@@ -2940,6 +3047,210 @@ class FinishUpTui(App[int]):
                 self.say(Level.VERIFIED, f"Stopping. Service state: {state}")
             else:
                 self.say(Level.OPTIONAL, "The service is still running.")
+
+    async def command_server(self) -> None:
+        """List server targets, show one's status, or switch, as ``finishup server`` does."""
+
+        rows, lines = await self.runtime.server_rows()
+        self.say(Level.ACTIVE, "FinishUP servers", lines)
+        zero_network = await self.runtime.refresh_zero_network_item()
+        if zero_network:
+            # ADR-051 decision 8: connections to the server are refused; "Use local" below is the
+            # way out, and nothing switches until the owner chooses it.
+            self.say(Level.UNPROVEN, self.runtime.zero_network_heading(), zero_network)
+        held: tuple[str, ...] = ()
+        if not zero_network:
+            # ADR-051 decision 8, round 4: this repository's work is held from the selected server
+            # elsewhere, or kept here; nothing is sent until the owner chooses below.
+            held = await self.runtime.refresh_repository_hold_item()
+            if held:
+                self.say(Level.UNPROVEN, self.runtime.repository_hold_heading(), held)
+        from finishup.client import authorization
+
+        def opened(kind: str) -> bool:
+            return kind in authorization.OPEN_REMOTE_KINDS
+
+        options = [
+            Option(
+                f"use:{row.name}",
+                f"Use {row.name}",
+                # The remote kinds are closed in this release: choosing one is refused. A kind a
+                # later layer opens asks for the owner's consent on this terminal (ADR-052).
+                (
+                    "asks you to confirm on this terminal"
+                    if opened(row.kind)
+                    else "not available in this release"
+                )
+                if row.remote
+                else row.kind,
+            )
+            for row in rows
+            if not row.selected
+        ]
+        if held:
+            options.append(
+                Option(
+                    "repo-send",
+                    "Send this repository's work to this server anyway",
+                    "asks you to confirm on this terminal",
+                )
+            )
+        options.extend(
+            (
+                Option("status", "Show the selected server's status"),
+                Option("add", "Add a server on this computer"),
+                Option("remove", "Remove a server"),
+            )
+        )
+        choice = await self.ask(
+            SelectionView(name="server", options=options, hint="enter to choose · esc to go back")
+        )
+        if choice is None:
+            return
+        if choice == "status":
+            self.say(Level.ACTIVE, "Server status", await self.runtime.server_status_lines())
+            return
+        if choice == "add":
+            await self._server_add()
+            return
+        if choice == "remove":
+            self.say(Level.OPTIONAL, "Run this in your shell", _SERVER_SHELL_COMMANDS[choice])
+            return
+        if choice == "repo-send":
+            await self._server_repository_send()
+            return
+        name = choice.removeprefix("use:")
+        row = next(row for row in rows if row.name == name)
+        if row.remote and opened(row.kind):
+            # The owner's consent to that server's profile, on this terminal (ADR-052): handed
+            # over to the confirmation prompt, which runs on the loop thread (SRV-6).
+            confirmed = await self.ask(
+                ApprovalView(
+                    name="server-use",
+                    title=f"Use the server {row.name}?",
+                    body=(
+                        "FinishUP will hand this terminal to its confirmation prompt.",
+                        "It shows what is sent to that server and what it offers; type the",
+                        "server's name there to authorize it.",
+                    ),
+                    approve_label="Continue to confirmation",
+                    decline_label="Not now",
+                    default_to_safe=True,
+                )
+            )
+            if confirmed != "approve":
+                self.say(Level.OPTIONAL, "The selected server is unchanged.")
+                return
+            try:
+                switch = await self.hand_over_terminal(lambda: self.runtime.use_server(name))
+            except SuspendNotSupported:
+                self.say(
+                    Level.UNPROVEN,
+                    "This terminal cannot hand over for the confirmation",
+                    ("Run this from your shell instead:", "", f"    finishup server use {name}"),
+                )
+                return
+        else:
+            # A remote server of a closed kind is refused (``remote_kind_unavailable``) and the
+            # selection unchanged.
+            switch = await self.runtime.use_server(name)
+        self.say(
+            Level.VERIFIED,
+            "Using this computer's everyday server"
+            if switch.indicator == "everyday"
+            else f"Using the server {row.name}",
+            (
+                *(() if switch.left_open else switch.left_lines),
+                "New hooks and commands use it now. Restart open agent sessions: a running",
+                "FinishUP MCP bridge keeps a server on this computer it started with, and ends a",
+                "connection to a server elsewhere to follow the new selection.",
+            ),
+        )
+        if switch.left_open:
+            # The switch happened, but the connection to the server it left is still open.
+            self.say(
+                Level.UNPROVEN,
+                "The connection to the server you left did not close",
+                switch.left_lines,
+            )
+        await self._refresh_header()
+
+    async def _server_repository_send(self) -> None:
+        """``/server`` repo-send: ``finishup server repositories add`` for this repository, with
+        the terminal handed over to its disclosure and typed name (ADR-051 decision 8, round 4).
+        Nothing switches servers or changes a privacy policy."""
+
+        confirmed = await self.ask(
+            ApprovalView(
+                name="server-repository-send",
+                title="Send this repository's work to the selected server anyway?",
+                body=(
+                    "FinishUP will hand this terminal to its confirmation prompt.",
+                    "It shows what that server would receive; type the server's",
+                    "name there to allow it.",
+                ),
+                approve_label="Continue to confirmation",
+                decline_label="Not now",
+                default_to_safe=True,
+            )
+        )
+        declined = ("Nothing changed; this repository's work stays on this computer.",)
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
+            return
+        try:
+            target_id, allowed = await self.hand_over_terminal(self.runtime.allow_repository_here)
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot hand over for the confirmation",
+                ("Run this from your shell instead:", "", "    finishup server repositories add"),
+            )
+            return
+        except RuntimeError_ as error:
+            if error.reason != "authorization_declined":
+                raise
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
+            return
+        if allowed:
+            self.say(
+                Level.VERIFIED,
+                f"Sending this repository's work to {target_id}",
+                ("Your agent can repeat its last FinishUP request now.",),
+            )
+        else:
+            self.say(Level.OPTIONAL, "Nothing changed", declined)
+        await self._refresh_header()
+
+    async def _server_add(self) -> None:
+        """``/server`` add: a server on this computer, the only kind this release adds; the
+        command to run is printed for your shell (servers on another machine, a port or the web
+        are not offered: ``finishup server add`` refuses them as ``remote_kind_unavailable``)."""
+
+        where = await self.ask(
+            SelectionView(
+                name="server-add",
+                title="Add a server",
+                body=(
+                    "Add an SSH server with 'finishup server add NAME ssh://USER@HOST' or an "
+                    "HTTPS server with 'finishup server add NAME https://HOST' in a terminal "
+                    "(OpenSSH may ask about its host key there; an HTTPS server asks for its API "
+                    "key there).",
+                ),
+                options=(
+                    Option(
+                        "add:local",
+                        "On this computer",
+                        "a second FinishUP with its own tasks, vault and settings",
+                    ),
+                ),
+                hint="enter to choose · esc to go back",
+            )
+        )
+        if where is None:
+            self.say(Level.OPTIONAL, "No server was added.")
+            return
+        self.say(Level.OPTIONAL, "Run this in your shell", _server_add_lines())
 
     async def command_work(self) -> None:
         recent = self.runtime.opened_titles
@@ -3149,6 +3460,22 @@ class FinishUpTui(App[int]):
             return self._active_task_title
         await self.command_work()
         return self._active_task_title
+
+
+def _server_add_lines() -> tuple[str, ...]:
+    """The ``finishup server add`` command ``/server`` prints: a server on this computer."""
+
+    return (
+        "    finishup server add NAME --local",
+        "",
+        "Then select it with /server or 'finishup server use NAME', and run 'finishup setup'.",
+    )
+
+
+# ``/server`` prints these for the changes that belong on the command line (ADR-051).
+_SERVER_SHELL_COMMANDS: Final[dict[str, tuple[str, ...]]] = {
+    "remove": ("    finishup server remove NAME",),
+}
 
 
 def _efforts_with_default(default: str) -> tuple[str, ...]:
