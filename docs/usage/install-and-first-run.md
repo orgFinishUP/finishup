@@ -65,12 +65,12 @@ operator details. Configuration success alone does not prove a fresh host sessio
 ## Install
 
 For guided setup, click **Set up with your agent** on [finishup.dev](https://finishup.dev).
-The popup confirms the instruction was copied. Paste it into your agent’s chat, then send it
-to start setup.
-The **Install with PyPI** and **Install with npm** buttons show the copied command in the popup:
-paste it into your terminal, then press Enter.
-After the PyPI installation finishes, run `finishup` in your terminal to start setup.
-The npm command, `npx finishup`, starts setup directly.
+The page copies the setup instructions and confirms it: “Copied the setup instructions for your
+agent. Paste them into Codex, Claude Code or Cursor. Or install with PyPI or npm, as shown on
+GitHub.” Paste those instructions into your agent’s chat, then send them to start setup.
+“as shown on GitHub” opens this page. After the PyPI commands below finish, run `finishup`
+in your terminal to start setup. With `uv` already installed, `npx finishup` makes that same
+install and starts setup directly.
 
 Install the latest published version through Python via [`uv`](https://docs.astral.sh/uv/):
 

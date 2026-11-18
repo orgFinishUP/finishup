@@ -1,7 +1,7 @@
 # ADR-049 — Per-conversation review mode and the hybrid default
 
-**Status:** Accepted for [issue #1073](https://github.com/TheGaySupreme123/finishup/issues/1073)
-(section 2.A, the FinishUP 0.3 relaunch) and [PR #1068](https://github.com/TheGaySupreme123/finishup/pull/1068).
+**Status:** Accepted for [issue #1073](https://github.com/orgFinishUP/finishup/issues/1073)
+(section 2.A, the FinishUP 0.3 relaunch) and [PR #1068](https://github.com/orgFinishUP/finishup/pull/1068).
 Design gates: protocol, privacy/egress. Maintainer acknowledgement: the owner's brief on #1073
 §2.A — every conversation starts local; the agent decides per task when AI-powered review is worth
 it; choosing the recommended setup answer is the owner's standing permission for that; a strict

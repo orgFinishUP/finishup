@@ -1,6 +1,6 @@
 # ADR-043 — Bounded agent-facing text: one composer, and a committed operation never fails on its text
 
-**Status:** Accepted for [issue #1025](https://github.com/TheGaySupreme123/finishup/issues/1025)
+**Status:** Accepted for [issue #1025](https://github.com/orgFinishUP/finishup/issues/1025)
 (tb4n3 core issue RC-2: N3-1 and family A). Maintainer acknowledgement (TheGaySupreme123,
 2026-10-11, tb4n3 remediation owner decisions 1 and 3): raise the MCP text cap from 512 B to
 4,096 B, add one never-failing composer, make a committed operation return its stored verdict plus

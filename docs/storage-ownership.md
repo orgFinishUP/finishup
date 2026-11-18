@@ -6,8 +6,8 @@
 
 **Owners:** storage and runtime foundation
 
-This page is the durable storage ownership inventory required by issues [#496](https://github.com/TheGaySupreme123/finishup/issues/496)
-and [#498](https://github.com/TheGaySupreme123/finishup/issues/498). It records the durable owner of each
+This page is the durable storage ownership inventory required by issues [#496](https://github.com/orgFinishUP/finishup/issues/496)
+and [#498](https://github.com/orgFinishUP/finishup/issues/498). It records the durable owner of each
 workspace-keyed store, what may be shared, how an object remains rooted, and which concurrency
 and migration rule applies. A workspace reference is an input to routing; it is not authority to
 open another task bundle.

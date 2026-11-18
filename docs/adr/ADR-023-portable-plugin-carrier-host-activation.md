@@ -1,7 +1,7 @@
 # ADR-023 — Portable plugin carrier and host activation
 
 **Status:** Accepted (2026-08-21), acknowledged in
-[issue #149](https://github.com/TheGaySupreme123/finishup/issues/149#issuecomment-5371952502).
+[issue #149](https://github.com/orgFinishUP/finishup/issues/149#issuecomment-5371952502).
 Issue #149 suggested the name ADR-020; that number was taken by typed evidence digest provenance
 before this document landed, so the accepted decision set lives here unchanged.
 **Implemented by:** the skills-only artifact slice (#150) and optional exclusive plugin-managed MCP
@@ -64,7 +64,7 @@ becomes host-derived.
    entrypoints must not fork those contracts. A generic portable export retains a neutral skill;
    a Cursor-targeted portable artifact carries the Cursor skill. The neutral portable skill contains
    no host-specific restart procedure. This clarification follows the maintainer's scoped personalization request
-   recorded on [#613](https://github.com/TheGaySupreme123/finishup/issues/613#issuecomment-5608159518).
+   recorded on [#613](https://github.com/orgFinishUP/finishup/issues/613#issuecomment-5608159518).
 
 3. **The upstream revision is pinned for vendoring.** The portable projection targets Agent Plugins
    specification 1.0.0 exactly. Its two canonical schemas are pinned for vendoring by URL and

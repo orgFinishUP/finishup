@@ -35,7 +35,7 @@ _UNSUPPORTED_PLATFORM_EXIT: Final = 20
 UNSUPPORTED_PLATFORM_MESSAGE: Final = (
     "unsupported_platform: FinishUP runs on macOS and Linux; native Windows is not supported.\n"
     "On Windows, install and run FinishUP inside WSL 2 (Ubuntu). Setup guide:\n"
-    "  https://github.com/TheGaySupreme123/finishup/blob/main/docs/usage/install-and-first-run.md#windows"
+    "  https://github.com/orgFinishUP/finishup/blob/main/docs/usage/install-and-first-run.md#windows"
 )
 
 # The deprecated ``yoetz`` alias (ADR-048) names its replacement once per interactive run. It is
@@ -45,7 +45,7 @@ LEGACY_ALIAS_NOTICE: Final = (
     "notice: 'yoetz' is now 'finishup'. For this release any finishup command also works as "
     "'yoetz' with the same subcommand, and 'yoetz upgrade' shows how to move; the alias will be "
     "removed in a later release. See "
-    "https://github.com/TheGaySupreme123/finishup/blob/main/docs/usage/upgrading.md#upgrading-from-yoetz"
+    "https://github.com/orgFinishUP/finishup/blob/main/docs/usage/upgrading.md#upgrading-from-yoetz"
 )
 _LEGACY_ALIAS_QUIET_FLAGS: Final = frozenset({"--json", "--version"})
 

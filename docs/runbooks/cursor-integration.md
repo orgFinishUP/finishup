@@ -250,7 +250,7 @@ connect, status, repeat/no-op, disconnect and reconnect for Cursor Agent CLI
 `2026.09.18-9a7762b` on Ubuntu 24.04 x86-64 and Ubuntu 24.04 inside actual WSL 2, and for
 Cursor IDE `3.21.16` on Ubuntu 24.04. The common setup discovery verifies the executable and
 reported version; the IDE install check verified its managed plugin and project MCP files.
-The [acceptance record](https://github.com/TheGaySupreme123/finishup/issues/767#issuecomment-5750168131)
+The [acceptance record](https://github.com/orgFinishUP/finishup/issues/767#issuecomment-5750168131)
 binds the source, wheel digest and per-platform outcomes. Provider login and model runs were
 outside this installation acceptance.
 

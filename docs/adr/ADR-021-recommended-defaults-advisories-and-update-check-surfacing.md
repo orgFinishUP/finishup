@@ -1,8 +1,8 @@
 # ADR-021 — Recommended-defaults advisories and update-check surfacing
 
 **Status:** Accepted (2026-08-12), acknowledged in
-[issue #204](https://github.com/TheGaySupreme123/finishup/issues/204) and
-[issue #205](https://github.com/TheGaySupreme123/finishup/issues/205).
+[issue #204](https://github.com/orgFinishUP/finishup/issues/204) and
+[issue #205](https://github.com/orgFinishUP/finishup/issues/205).
 **Implemented by:** `src/finishup/application/recommendations.py`,
 `src/finishup/cli/recommend.py`, `src/finishup/application/package_update.py`,
 `src/finishup/adapters/privacy/update_checks.py`,

@@ -1,6 +1,6 @@
 # Required startup for native Claude Code and Cursor
 
-Issue [#692](https://github.com/TheGaySupreme123/finishup/issues/692) adds an owner-selected tool gate.
+Issue [#692](https://github.com/orgFinishUP/finishup/issues/692) adds an owner-selected tool gate.
 Optional cooperative startup remains the default for new installations. This is a workflow
 constraint, not a security sandbox or evidence that a plan is correct.
 

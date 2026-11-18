@@ -16,7 +16,7 @@ Curated release-notes conventions (docs/releases/).
   must not appear here as a stronger statement.
 - Thank external contributors by name whenever there are any.
 - Relative links do not resolve from a GitHub release body: link into the repository with
-  absolute `https://github.com/TheGaySupreme123/finishup/blob/<tag>/...` URLs pinned to the tag.
+  absolute `https://github.com/orgFinishUP/finishup/blob/<tag>/...` URLs pinned to the tag.
 -->
 
 One short paragraph: what can no longer go wrong, or what is now possible, and for whom.
@@ -29,9 +29,9 @@ One short paragraph: what can no longer go wrong, or what is now possible, and f
 ## What this release does not claim
 
 - Bounded statements of what remains unverified, untested, or deferred, mirroring
-  [`docs/public-claims.json`](https://github.com/TheGaySupreme123/finishup/blob/vX.Y.Z/docs/public-claims.json)
+  [`docs/public-claims.json`](https://github.com/orgFinishUP/finishup/blob/vX.Y.Z/docs/public-claims.json)
   and
-  [`docs/OPEN_QUESTIONS.md`](https://github.com/TheGaySupreme123/finishup/blob/vX.Y.Z/docs/OPEN_QUESTIONS.md).
+  [`docs/OPEN_QUESTIONS.md`](https://github.com/orgFinishUP/finishup/blob/vX.Y.Z/docs/OPEN_QUESTIONS.md).
 
 ## Install
 
@@ -59,4 +59,4 @@ Curated notes above; the complete list of merged changes:
 
 - Per-PR list (the GitHub "generate release notes" output is fine here).
 
-**Full Changelog**: https://github.com/TheGaySupreme123/finishup/compare/vPREV...vX.Y.Z
+**Full Changelog**: https://github.com/orgFinishUP/finishup/compare/vPREV...vX.Y.Z

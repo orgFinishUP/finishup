@@ -1,14 +1,14 @@
 # ADR-026 — Exact-target isolated-root runtime identity
 
 **Status:** Accepted (2026-09-01), maintainer-authorized in
-[issue #518](https://github.com/TheGaySupreme123/finishup/issues/518); amended 2026-09-03,
-maintainer-authorized in [issue #534](https://github.com/TheGaySupreme123/finishup/issues/534), to
+[issue #518](https://github.com/orgFinishUP/finishup/issues/518); amended 2026-09-03,
+maintainer-authorized in [issue #534](https://github.com/orgFinishUP/finishup/issues/534), to
 exempt one explicitly passed dedicated Codex evaluator home from the "every artifact lives beneath
 the root" reverse state; amended 2026-09-04, maintainer-authorized in
-[issue #561](https://github.com/TheGaySupreme123/finishup/issues/561), to bind the root into
+[issue #561](https://github.com/orgFinishUP/finishup/issues/561), to bind the root into
 FinishUP-owned external Codex MCP registrations; amended 2026-09-22, maintainer-authorized in
-[issue #571](https://github.com/TheGaySupreme123/finishup/issues/571) (item B1, from
-[#567](https://github.com/TheGaySupreme123/finishup/issues/567)), to name path-identity digests
+[issue #571](https://github.com/orgFinishUP/finishup/issues/571) (item B1, from
+[#567](https://github.com/orgFinishUP/finishup/issues/567)), to name path-identity digests
 apart from byte-content digests (decision 8).
 **Implemented by:** `src/finishup/config/paths.py` (`isolated_root()`, `runtime_dir()`,
 `ISOLATED_ROOT_ENV`), `src/finishup/adapters/control/unix_socket.py`, `src/finishup/config/load.py`,

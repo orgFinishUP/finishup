@@ -20,7 +20,7 @@ For the 0.2 multi-round workflow and recovery follow-up, use
 feedback scope, evidence reuse, repair qualification, safe recovery, and final-receipt agreement to
 each named host cell while keeping package delivery separate from actual guidance use.
 
-**Issue:** [#133](https://github.com/TheGaySupreme123/finishup/issues/133).  
+**Issue:** [#133](https://github.com/orgFinishUP/finishup/issues/133).  
 **Design gate:** docs/test-only evaluation protocol — no public runtime behavior change.  
 **Out of scope here:** product fixes owned by #128–#132 (schema authorability, nested errors,
 undeclared scope, evidence provenance, AI-powered review route preflight).

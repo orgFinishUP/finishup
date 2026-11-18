@@ -1,8 +1,8 @@
 # ADR-048 — FinishUP rebrand and frozen legacy identifiers
 
-**Status:** Accepted for [issue #1055](https://github.com/TheGaySupreme123/finishup/issues/1055);
+**Status:** Accepted for [issue #1055](https://github.com/orgFinishUP/finishup/issues/1055);
 the steps code cannot take (domains, mail, registries, repository rename, live verification) are
-tracked in [issue #1056](https://github.com/TheGaySupreme123/finishup/issues/1056). Design gates:
+tracked in [issue #1056](https://github.com/orgFinishUP/finishup/issues/1056). Design gates:
 protocol, storage/durability, release/packaging. Maintainer acknowledgement: the owner's final
 decisions recorded on #1055 — full backward compatibility for existing installs (PyPI `yoetz`
 0.1-0.2.5, the maintainer's live vault, 0.3 development builds); recorded data is never rewritten;
@@ -281,7 +281,7 @@ inspection and static contract tests only until a dry run (#1056).
 ## Amendment: the possible-credential placeholder (*Amended 2026-10-31, #1248*)
 
 Owner decisions P-D1 and P-D5, made in session on 2026-10-29 and recorded on
-[#1248](https://github.com/TheGaySupreme123/finishup/issues/1248), which also records the maintainer
+[#1248](https://github.com/orgFinishUP/finishup/issues/1248), which also records the maintainer
 acknowledgement for the privacy and egress design gate. ADR-009's amendment of the same date holds
 the scanning rules. This one covers the spelling.
 

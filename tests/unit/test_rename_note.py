@@ -57,7 +57,7 @@ def test_cli_help_carries_the_same_sentence() -> None:
 # its raw URL on the default branch of the renamed repository (issue #1056); moving the file breaks
 # every published PyPI page, which this test refuses.
 _LOGO = "docs/assets/finishup-logo.png"
-_LOGO_URL = f"https://raw.githubusercontent.com/TheGaySupreme123/finishup/main/{_LOGO}"
+_LOGO_URL = f"https://raw.githubusercontent.com/orgFinishUP/finishup/main/{_LOGO}"
 
 
 def test_readme_logo_names_the_tracked_asset_by_absolute_url() -> None:
