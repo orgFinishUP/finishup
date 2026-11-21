@@ -45,6 +45,7 @@ from finishup.cli.exits import (
     remediation_message,
 )
 from finishup.cli.helper import helper_app
+from finishup.cli.lazy_command import LazyTyper
 from finishup.cli.project import project_app
 from finishup.cli.render import (
     bounded_failure_line,
@@ -146,7 +147,8 @@ class _MutableBinaryReader(Protocol):
     def readinto(self, buffer: memoryview) -> int | None: ...
 
 
-app = typer.Typer(
+# Its call converts only the invoked command's path to click (``finishup.cli.lazy_command``).
+app = LazyTyper(
     name="finishup",
     help=f"Local-first evidence ledger and review engine. {RENAME_NOTE} https://finishup.dev",
     epilog=AGENT_START_HANDOFF,
