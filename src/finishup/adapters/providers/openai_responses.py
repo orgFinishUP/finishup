@@ -2624,18 +2624,22 @@ class OpenAIResponsesEvaluator:
 
         finished = self._clock.monotonic_seconds()
         if case.purpose != "credential-probe":
+            reported = getattr(response, "usage", None)
+            usage = api_exchange_usage(
+                reported,
+                input_name="input_tokens",
+                details_name="input_tokens_details",
+                output_name="output_tokens",
+            )
             record_exchange_cache(
                 component="openai_responses",
                 request_id=case.request_id,
                 session=CURRENT_REVIEWER_SESSION.get(),
                 exchange=exchange,
                 settings={key: value for key, value in body_object.items() if key != "input"},
-                usage=api_exchange_usage(
-                    getattr(response, "usage", None),
-                    input_name="input_tokens",
-                    details_name="input_tokens_details",
-                    output_name="output_tokens",
-                ),
+                usage=usage,
+                # A usage object whose required counts FinishUP refused, not a missing one.
+                usage_refused=usage is None and reported is not None,
                 completed=getattr(response, "status", None) == "completed",
             )
         return normalize_response(

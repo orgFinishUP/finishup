@@ -2111,7 +2111,9 @@ def _turn_cache_usage(
 ) -> ExchangeCacheUsage | None:
     """One turn's usage: the thread's cumulative counters across it, or ``None`` if unknown.
 
-    ``start`` is the thread's total before the turn's requests, ``None`` when it is unknown.
+    ``start`` is the thread's total before the turn's requests, ``None`` when it is unknown. With
+    at least one reported request (and so a snapshot), ``None`` means the counters are
+    inconsistent: a snapshot whose ``last`` exceeds its ``total``, or deltas the usage refuses.
     ``first_cached`` and ``last_input`` come from the ``last`` breakdown of the snapshots whose
     total grew, so a turn that made several model requests still names its first request's reuse.
     """
@@ -2944,25 +2946,29 @@ class CodexAppServerEvaluator:
             # When that turn reported nothing or had a snapshot refused, that total is stale, so
             # the turn starts at the total before its own first reported request: it still records
             # its own requests, never the thread's earlier ones. A turn that had a snapshot refused
-            # may be missing a request, so it records no counts.
+            # may be missing a request, so it records no counts, only that they were refused.
             start = first_request_start
             if held is None:
                 start = _cache_counters(None)
             elif held.usage_current and turn_start_usage is not None:
                 start = _cache_counters(turn_start_usage)
+            turn_usage = (
+                None
+                if usage_refused
+                else _turn_cache_usage(start, token_usage, requests, first_cached, last_input)
+            )
             record_exchange_cache(
                 component="codex_app_server",
                 request_id=case.request_id,
                 session=session,
                 exchange=exchange,
                 settings=turn_settings,
-                usage=(
-                    None
-                    if usage_refused
-                    else _turn_cache_usage(start, token_usage, requests, first_cached, last_input)
-                ),
+                usage=turn_usage,
                 completed=turn_completed,
                 compacted=compacted,
+                # A turn that reported a request has a snapshot, so no usage for it means its
+                # counts were inconsistent; a turn that reported none is unreported.
+                usage_refused=usage_refused or (turn_usage is None and requests > 0),
             )
         if cleanup == "failed" and failure is None:
             failure = "post_ack_unknown" if turn_acknowledged else "unavailable"

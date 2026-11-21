@@ -3257,7 +3257,30 @@ has: a response without a choice, or a first choice whose finish reason is `leng
 `content_filter` (filtered), stays `incomplete`; a refusal that finished (`stop` with a refusal
 message, as Responses records a refusal whose status is `completed`) and an answer whose finish
 reason is anything else are `completed`, so an accepted answer whose finish reason is not `stop` is
-no longer recorded `incomplete`. No field, label, egress or outcome changes.
+no longer recorded `incomplete`. That change adds no field or label.
+
+Every exchange now leaves a record, also at the maintainer's request. Until now an exchange without
+usable counts wrote nothing while the review's exchange index still advanced, so a reader could not
+tell a provider that reported no usage from counts FinishUP refused, or either from a line the
+diagnostics ring evicted. Such an exchange now records its index and one closed field,
+`reviewer_usage_state`: `unreported` when the provider reported no usage for it (an API answer
+without a usage object, a Codex turn in which no snapshot reported a request), `refused` when it
+reported counts FinishUP could not accept as consistent (API input or output counts that are not
+plain counters, a refused Codex usage snapshot, Codex counters that do not fit together). A
+compaction keeps its `compaction` label beside it. The record carries no token count and no other
+label, and the next exchange still gets no prefix and no guessed label. An exchange with counts
+never carries the field, and which Codex turns record counts is unchanged (#1192). The diagnostics
+fence admits the field with exactly those two values. Still not recorded, and not advancing the
+index: the local model route, the credential probe, an API request that fails before an answer
+arrives, and a Codex exchange that fails before its turn's settings are fixed (for example at
+launch or thread start). Within a review's records a missing index therefore means a lost line.
+The largest record is unchanged at 656 bytes.
+
+The `retry` label is unchanged, but what it means is now stated exactly. A format repair appends
+its note after the unchanged previous input on every route (Codex holds the rejected answer in its
+thread before the note; the stateless routes leave it out), so the repair is not what breaks the
+prefix. `retry` marks a shortfall that no compaction, first turn or settings change explains and
+that fell on the review's repair exchange. No egress or outcome changes.
 
 ## Amendment — 2026-10-21: routine correctness advisory dispositions (#1162)
 

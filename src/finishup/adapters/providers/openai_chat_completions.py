@@ -605,18 +605,22 @@ class ChatCompletionsEvaluator:
 
         finished = self._clock.monotonic_seconds()
         if case.purpose != "credential-probe":
+            reported = getattr(response, "usage", None)
+            usage = api_exchange_usage(
+                reported,
+                input_name="prompt_tokens",
+                details_name="prompt_tokens_details",
+                output_name="completion_tokens",
+            )
             record_exchange_cache(
                 component="openai_chat_completions",
                 request_id=case.request_id,
                 session=CURRENT_REVIEWER_SESSION.get(),
                 exchange=exchange,
                 settings={key: value for key, value in body_object.items() if key != "messages"},
-                usage=api_exchange_usage(
-                    getattr(response, "usage", None),
-                    input_name="prompt_tokens",
-                    details_name="prompt_tokens_details",
-                    output_name="completion_tokens",
-                ),
+                usage=usage,
+                # A usage object whose required counts FinishUP refused, not a missing one.
+                usage_refused=usage is None and reported is not None,
                 # Whether the generation finished, as the Responses status says: a truncated or
                 # filtered finish, or no choice, is incomplete; a finished refusal is completed.
                 completed=_generation_finished(_first_choice(response)),

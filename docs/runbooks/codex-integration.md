@@ -14,8 +14,9 @@ native acceptance on each host/OS remains a separate claim. See
 [the reviewer contract](../INTERFACES.md#reviewer-loop-issue-1118-unit-2).
 
 Per-exchange prompt-cache telemetry (#1172) is shared service behavior too: each reviewer
-exchange that reports usage writes one content-free `exchange_cache` owner diagnostic (input,
-cached, cache-write where reported and output tokens, and a closed miss label), read with
+exchange the provider answers writes one content-free `exchange_cache` owner diagnostic (input,
+cached, cache-write where reported and output tokens, and a closed miss label, or without counts
+whether its usage was unreported or refused), read with
 `finishup service diagnostics --request-id`. It does not depend on the agent host, adds no
 request or egress, and never changes a review outcome. See [the exchange contract](../INTERFACES.md#reviewer-completion-exchanges-issue-1118-unit-3-adr-006).
 The reviewer also keeps its reply schema through a review's normal final turn and announces that

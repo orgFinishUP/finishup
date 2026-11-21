@@ -3,7 +3,8 @@
 Each provider exchange writes one ``exchange_cache`` owner diagnostic: the provider-reported input,
 cached input, cache-write (where the provider reports it) and output tokens, the prefix the
 exchange could reuse from the review's earlier exchanges, and the closed miss label
-``domain.reviewer_cache`` derives. Only integers, that one closed token and the review's first
+``domain.reviewer_cache`` derives; an exchange without counts records its index and the closed
+``reviewer_usage_state`` instead. Only integers, those closed tokens and the review's first
 provider request id are recorded. Telemetry never changes an outcome: any failure here is dropped.
 """
 
@@ -39,7 +40,8 @@ def api_exchange_usage(
     count is kept only when it is one and at most the input, a cache-write count only when it is
     one: an optional count the answer omits or reports inconsistently stays unknown, never zero,
     and never discards the input and output counts, so the input still becomes the next
-    exchange's prefix (#1172).
+    exchange's prefix (#1172). ``None`` for a present ``usage`` object means FinishUP refused its
+    counts; the caller records that as ``usage_refused``, and an absent one as unreported.
     """
 
     try:
@@ -95,12 +97,14 @@ def record_exchange_cache(
     usage: ExchangeCacheUsage | None,
     completed: bool,
     compacted: bool = False,
+    usage_refused: bool = False,
 ) -> None:
     """Account one exchange in its review's cache state and record it, never raising.
 
     ``settings`` is what the route sent beside the messages; only its digest is kept, to notice a
     change between a review's exchanges. A one-shot case (no review session) opens its own
-    conversation.
+    conversation. Without ``usage``, ``usage_refused`` says FinishUP refused the counts the
+    provider reported rather than the provider reporting none.
     """
 
     try:
@@ -114,14 +118,14 @@ def record_exchange_cache(
             roles=() if exchange is None else tuple(role for role, _text in exchange.history),
             usage=usage,
             compacted=compacted,
+            usage_refused=usage_refused,
         )
-        if counts is not None:
-            record_bounded_counts_without_raising(
-                component=component,
-                operation="exchange_cache",
-                outcome="completed" if completed else "incomplete",
-                counts=counts,
-                request_id=review_request,
-            )
+        record_bounded_counts_without_raising(
+            component=component,
+            operation="exchange_cache",
+            outcome="completed" if completed else "incomplete",
+            counts=counts,
+            request_id=review_request,
+        )
     except Exception:  # noqa: BLE001 - telemetry is never allowed to change a review
         return
