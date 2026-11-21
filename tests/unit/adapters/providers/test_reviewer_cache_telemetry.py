@@ -19,12 +19,15 @@ import pytest
 from builders.codex_capability import profile_for, record_for
 from finishup.adapters.providers import codex_app_server as codex
 from finishup.adapters.providers import reviewer_cache_telemetry as telemetry
+from finishup.application.reviewer_exchange import REVIEWER_REPLY_SCHEMAS, ReviewerExchangeModel
+from finishup.application.reviewer_loop import Turn
 from finishup.domain.privacy import ProviderBinding
 from finishup.domain.reviewer_cache import ExchangeCacheUsage
 from finishup.observability.diagnostics import lookup_diagnostic_records
 from finishup.ports.secret_memory import ProviderAttemptAuthBinding
 from finishup.ports.semantic import (
     CURRENT_REVIEWER_SESSION,
+    Deadline,
     ExternalRuntimeAuthority,
     ReviewerMessage,
     ReviewerReplySchemas,
@@ -33,6 +36,7 @@ from finishup.ports.semantic import (
     SemanticResultInvalid,
     SemanticResultRefused,
     SemanticResultReply,
+    decode_reviewer_exchange,
     reviewer_exchange,
 )
 from finishup.protocol.canonical import canonical_digest
@@ -44,7 +48,9 @@ from unit.adapters.providers.test_reviewer_completions import (
     _FIRST,  # pyright: ignore[reportPrivateUsage]
     _SCHEMAS,  # pyright: ignore[reportPrivateUsage]
     _SECOND,  # pyright: ignore[reportPrivateUsage]
+    _api_binding,  # pyright: ignore[reportPrivateUsage]
     _api_evaluate,  # pyright: ignore[reportPrivateUsage]
+    _api_profile,  # pyright: ignore[reportPrivateUsage]
     _Capture,  # pyright: ignore[reportPrivateUsage]
     _case,  # pyright: ignore[reportPrivateUsage]
     _Clock,  # pyright: ignore[reportPrivateUsage]
@@ -524,6 +530,42 @@ async def test_api_routes_record_each_exchange_from_the_reported_usage(
         2_000,
         280,
     ]
+
+
+@pytest.mark.parametrize(
+    ("route", "component"),
+    [("responses", "openai_responses"), ("chat", "openai_chat_completions")],
+)
+async def test_the_facade_carries_its_review_session_to_each_stateless_exchange(
+    records: list[dict[str, object]], route: str, component: str
+) -> None:
+    """The review's session reaches the route only through ``ReviewerExchangeModel.complete``:
+    without it each exchange would be its own first turn under its own request id (#1172)."""
+
+    requests, usages = iter(_REQUESTS), iter([(2_000, 0, 30), (2_200, 1_920, 30)])
+
+    async def dispatch(payload: bytes, media_type: str, deadline: Deadline) -> SemanticResult:
+        del media_type, deadline
+        capture = _UsageCapture(route, [next(usages)])
+        history = decode_reviewer_exchange(payload)
+        result, *_rest = await _api_evaluate(route, history, capture, _Clock(), next(requests))
+        return result
+
+    session = ReviewerSession("review-a", _DEADLINE)
+    async with ReviewerExchangeModel(_api_binding(_api_profile(route)), dispatch, session) as model:
+        for history in (_FIRST, _SECOND):
+            turns = [Turn(role, text) for role, text in history]
+            await model.complete(turns, REVIEWER_REPLY_SCHEMAS.turn, deadline=_DEADLINE)
+    assert CURRENT_REVIEWER_SESSION.get() is None  # bound only while each exchange runs
+    # Two provider requests, one review: both records carry the first request id.
+    assert [(r["component"], r["request_id"]) for r in records] == [(component, _REQUESTS[0])] * 2
+    first, second = (cast(dict[str, object], r["counts"]) for r in records)
+    assert (first["reviewer_exchange_index"], first["reviewer_cache_miss"]) == (1, "first_turn")
+    assert (
+        second["reviewer_exchange_index"],
+        second["reviewer_prefix_tokens"],
+        second["reviewer_cache_miss"],
+    ) == (2, 2_000, "none")
 
 
 async def test_a_chat_answer_without_a_cached_count_still_records_and_leaves_its_prefix(
