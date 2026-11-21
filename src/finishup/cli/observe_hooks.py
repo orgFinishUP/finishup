@@ -124,9 +124,12 @@ from finishup.domain.command_segments import (
 from finishup.domain.compaction_recap import RECAP_CONTEXT_LIMIT, RecapFacts
 from finishup.domain.finishup_tools import (
     FINISHUP_SCOPED_TOOL_PREFIXES,
+    FINISHUP_SUPPORT_TOOL_NAMES,
     FINISHUP_TOOL_SERVER_NAMES,
+    FINISHUP_WORKFLOW_TOOL_NAMES,
     finishup_tool_spelling,
 )
+from finishup.domain.hook_pairing import observation_pairing_contract
 from finishup.domain.observation import (
     ANNOUNCED_CALL_EVENT_KINDS,
     MAX_ANNOUNCED_TOOL_TIMEOUT_MS,
@@ -184,11 +187,6 @@ from finishup.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from finishup.domain.workspace_effect import WORKSPACE_EFFECT_KEY, WORKSPACE_UNCHANGED
-from finishup.ports.integrations import (
-    FINISHUP_SUPPORT_TOOL_NAMES,
-    FINISHUP_WORKFLOW_TOOL_NAMES,
-    observation_pairing_contract,
-)
 from finishup.protocol.canonical import (
     JsonValue,
     canonical_digest,
