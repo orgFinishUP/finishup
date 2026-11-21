@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1129,3 +1130,90 @@ async def test_mid_swap_failure_restores_native_and_records_unknown_outcome(
     ).read_bytes() == native_marker
     status = await adapter.status_artifact(PluginArtifactStatusCommand(target, command.request_id))
     assert status.operation_state is PluginOperationState.OUTCOME_UNKNOWN
+
+
+def _non_ascii_project(tmp_path: Path) -> tuple[ArtifactTarget, Path]:
+    target = _target(tmp_path)
+    destination = tmp_path / AGENT_PLUGIN_ROOT
+    destination.mkdir(parents=True, mode=0o700)
+    for directory in (tmp_path / ".agents", destination.parent):
+        directory.chmod(0o700)
+    return target, destination
+
+
+@pytest.mark.anyio
+async def test_foreign_tree_with_a_non_ascii_member_reads_unmanaged(tmp_path: Path) -> None:
+    target, destination = _non_ascii_project(tmp_path)
+    (destination / "notes-é.md").write_bytes(b"owner notes\n")
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.UNMANAGED
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(40)), target, PluginArtifactAction.INSTALL
+        )
+    assert caught.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert (destination / "notes-é.md").read_bytes() == b"owner notes\n"
+
+
+@pytest.mark.anyio
+async def test_owner_non_ascii_file_in_a_managed_tree_reads_modified_and_blocks_remove(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(), mcp_owner_state=McpOwnershipState.EXTERNAL
+    )
+    preview = await adapter.preview_artifact(
+        request_id(_request(41)), target, PluginArtifactAction.INSTALL
+    )
+    await adapter.install_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(41)),
+            target,
+            PluginArtifactAction.INSTALL,
+            preview.preview_digest,
+            _setup_authority(preview.preview_digest),
+        )
+    )
+    added = tmp_path / AGENT_PLUGIN_ROOT / "skills/finishup/résumé.md"
+    added.write_bytes(b"owner file\n")
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(42)), target, PluginArtifactAction.REMOVE
+        )
+    assert caught.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert added.read_bytes() == b"owner file\n"
+
+
+@pytest.mark.anyio
+async def test_legacy_tree_with_a_non_ascii_member_reads_foreign(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    legacy = tmp_path / LEGACY_AGENT_PLUGIN_ROOT
+    legacy.mkdir(parents=True, mode=0o700)
+    (legacy / "notes-é.md").write_bytes(b"owner notes\n")
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.ABSENT
+    assert status.legacy_installation == "foreign"
+
+
+@pytest.mark.anyio
+async def test_member_name_that_is_not_utf8_is_refused_as_unsafe(tmp_path: Path) -> None:
+    target, destination = _non_ascii_project(tmp_path)
+    try:
+        Path(os.fsdecode(os.fsencode(destination) + b"/notes-\xff.md")).write_bytes(
+            b"owner notes\n"
+        )
+    except OSError:
+        pytest.skip("this filesystem only stores UTF-8 file names")
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert caught.value.reason is PluginArtifactReason.TARGET_UNSAFE
