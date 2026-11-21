@@ -227,6 +227,29 @@ def test_workflow_allowlist_tracks_the_canonical_registry() -> None:
     )
 
 
+def test_gate_binds_the_registry_object_without_importing_the_ports_boundary() -> None:
+    from finishup.domain.finishup_tools import FINISHUP_WORKFLOW_TOOL_NAMES
+    from finishup.ports.integrations import (
+        FINISHUP_WORKFLOW_TOOL_NAMES as PORTS_FINISHUP_WORKFLOW_TOOL_NAMES,
+    )
+
+    assert startup_gate_module.FINISHUP_WORKFLOW_TOOL_NAMES is FINISHUP_WORKFLOW_TOOL_NAMES
+    assert PORTS_FINISHUP_WORKFLOW_TOOL_NAMES is FINISHUP_WORKFLOW_TOOL_NAMES
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "import finishup.cli.startup_gate\n"
+            "print('finishup.ports.integrations' in sys.modules)\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout == "False\n"
+
+
 def test_investigation_and_delegation_denied_until_accepted_current_plan(host: Host) -> None:
     assert host.denied("Read") and host.denied("Agent") and host.denied("Task")
     host.start()

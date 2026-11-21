@@ -28,10 +28,10 @@ from finishup.cli.hook_io import (
 from finishup.domain.finishup_tools import (
     FINISHUP_SKILL_NAMES,
     FINISHUP_TOOL_SERVER_NAMES,
+    FINISHUP_WORKFLOW_TOOL_NAMES,
     finishup_scoped_tool_basename,
 )
 from finishup.legacy_names import GUIDANCE_SCHEME, LAUNCHER_NAMES, LEGACY_GUIDANCE_SCHEME
-from finishup.ports.integrations import FINISHUP_WORKFLOW_TOOL_NAMES
 from finishup.protocol.canonical import JsonValue
 from finishup.protocol.errors import PublicErrorCode
 from finishup.protocol.ids import IdKind, is_valid_id
