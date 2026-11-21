@@ -559,4 +559,10 @@ def main() -> None:
         code = _service_status_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
+    if argv[:2] == ["mcp", "serve"] and not any(token in {"--help", "-h"} for token in argv):
+        # Bridge startup builds a large, long-lived import heap; cyclic collection would only
+        # rescan it. The bridge freezes that heap and re-enables collection before serving.
+        import gc
+
+        gc.disable()
     _run_full_cli()

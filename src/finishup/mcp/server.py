@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import os
 import re
 import stat
@@ -5291,6 +5292,11 @@ def main(
     # The long-lived bridge builds every protocol and config model before serving, as an
     # import-time build did, so no tool call pays a first-use model build.
     build_deferred_models()
+    if not gc.isenabled():
+        # The CLI entry disables cyclic collection for bridge startup. Move the startup heap to
+        # the permanent generation without collecting it, so later passes never rescan it.
+        gc.freeze()
+        gc.enable()
     anyio.run(
         run_stdio,
         runtime,
