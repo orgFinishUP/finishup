@@ -77,6 +77,7 @@ from finishup.protocol.errors import ProtocolValueError
 from finishup.protocol.guidance_uris import FOCUSED_GUIDANCE_URIS, GUIDANCE_DOCUMENT_URIS
 
 __all__ = [
+    "PluginListMemo",
     "claude_code_other_projects",
     "CLAUDE_CODE_HARNESS_PROFILE",
     "CLAUDE_CODE_HOOK_EVENTS",
@@ -644,6 +645,46 @@ class SubprocessClaudeCodeCommands:
         ):
             raise _error(PluginArtifactReason.WRITE_FAILED)
         return ClaudeCodeCommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+_PLUGIN_LIST_ARGUMENTS: Final = ("plugin", "list", "--json")
+
+
+class PluginListMemo:
+    """Answer repeated ``claude plugin list --json`` for one target from one run.
+
+    Each listing spawns Claude Code, which reaches the network, yet one connection plan asks
+    for the same inventory several times with nothing changed in between. Scope one memo to
+    one read-only observation window, never to a process: any other command is passed through
+    and forgets every remembered listing, so a mutation is always followed by a fresh one.
+    Only a listing that was read is remembered: a run that raised, exited nonzero, or printed
+    no plugin list runs again on the next request. Without a delegate, the default subprocess
+    port is resolved at run time.
+    """
+
+    __slots__ = ("_delegate", "_listings")
+
+    def __init__(self, delegate: ClaudeCodeCommandPort | None = None) -> None:
+        self._delegate = delegate
+        self._listings: dict[tuple[str, str, str], ClaudeCodeCommandResult] = {}
+
+    def clear(self) -> None:
+        self._listings.clear()
+
+    def run(
+        self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+    ) -> ClaudeCodeCommandResult:
+        delegate = SubprocessClaudeCodeCommands() if self._delegate is None else self._delegate
+        if tuple(arguments) != _PLUGIN_LIST_ARGUMENTS:
+            self._listings.clear()
+            return delegate.run(target, arguments)
+        key = (target.executable, target.claude_config_root, target.project_root)
+        remembered = self._listings.get(key)
+        if remembered is None:
+            remembered = delegate.run(target, arguments)
+            if _plugin_rows(remembered) is not None:
+                self._listings[key] = remembered
+        return remembered
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -1797,17 +1838,23 @@ def observe_claude_code_mcp(
 def _list_plugins(
     target: ClaudeCodePluginTarget, commands: ClaudeCodeCommandPort
 ) -> tuple[list[Mapping[str, JsonValue]], bool]:
-    result = commands.run(target, ("plugin", "list", "--json"))
+    rows = _plugin_rows(commands.run(target, ("plugin", "list", "--json")))
+    return ([], False) if rows is None else (rows, True)
+
+
+def _plugin_rows(result: ClaudeCodeCommandResult) -> list[Mapping[str, JsonValue]] | None:
+    """The rows of one ``claude plugin list --json`` run, or ``None`` when it was not read."""
+
     if result.returncode != 0:
-        return [], False
+        return None
     try:
         # Host output: other plugins' rows may carry values the wire profile does not admit.
         parsed = parse_host_config_json(result.stdout)
     except (ProtocolValueError, UnicodeError):
-        return [], False
+        return None
     if type(parsed) is not list or any(not isinstance(item, Mapping) for item in parsed):
-        return [], False
-    return [cast(Mapping[str, JsonValue], item) for item in parsed], True
+        return None
+    return [cast(Mapping[str, JsonValue], item) for item in parsed]
 
 
 def _exact_plugin_entry(

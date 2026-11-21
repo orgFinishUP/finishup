@@ -566,14 +566,16 @@ def prepare_connection(
             finishup_launcher=launcher,
             startup_mode=claude.installed_claude_startup_mode(target) or "optional",
         )
-        before = claude.status_claude_code_plugin(target, artifact)
+        # One `claude plugin list` answers every read below: nothing changes in between.
+        listing = claude.PluginListMemo()
+        before = claude.status_claude_code_plugin(target, artifact, commands=listing)
         # Claude Code lists every project's install, so the host itself names who shares the
         # config root's marketplace source; no FinishUP record is needed (#1058).
         shared = SharedProjectsStep(
             installation.config_root,
             project,
             action,
-            observed=claude.claude_code_other_projects(target) or (),
+            observed=claude.claude_code_other_projects(target, commands=listing) or (),
             recorded=False,
             remove_shared=remove_shared,
         )
@@ -590,7 +592,9 @@ def prepare_connection(
             if action == "disconnect"
             and not legacy_owned
             and (before.state is PluginArtifactState.ABSENT or detached)
-            else claude.preview_claude_code_plugin(request, target, operation, artifact)
+            else claude.preview_claude_code_plugin(
+                request, target, operation, artifact, commands=listing
+            )
         )
         noop = preview is None or preview.action is claude.ClaudeCodePluginAction.NOOP
         body["plugin_preview_digest"] = None if preview is None else preview.preview_digest
@@ -636,7 +640,9 @@ def prepare_connection(
         sweep_admission = admission.plan(body, "claude", action)
 
         def status() -> dict[str, JsonValue]:
-            observed = claude.status_claude_code_plugin(target, artifact)
+            # A fresh listing per status: it may follow an apply or a wait for approval.
+            listing = claude.PluginListMemo()
+            observed = claude.status_claude_code_plugin(target, artifact, commands=listing)
             return {
                 "installed": observed.installed_digest == artifact.artifact_digest,
                 "enabled": observed.enabled,
@@ -649,7 +655,7 @@ def prepare_connection(
                     list[JsonValue],
                     sorted(
                         {
-                            *(claude.claude_code_other_projects(target) or ()),
+                            *(claude.claude_code_other_projects(target, commands=listing) or ()),
                             *((str(project),) if observed.discovered else ()),
                         }
                     ),
