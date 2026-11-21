@@ -649,6 +649,11 @@ class HumanControlService:
             except (UnlockError, TypeError, ValueError) as exc:
                 await self._consume_failed(session)
                 raise HumanControlError(self._map_error(exc)) from exc
+            except Exception as exc:
+                # Every failure ends the ceremony as one bounded reason and frees the slot; an
+                # untranslated effect error must not leave the ceremony active.
+                await self._consume_failed(session)
+                raise HumanControlError("internal_error") from exc
 
     async def cancel(self, ceremony_id: str) -> ServerCloseEnvelope:
         async with self._mutex:

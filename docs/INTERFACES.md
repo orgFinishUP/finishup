@@ -4347,7 +4347,10 @@ transport, and durable egress-receipt path as inference. Only a provider refusal
 (HTTP 401/403) withdraws the record via `VaultService.discard_provider_credential(binding)` and
 fails the ceremony as `secret_rejected`; a rate limit counts as accepted, and timeout, transport
 failure, outage, or unsupported-profile answers leave the stored credential in place as
-unverified.
+unverified. A credential the vault itself refuses (outside 16..512 bytes or not token68) commits
+nothing and also fails the ceremony as `secret_rejected`; a `rotate` with no stored record fails as
+`record_missing`. Any failure of an effect ends the ceremony with one bounded reason and frees the
+ceremony slot.
 
 Pristine automatic keyring initialization requires both an approved create-if-absent/round-trip
 keyring probe and an installed `UserPresenceCapability` matching an active
