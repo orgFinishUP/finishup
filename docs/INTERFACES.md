@@ -9871,7 +9871,9 @@ and reports `version_provenance`: `tested` for an exactly proven cell
 `version_unsupported`/`minimum_version`. An `untested` host is admitted but never promoted to a
 proven cell. Preview also re-hashes the executable to detect stale identity, and refuses with
 `recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
-before any mutation.
+before any mutation. Within one read-only observation (preparing a connection plan, or one plan
+status), a later check of the same unchanged executable (same device, inode, size, modification and
+change times) reuses the digest the first check took; an apply always re-hashes.
 
 `ClaudeCodePluginArtifact` contains one `PortablePluginPlan`, sorted native member mapping,
 generated strict marketplace manifest, separate artifact/marketplace digests, the exact bound

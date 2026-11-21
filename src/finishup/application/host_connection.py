@@ -514,6 +514,9 @@ def _cursor_observed_members(
     return {"connected_projects_observed": observed}
 
 
+# Claude Code's executable is hashed once per read-only observation, not once per check: the
+# plan reads below and each status are windows; an apply is not (`claude.digest_window`).
+@claude.digest_window()
 def prepare_connection(
     request: RequestId,
     installation: HostInstallation,
@@ -639,6 +642,7 @@ def prepare_connection(
             admission.disclosure["route_changes_for"] = cast(list[JsonValue], list(shared.others))
         sweep_admission = admission.plan(body, "claude", action)
 
+        @claude.digest_window()
         def status() -> dict[str, JsonValue]:
             # A fresh listing per status: it may follow an apply or a wait for approval.
             listing = claude.PluginListMemo()

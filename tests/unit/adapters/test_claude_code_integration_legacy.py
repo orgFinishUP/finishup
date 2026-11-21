@@ -14,10 +14,11 @@ import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 
+from finishup.adapters.integrations import claude_code_integration
 from finishup.adapters.integrations.claude_code_integration import (
     ClaudeCodeCapabilityIdentity,
     ClaudeCodeCommandResult,
@@ -43,6 +44,7 @@ from finishup.ports.plugin_artifacts import (
 )
 from finishup.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
+_REAL_DIGEST_WINDOW = claude_code_integration._DIGEST_WINDOW  # pyright: ignore[reportPrivateUsage]
 _NEW = ("finishup-local", "finishup@finishup-local", "finishup")
 _OLD = ("yoetz-local", "yoetz@yoetz-local", "yoetz")
 # A pre-rename installation's launcher; only the legacy marker that recorded it proves it.
@@ -692,9 +694,22 @@ class _PassThrough:
         return delegate.run(target, arguments)
 
 
+class _NoDigestWindow:
+    """The executable digest before the window: every check hashes the file."""
+
+    def get(self) -> None:
+        return None
+
+    def set(self, _value: object) -> None:
+        return None
+
+    def reset(self, _token: object) -> None:
+        return None
+
+
 def _connect_counting_listings(
-    root: Path, monkeypatch: pytest.MonkeyPatch, *, memo: bool
-) -> tuple[dict[str, object], tuple[int, int]]:
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, memo: bool, window: bool = True
+) -> tuple[dict[str, object], tuple[int, int], tuple[int, int, int]]:
     from finishup.adapters.integrations import claude_code_integration as module
     from finishup.adapters.integrations.host_discovery import HostInstallation
     from finishup.adapters.integrations.observation_local import LocalObservationStore
@@ -709,7 +724,7 @@ def _connect_counting_listings(
         shutil.rmtree(root)
     root.mkdir()
     # Each run starts without the observation consent an earlier run granted.
-    state = root.parent / f"observation-{memo}"
+    state = root.parent / f"observation-{memo}-{window}"
     state.mkdir(mode=0o700)
     monkeypatch.setattr(
         host_connection, "_observation_store", lambda: LocalObservationStore(_state=state)
@@ -722,6 +737,19 @@ def _connect_counting_listings(
     monkeypatch.setattr(module, "discover_claude_code", discover)
     monkeypatch.setattr(module, "SubprocessClaudeCodeCommands", lambda: claude)
     monkeypatch.setattr(module, "PluginListMemo", PluginListMemo if memo else _PassThrough)
+    monkeypatch.setattr(
+        module,
+        "_DIGEST_WINDOW",
+        _REAL_DIGEST_WINDOW if window else _NoDigestWindow(),
+    )
+    hash_stream = module._hash_stream  # pyright: ignore[reportPrivateUsage]
+    hashes: list[str] = []
+
+    def counted(stream: BinaryIO) -> str:
+        hashes.append(stream.name)
+        return hash_stream(stream)
+
+    monkeypatch.setattr(module, "_hash_stream", counted)
     installation = HostInstallation(
         "claude",
         Path(target.executable),
@@ -743,9 +771,11 @@ def _connect_counting_listings(
     listing = ("plugin", "list", "--json")
     plan = prepare()
     prepared = claude.calls.count(listing)
+    prepared_hashes = len(hashes)
     claude.calls.clear()
     before = plan.status()
     status = claude.calls.count(listing)
+    status_hashes = len(hashes) - prepared_hashes
     claude.calls.clear()
     after = apply_connection(
         plan,
@@ -764,7 +794,8 @@ def _connect_counting_listings(
         "after": after,
         "mutations": [call for call in claude.calls if call != listing],
     }
-    return observed, (prepared, status)
+    applied_hashes = len(hashes) - prepared_hashes - status_hashes
+    return observed, (prepared, status), (prepared_hashes, status_hashes, applied_hashes)
 
 
 def test_a_connection_plan_lists_plugins_once_per_observation(
@@ -773,11 +804,27 @@ def test_a_connection_plan_lists_plugins_once_per_observation(
     """Prepare and each status list once; plan, status and apply match the unmemoized run."""
 
     root = tmp_path / "claude"
-    unmemoized, plain_counts = _connect_counting_listings(root, monkeypatch, memo=False)
-    memoized, memo_counts = _connect_counting_listings(root, monkeypatch, memo=True)
+    unmemoized, plain_counts, _ = _connect_counting_listings(root, monkeypatch, memo=False)
+    memoized, memo_counts, _ = _connect_counting_listings(root, monkeypatch, memo=True)
     assert plain_counts == (3, 2)
     assert memo_counts == (1, 1)
     assert memoized == unmemoized
+
+
+def test_a_connection_plan_hashes_the_executable_once_per_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare and each status hash once; apply keeps every check; results are unchanged."""
+
+    root = tmp_path / "claude"
+    plain, _, plain_hashes = _connect_counting_listings(root, monkeypatch, memo=True, window=False)
+    windowed, _, windowed_hashes = _connect_counting_listings(root, monkeypatch, memo=True)
+    assert plain_hashes[:2] == (5, 2)
+    assert windowed_hashes[:2] == (1, 1)
+    # The apply revalidates outside any plan window, as often as before; only its refresh and
+    # the status after it are windows of their own.
+    assert plain_hashes[2] - windowed_hashes[2] == (5 - 1) + (2 - 1)
+    assert windowed == plain
 
 
 def test_the_plugin_list_memo_forgets_on_any_other_command(tmp_path: Path) -> None:
