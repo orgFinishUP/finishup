@@ -1293,10 +1293,7 @@ def server_add(
             choice=LevelChoice(level, retention),
         )
         return
-    if level is not None or retention is not None:
-        raise ServerCommandRefused(
-            "usage", message="--level and --retention apply to a server elsewhere"
-        )
+    _refuse_level_choice_here(LevelChoice(level, retention))
     _require_selection_in_force()
     try:
         validate_name(name)
@@ -1986,6 +1983,15 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
     return TargetSwitch(record, previous)
 
 
+def _refuse_level_choice_here(choice: LevelChoice | None) -> None:
+    """Refuse ``--level``/``--retention`` for a server on this computer (it keeps no copies)."""
+
+    if choice is not None and (choice.level is not None or choice.retention is not None):
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
+
+
 def use_target(
     name: str,
     *,
@@ -2008,6 +2014,9 @@ def use_target(
     """
 
     if name == "local":
+        # Refused before anything is read or written: the selection and the connection to a
+        # server elsewhere stay as they were, as for a named server on this computer.
+        _refuse_level_choice_here(choice)
         # The way back never resolves the selection it removes: a damaged selection, or one that
         # names a missing or unsafe target folder, is exactly what it must clear.
         _require_no_explicit_source()
@@ -2024,10 +2033,7 @@ def use_target(
         if not _open_kind(record.kind):
             raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
         return _use_remote(record, authorize, choice)
-    if choice is not None and (choice.level is not None or choice.retention is not None):
-        raise ServerCommandRefused(
-            "usage", message="--level and --retention apply to a server elsewhere"
-        )
+    _refuse_level_choice_here(choice)
     try:
         with registry_lock():
             # Read again under the lock: a target removed meanwhile stays gone, and one whose

@@ -420,7 +420,9 @@ helper for that server follows it (a few seconds at most; if it does not, Finish
 the next program starts a new one), and your next task uses the new level. If the server stops offering a copy, `server use lab` refuses
 (`server_level_unavailable`) until you choose `--level L1`: FinishUP never narrows your choice on
 its own. `--level L1` stops future updates; the copy already sent stays until you forget it or its
-time runs out.
+time runs out. `--level` and `--retention` apply only to a server elsewhere: `server use local`,
+`server use` of a server on this computer and `server add --local` refuse them as a usage error
+and change nothing, so the server you use and its connection stay as they were.
 
 ### What is sent, scanned and kept
 

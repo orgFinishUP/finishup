@@ -212,6 +212,32 @@ def test_the_level_options_are_shown_and_refused_for_a_server_on_this_computer(h
     assert "--level and --retention apply to a server elsewhere" in refused.output
 
 
+@pytest.mark.parametrize(
+    "options", [("--level", "L2"), ("--retention", "task_close")], ids=["level", "retention"]
+)
+@pytest.mark.parametrize("name", ["local", "bench"])
+def test_use_of_a_server_on_this_computer_refuses_the_level_options_and_changes_nothing(
+    remote: targets.ServerTarget,
+    name: str,
+    options: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use local`` refuses ``--level``/``--retention`` as a named server on this computer does:
+    the selection and the connection to the server elsewhere stay as they were."""
+
+    with targets.registry_lock():
+        targets.new_local_target("bench")
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the connection to the server elsewhere is not closed")
+
+    monkeypatch.setattr(server_cli, "runtime_for", never)
+    refused = _RUNNER.invoke(app, ["server", "use", name, *options])
+    assert refused.exit_code == 2, refused.output
+    assert "--level and --retention apply to a server elsewhere" in refused.output
+    assert targets.read_selected_target_id() == remote.target_id
+
+
 # --- finishup server code: this computer's own choices ----------------------------------------------
 
 
