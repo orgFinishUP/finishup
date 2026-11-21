@@ -9,7 +9,8 @@ The streak is the bridge's own per-process memory (one MCP bridge serves one hos
 number of consecutive first-page ``status`` reads for one ``(session_id, actor_id)`` since that
 session's last write call through this bridge. A write call (``start``, ``publish_work``,
 ``check``, ``respond`` or ``receipt``, whatever its outcome) resets the session's streaks. A
-continuation page (a request carrying ``cursor``) and the ``operation`` view (polling a running
+``check`` in a read-only mode (ADR-047 ``mode: inspect``) records nothing, so it is a read that
+neither counts nor resets. A continuation page (a request carrying ``cursor``) and the ``operation`` view (polling a running
 check) neither count nor nudge, because rereading is how those are meant to be used. A status
 read cannot be recovered from the ledger (reads append nothing), so the rule cannot be stateless;
 a bridge restart simply starts the count again, which only delays the nudge.
@@ -37,6 +38,7 @@ from finishup.domain.task_fact_tokens import (
 )
 from finishup.domain.values import JsonValue
 from finishup.protocol.ids import IdKind, is_valid_id
+from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 
 __all__ = [
     "STATUS_STREAK_NUDGE_THRESHOLD",
@@ -45,7 +47,8 @@ __all__ = [
 ]
 
 STATUS_STREAK_NUDGE_THRESHOLD: Final = 3
-# Write calls that end a streak. ``closure_prepare`` and ``read_guidance`` are reads.
+# Write calls that end a streak. ``closure_prepare``, ``read_guidance`` and a ``check`` in a
+# read-only mode (``READ_ONLY_CHECK_MODES``, ADR-047 ``inspect``) are reads.
 _WRITE_OPERATIONS: Final = frozenset({"start", "publish_work", "check", "respond", "receipt"})
 # Bound on the remembered (session, actor) pairs; the least recently read is forgotten first.
 _MAX_TRACKED_STREAKS: Final = 64
@@ -82,6 +85,10 @@ class StatusReadStreaks:
         """Record one tool call; return the status streak it reached (``0`` when not counted)."""
 
         session = _token(arguments.get("session_id"))
+        mode = arguments.get("mode")
+        if operation == "check" and type(mode) is str and mode in READ_ONLY_CHECK_MODES:
+            # An inspection records nothing: it is a read that neither counts nor resets.
+            return 0
         if operation in _WRITE_OPERATIONS:
             with self._lock:
                 if not session:

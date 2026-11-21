@@ -309,7 +309,8 @@ open and both test targets had passed. Two causes, two changes:
 - **Status loop (text only).** The MCP bridge keeps, per process (one host session), the number of
   consecutive first-page `status` reads per `(session_id, actor_id)` since that session's last
   write call (`start`, `publish_work`, `check`, `respond`, `receipt`, whatever the outcome).
-  Continuation pages (`cursor`) and `view: operation` neither count nor nudge. From the third such
+  A `check` with `mode: inspect` records nothing (decision 1), so it is a read: it neither counts
+  nor ends the streak. Continuation pages (`cursor`) and `view: operation` neither count nor nudge. From the third such
   read, the text channel leads with "Status read N times in a row with no write. No status read
   is needed." and one next write derived from the same result's `closure_readiness` (`state`,
   `agent_actionable`, in the service's order) and, for open obligations, the first `obligations`
