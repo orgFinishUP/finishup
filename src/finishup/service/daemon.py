@@ -157,6 +157,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from finishup.protocol.deferred_build import build_deferred_models
 from finishup.protocol.errors import ProtocolValueError, PublicOperationError, SafeDetailValue
 from finishup.protocol.ids import IdKind, new_id, validate_id
 from finishup.protocol.models import (
@@ -6281,6 +6282,10 @@ async def run_service(
     stage = "configuration"
     daemon: ServiceDaemon | None = None
     try:
+        # Likewise it builds every protocol and config model before serving, as an import-time
+        # build did, so no request pays a first-use model build. Inside the stage record, so a
+        # model whose build fails is recorded as a configuration-stage startup failure.
+        build_deferred_models()
         config = load_config({}, os.environ, None)
         configure_logging(config.logging, LogMode.SERVICE)
         stage = "composition"

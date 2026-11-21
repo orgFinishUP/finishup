@@ -69,6 +69,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from finishup.protocol.deferred_build import ensure_built
 from finishup.protocol.models import (
     MAX_FRESHNESS_VERDICTS,
     MAX_PRIOR_FINDING_VERDICTS,
@@ -860,20 +861,22 @@ _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel
 )
+# An adapter over a deferred model reuses that model's validator only once the model is built,
+# so each adapter below wraps a model that ensure_built has finished.
 _PRIOR_VERDICT_ADAPTER: Final[TypeAdapter[ProviderPriorFindingVerdictModel]] = TypeAdapter(
-    ProviderPriorFindingVerdictModel
+    ensure_built(ProviderPriorFindingVerdictModel)
 )
 _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
-    TypeAdapter(ProviderJudgmentEnvelopeModel)
+    TypeAdapter(ensure_built(ProviderJudgmentEnvelopeModel))
 )
 # One adapter per conclusion branch. Used only to classify an already-rejected judgment: the
 # union adapter above decides acceptance, and the branch selected by the stated conclusion
 # yields errors that name one field instead of every branch's disagreement.
 _PROVIDER_JUDGMENT_BRANCH_ADAPTERS: Final[Mapping[str, TypeAdapter[Any]]] = MappingProxyType(
     {
-        "no_material_discrepancy": TypeAdapter(ProviderJudgmentNoDiscrepancyModel),
-        "challenges_returned": TypeAdapter(ProviderJudgmentChallengesModel),
-        "insufficient_packet": TypeAdapter(ProviderJudgmentInsufficientModel),
+        "no_material_discrepancy": TypeAdapter(ensure_built(ProviderJudgmentNoDiscrepancyModel)),
+        "challenges_returned": TypeAdapter(ensure_built(ProviderJudgmentChallengesModel)),
+        "insufficient_packet": TypeAdapter(ensure_built(ProviderJudgmentInsufficientModel)),
     }
 )
 
@@ -2054,7 +2057,7 @@ def normalize_judgment(parsed: JsonValue, *, require_part2: bool = False) -> Sem
 
 
 _REMAINING_CHECK_ADAPTER: Final[TypeAdapter[ProviderRemainingCheckModel]] = TypeAdapter(
-    ProviderRemainingCheckModel
+    ensure_built(ProviderRemainingCheckModel)
 )
 
 
@@ -2076,7 +2079,7 @@ def _separate_remaining_check(body: dict[str, JsonValue]) -> dict[str, JsonValue
 
 
 _TEST_VERDICT_ADAPTER: Final[TypeAdapter[ProviderDeclaredTestVerdictModel]] = TypeAdapter(
-    ProviderDeclaredTestVerdictModel
+    ensure_built(ProviderDeclaredTestVerdictModel)
 )
 
 
@@ -2106,7 +2109,7 @@ def _separate_declared_test_verdicts(body: dict[str, JsonValue]) -> dict[str, Js
 
 
 _FRESHNESS_VERDICT_ADAPTER: Final[TypeAdapter[ProviderFreshnessVerdictModel]] = TypeAdapter(
-    ProviderFreshnessVerdictModel
+    ensure_built(ProviderFreshnessVerdictModel)
 )
 
 

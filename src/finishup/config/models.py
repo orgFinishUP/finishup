@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal, cast
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
 
 from finishup.domain.code_exclusions import ALWAYS_EXCLUDED, valid_pattern
 from finishup.domain.privacy import ProviderDataUseProfile
@@ -21,6 +22,11 @@ from finishup.protocol.consent_envelope import (
     Retention,
     exclusions_to_json,
     retention_from_token,
+)
+from finishup.protocol.deferred_build import (
+    ensure_built,
+    record_deferred_model,
+    serialized_rebuild,
 )
 from finishup.protocol.models import MAX_FINDINGS_LIMIT
 
@@ -84,6 +90,7 @@ _MODEL_CONFIG: Final = ConfigDict(
     extra="forbid",
     frozen=True,
     validate_default=True,
+    defer_build=True,
 )
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$", re.ASCII)
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
@@ -201,11 +208,57 @@ def _validation_reason(error: ValidationError) -> str:
 class StrictConfigModel(BaseModel):
     model_config = _MODEL_CONFIG
 
+    @classmethod
+    def model_rebuild(
+        cls,
+        *,
+        force: bool = False,
+        raise_errors: bool = True,
+        _parent_namespace_depth: int = 2,
+        _types_namespace: Mapping[str, object] | None = None,
+    ) -> bool | None:
+        return serialized_rebuild(
+            lambda: super(StrictConfigModel, cls).model_rebuild(
+                force=force,
+                raise_errors=raise_errors,
+                _parent_namespace_depth=0,
+                _types_namespace=_types_namespace,
+            )
+        )
+
+    @classmethod
+    def model_json_schema(
+        cls,
+        by_alias: bool = True,
+        ref_template: str = DEFAULT_REF_TEMPLATE,
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        mode: JsonSchemaMode = "validation",
+        *,
+        union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+    ) -> dict[str, Any]:
+        # Pydantic reads the core schema here without waiting for a build in another thread.
+        ensure_built(cls)
+        return super().model_json_schema(
+            by_alias=by_alias,
+            ref_template=ref_template,
+            schema_generator=schema_generator,
+            mode=mode,
+            union_format=union_format,
+        )
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        record_deferred_model(cls)
+
     def __init__(self, /, **data: object) -> None:
         try:
             super().__init__(**data)
         except ValidationError as exc:
             raise ConfigError(_validation_reason(exc)) from None
+
+
+record_deferred_model(StrictConfigModel)
 
 
 def _mapping(value: object) -> Mapping[object, object]:

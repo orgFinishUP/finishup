@@ -172,6 +172,14 @@ def _start_edge(provisioned: ProvisionedServer, edge: str) -> tuple[subprocess.P
             time.sleep(0.05)
 
 
+def _await_service(root: Path) -> None:
+    """Wait, on a deadline, until the root's service answers ``finishup service status``."""
+
+    deadline = time.monotonic() + 60
+    while _run([str(_LAUNCHER), "service", "status", "--json"], root).returncode != 0:
+        assert time.monotonic() < deadline, "the native edge's service did not answer"
+
+
 def _stop(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         process.terminate()
@@ -206,7 +214,9 @@ def rest_target(
     process, port = _start_edge(_provisioned, edge)
     if edge == "native":
         # A service started afresh holds a locked passphrase vault: the owner unlocks it on the
-        # server host's own terminal (the ceremony), so claims can be keyed.
+        # server host's own terminal (the ceremony), so claims can be keyed. The edge listens
+        # before its service answers on the control channel, so wait for the service first.
+        _await_service(_provisioned.root)
         ceremony = _ceremony()
         unlocked = ceremony.run_ceremony(
             [str(_LAUNCHER), "service", "unlock", "--json"],

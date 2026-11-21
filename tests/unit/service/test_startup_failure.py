@@ -273,6 +273,28 @@ async def test_run_service_names_the_stage_that_failed(
 
 
 @pytest.mark.anyio
+async def test_a_model_build_failure_is_recorded_as_a_configuration_failure(
+    ring: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The service's eager model build runs inside the stage record, not before it."""
+
+    def failing_build() -> None:
+        raise RuntimeError("model build exploded")
+
+    _patch_run_service(monkeypatch)
+    monkeypatch.setattr(daemon_module, "build_deferred_models", failing_build)
+
+    with pytest.raises(ServiceStartupError) as raised:
+        await daemon_module.run_service(_SPAWN_ID)
+
+    failure = raised.value.failure
+    assert failure.stage == "configuration"
+    assert failure.reason == "exception_runtime_error"
+    (record,) = lookup_diagnostic_records(_SPAWN_ID, root=ring)
+    assert record["phase"] == "configuration"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("refusal", "token"),
     [

@@ -137,6 +137,7 @@ from finishup.ports.control import (
 from finishup.ports.integrations import FINISHUP_MCP_TOOL_NAMES
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.consent import CONSENT_PENDING_TTL_SECONDS
+from finishup.protocol.deferred_build import build_deferred_models
 from finishup.protocol.errors import (
     AUTHORIZATION_REFUSAL_PHASES,
     SERVICE_STARTUP_PHASES,
@@ -5287,6 +5288,9 @@ def main(
         isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
+    # The long-lived bridge builds every protocol and config model before serving, as an
+    # import-time build did, so no tool call pays a first-use model build.
+    build_deferred_models()
     anyio.run(
         run_stdio,
         runtime,

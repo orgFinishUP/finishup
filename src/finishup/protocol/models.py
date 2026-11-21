@@ -13,6 +13,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import (
     Annotated,
+    Any,
     ClassVar,
     Final,
     Literal,
@@ -33,6 +34,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
 
 from finishup.domain.coordination import (
     GrantState,
@@ -67,6 +69,11 @@ from finishup.protocol.coverage import (
     EvidenceImmutability,
     LedgerFreshness,
     PublicationChannel,
+)
+from finishup.protocol.deferred_build import (
+    ensure_built,
+    record_deferred_model,
+    serialized_rebuild,
 )
 from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
 from finishup.protocol.guidance_uris import (
@@ -649,10 +656,12 @@ def validate_semantic_provenance_binding(
         raise ProtocolValueError("invalid_semantic_provenance")
 
 
+# ``defer_build`` moves each model's validator and serializer build from import to first use;
+# ``_ClosedModel`` and ``PublicResultModel`` serialize that build (see ``deferred_build``).
 _ORDINARY_CONFIG: Final = ConfigDict(
-    extra="forbid", frozen=True, strict=True, validate_default=True
+    extra="forbid", frozen=True, strict=True, validate_default=True, defer_build=True
 )
-_ROOT_CONFIG: Final = ConfigDict(frozen=True, strict=True, validate_default=True)
+_ROOT_CONFIG: Final = ConfigDict(frozen=True, strict=True, validate_default=True, defer_build=True)
 _DIGEST_PATTERN: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 _COMMITMENT_PATTERN: Final = re.compile(r"^hmac-sha256:[0-9a-f]{64}$", re.ASCII)
 _TIMESTAMP_PATTERN: Final = re.compile(
@@ -1253,6 +1262,49 @@ class _ClosedModel(BaseModel):
 
     optional_non_null_fields: ClassVar[frozenset[str]] = frozenset()
 
+    @classmethod
+    def model_rebuild(
+        cls,
+        *,
+        force: bool = False,
+        raise_errors: bool = True,
+        _parent_namespace_depth: int = 2,
+        _types_namespace: Mapping[str, object] | None = None,
+    ) -> bool | None:
+        return serialized_rebuild(
+            lambda: super(_ClosedModel, cls).model_rebuild(
+                force=force,
+                raise_errors=raise_errors,
+                _parent_namespace_depth=0,
+                _types_namespace=_types_namespace,
+            )
+        )
+
+    @classmethod
+    def model_json_schema(
+        cls,
+        by_alias: bool = True,
+        ref_template: str = DEFAULT_REF_TEMPLATE,
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        mode: JsonSchemaMode = "validation",
+        *,
+        union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+    ) -> dict[str, Any]:
+        # Pydantic reads the core schema here without waiting for a build in another thread.
+        ensure_built(cls)
+        return super().model_json_schema(
+            by_alias=by_alias,
+            ref_template=ref_template,
+            schema_generator=schema_generator,
+            mode=mode,
+            union_format=union_format,
+        )
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        record_deferred_model(cls)
+
     @model_validator(mode="before")
     @classmethod
     def _adapt_json_arrays_and_reject_forbidden_nulls(cls, value: object) -> object:
@@ -1271,6 +1323,9 @@ class _ClosedModel(BaseModel):
             if adapted is not None:
                 return adapted
         return cast(object, value)
+
+
+record_deferred_model(_ClosedModel)
 
 
 def _strip_optional_non_null_fields(
@@ -1343,6 +1398,49 @@ class PublicRequestModel(PublicEnvelopeModel):
 class PublicResultModel[T](RootModel[T]):
     model_config = _ROOT_CONFIG
 
+    @classmethod
+    def model_rebuild(
+        cls,
+        *,
+        force: bool = False,
+        raise_errors: bool = True,
+        _parent_namespace_depth: int = 2,
+        _types_namespace: Mapping[str, object] | None = None,
+    ) -> bool | None:
+        return serialized_rebuild(
+            lambda: super(PublicResultModel, cls).model_rebuild(
+                force=force,
+                raise_errors=raise_errors,
+                _parent_namespace_depth=0,
+                _types_namespace=_types_namespace,
+            )
+        )
+
+    @classmethod
+    def model_json_schema(
+        cls,
+        by_alias: bool = True,
+        ref_template: str = DEFAULT_REF_TEMPLATE,
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        mode: JsonSchemaMode = "validation",
+        *,
+        union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+    ) -> dict[str, Any]:
+        # Pydantic reads the core schema here without waiting for a build in another thread.
+        ensure_built(cls)
+        return super().model_json_schema(
+            by_alias=by_alias,
+            ref_template=ref_template,
+            schema_generator=schema_generator,
+            mode=mode,
+            union_format=union_format,
+        )
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        record_deferred_model(cls)
+
     @model_validator(mode="before")
     @classmethod
     def _require_exact_boolean_discriminator(cls, value: object) -> object:
@@ -1352,6 +1450,9 @@ class PublicResultModel[T](RootModel[T]):
         if type(source.get("ok")) is not bool:
             raise ValueError("result_ok_wrong_type")
         return cast(object, value)
+
+
+record_deferred_model(PublicResultModel)
 
 
 class FrontierModel(_ClosedModel):

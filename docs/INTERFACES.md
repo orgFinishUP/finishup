@@ -1022,6 +1022,16 @@ One boundary is narrower than before. A member outside every loaded closure whos
 the manifest digest, but are not canonical or carry a wrong `$id`, is no longer refused by a hook.
 The service still refuses it, and so does any later full load.
 
+Protocol and config models (`finishup.protocol.models` and `finishup.config.models` with their
+subclasses) are likewise built on first use instead of at import. Every build of one runs under a
+single process-wide lock and resolves names from the model's own module, as the import-time build
+did; a JSON schema asked of a model and a `TypeAdapter` over one also wait for that build (every
+`TypeAdapter` over a model class adapts the model `ensure_built` returned, and an architecture
+test holds `src/` and `scripts/` to that). The service and the MCP bridge build every model before
+they serve, and the native REST edge builds them before its port listens. Validation results,
+errors, serialization, and JSON schemas are unchanged; only a class's introspected `__init__`
+signature stays generic until the model is first used.
+
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
