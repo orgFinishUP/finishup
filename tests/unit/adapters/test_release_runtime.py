@@ -627,14 +627,16 @@ def test_sealed_generation_imports_from_its_bytecode(prefix: Path) -> None:
 
 
 def _spy_compiles(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    import py_compile
+
     compiled: list[str] = []
-    original = runtimes.py_compile.compile
+    original = py_compile.compile
 
     def spy(file: str, *args: object, **kwargs: object) -> object:
         compiled.append(Path(file).name)
         return original(file, *args, **kwargs)  # pyright: ignore[reportArgumentType]
 
-    monkeypatch.setattr(runtimes.py_compile, "compile", spy)
+    monkeypatch.setattr(py_compile, "compile", spy)
     return compiled
 
 
@@ -910,3 +912,26 @@ def test_install_epoch_reaches_only_the_install_and_its_build_backends(
     pyc = site / "__pycache__" / f"epochprobe_mod.{_TAG}.pyc"
     assert int.from_bytes(pyc.read_bytes()[4:8], "little") == (0b11 if owned else 0)
     assert "SOURCE_DATE_EPOCH" not in os.environ
+
+
+def test_importing_the_runtime_handoff_never_loads_the_bytecode_compiler() -> None:
+    """Importing this module on its own never loads the bytecode compiler; only a build does.
+
+    ``py_compile`` stays inside ``_compile_sources``, which runs only while a new generation is
+    staged. The probe imports the module alone: real hook, MCP and service processes still load
+    ``traceback`` and ``_colorize`` through ``logging`` and ``asyncio``, so there the saving is
+    ``py_compile`` itself.
+    """
+
+    import subprocess
+
+    probe = (
+        "import sys\n"
+        "import finishup.adapters.release_runtime\n"
+        "print(sorted(m for m in ('py_compile', 'traceback', '_colorize') if m in sys.modules))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=60
+    )
+
+    assert result.stdout == "[]\n"

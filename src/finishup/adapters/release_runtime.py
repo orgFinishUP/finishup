@@ -16,7 +16,6 @@ import importlib.util
 import json
 import marshal
 import os
-import py_compile
 import re
 import shutil
 import stat
@@ -500,6 +499,9 @@ def _reusable_bytecode(installed: Path, source: bytes) -> bytes | None:
 
 
 def _compile_sources(prefix: Path, staging: Path, published: Path, tag: str) -> None:
+    # Imported here: it pulls in traceback and _colorize, and only a new generation compiles.
+    import py_compile
+
     for source in sorted(staging.joinpath("lib").rglob("*.py")):
         if source.is_symlink() or not source.is_file():
             continue
