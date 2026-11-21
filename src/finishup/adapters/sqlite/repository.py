@@ -640,7 +640,9 @@ class SqliteLedger:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         canonical, status, logical_key, payload_digest, _ = row
         try:
-            parsed = strict_json_parse(cast(bytes, canonical))
+            # canonical_encode below walks the full profile, exactly the walk validate=True would
+            # repeat; both raise the same ValueError, mapped to STORAGE_CORRUPT below.
+            parsed = strict_json_parse(cast(bytes, canonical), validate=False)
             if canonical_encode(parsed) != canonical or not isinstance(parsed, Mapping):
                 raise ValueError("canonical_entry_invalid")
             source = cast(Mapping[str, object], parsed)
