@@ -338,7 +338,8 @@ class CodeCopies:
             if flight.serves(claim.worktree, base_commit):
                 outcome = flight.outcome or SyncOutcome("unavailable", "code_sync_busy")
                 if outcome.snapshot is not None and outcome.outcome in {"synced", "unchanged"}:
-                    self._pin(claim, task_id, outcome.snapshot)
+                    # The joined pull is this task's sync too: its pin records that sync time.
+                    self._pin(claim, task_id, outcome.snapshot, outcome.synced_at)
                 return outcome
             # Another worktree's or another base's pull: this one makes its own, after it.
         try:
