@@ -2,8 +2,8 @@
 
 Loading ``finishup.cli.app`` costs a substantial typer/pydantic/protocol-schema import that a Codex
 hook never uses (#242). Only exact hook commands, the ordinary ``service status`` forms, and the
-exact bare ``--version`` and ``version`` forms are fast-pathed; everything else falls through to
-the full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
+exact ``--version``, ``version`` and ``version --json`` forms are fast-pathed; everything else
+falls through to the full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from typing import Final
+from typing import Final, cast
 
 # Sampled before any finishup module resolves, so the hook can measure the import
 # term it otherwise cannot see. Interpreter start itself is not portably
@@ -311,16 +311,22 @@ _VERSION_FAST_ARGUMENTS: Final = (["--version"], ["version"])
 
 
 def _version_fast_path(arguments: list[str]) -> int | None:
-    """Print the bare package version without loading typer, or return None to fall through.
+    """Answer the exact version forms without loading typer, or return None to fall through.
 
-    Only the exact ``--version`` and ``version`` forms qualify. Both print ``__version__`` through
-    ``click.echo`` behind ``cli.app.main``; every outcome of that write is reproduced here: a
-    closed stdout prints nothing and succeeds, a broken pipe exits 1 with both streams pacified,
-    an interrupt exits 130 silently, and any other failure is ``cli.app.main``'s bounded
-    ``internal_error`` line with its diagnostic correlation.
+    Exactly ``version --json`` is handed to ``_version_json_fast_path``, whose write outcomes
+    mirror ``version_command`` instead. Otherwise only the exact ``--version`` and ``version``
+    forms qualify; both print ``__version__`` through ``click.echo`` behind ``cli.app.main``, and
+    every outcome of that write is reproduced here: a closed stdout prints nothing and succeeds,
+    a broken pipe exits 1 with both streams pacified, an interrupt exits 130 silently, and any
+    other failure is ``cli.app.main``'s bounded ``internal_error`` line with its diagnostic
+    correlation.
     """
 
-    if arguments not in _VERSION_FAST_ARGUMENTS or _COMPLETION_VARIABLE in os.environ:
+    if _COMPLETION_VARIABLE in os.environ:
+        return None
+    if arguments == ["version", "--json"]:
+        return _version_json_fast_path()
+    if arguments not in _VERSION_FAST_ARGUMENTS:
         return None
     from finishup import __version__
 
@@ -340,6 +346,40 @@ def _version_fast_path(arguments: list[str]) -> int | None:
             sys.stdout = PacifyFlushWrapper(sys.stdout)  # pyright: ignore[reportAttributeAccessIssue]
             sys.stderr = PacifyFlushWrapper(sys.stderr)  # pyright: ignore[reportAttributeAccessIssue]
             return 1
+    except Exception as error:
+        return _unexpected_cli_failure(error)
+    return 0
+
+
+def _version_json_fast_path() -> int | None:
+    """Write the ``version --json`` manifest without loading typer, or return None to fall through.
+
+    The manifest is built before anything is written, so any failure to build it (a resource
+    integrity refusal, a missing optional module, a defect) falls through to the full CLI, which
+    renders it exactly as it always has. The write itself mirrors ``version_command``: a broken
+    pipe exits 70, an interrupt exits 130 silently, and any other failure is ``cli.app.main``'s
+    bounded ``internal_error`` line.
+    """
+
+    try:
+        import finishup
+        from finishup.version import VersionManifest, version_manifest_json
+
+        builder = cast(Callable[[], VersionManifest], getattr(finishup, "get_version_manifest"))
+        payload = version_manifest_json(builder(), include_resources=False) + b"\n"
+    except KeyboardInterrupt:
+        return 130
+    except Exception:  # noqa: BLE001 - the full CLI renders every build failure itself
+        return None
+    try:
+        stream = sys.stdout.buffer
+        try:
+            stream.write(payload)
+            stream.flush()
+        except BrokenPipeError:
+            return 70
+    except KeyboardInterrupt:
+        return 130
     except Exception as error:
         return _unexpected_cli_failure(error)
     return 0

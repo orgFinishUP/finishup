@@ -10546,10 +10546,11 @@ facade and are never MCP tools.
   (`os.name == "nt"`) with the fixed `unsupported_platform` line and exit 20 — the exit an absent
   service already carries, because no FinishUP service can be reached from that process — before the
   full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). The exact
-  argument lists `--version` and `version` then print the bare package version without loading
-  typer, with the full CLI's bytes, exit codes and failure lines, unless typer's
-  `_FINISHUP_COMPLETE` completion variable is set. Everything else falls through to `cli/app.py`
-  unchanged.
+  argument lists `--version` and `version` then print the bare package version, and exactly
+  `version --json` writes the version manifest, without loading typer, with the full CLI's bytes,
+  exit codes and failure lines, unless typer's `_FINISHUP_COMPLETE` completion variable is set. A
+  manifest that cannot be built falls through, so the full CLI renders the refusal. Everything
+  else falls through to `cli/app.py` unchanged.
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
   ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
   installation marker owns immutable vault-mode publication. Unlock calls only
