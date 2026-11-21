@@ -457,8 +457,11 @@ def _linux_snapshots(
 
 
 def _parse_ps_table(payload: bytes) -> tuple[tuple[int, int, str], ...]:
+    # Every row is read, as the Linux /proc walk reads every PID: ``ps`` lists by PID and Cursor
+    # usually starts late, so a row cap would drop its helper child. ``_MAX_PROCESSES`` bounds
+    # classified serve children only; each row keeps its own text bound below.
     rows: list[tuple[int, int, str]] = []
-    for raw_line in payload.splitlines()[: 8 * _MAX_PROCESSES]:
+    for raw_line in payload.splitlines():
         line = raw_line.decode("utf-8", errors="ignore").strip()
         if not line:
             continue

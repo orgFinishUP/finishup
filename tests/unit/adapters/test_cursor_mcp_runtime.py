@@ -413,6 +413,45 @@ def test_darwin_scanner_uses_the_text_match_for_whitespace_launchers(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("filler_rows", [0, 509, 700, 4_000])
+def test_darwin_scanner_reads_the_whole_process_table(
+    monkeypatch: pytest.MonkeyPatch, filler_rows: int
+) -> None:
+    # ``ps`` lists by PID and Cursor usually starts late, so its helper child can sit past any
+    # fixed row count; macOS must see it just as the Linux /proc walk does.
+    import subprocess
+
+    import finishup.adapters.integrations.cursor_mcp_runtime as module
+
+    launcher = "/opt/finishup/bin/finishup"
+    pids = range(100, 100 + filler_rows)
+    comm_table = b"".join(f"{pid} 1 /usr/libexec/d{pid}\n".encode() for pid in pids)
+    arg_table = b"".join(f"{pid} 1 /usr/libexec/d{pid} --flag\n".encode() for pid in pids)
+    comm_table += b"9000 1 Cursor\n9001 9000 mcp-process\n9002 9001 finishup\n"
+    arg_table += (
+        b"9000 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"9001 9000 mcp-process\n" + f"9002 9001 {launcher} mcp serve --host cursor\n".encode()
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    snapshot = module._darwin_snapshots((launcher,))  # pyright: ignore[reportPrivateUsage]
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
+    observation = observe_cursor_mcp_runtime(
+        installed_route="policy", processes=FixedCursorMcpProcesses(snapshot)
+    )
+    assert observation.activation == "matched"
+    assert observation.executable_activation == "matched"
+
+
 @pytest.mark.parametrize(
     "launcher",
     ["yoetz", "/opt/yoetz/bin/yoetz", "C:\\tools\\yoetz.exe", "finishup", "/opt/x/finishup.exe"],
