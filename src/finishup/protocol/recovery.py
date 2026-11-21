@@ -1780,6 +1780,11 @@ def covered_reason_codes() -> frozenset[str]:
     )
 
 
+# C0 controls and DEL. ``text`` has already encoded as strict ASCII, so this is exactly the
+# per-character ``ord(c) <= 0x1F or ord(c) == 0x7F`` test, run in C at import time.
+_CONTROL_CHARACTER: Final[re.Pattern[str]] = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _check_registry() -> None:
     """Hold the registry to its own bounds at import time."""
 
@@ -1798,7 +1803,7 @@ def _check_registry() -> None:
                 raise RuntimeError("recovery_directive_not_ascii") from exc
             if not 1 <= len(encoded) <= bound:
                 raise RuntimeError("recovery_directive_out_of_bounds")
-            if any(ord(character) <= 0x1F or ord(character) == 0x7F for character in text):
+            if _CONTROL_CHARACTER.search(text) is not None:
                 raise RuntimeError("recovery_directive_control_character")
         if entry.guidance_uri is not None and (
             _GUIDANCE_URI_PATTERN.fullmatch(entry.guidance_uri) is None
