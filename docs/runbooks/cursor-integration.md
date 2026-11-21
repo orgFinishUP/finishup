@@ -1781,7 +1781,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade FinishUP service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no AI-powered review | expected route ceiling; authorize a separate policy route when intended |
-| Modified plugin cannot remove | preserved local change; inspect and resolve manually |
+| Modified plugin cannot remove | preserved local change; inspect and resolve manually. A file you added inside the installed plugin tree reads `modified` whatever its name (non-ASCII UTF-8 names included, #1386); a name that is not valid UTF-8 is refused `target_unsafe`. Move the file out, then re-run status |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | the platform presence cell refused: on macOS LocalAuthentication was cancelled, unavailable, or timed out; on Linux or WSL 2 the password was wrong, empty, or cancelled, the command did not run from your own foreground terminal, or PAM is unavailable; any other platform has no cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |

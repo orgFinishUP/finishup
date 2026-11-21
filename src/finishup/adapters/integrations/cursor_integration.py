@@ -1042,7 +1042,17 @@ def _ensure_private_path(path: Path) -> None:
 
 def _safe_tree(root: Path) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*"), key=lambda value: value.as_posix().encode("utf-8")):
+    # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
+    # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda value: value.as_posix().encode("utf-8", "surrogateescape"),
+    )
+    for path in paths:
+        try:
+            path.as_posix().encode("utf-8")
+        except UnicodeEncodeError:
+            raise _error(PluginArtifactReason.TARGET_UNSAFE) from None
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
@@ -1063,7 +1073,7 @@ def _tree_digest(files: Mapping[str, bytes]) -> str:
         {
             "files": [
                 {"relative_path": path, "sha256": _sha(data), "size": len(data)}
-                for path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii"))
+                for path, data in sorted(files.items(), key=lambda item: item[0].encode("utf-8"))
             ]
         }
     )

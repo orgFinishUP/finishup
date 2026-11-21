@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import plistlib
 import shlex
 import shutil
@@ -18,6 +19,7 @@ from finishup.adapters.integrations.cursor_integration import (
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
     CursorIntegrationError,
     CursorMcpSource,
+    CursorPluginArtifact,
     CursorPluginTarget,
     CursorSdkBinding,
     apply_cursor_plugin,
@@ -1998,3 +2000,50 @@ def test_same_name_entry_with_any_extra_key_is_foreign_not_a_recognized_route(
     assert observation.ownership_state is McpOwnershipState.FOREIGN
     assert observation.route_profile is None
     assert observation.winning_source is CursorMcpSource.USER
+
+
+def _install_portable(tmp_path: Path) -> tuple[CursorPluginTarget, CursorPluginArtifact, Path]:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
+    preview = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
+    )
+    return target, artifact, tmp_path / ".cursor" / "plugins" / "local" / "finishup"
+
+
+@pytest.mark.parametrize("name", ["notes-resume.md", "notes-résumé.md", "メモ/a.md"])
+def test_foreign_member_with_any_utf8_name_is_classified_modified(
+    tmp_path: Path, name: str
+) -> None:
+    target, artifact, plugin = _install_portable(tmp_path)
+    member = plugin / name
+    member.parent.mkdir(mode=0o700, exist_ok=True)
+    member.write_bytes(b"mine\n")
+
+    assert status_cursor_plugin(target, artifact).state is PluginArtifactState.MODIFIED
+    with pytest.raises(CursorIntegrationError) as removal:
+        preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.REMOVE, artifact)
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    with pytest.raises(CursorIntegrationError) as replacement:
+        preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.REPLACE, artifact)
+    assert replacement.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert member.read_bytes() == b"mine\n"
+
+
+def test_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
+    target, artifact, plugin = _install_portable(tmp_path)
+    try:
+        (plugin / os.fsdecode(b"notes-\xe9.md")).write_bytes(b"mine\n")
+    except OSError:
+        pytest.skip("this file system accepts only UTF-8 file names")
+
+    with pytest.raises(CursorIntegrationError) as raised:
+        status_cursor_plugin(target, artifact)
+    assert raised.value.reason is PluginArtifactReason.TARGET_UNSAFE

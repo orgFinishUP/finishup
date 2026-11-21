@@ -1701,7 +1701,9 @@ foreign marketplaces/MCP entries, modified sources, and orphaned caches. A lost/
 is `outcome_unknown` — as is any post-mutation state the read-back cannot confirm, even on exit 0;
 run status and reconcile rather than guessing rollback. Replacement and removal revalidate the
 displaced tree after renaming it out of the public path and destroy only a marker-valid managed
-tree; interrupted stage/rollback material surfaces in status as `recovery_required`.
+tree; interrupted stage/rollback material surfaces in status as `recovery_required`. A file added
+inside the marketplace source makes it `modified` whatever its name (non-ASCII UTF-8 names included,
+#1386); a name that is not valid UTF-8 is refused `target_unsafe`.
 
 ## Proof checklist
 

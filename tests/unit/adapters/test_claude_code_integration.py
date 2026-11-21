@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import shutil
 from collections.abc import Sequence
@@ -1484,3 +1485,61 @@ def test_umask_0002_claude_home_is_a_safe_target_only_for_a_user_private_group(
             _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
         )
     assert refused.value.reason is PluginArtifactReason.TARGET_UNSAFE
+
+
+def _install_source(
+    tmp_path: Path,
+) -> tuple[ClaudeCodePluginTarget, ClaudeCodePluginArtifact, _ClaudeFixture]:
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    commands = _ClaudeFixture(artifact)
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_Review(),
+        commands=commands,
+    )
+    return target, artifact, commands
+
+
+@pytest.mark.parametrize("name", ["notes-resume.md", "notes-résumé.md", "メモ/a.md"])
+def test_foreign_source_member_with_any_utf8_name_is_classified_modified(
+    tmp_path: Path, name: str
+) -> None:
+    target, artifact, commands = _install_source(tmp_path)
+    member = Path(target.marketplace_root) / name
+    member.parent.mkdir(mode=0o700, exist_ok=True)
+    member.write_bytes(b"mine\n")
+
+    status = status_claude_code_plugin(target, artifact, commands=commands)
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(ClaudeCodeIntegrationError) as update:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.UPDATE, artifact, commands=commands
+        )
+    assert update.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    with pytest.raises(ClaudeCodeIntegrationError) as removal:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.REMOVE, artifact, commands=commands
+        )
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert member.read_bytes() == b"mine\n"
+
+
+def test_source_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
+    target, artifact, commands = _install_source(tmp_path)
+    try:
+        (Path(target.marketplace_root) / os.fsdecode(b"notes-\xe9.md")).write_bytes(b"mine\n")
+    except OSError:
+        pytest.skip("this file system accepts only UTF-8 file names")
+
+    with pytest.raises(ClaudeCodeIntegrationError) as raised:
+        status_claude_code_plugin(target, artifact, commands=commands)
+    assert raised.value.reason is PluginArtifactReason.TARGET_UNSAFE
