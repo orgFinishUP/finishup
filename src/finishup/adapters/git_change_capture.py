@@ -212,6 +212,9 @@ _BASELINE_FIELDS: Final = (0, 2, 3, 4, 5)
 type _Identity = tuple[int, int, int, int, int, int, int, int, int]
 # A path reachable only through a link or a non-directory component.
 _BLOCKED: Final[_Identity] = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+# The 256 loose-object fan-out directories, in the order the object-store fence lists them.
+_FAN_OUT_NAMES: Final = tuple(b".git/objects/%02x" % index for index in range(256))
+_LOWER_HEX: Final = frozenset(b"0123456789abcdef")
 
 
 class _ChangedDuringCapture(Exception):
@@ -2679,9 +2682,13 @@ class GitChangeCaptureAdapter:
             if not stat.S_ISDIR(facts.st_mode) or facts.st_uid != expected_uid:
                 raise ChangeCaptureUnavailable("unsafe_root")
         snapshot: list[tuple[bytes, _Identity]] = [(b".git/objects", _identity(objects))]
-        for index in range(256):
-            name = b".git/objects/%02x" % index
-            identity = _path_identity(descriptor, name)
+        # One listing answers for all 256 fan-out names; without it each is walked on its own.
+        listed = _listed_fan_out_identities(descriptor)
+        for name in _FAN_OUT_NAMES:
+            if listed is None:
+                identity = _path_identity(descriptor, name)
+            else:
+                identity = listed.get(name)
             if identity is not None:
                 if not stat.S_ISDIR(identity[0]):
                     raise ChangeCaptureUnavailable("unsafe_root")
@@ -4728,6 +4735,52 @@ def _identity(facts: os.stat_result) -> _Identity:
         facts.st_uid,
         facts.st_gid,
     )
+
+
+def _listed_fan_out_identities(root_descriptor: int) -> dict[bytes, _Identity] | None:
+    """The identity of every fan-out directory ``.git/objects/00``..``ff``, from one listing.
+
+    The same answers ``_path_identity`` gives each of the 256 names (an absent name is left out;
+    nothing is followed through a link), read through one ``O_NOFOLLOW`` descriptor of
+    ``.git/objects`` instead of 256 walks from the root. Only names that are exactly two
+    lowercase hex digits count. ``None`` when anything goes other
+    than plainly (``.git/objects`` cannot be opened or listed, an entry cannot be ``stat``-ed):
+    the caller then asks for each name on its own, as before. ``None`` too when an entry could
+    answer a lookup of a fan-out name under another spelling (two hex digits not all lowercase,
+    or any non-ASCII name): on a case-insensitive or case-folding file system (APFS, HFS+, WSL's
+    drvfs, ext4 casefold) the walk finds such an entry, so only the walk can decide.
+    """
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    opened: list[int] = []
+    found: dict[bytes, _Identity] = {}
+    try:
+        current = root_descriptor
+        for part in (b".git", b"objects"):
+            current = os.open(part, directory_flags, dir_fd=current)
+            opened.append(current)
+        with os.scandir(current) as entries:
+            for entry in entries:
+                name = os.fsencode(entry.name)
+                if not name.isascii() or (
+                    len(name) == 2
+                    and name != name.lower()
+                    and all(byte in _LOWER_HEX for byte in name.lower())
+                ):
+                    return None
+                if len(name) != 2 or not all(byte in _LOWER_HEX for byte in name):
+                    continue
+                try:
+                    facts = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                found[b".git/objects/" + name] = _identity(facts)
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+    return found
 
 
 def _path_identity(root_descriptor: int, path: bytes) -> _Identity | None:
