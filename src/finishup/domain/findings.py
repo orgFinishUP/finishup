@@ -41,7 +41,7 @@ from finishup.protocol.coverage import (
 )
 from finishup.protocol.errors import ProtocolValueError
 from finishup.protocol.ids import IdKind, validate_id
-from finishup.protocol.models import (
+from finishup.protocol.model_values import (
     MAX_REVIEW_TEXT_BYTES,
     SemanticReason,
     SemanticStatus,

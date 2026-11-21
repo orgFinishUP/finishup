@@ -10,9 +10,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import Enum
 from threading import Lock
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
-from finishup.config.models import LoggingConfig
 from finishup.domain.values import format_rfc3339_millis
 from finishup.observability.exception_reasons import exception_reason as _exception_reason
 from finishup.observability.privacy import (
@@ -21,6 +20,14 @@ from finishup.observability.privacy import (
 )
 from finishup.ports.clock import ClockPort
 from finishup.protocol.ids import IdKind, new_id, validate_id
+
+if TYPE_CHECKING:
+    import finishup.config.models as _config_models
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The configuration models load on first use, so importing the logger stays free of pydantic.
+    _config_models = LazyModule("finishup.config.models")
 
 __all__ = [
     "LogMode",
@@ -377,7 +384,7 @@ def _remove_existing_handlers() -> None:
 
 
 def configure_logging(
-    config: LoggingConfig,
+    config: _config_models.LoggingConfig,
     mode: LogMode,
     *,
     clock: ClockPort | None = None,

@@ -871,6 +871,16 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
 
 ## 3. Protocol constants (`protocol/models.py` unless noted)
 
+The bounds below, the wire enums `DataCategory`, `ClientKind`, `IntegrationKind`,
+`LineageReadGapReason`, `LineageProvenanceRestriction`, `ReceiptRedactionProfile`,
+`SemanticStatus`, `SemanticReason`, and `SemanticProgressPhase`, and the AI-powered outcome
+validators are defined in the pydantic-free `protocol/model_values.py` and re-exported unchanged
+by `protocol/models.py`: each is the same object through both modules and keeps
+`finishup.protocol.models` as its `__module__`. The domain, kernel, and port modules an
+observation hook loads to refresh its advice import them from `protocol/model_values.py` and
+name pydantic or a protocol model only through `protocol/lazy_module.LazyModule`, so that hook
+never imports pydantic.
+
 - `PROTOCOL_VERSION = "0.1"`; request/result `schema_version = "1.0.0"` per operation.
 - `MAX_EVENTS_PER_BATCH = 100`; `MAX_CANONICAL_REQUEST_BYTES = 1_048_576` (1 MiB);
   `MAX_FINDINGS_DEFAULT = 3`; `MAX_FINDINGS_LIMIT = 10`; `MAX_REASON_BYTES = 4_096`;
@@ -1486,7 +1496,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 MCP process receives an AI-powered check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
-its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
+its pair and final-provenance-binding validators (defined in `protocol/model_values.py`, see §3). `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
 objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
 `CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance. A present
 provenance record always repeats that same selected/final status and reason. Earlier late or

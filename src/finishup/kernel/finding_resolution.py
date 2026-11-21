@@ -135,7 +135,10 @@ from finishup.kernel.task_facts import (
     WRITE_OUTSIDE_WORKSPACE_GAP,
 )
 from finishup.protocol.coverage import LedgerFreshness
-from finishup.protocol.models import SemanticReason, SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticReason,
+    SemanticStatus,
+)
 from finishup.protocol.policy_packs import (
     WORK_INTEGRITY_POLICY_ID,
     policy_version_supersedes_or_equals,

@@ -7,9 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Annotated, Final, Literal, cast
-
-from pydantic import Field, ValidationError
+from typing import TYPE_CHECKING, Annotated, Final, Literal, cast
 
 from finishup.domain.coordination import (
     CoordinationDisposition,
@@ -111,15 +109,13 @@ from finishup.protocol.errors import (
     PublicOperationError,
 )
 from finishup.protocol.ids import validate_opaque_item_id
-from finishup.protocol.models import (
+from finishup.protocol.model_values import (
     MAX_MISSING_FOR_ASSESSMENT,
     MAX_MISSING_TARGET_REFS,
     MAX_REVIEW_FOLLOW_UP_ROUNDS,
     MAX_TASK_STATEMENT_BYTES,
     MISSING_FOR_ASSESSMENT_KINDS,
     MISSING_ITEM_AVAILABILITIES,
-    CheckPolicyExecutionModel,
-    CheckScopeModel,
     ClientKind,
     IntegrationKind,
     LineageProvenanceRestriction,
@@ -143,6 +139,19 @@ from finishup.protocol.redacted_values import (
     semantic_redacted_values_from_wire,
     validate_semantic_redacted_values,
 )
+
+if TYPE_CHECKING:
+    import pydantic as _pydantic
+
+    import finishup.protocol.models as _protocol_models
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # Pydantic and the protocol models load on first use: an annotation or check that names them
+    # still reads the real objects, and a process that never meets a check payload never imports
+    # them (an observation hook refreshing its advice, for one).
+    _pydantic = LazyModule("pydantic")
+    _protocol_models = LazyModule("finishup.protocol.models")
 
 __all__ = [
     "EVENT_FAMILIES",
@@ -3582,8 +3591,8 @@ class CheckReviewMode:
 class CheckRecordedPayload:
     mode: CheckMode
     policies: tuple[PolicyVersion, ...]
-    scope: CheckScopeModel
-    policy_executions: tuple[CheckPolicyExecutionModel, ...]
+    scope: _protocol_models.CheckScopeModel
+    policy_executions: tuple[_protocol_models.CheckPolicyExecutionModel, ...]
     subject_frontier: Frontier
     verdict: CheckVerdict
     returned_finding_ids: tuple[FindingId, ...]
@@ -3652,14 +3661,17 @@ class CheckRecordedPayload:
         if policies not in _VALID_POLICY_SELECTIONS:
             raise ProtocolValueError("invalid_event_value_type")
         object.__setattr__(self, "policies", policies)
-        if type(self.scope) is not CheckScopeModel:
+        if type(self.scope) is not _protocol_models.CheckScopeModel:
             raise ProtocolValueError("invalid_event_value_type")
         _id_tuple(self.scope.claim_ids, claim_id, field="scope")
         _id_tuple(self.scope.obligation_ids, obligation_id, field="scope")
         executions_raw = _tuple(self.policy_executions, 1, 3)
-        if any(type(execution) is not CheckPolicyExecutionModel for execution in executions_raw):
+        if any(
+            type(execution) is not _protocol_models.CheckPolicyExecutionModel
+            for execution in executions_raw
+        ):
             raise ProtocolValueError("invalid_event_value_type")
-        executions = cast(tuple[CheckPolicyExecutionModel, ...], executions_raw)
+        executions = cast(tuple[_protocol_models.CheckPolicyExecutionModel, ...], executions_raw)
         if len(executions) != len(set(executions)):
             raise ProtocolValueError("duplicate_set_member")
         execution_identities = tuple(
@@ -4361,7 +4373,7 @@ def _decode_policy_version(value: object) -> PolicyVersion:
     )
 
 
-def _decode_scope(value: object) -> CheckScopeModel:
+def _decode_scope(value: object) -> _protocol_models.CheckScopeModel:
     source = _closed_object(
         value,
         required=frozenset({"claim_ids", "obligation_ids"}),
@@ -4377,24 +4389,24 @@ def _decode_scope(value: object) -> CheckScopeModel:
         field="scope",
     )
     try:
-        return CheckScopeModel.model_validate(
+        return _protocol_models.CheckScopeModel.model_validate(
             {
                 "claim_ids": claim_ids,
                 "obligation_ids": obligation_ids,
             }
         )
-    except ValidationError as exc:
+    except _pydantic.ValidationError as exc:
         raise ProtocolValueError("invalid_event_value_type") from exc
 
 
-def _decode_policy_execution(value: object) -> CheckPolicyExecutionModel:
+def _decode_policy_execution(value: object) -> _protocol_models.CheckPolicyExecutionModel:
     source = _closed_object(
         value,
         required=frozenset({"policy_id", "policy_version", "outcome", "reason"}),
     )
     try:
-        return CheckPolicyExecutionModel.model_validate(dict(source))
-    except ValidationError as exc:
+        return _protocol_models.CheckPolicyExecutionModel.model_validate(dict(source))
+    except _pydantic.ValidationError as exc:
         raise ProtocolValueError("invalid_event_enum") from exc
 
 
@@ -6358,7 +6370,7 @@ OCCURRED_AT_DRAFT_DESCRIPTION: Final = (
 class EventDraft:
     event_id: EventId
     schema: EventSchema
-    occurred_at: Annotated[Timestamp, Field(description=OCCURRED_AT_DRAFT_DESCRIPTION)]
+    occurred_at: Annotated[Timestamp, _pydantic.Field(description=OCCURRED_AT_DRAFT_DESCRIPTION)]
     causal_parents: tuple[EventId, ...]
     payload: EventPayload | JsonValue
     artifact_refs: tuple[ObjectId, ...]

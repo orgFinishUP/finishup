@@ -2,8 +2,10 @@
 
 Each host tool call spawns one hook process, and the protocol-model graph costs about half a
 second to import. Consented PreToolUse passes and every pass in an unconsented workspace never
-build a protocol request, so they must not load it. The hermetic conftest rebases ``HOME`` so the
-state these runs create is private to the case.
+build a protocol request, so they must not load it. A consented PostToolUse refreshes the
+workspace's local advice from its retained envelopes, which reads the domain and kernel layers
+but no protocol model, so it must not load pydantic either. The hermetic conftest rebases
+``HOME`` so the state these runs create is private to the case.
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ from pathlib import Path
 import pytest
 
 _HEAVY = ("pydantic", "finishup.protocol.models", "finishup.service.client", "finishup.cli.render")
+# The module a consented PostToolUse loads to refresh its advice: its presence proves the pass
+# took the refresh path the import guard is about.
+_ADVICE = "finishup.application.observation_advice"
 _CLAUDE_PROFILE = "claude-code-ordinary-observation-v1"
 _CURSOR_PROFILE = "cursor-ordinary-observation-v1"
 
@@ -37,11 +42,16 @@ _ENTRY = (
 )
 
 
-def _run_hook(workspace: Path, payload: dict[str, object], *args: str) -> tuple[list[str], bytes]:
-    """Return the heavy modules the hook loaded and its stdout; the hook must exit 0."""
+def _run_hook(
+    workspace: Path,
+    payload: dict[str, object],
+    *args: str,
+    probe: tuple[str, ...] = _HEAVY,
+) -> tuple[list[str], bytes]:
+    """Return the probed modules the hook loaded and its stdout; the hook must exit 0."""
 
     completed = subprocess.run(  # noqa: S603 - fixed interpreter and probe source
-        [sys.executable, "-c", _HOOK_PROBE, json.dumps(_HEAVY), *args],
+        [sys.executable, "-c", _HOOK_PROBE, json.dumps(probe), *args],
         input=json.dumps(payload).encode(),
         capture_output=True,
         check=False,
@@ -168,3 +178,48 @@ def test_unconsented_hooks_stay_off_protocol_models(workspaces: tuple[Path, Path
     assert codex == []
     assert claude_stdout == b"{}\n"
     assert codex_stdout == b"{}\n"
+
+
+def test_consented_claude_posttool_hook_refreshes_advice_without_pydantic(
+    workspaces: tuple[Path, Path],
+) -> None:
+    consented, _ = workspaces
+    loaded, stdout = _run_hook(
+        consented,
+        _claude(consented, "PostToolUse"),
+        *_claude_args(consented, "PostToolUse"),
+        probe=(*_HEAVY, "finishup.config.models", _ADVICE),
+    )
+    assert loaded == [_ADVICE]
+    assert stdout == b"{}\n"
+
+
+def test_consented_cursor_posttool_hook_refreshes_advice_without_pydantic(
+    workspaces: tuple[Path, Path],
+) -> None:
+    consented, _ = workspaces
+    payload: dict[str, object] = {
+        "conversation_id": "c-1234",
+        "generation_id": "g-1",
+        "workspace_roots": [str(consented)],
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_use_id": "call_1",
+        "tool_input": {"command": "git status"},
+        "tool_output": "clean",
+    }
+    loaded, stdout = _run_hook(
+        consented,
+        payload,
+        "hooks",
+        "cursor-observe",
+        "--workspace",
+        str(consented),
+        "--event",
+        "postToolUse",
+        "--observation-profile",
+        _CURSOR_PROFILE,
+        probe=(*_HEAVY, "finishup.config.models", _ADVICE),
+    )
+    assert loaded == [_ADVICE]
+    assert stdout == b"{}\n"

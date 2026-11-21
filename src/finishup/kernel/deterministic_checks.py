@@ -106,7 +106,9 @@ from finishup.protocol.coverage import (
     coverage_to_json,
     weakest,
 )
-from finishup.protocol.models import SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticStatus,
+)
 from finishup.protocol.policy_packs import (
     RESEARCH_EVIDENCE_POLICY_ID,
     RESEARCH_EVIDENCE_POLICY_VERSION,

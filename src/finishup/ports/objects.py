@@ -17,7 +17,9 @@ from finishup.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
-from finishup.protocol.models import MAX_OBJECT_PLAINTEXT_BYTES
+from finishup.protocol.model_values import (
+    MAX_OBJECT_PLAINTEXT_BYTES,
+)
 
 __all__ = [
     "MAX_OBJECT_HEADER_BYTES",

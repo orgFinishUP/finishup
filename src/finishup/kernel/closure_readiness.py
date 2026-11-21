@@ -113,7 +113,10 @@ from finishup.kernel.task_facts import (
     requested_output_unchanged_candidates,
     task_fact_signals,
 )
-from finishup.protocol.models import SemanticReason, SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticReason,
+    SemanticStatus,
+)
 
 # L5's D7 predicate (#984, D7a), looked up by name so this module works on a build without it:
 # absent, nothing is reported as disputed. Tests monkeypatch this attribute.
