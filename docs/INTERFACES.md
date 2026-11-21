@@ -879,7 +879,9 @@ by `protocol/models.py`: each is the same object through both modules and keeps
 `finishup.protocol.models` as its `__module__`. The domain, kernel, and port modules an
 observation hook loads to refresh its advice import them from `protocol/model_values.py` and
 name pydantic or a protocol model only through `protocol/lazy_module.LazyModule`, so that hook
-never imports pydantic.
+never imports pydantic. The control client (`service/client.py`, `service/control_protocol.py`)
+likewise imports the workflow request and result models on the first workflow call or result, so
+`finishup service status` and an observation hook's outbox drain never import pydantic either.
 
 - `PROTOCOL_VERSION = "0.1"`; request/result `schema_version = "1.0.0"` per operation.
 - `MAX_EVENTS_PER_BATCH = 100`; `MAX_CANONICAL_REQUEST_BYTES = 1_048_576` (1 MiB);

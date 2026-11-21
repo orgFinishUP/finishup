@@ -31,7 +31,9 @@ from finishup.kernel import command_attempts
 from finishup.observability import logging as structured_logging
 from finishup.ports import control, ledger
 from finishup.ports.control import ControlMethod
-from finishup.protocol.lazy_module import LazyModule
+from finishup.protocol.lazy_module import LazyModule, is_pydantic_model
+from finishup.service import control_protocol
+from finishup.service.client import ServiceClient
 
 _LEAF = Path(model_values.__file__)
 
@@ -160,3 +162,43 @@ def test_control_body_types_match_the_former_method_maps(method: ControlMethod) 
     expected_success = _RESULT_TYPES.get(method, control.JsonObject)
     assert control._expected_call_body_type(method) is expected_call  # pyright: ignore[reportPrivateUsage]
     assert control._expected_success_body_type(method) is expected_success  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("method", list(ControlMethod))
+def test_control_protocol_workflow_models_match_the_former_maps(method: ControlMethod) -> None:
+    assert control_protocol._workflow_request_model(method) is _REQUEST_TYPES.get(method)  # pyright: ignore[reportPrivateUsage]
+    assert control_protocol._workflow_result_model(method) is _RESULT_TYPES.get(method)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("method", list(_REQUEST_TYPES))
+def test_service_client_workflow_annotations_resolve_to_the_real_models(
+    method: ControlMethod,
+) -> None:
+    hints = typing.get_type_hints(getattr(ServiceClient, method.value))
+    assert hints["request"] is _REQUEST_TYPES[method]
+    assert hints["return"] is _RESULT_TYPES[method]
+
+
+def test_control_protocol_workflow_model_aliases_resolve_to_the_real_models() -> None:
+    request_alias = get_args(
+        typing.get_type_hints(control_protocol._workflow_request_model)["return"]  # pyright: ignore[reportPrivateUsage]
+    )[0]
+    result_alias = get_args(
+        typing.get_type_hints(control_protocol._workflow_result_model)["return"]  # pyright: ignore[reportPrivateUsage]
+    )[0]
+    assert set(get_args(get_args(request_alias)[0].__value__)) == set(_REQUEST_TYPES.values())
+    assert set(get_args(get_args(result_alias)[0].__value__)) == set(_RESULT_TYPES.values())
+
+
+def test_is_pydantic_model_matches_isinstance() -> None:
+    model = models.CheckScopeModel(claim_ids=(), obligation_ids=())
+    values: tuple[object, ...] = (
+        model,
+        models.CheckScopeModel,
+        control.ServiceStopResult(),
+        {"claim_ids": []},
+        None,
+        models.SemanticStatus.SUCCEEDED,
+    )
+    for value in values:
+        assert is_pydantic_model(value) is isinstance(value, pydantic.BaseModel), value

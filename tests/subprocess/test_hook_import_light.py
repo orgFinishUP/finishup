@@ -223,3 +223,40 @@ def test_consented_cursor_posttool_hook_refreshes_advice_without_pydantic(
     )
     assert loaded == [_ADVICE]
     assert stdout == b"{}\n"
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+def test_consented_codex_hook_drains_without_pydantic(
+    workspaces: tuple[Path, Path], event: str
+) -> None:
+    """A codex pass drains its outbox through the control client, which needs no protocol model."""
+
+    consented, _ = workspaces
+    payload: dict[str, object] = {
+        "session_id": "019a0000-0000-7000-8000-000000000001",
+        "cwd": str(consented),
+        "hook_event_name": event,
+        "tool_name": "Bash",
+        "tool_use_id": "call_x",
+        "tool_input": {"command": "git status"},
+    }
+    if event == "PostToolUse":
+        payload["tool_response"] = "clean"
+    loaded, stdout = _run_hook(
+        consented,
+        payload,
+        "hooks",
+        "observe",
+        "--workspace",
+        str(consented),
+        "--event",
+        event,
+        probe=(
+            "pydantic",
+            "finishup.protocol.models",
+            "finishup.config.models",
+            "finishup.application.observation_drain",
+        ),
+    )
+    assert loaded == ["finishup.application.observation_drain"]
+    assert stdout == b"{}\n"

@@ -1,4 +1,4 @@
-"""A module stand-in that imports the real module on its first attribute read.
+"""Lazy access to pydantic and the protocol models for modules that only sometimes need them.
 
 A module that names a pydantic or protocol model only in annotations, in a type alias, or inside
 functions that run when such a model already exists, binds that module's names through a
@@ -8,14 +8,22 @@ alias's value, a runtime identity check) still gets the real object from the rea
 
 The stand-in caches the imported module, never the attributes it reads from it, so a read always
 sees the module's current binding.
+
+:func:`is_pydantic_model` answers ``isinstance(value, pydantic.BaseModel)`` without importing
+pydantic: no value can be a pydantic model before pydantic defined ``BaseModel``.
 """
 
 from __future__ import annotations
 
+import sys
 from importlib import import_module
 from types import ModuleType
+from typing import TYPE_CHECKING, TypeGuard
 
-__all__ = ["LazyModule"]
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+__all__ = ["LazyModule", "is_pydantic_model"]
 
 
 class LazyModule:
@@ -39,3 +47,15 @@ class LazyModule:
 
     def __repr__(self) -> str:
         return f"<lazy module {self._name!r}>"
+
+
+def is_pydantic_model(value: object) -> TypeGuard[BaseModel]:
+    """Return ``isinstance(value, pydantic.BaseModel)``, importing nothing.
+
+    Until ``pydantic.main`` has defined ``BaseModel`` no instance of it can exist, so the answer is
+    ``False`` exactly when that isinstance check would have been.
+    """
+
+    main = sys.modules.get("pydantic.main")
+    base_model: object = getattr(main, "BaseModel", None) if main is not None else None
+    return isinstance(base_model, type) and isinstance(value, base_model)
