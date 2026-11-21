@@ -16,10 +16,11 @@ Corpus sources:
 * Codex: a recorded rollout (read-only). Each ``exec_command`` and FinishUP MCP call becomes the
   PreToolUse/PostToolUse pair Codex sends for it, in the shape pinned by
   ``fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json``, preceded by SessionStart
-  and UserPromptSubmit and followed by Stop and SessionEnd. ``transcript_path`` names a copy of the
-  rollout that grows to the point the callback fired at; unless ``--max-calls`` cuts the turn short,
-  Stop fires after the turn's final reply and carries it as ``last_assistant_message``, as Codex
-  sends it. Calls with no recorded hook shape in this repository (``write_stdin``, ``view_image``,
+  and UserPromptSubmit and followed by Stop and SessionEnd. Only the rollout's first turn is
+  replayed: every callback carries that turn's ``turn_id``, and calls from later turns are left out
+  (they never count against ``--max-calls``). ``transcript_path`` names a copy of the rollout that
+  grows to the point the callback fired at; unless ``--max-calls`` cuts the turn short, Stop fires
+  after the turn's final reply and carries it as ``last_assistant_message``, as Codex sends it. Calls with no recorded hook shape in this repository (``write_stdin``, ``view_image``,
   MCP resource listing) are left out.
 * Claude Code and Cursor: the ordinary-profile session assembled from the repository's recorded
   shapes (``fixtures/observations/*-outcomes.case.json`` and the host test payloads).
@@ -169,6 +170,19 @@ def _ends_turn(record: Mapping[str, Any]) -> bool:
     )
 
 
+def _starts_next_turn(record: Mapping[str, Any]) -> bool:
+    """Whether a record after the prompt lies past the prompt's turn.
+
+    Unlike ``_ends_turn`` this ignores the ``user_message`` event, which echoes the prompt it
+    follows; the next turn's own ``task_started``, ``turn_context`` or prompt still bound it.
+    """
+
+    payload = cast(dict[str, Any], record.get("payload") or {})
+    if record.get("type") == "event_msg" and payload.get("type") == "user_message":
+        return False
+    return _ends_turn(record)
+
+
 def mcp_tool_response(output: str) -> dict[str, Any]:
     """The MCP CallToolResult a hook receives, rebuilt from the rollout's flattened output text."""
 
@@ -263,11 +277,21 @@ def codex_corpus(
     }
     # A callback fires where its rollout line lands: Pre at the call, Post at the output. Parallel
     # calls therefore see both Pre callbacks before either Post, as Codex delivers them.
+    # Only the first turn is replayed: every callback carries its ``turn_id`` and Stop closes it, so
+    # a later turn's call must neither be replayed under it nor count as a cut.
+    turn_end = next(
+        (
+            index
+            for index in range(prompt_index + 1, len(records))
+            if _starts_next_turn(records[index])
+        ),
+        len(records),
+    )
     callbacks: list[tuple[int, int, str, list[str], dict[str, Any]]] = []
     replayed = 0
     last = prompt_index + 1
     truncated = False
-    for index, record in enumerate(records):
+    for index, record in enumerate(records[:turn_end]):
         payload = cast(dict[str, Any], record.get("payload") or {})
         if record.get("type") != "response_item" or payload.get("type") != "function_call":
             continue
@@ -337,8 +361,8 @@ def codex_corpus(
         # output, with the last reply recorded before it (usually none, so the message-dependent
         # closure checks are not exercised).
         last = next(
-            (index for index in range(last, len(records)) if _ends_turn(records[index])),
-            len(records),
+            (index for index in range(last, turn_end) if _ends_turn(records[index])),
+            turn_end,
         )
     last_message = ""
     for record in records[:last]:
