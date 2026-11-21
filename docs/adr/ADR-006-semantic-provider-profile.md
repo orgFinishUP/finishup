@@ -3242,6 +3242,23 @@ digest and generation, the provider binding (endpoint, model, effort, reply sche
 version and isolated configuration, and the review's input roots and read catalog. Reuse never
 crosses tasks.
 
+## Amendment — 2026-11-21: reviewer cache accounting keeps every exchange (#1172)
+
+At the maintainer's request, an API exchange keeps its token counts when an optional count is
+wrong. A stateless route's input and output counts must each be an integer from 0 to 2^53-1, or
+the exchange has no usage, as before. Its cached count is kept only when it is such an integer and
+at most the input, and its cache-write count only when it is such an integer. Until now a cached
+count above the input dropped the whole exchange's usage, so its input and output went unrecorded
+and the next exchange lost its prefix and its miss label. Such a count is now unknown, never zero:
+the exchange records its input and output, its input is the next exchange's prefix, and that next
+exchange gets a miss label only when its own cached count is known. A Chat Completions exchange is
+recorded `completed` exactly when its generation finished, the meaning the Responses status already
+has: a response without a choice, or a first choice whose finish reason is `length` (truncated) or
+`content_filter` (filtered), stays `incomplete`; a refusal that finished (`stop` with a refusal
+message, as Responses records a refusal whose status is `completed`) and an answer whose finish
+reason is anything else are `completed`, so an accepted answer whose finish reason is not `stop` is
+no longer recorded `incomplete`. No field, label, egress or outcome changes.
+
 ## Amendment — 2026-10-21: routine correctness advisory dispositions (#1162)
 
 Routine `code_defect` notes remain advisory and non-blocking. In addition to their immediate

@@ -13961,8 +13961,11 @@ request-queue and pre-disclosure bounds and all event/tool allowlists still appl
 
 **Per-exchange prompt-cache telemetry (issue #1172).** Every provider exchange that reports usage
 writes one `exchange_cache` owner diagnostic (component `codex_app_server`, `openai_responses` or
-`openai_chat_completions`; reason `completed`, or `incomplete` when the Codex turn did not complete,
-the Responses status is not `completed` or the Chat Completions `finish_reason` is not `stop`). Its
+`openai_chat_completions`; reason `completed` when the generation finished, or `incomplete` when
+the Codex turn did not complete, the Responses status is not `completed`, or the Chat Completions
+response carries no choice or its first choice's `finish_reason` is `length` (truncated) or
+`content_filter` (filtered); a refusal that finished is `completed` on both API routes, as is a
+Chat Completions answer with any other finish reason, whether or not the route accepts it). Its
 `request_id` is the review's first provider request id, the attempt row's `provider_request_id`, so
 every exchange of one review shares it and `finishup service diagnostics --request-id <id>`
 returns them all; a one-shot case names its own. Fields, all integers but the last:
@@ -13971,7 +13974,7 @@ returns them all; a one-shot case names its own. Fields, all integers but the la
 |---|---|
 | `reviewer_exchange_index` | 1-based exchange of the review (a one-shot case is 1) |
 | `reviewer_model_requests` | model requests the exchange made |
-| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report one |
+| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report a consistent one |
 | `reviewer_cache_write_input_tokens` | provider-reported cache writes, absent where the provider did not report them |
 | `reviewer_prefix_tokens` | input of the previous exchange's last request: what this exchange could reuse (0 when it opened the conversation; absent when the previous exchange's requests are unknown) |
 | `reviewer_prefix_cached_tokens` | cached input of this exchange's first request (absent with the cached count) |
@@ -13987,10 +13990,14 @@ own (#1192). A turn that had a usage snapshot refused records no counts (it may 
 request) and leaves the next prefix unknown. Responses reads `usage.input_tokens`,
 `usage.output_tokens` and, in `usage.input_tokens_details`, `cached_tokens` and
 `cache_write_tokens`; Chat Completions `prompt_tokens`, `completion_tokens` and the same two in
-`prompt_tokens_details`, which may be absent. A count the answer omits is left out, never recorded
-as zero. An answer without input and output counts records nothing. A compaction is still
-recorded then, by its index and label alone. The local model route records nothing (FinishUP
-observes no provider prompt cache there), nor does the credential probe.
+`prompt_tokens_details`, which may be absent. The input and output counts must each be an integer
+from 0 to 2^53-1 (not a boolean or a float); an answer without both records nothing. The cached
+count is kept only when it is such an integer and at most the input, the cache-write count only
+when it is such an integer. A count the answer omits or reports otherwise is left out, never
+recorded as zero, and the exchange's input and output are still recorded, its input still the
+next exchange's prefix (#1172). A compaction is still recorded without counts, by its index and
+label alone. The local model route records nothing (FinishUP observes no provider prompt cache
+there), nor does the credential probe.
 
 `reviewer_cache_miss` is the first that applies: `compaction` (a `thread/compacted` notification or
 `contextCompaction` item in the turn, recorded even where the reviewer then refuses it);

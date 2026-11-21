@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -29,6 +30,7 @@ from finishup.ports.semantic import (
     ReviewerSession,
     SemanticResult,
     SemanticResultInvalid,
+    SemanticResultRefused,
     SemanticResultReply,
     reviewer_exchange,
 )
@@ -478,17 +480,188 @@ async def test_a_chat_answer_without_a_cached_count_still_records_and_leaves_its
     assert (second["reviewer_prefix_tokens"], second["reviewer_cache_miss"]) == (2_000, "none")
 
 
-async def test_a_truncated_chat_answer_is_recorded_incomplete(
+class _ChoiceCapture(_UsageCapture):
+    """A Chat Completions answer whose first choice ends as given, refuses, or is missing."""
+
+    def __init__(self, finish_reason: str, *, refusal: str | None, choice: bool) -> None:
+        super().__init__("chat", [(2_000, 0, 30)], finish_reason=finish_reason)
+        self.refusal, self.choice = refusal, choice
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await super().handle_async_request(request)
+        payload = cast(dict[str, object], __import__("json").loads(response.content))
+        choices = cast(list[dict[str, object]], payload["choices"])
+        if not self.choice:
+            choices.clear()
+        elif self.refusal is not None:
+            cast(dict[str, object], choices[0]["message"]).update(
+                content=None, refusal=self.refusal
+            )
+        return httpx.Response(200, request=request, json=payload)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "refusal", "choice", "result_type", "outcome"),
+    [
+        # ``length`` is the Chat Completions spelling of Responses ``incomplete``.
+        ("length", None, True, SemanticResultInvalid, "incomplete"),
+        ("content_filter", None, True, SemanticResultRefused, "incomplete"),
+        # A refusal that finished is a finished generation, as a Responses refusal whose status is
+        # ``completed``; one cut short is not.
+        ("stop", "I can't review this.", True, SemanticResultRefused, "completed"),
+        ("length", "I can't review this.", True, SemanticResultRefused, "incomplete"),
+        # The route parses any other answer whatever its finish reason; it finished.
+        ("eos", None, True, SemanticResultReply, "completed"),
+        ("stop", None, False, SemanticResultInvalid, "incomplete"),
+    ],
+    ids=[
+        "truncated",
+        "filtered",
+        "finished-refusal",
+        "truncated-refusal",
+        "other-finish-reason",
+        "no-choice",
+    ],
+)
+async def test_a_chat_exchange_is_completed_exactly_when_its_generation_finished(
+    records: list[dict[str, object]],
+    finish_reason: str,
+    refusal: str | None,
+    choice: bool,
+    result_type: type[object],
+    outcome: str,
+) -> None:
+    capture = _ChoiceCapture(finish_reason, refusal=refusal, choice=choice)
+    result, *_rest = await _api_evaluate("chat", _FIRST, capture, _Clock())
+    assert type(result) is result_type
+    assert [(r["component"], r["outcome"]) for r in records] == [
+        ("openai_chat_completions", outcome)
+    ]
+
+
+async def test_an_inconsistent_cached_count_keeps_the_exchange_and_the_next_prefix(
     records: list[dict[str, object]],
 ) -> None:
-    # ``length`` is the Chat Completions spelling of Responses ``incomplete``: the answer is
-    # invalid, so its exchange is not recorded as a completed one.
-    capture = _UsageCapture("chat", [(2_000, 0, 30)], finish_reason="length")
-    result, *_rest = await _api_evaluate("chat", _FIRST, capture, _Clock())
-    assert type(result) is SemanticResultInvalid
-    assert [(r["component"], r["outcome"]) for r in records] == [
-        ("openai_chat_completions", "incomplete")
-    ]
+    session = ReviewerSession("review-a", _DEADLINE)
+    token = CURRENT_REVIEWER_SESSION.set(session)
+    try:
+        # More cached than input (and so a negative cache write): both unknown, never zero.
+        for history, usage in (
+            (_FIRST, (2_000, 2_500, 30)),
+            (_SECOND, (2_200, 9_999, 30)),
+            (_THIRD, (2_400, 2_100, 30)),
+        ):
+            result, *_rest = await _api_evaluate(
+                "chat", history, _UsageCapture("chat", [usage]), _Clock()
+            )
+            assert type(result) is SemanticResultReply
+    finally:
+        CURRENT_REVIEWER_SESSION.reset(token)
+    first, second, third = (cast(dict[str, object], r["counts"]) for r in records)
+    assert first == {
+        "reviewer_exchange_index": 1,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 2_000,
+        "reviewer_output_tokens": 30,
+        "reviewer_prefix_tokens": 0,
+        "reviewer_cache_miss": "first_turn",
+    }
+    # Its prefix is known but its own reuse is not, so no label is guessed.
+    assert second == {
+        "reviewer_exchange_index": 2,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 2_200,
+        "reviewer_output_tokens": 30,
+        "reviewer_prefix_tokens": 2_000,
+    }
+    assert (third["reviewer_prefix_tokens"], third["reviewer_cache_miss"]) == (2_200, "none")
+
+
+def _api_usage(**fields: object) -> ExchangeCacheUsage | None:
+    details = SimpleNamespace(
+        cached_tokens=fields.pop("cached", None), cache_write_tokens=fields.pop("write", None)
+    )
+    return telemetry.api_exchange_usage(
+        SimpleNamespace(prompt_tokens_details=details, **fields),
+        input_name="prompt_tokens",
+        details_name="prompt_tokens_details",
+        output_name="completion_tokens",
+    )
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, -1, 2**53, "5"], ids=repr)
+def test_an_optional_count_that_is_not_a_counter_is_unknown_not_zero(bad: object) -> None:
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=bad, write=bad) == (
+        ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=None)
+    )
+
+
+def test_a_cached_count_above_the_input_is_unknown_and_the_write_count_still_kept() -> None:
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=2_001, write=7) == (
+        ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=7)
+    )
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=2_000, write=0) == (
+        ExchangeCacheUsage(2_000, 2_000, 30, 1, 2_000, 2_000, cache_write_input_tokens=0)
+    )
+
+
+class _UnreadableDetails:
+    """Input details whose every count raises when read, as a broken SDK shape might."""
+
+    @property
+    def cached_tokens(self) -> int:
+        raise RuntimeError("unreadable")
+
+    @property
+    def cache_write_tokens(self) -> int:
+        raise RuntimeError("unreadable")
+
+
+class _UnreadableUsage(SimpleNamespace):
+    """A usage whose input details object itself raises when read."""
+
+    @property
+    def prompt_tokens_details(self) -> object:
+        raise RuntimeError("unreadable")
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        SimpleNamespace(
+            prompt_tokens=2_000, completion_tokens=30, prompt_tokens_details=_UnreadableDetails()
+        ),
+        _UnreadableUsage(prompt_tokens=2_000, completion_tokens=30),
+    ],
+    ids=["counts-raise", "details-raise"],
+)
+def test_an_optional_count_whose_read_raises_is_unknown_and_keeps_the_exchange(
+    usage: object,
+) -> None:
+    # Input and output are read on their own; a failing optional read is that count unknown.
+    assert telemetry.api_exchange_usage(
+        usage,
+        input_name="prompt_tokens",
+        details_name="prompt_tokens_details",
+        output_name="completion_tokens",
+    ) == ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=None)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"prompt_tokens": True, "completion_tokens": 30},
+        {"prompt_tokens": 2_000.0, "completion_tokens": 30},
+        {"prompt_tokens": 2_000, "completion_tokens": -1},
+        {"prompt_tokens": 2**53, "completion_tokens": 30},
+        {"prompt_tokens": 2_000},
+    ],
+    ids=["bool-input", "float-input", "negative-output", "input-too-large", "no-output"],
+)
+def test_an_input_or_output_count_that_is_not_a_counter_is_no_usage(
+    fields: dict[str, object],
+) -> None:
+    assert _api_usage(**fields, cached=0, write=0) is None
 
 
 async def test_an_api_answer_without_usage_records_nothing(

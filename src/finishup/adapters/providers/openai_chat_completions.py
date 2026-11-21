@@ -91,6 +91,7 @@ _HOSTNAME_PATTERN: Final = re.compile(
 # Whether the host enforces the judgment schema itself or only sees it in the instruction. This is
 # an endpoint capability fact recorded per profile, never a guess made at dispatch time.
 type StructuredOutputEnforcement = Literal["provider_enforced", "prompt_only"]
+type _ChoiceEnd = Literal["refused", "filtered", "truncated", "answered", "no_choice"]
 
 # The only Chat Completions-specific part of the instruction. Everything before it is the shared
 # reviewer instruction owned by the Responses adapter (issue #906: one source). A hand copy here
@@ -352,6 +353,43 @@ def _first_choice(response: object) -> object | None:
     return items[0] if items else None
 
 
+def _choice_end(choice: object | None) -> _ChoiceEnd:
+    """How the first choice ended, in ``normalize_response``'s inspection order.
+
+    A refusal or a ``content_filter`` finish is refused and a ``length`` finish truncated. Any
+    other finish reason leaves the answer to the judgment parser: ``answered``, or ``no_choice``
+    when the response carries none.
+    """
+
+    if choice is None:
+        return "no_choice"
+    refusal = getattr(getattr(choice, "message", None), "refusal", None)
+    if type(refusal) is str and refusal:
+        return "refused"
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "content_filter":
+        return "filtered"
+    if finish_reason == "length":
+        return "truncated"
+    return "answered"
+
+
+def _generation_finished(choice: object | None) -> bool:
+    """Whether the first choice's generation ran to its end: the Responses ``completed`` status.
+
+    A ``length`` (truncated) or ``content_filter`` (filtered) finish stopped it early, and a
+    response without a choice generated nothing. A refusal that finished is a finished generation,
+    as Responses records a refusal whose status is ``completed``, and so is an answer with any
+    other finish reason. The exchange telemetry records this, not whether the route accepts the
+    answer (#1172).
+    """
+
+    return choice is not None and getattr(choice, "finish_reason", None) not in (
+        "length",
+        "content_filter",
+    )
+
+
 def normalize_response(
     response: object,
     profile: ChatCompletionsProfile,
@@ -392,15 +430,10 @@ def normalize_response(
 
     choice = _first_choice(response)
     message = getattr(choice, "message", None)
-
-    refusal = getattr(message, "refusal", None)
-    if type(refusal) is str and refusal:
+    end = _choice_end(choice)
+    if end in ("refused", "filtered"):
         return SemanticResultRefused(prov(SemanticStatus.REFUSED))
-
-    finish_reason = getattr(choice, "finish_reason", None)
-    if finish_reason == "content_filter":
-        return SemanticResultRefused(prov(SemanticStatus.REFUSED))
-    if finish_reason == "length":
+    if end == "truncated":
         # Truncated output is the Chat Completions spelling of Responses `incomplete`: content
         # invalidity from the output token cap, not a transport/deadline timeout.
         truncated_text = getattr(message, "content", None)
@@ -584,9 +617,9 @@ class ChatCompletionsEvaluator:
                     details_name="prompt_tokens_details",
                     output_name="completion_tokens",
                 ),
-                # A truncated (``length``) or filtered answer is not a completed generation, as
-                # Responses reports its own ``incomplete`` status.
-                completed=getattr(_first_choice(response), "finish_reason", None) == "stop",
+                # Whether the generation finished, as the Responses status says: a truncated or
+                # filtered finish, or no choice, is incomplete; a finished refusal is completed.
+                completed=_generation_finished(_first_choice(response)),
             )
         return normalize_response(
             response,
