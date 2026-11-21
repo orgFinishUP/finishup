@@ -225,6 +225,23 @@ def _start_service(launcher: Path, env: dict[str, str]) -> subprocess.Popen[byte
     raise AssertionError("service did not become reachable in time")
 
 
+def _wait_for_exit(pid: int) -> None:
+    """Wait, on a deadline, until a process this test does not own is gone.
+
+    ``service stop`` answers once the service acknowledged the request; the process exits a
+    moment later, and disposal refuses while any process still uses the instance's runtime.
+    """
+
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    raise AssertionError("the stopped service did not exit in time")
+
+
 def _stop_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -423,8 +440,13 @@ def test_permanent_install_and_two_pinned_snapshots_coexist_and_dispose_independ
         assert again == {"tag": "a", "state": "absent", "disposed": False}
 
         # b's restarted service is detached; its own runtime stops it before disposal.
+        b_holder = cast(
+            dict[str, object], _json(b_exe, ["instance", "status"], env)["service_holder"]
+        )
+        b_service_pid = cast(int, b_holder["pid"])
         stopped = _cli(b_exe, ["service", "stop"], env)
         assert stopped.returncode in _BOUNDED_EXIT_CODES
+        _wait_for_exit(b_service_pid)
         assert _dispose(base, "b", env)["state"] == "removed"
         assert not (base / "b").exists()
         assert _json(permanent_exe, ["service", "status"], permanent_env)["state"] in {
