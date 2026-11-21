@@ -656,10 +656,14 @@ def _derive_role(path: str) -> SchemaArtifactRole:
 def _freeze_json(value: JsonValue) -> JsonValue:
     if type(value) is dict:
         source = cast(dict[str, JsonValue], value)
-        frozen = {
-            key: _freeze_json(source[key])
-            for key in sorted(source, key=lambda item: item.encode("utf-16-be"))
-        }
+        # Code-point order is UTF-16BE byte order for ASCII keys, which schema keys almost always
+        # are, and plain ``sorted`` skips encoding every key.
+        keys = (
+            sorted(source)
+            if all(key.isascii() for key in source)
+            else sorted(source, key=lambda item: item.encode("utf-16-be"))
+        )
+        frozen = {key: _freeze_json(source[key]) for key in keys}
         return MappingProxyType(frozen)
     if type(value) is list:
         return tuple(_freeze_json(item) for item in cast(list[JsonValue], value))
@@ -765,7 +769,13 @@ def _validate_document_references(
     """
 
     resolver = registry.resolver(schema_id)
+    # Admitting and resolving a reference depends only on the document and the reference, so a
+    # repeated one (about half of all) is already known good; refs keep first-occurrence order,
+    # so the first refusal is the same one.
+    admitted: set[str] = set()
     for ref in _walk_refs(schema):
+        if ref in admitted:
+            continue
         split = urlsplit(ref)
         if split.query:
             _protocol_error("schema_reference_unresolved")
@@ -785,6 +795,7 @@ def _validate_document_references(
             resolver.lookup(ref)
         except BaseException:
             raise ProtocolValueError("schema_reference_unresolved") from None
+        admitted.add(ref)
 
 
 def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
