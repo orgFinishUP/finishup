@@ -4,7 +4,8 @@ This adapter is intentionally independent of the LLM egress gateway. It may only
 
 - issue a fixed allowlisted HTTPS GET for the ``finishup`` distribution identity on PyPI, or for
   the transitional ``yoetz`` identity when the running install came from it (ADR-048);
-- parse version fields from a size-capped JSON body;
+- parse version fields from a size-capped JSON body, admitting only a bounded PEP 440 version
+  token (``is_release_version``) so registry text never reaches a cache, report, or terminal;
 - never accept task/user content, proxies (``trust_env=False``), redirects beyond one hop,
   or open endpoint configuration.
 
@@ -15,10 +16,12 @@ an empty/missing version as "no advisory," never as an error surfaced to work re
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
 import httpx
+from packaging.version import InvalidVersion, Version
 
 from finishup.legacy_names import LAUNCHER_NAME, LEGACY_LAUNCHER_NAME
 
@@ -28,6 +31,7 @@ __all__ = [
     "UpdateChecksTransport",
     "UpdateChecksTransportError",
     "fetch_latest_finishup_version",
+    "is_release_version",
     "parse_latest_version",
 ]
 
@@ -42,6 +46,20 @@ _PACKAGE_URLS: Final = {
 }
 _MAX_BODY_BYTES: Final = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS: Final = 3.0
+# A bounded ASCII token in the PEP 440 character set: no whitespace, control, or shell characters.
+_RELEASE_VERSION: Final = re.compile(r"[0-9][a-zA-Z0-9.!+_-]{0,63}", re.ASCII)
+
+
+def is_release_version(value: object) -> bool:
+    """Return True only for a bounded ASCII token that parses as a PEP 440 version."""
+
+    if type(value) is not str or _RELEASE_VERSION.fullmatch(value) is None:
+        return False
+    try:
+        Version(value)
+    except InvalidVersion:
+        return False
+    return True
 
 
 class UpdateChecksTransportError(Exception):
@@ -58,7 +76,7 @@ class UpdateChecksTransport(Protocol):
     """Narrow fetch seam so unit tests can inject scripted responses without sockets."""
 
     async def fetch_latest_version(self) -> str:
-        """Return a non-empty version string from the allowlisted registry document."""
+        """Return a PEP 440 version string (``is_release_version``) from the registry document."""
         ...
 
 
@@ -98,12 +116,9 @@ def parse_latest_version(body: bytes) -> str:
         raise UpdateChecksTransportError("info_missing")
     info = cast(dict[str, object], info_raw)
     version_raw = info.get("version")
-    if type(version_raw) is not str or not version_raw or len(version_raw) > 64:
+    if type(version_raw) is not str or not is_release_version(version_raw):
         raise UpdateChecksTransportError("version_invalid")
-    version = version_raw
-    if any(char.isspace() for char in version):
-        raise UpdateChecksTransportError("version_invalid")
-    return version
+    return version_raw
 
 
 async def fetch_latest_finishup_version(

@@ -6519,7 +6519,11 @@ Interactive-only structural DTO (`finishup.application.package_update.PackageUpd
 `installed_version`, `latest_version` (nullable), `is_newer`, `upgrade_command`
 (`finishup upgrade`), `source` (`network|cache|none`). Setup reports may include a
 `package_update` object with the same field names. Work receipts and ledger documents never carry
-these fields.
+these fields. `latest_version` is null or a bounded ASCII PEP 440 version
+(`update_checks.is_release_version`): a registry answer, transport result or cached entry holding
+anything else is refused as `UpdateChecksTransportError("version_invalid")` (falling back to a valid
+cached entry, otherwise `skipped_unavailable`) and is never written to the update cache; a cache
+entry that fails the check is ignored and refetched.
 
 `ProviderBinding` is exactly the five nonsecret fields `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport` (`external|local_af_unix`); it
