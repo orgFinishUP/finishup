@@ -938,16 +938,16 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, 0o600)
     try:
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short_write")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temporary, path)
         os.chmod(path, 0o600)
     except BaseException:
