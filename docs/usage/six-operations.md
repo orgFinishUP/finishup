@@ -351,6 +351,9 @@ after it ("The receipt will read ..."). `basis_frontier` is the frontier that co
 at. A current status read that is interrupted by new work reads the prediction again at the
 newer frontier and names it there. A status read you pinned with `at_frontier`, or continued with
 a cursor, stays on that frontier; if it is no longer a safe basis, the prediction is left out.
+`at_frontier` must name a frontier the task has reached: one beyond the current head, or `"0"` once
+the task has started (there is no task state before its first record), is refused as
+`INVALID_REQUEST`.
 
 `closure_readiness.state` tells you whether anything is left to do. `action_required` lists the
 work in `agent_actionable`: open obligations, unanswered findings, an unresolved finding you can

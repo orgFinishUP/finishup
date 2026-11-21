@@ -10892,7 +10892,11 @@ inspection. No new retry, lease, cancellation, network or credential authority i
 A status request reaches the application already validated against its frozen schema.
 `INVALID_REQUEST` is therefore returned only from the explicit caller-shape sites: cursor decoding
 and binding, the requested frontier, selector and view consistency, and the translation of the
-caller's view, filter, and cursor position into a projection query. Any other `TypeError` or
+caller's view, filter, and cursor position into a projection query. A requested frontier is
+invalid when it is beyond the head or, on a task that has records, is genesis (`at_frontier`
+`"0"` or a cursor at sequence 0): the task has no state before its first record, so the
+application and the ledger's `query_projection` both refuse that read with `INVALID_REQUEST` on
+every view (issue #1395). Any other `TypeError` or
 `ValueError` raised while serving the read — including a pydantic `ValidationError` and the
 `CoordinationError`/`ProjectCommandError` family, which subclass `ValueError` — is a fault in stored
 state or in the service's own projection, and `application/status_faults.py` classifies it once by
