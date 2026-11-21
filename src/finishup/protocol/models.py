@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import types
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -9968,7 +9969,30 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
     return result
 
 
-_RESULT_LEAF_RULES: Final[tuple[_ResultLeafRule, ...]] = _build_result_leaf_rules()
+_RESULT_LEAF_RULES_LOCK: Final = threading.Lock()
+_result_leaf_rules_built: tuple[_ResultLeafRule, ...] | None = None
+
+
+def _result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
+    """The result-leaf registry, built once on first use and shared by every thread.
+
+    Most processes that import this module (every full-CLI command) never classify a result
+    leaf, so they no longer pay for building its two thousand rules at import. The builder's
+    completeness guard (``incomplete_result_leaf_registry``) therefore fires at the first
+    classification rather than at import, a failed build is not cached, and the service pays the
+    build once at its first classification; only a broken build can fail, and the parity tests
+    run the builder.
+    """
+
+    global _result_leaf_rules_built
+    rules = _result_leaf_rules_built
+    if rules is None:
+        with _RESULT_LEAF_RULES_LOCK:
+            rules = _result_leaf_rules_built
+            if rules is None:
+                rules = _build_result_leaf_rules()
+                _result_leaf_rules_built = rules
+    return rules
 
 
 def _decode_pointer(pointer: object) -> tuple[str, ...]:
@@ -10057,7 +10081,7 @@ def _classify_leaf_shape(
 
     contextual = tuple(
         rule
-        for rule in _RESULT_LEAF_RULES
+        for rule in _result_leaf_rules()
         if rule.method == method
         and (rule.status_view is None or rule.status_view == status_view)
         and (rule.event_selector is None or rule.event_selector == event_selector)

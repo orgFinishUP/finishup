@@ -2623,7 +2623,7 @@ def test_result_field_classification_is_closed() -> None:
 def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     models = _models_module()
     catalog = load_schema_catalog()
-    rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
+    rules = cast(tuple[Any, ...], getattr(models, "_result_leaf_rules")())
 
     derived_patterns = _derived_result_success_patterns(catalog)
     assert (

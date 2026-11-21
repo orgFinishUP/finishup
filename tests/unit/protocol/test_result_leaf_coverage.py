@@ -108,7 +108,7 @@ def _matching_rules(
     shape = tuple(None if segment == "*" else segment for segment in segments)
     contextual = [
         rule
-        for rule in getattr(models, "_RESULT_LEAF_RULES")
+        for rule in getattr(models, "_result_leaf_rules")()
         if rule.method == method
         and (rule.status_view is None or rule.status_view == status_view)
         and (rule.event_selector is None or rule.event_selector == event_selector)
