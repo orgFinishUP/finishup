@@ -33,6 +33,22 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(20)
 
 
+class _KeyEnteredNotReady(typer.Exit):
+    """Exit 20 after the hidden entry stored the key but readiness did not reload.
+
+    ``ai model`` must not roll back to the previous model on this exit: the new model's key is
+    already in the vault, so only the unlock continuation remains.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(20)
+
+
+def _entered_not_ready(message: str) -> NoReturn:
+    typer.echo(message, err=True)
+    raise _KeyEnteredNotReady
+
+
 def _usage_error(message: str) -> NoReturn:
     typer.echo(message, err=True)
     raise typer.Exit(2)
@@ -138,11 +154,11 @@ def key() -> None:
     try:
         service = _run(restart_service_for_semantic_composition)
     except (ControlError, OSError, ValueError):
-        _fail(
+        _entered_not_ready(
             "Key entry completed, but readiness could not reload. Run finishup service unlock, then finishup ai status."
         )
     if service.get("state") != "ready":
-        _fail(
+        _entered_not_ready(
             "Key entry completed; unlock FinishUP before using it: finishup service unlock, then finishup ai status."
         )
 
@@ -514,7 +530,12 @@ def model(
     try:
         key()
     except (typer.Exit, typer.Abort, KeyboardInterrupt) as stopped:
-        if isinstance(stopped, typer.Exit) and stopped.exit_code == 0:
+        # Roll back only when the hidden entry itself did not finish. Once the new model's key is
+        # stored, a readiness reload that comes back locked (a passphrase vault with no stored
+        # copy) keeps the new model and leaves only the unlock continuation key() printed.
+        if isinstance(stopped, typer.Exit) and (
+            stopped.exit_code == 0 or isinstance(stopped, _KeyEnteredNotReady)
+        ):
             raise
         _restore_previous_model(config, written_bytes)
         raise
