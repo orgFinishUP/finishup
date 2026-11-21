@@ -387,3 +387,32 @@ def test_paged_route_reconstructs_every_document_on_each_host_projection(
     import anyio
 
     anyio.run(_run)
+
+
+_SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_ARABIC_INDIC_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
+
+
+@pytest.mark.parametrize("digits", [_SUPERSCRIPT_DIGITS, _ARABIC_INDIC_DIGITS])
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ("page", "guidance_integer_invalid"),
+        ("page_size", "guidance_integer_invalid"),
+        ("page_count", "guidance_integer_invalid"),
+        ("continuation.page", "guidance_continuation_invalid"),
+    ],
+)
+def test_host_assembler_rejects_non_ascii_digit_integers(
+    field: str, code: str, digits: dict[int, str]
+) -> None:
+    page = read_resource_page(_URI, page_size=64)
+    wire = _wire(page)
+    if field == "continuation.page":
+        continuation = dict(cast(dict[str, object], wire["continuation"]))
+        continuation["page"] = cast(str, continuation["page"]).translate(digits)
+        wire["continuation"] = continuation
+    else:
+        wire[field] = cast(str, wire[field]).translate(digits)
+    with pytest.raises(GuidanceAssemblyError, match=code):
+        GuidancePageAssembler(host_proof_required=False).add(wire)

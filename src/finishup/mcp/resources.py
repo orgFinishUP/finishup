@@ -377,7 +377,14 @@ class GuidancePageAssembler:
 
 
 def _canonical_nonnegative_int(value: object) -> int:
-    if type(value) is not str or not value.isdigit() or (value != "0" and value.startswith("0")):
+    # ``isdigit`` alone admits superscript and other-script digits; the wire contract's
+    # ``canonical_uint`` is ASCII-only, so anything else is a malformed page, never a crash.
+    if (
+        type(value) is not str
+        or not value.isascii()
+        or not value.isdigit()
+        or (value != "0" and value.startswith("0"))
+    ):
         raise GuidanceAssemblyError("guidance_integer_invalid")
     parsed = int(value)
     if parsed > 9_007_199_254_740_991:
