@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import re
 import threading
@@ -994,6 +995,12 @@ class _ValidityChecker:
     # Remembers and reuses verdicts; the other one never does, for an instance holding a fragment.
     remembering_class: Any
     forgetful_class: Any
+    # One validator per (schema id, remembers verdicts), built on first use. A validator keeps no
+    # per-call state (``iter_errors`` only reads it and ``descend`` evolves new ones), so the
+    # threads that validate can share it; building one cost a few hundred microseconds per call.
+    validators: dict[tuple[str, bool], Any] = dataclasses.field(
+        default_factory=dict[tuple[str, bool], Any], repr=False, compare=False
+    )
 
     @classmethod
     def build(cls, state: _CatalogState) -> _ValidityChecker | None:
@@ -1050,12 +1057,16 @@ class _ValidityChecker:
         try:
             if digest is not None and self.verdicts.seen((schema_id, digest)):
                 return True
-            validator_class = self.forgetful_class if digest is None else self.remembering_class
-            validator = validator_class(
-                self.plain_by_id[schema_id],
-                registry=self.registry,
-                format_checker=_FORMAT_CHECKER,
-            )
+            key = (schema_id, digest is not None)
+            validator = self.validators.get(key)
+            if validator is None:
+                validator_class = self.remembering_class if key[1] else self.forgetful_class
+                validator = validator_class(
+                    self.plain_by_id[schema_id],
+                    registry=self.registry,
+                    format_checker=_FORMAT_CHECKER,
+                )
+                self.validators[key] = validator
             valid = next(validator.iter_errors(instance), None) is None
         except Exception:
             return False

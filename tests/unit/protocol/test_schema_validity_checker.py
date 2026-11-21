@@ -485,3 +485,70 @@ async def test_branch_screen_enters_only_the_branches_the_discriminators_select(
         )
         assert entered(screened, envelope) == open_branches
         assert open_branches < 5 < len(branches) // 2 < before
+
+
+async def test_reused_validators_decide_exactly_what_fresh_ones_do() -> None:
+    """A checker reuses one validator per (schema, memory mode), across calls and threads.
+
+    Differential against building a fresh validator for every call (the previous behavior), over
+    real results, envelopes and their mutations, with the same calls also issued concurrently.
+    """
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    state = schemas._load_catalog_state()
+    reused = schemas._ValidityChecker.build(state)
+    fresh = schemas._ValidityChecker.build(state)
+    assert reused is not None and fresh is not None
+    calls: list[tuple[str, JsonValue]] = []
+    for _label, schema_id, document in await _documents():
+        calls += [(schema_id, candidate) for candidate in (document, *_mutations(document))]
+
+    def fresh_verdict(schema_id: str, candidate: JsonValue) -> bool:
+        fresh.validators.clear()
+        return fresh.is_valid(schema_id, candidate, None)
+
+    expected = [fresh_verdict(schema_id, candidate) for schema_id, candidate in calls]
+    assert [reused.is_valid(schema_id, candidate, None) for schema_id, candidate in calls] == (
+        expected
+    )
+
+    def reused_verdict(call: tuple[str, JsonValue]) -> bool:
+        return reused.is_valid(call[0], call[1], None)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        concurrent = list(pool.map(reused_verdict, calls))
+    assert concurrent == expected
+    assert True in expected and False in expected
+
+
+def test_a_checker_builds_one_validator_per_schema_and_memory_mode() -> None:
+    """Repeated validations reuse the validator instead of constructing one per call."""
+
+    from dataclasses import replace
+
+    checker = schemas._ValidityChecker.build(schemas._load_catalog_state())
+    assert checker is not None
+    built: list[tuple[str, bool]] = []
+
+    def counted(validator_class: Any, remembers: bool) -> Any:
+        def construct(schema: Any, **kwargs: Any) -> Any:
+            built.append((cast(str, schema["$id"]), remembers))
+            return validator_class(schema, **kwargs)
+
+        return construct
+
+    counting = replace(
+        checker,
+        remembering_class=counted(checker.remembering_class, True),
+        forgetful_class=counted(checker.forgetful_class, False),
+        validators={},
+    )
+    schema_id = _schema_id("frontier")
+    for sequence in range(1, 6):
+        frontier: JsonValue = {"sequence": str(sequence), "head_digest": "sha256:" + "a" * 64}
+        digest = hashlib.sha256(canonical_encode(frontier)).digest()
+        assert counting.is_valid(schema_id, frontier, None) is True
+        assert counting.is_valid(schema_id, frontier, digest) is True
+        assert counting.is_valid(schema_id, {"sequence": str(sequence)}, None) is False
+    assert built == [(schema_id, False), (schema_id, True)]
