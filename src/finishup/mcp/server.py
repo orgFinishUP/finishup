@@ -582,6 +582,14 @@ class _ClientSlot:
     retirement_generation: int = 0
 
 
+@dataclass(slots=True)
+class _ToolListCache:
+    """The advertised tools/list inventory, built once for one exact descriptor tuple."""
+
+    descriptors: tuple[ToolDescriptor, ...] | None = None
+    tools: tuple[types.Tool, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class BridgeRuntime:
     """Verified static surface plus one private, initially empty ordinary-client slot."""
@@ -616,6 +624,11 @@ class BridgeRuntime:
     # so an identical id-less resend is refused with an explicit choice instead of guessed.
     publish_guard: PublishRepeatGuard = field(
         default_factory=PublishRepeatGuard, repr=False, compare=False
+    )
+    # The descriptors and their presentation schemas are static for the process, so tools/list
+    # builds its Tool objects once. Not an init field: ``replace`` never carries a stale list.
+    _tool_list: _ToolListCache = field(
+        default_factory=_ToolListCache, init=False, repr=False, compare=False
     )
 
 
@@ -4853,7 +4866,15 @@ def _guidance_text(
 async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool]:
     """Return the exact reviewed tool inventory in stable order."""
 
-    return [
+    cache = runtime._tool_list  # pyright: ignore[reportPrivateUsage]
+    if cache.descriptors is not runtime.descriptors:
+        cache.tools = _build_tool_list(runtime.descriptors)
+        cache.descriptors = runtime.descriptors
+    return list(cache.tools)
+
+
+def _build_tool_list(descriptors: Sequence[ToolDescriptor]) -> tuple[types.Tool, ...]:
+    return tuple(
         types.Tool(
             name=descriptor.name,
             title=descriptor.title,
@@ -4868,8 +4889,8 @@ async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool
                 openWorldHint=descriptor.annotations.open_world,
             ),
         )
-        for descriptor in runtime.descriptors
-    ]
+        for descriptor in descriptors
+    )
 
 
 async def call_tool(
