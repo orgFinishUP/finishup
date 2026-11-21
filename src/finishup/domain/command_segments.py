@@ -19,7 +19,8 @@ Splitting is deliberately conservative and deterministic:
 * the body of a here-document fed to a shell (``bash <<'EOF'``, ``sh -s <<EOF``) is split the same
   way; any other here-document (``python3 - <<'PY'``, ``cat > f <<EOF``) is data, not commands;
 * a segment that is itself a shell wrapper (``bash -lc '...'``, ``sh -c "..."``) also contributes
-  the segments of its argument.
+  the segments of its argument, unless the noexec flag ``n`` is in its cluster (``bash -nc``): that
+  shell reads the argument without running it, as ``set -n`` would, so it contributes nothing.
 
 An unterminated quote, substitution or here-document makes the command unsplittable: only the
 whole-command identity then exists, exactly as before. The result exists only to be committed by
@@ -117,6 +118,11 @@ _MAX_DEPTH: Final = 3
 _MAX_TEXT_CHARS: Final = 16_384
 _SHELLS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
+# A ``-c`` cluster without the noexec flag ``n``: ``bash -nc X`` reads ``X`` but never runs it,
+# and still exits zero, so only this form says the wrapped argument ran.
+_SHELL_RUNS_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-mo-z]*c[a-mo-z]*$", re.ASCII)
+# A short-option cluster carrying ``n``: a shell fed its script on stdin reads it without running it.
+_SHELL_NOEXEC_FLAG_RE: Final = re.compile(r"^-[A-Za-z]*n[A-Za-z]*$", re.ASCII)
 _ASSIGNMENT_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=", re.ASCII)
 _AMBIGUOUS_WORD_RE: Final = re.compile(r"[\s'\"\\]")
 # ``env`` options that take a separate operand (``env -u NAME cmd``, ``env -C DIR cmd``).
@@ -477,7 +483,10 @@ def _clean_segment(segment: str) -> _Cleaned:
     shell_reads_stdin = bool(kept) and (
         kept[0].replace("\\", "/").rsplit("/", 1)[-1] in _SHELLS
         and all(
-            word.startswith("-") and _SHELL_COMMAND_FLAG_RE.match(word) is None for word in kept[1:]
+            word.startswith("-")
+            and _SHELL_COMMAND_FLAG_RE.match(word) is None
+            and _SHELL_NOEXEC_FLAG_RE.match(word) is None
+            for word in kept[1:]
         )
     )
     return _Cleaned(
@@ -527,7 +536,8 @@ def _returns_control(segment: str) -> bool:
     zero without running ``pytest -q``), the builtins in ``_CONTROL_TRANSFER`` (``exit 0``,
     ``return 0``, ``eval ...``, ``source env.sh``), ``mapfile -C`` (it evaluates its callback), a
     ``set`` outside ``_safe_set`` or a ``shopt -o`` outside ``_safe_shopt`` (``set -n`` reads but
-    never runs the rest), a command word the reader cannot resolve (``_UNRESOLVED_HEAD_RE``:
+    never runs the rest; the same flag on a wrapper, ``bash -nc X``, keeps ``X`` from being
+    unwrapped at all), a command word the reader cannot resolve (``_UNRESOLVED_HEAD_RE``:
     ``$CMD``, ``exec>log``, ``{exit,0}``) and a segment whose words cannot be read. Wrappers that
     run an external program (``env``, ``timeout``, ``nice``) are looked through. Conservative by
     construction: an unrecognized ordinary program counts as returning, exactly as a separate
@@ -577,7 +587,12 @@ def _returns_control(segment: str) -> bool:
 
 
 def wrapped_shell_argument(words: Sequence[str]) -> str | None:
-    """``X`` for the words of ``bash -lc X`` / ``sh -c X`` (any shell path), else ``None``."""
+    """``X`` for the words of ``bash -lc X`` / ``sh -c X`` (any shell path), else ``None``.
+
+    A noexec cluster (``bash -nc X``) is still read as a wrapper here: callers that ask what the
+    script *could* do (write files, background) stay conservative. Whether ``X`` ran is
+    ``_wrapped_argument``'s question, and there it did not.
+    """
 
     if len(words) != 3:
         return None
@@ -588,7 +603,11 @@ def wrapped_shell_argument(words: Sequence[str]) -> str | None:
 
 
 def _wrapped_argument(text: str) -> str | None:
-    """``X`` for a segment ``bash -lc X`` / ``sh -c X`` in any quoting, else ``None``."""
+    """``X`` for a segment ``bash -lc X`` / ``sh -c X`` in any quoting, else ``None``.
+
+    ``None`` for a noexec cluster (``bash -nc X``, ``sh -cn X``): the shell reads ``X`` without
+    running it and exits zero, so ``X``'s segments are neither listed nor certified (#1444).
+    """
 
     try:
         words = shlex.split(text, posix=True)
@@ -597,7 +616,7 @@ def _wrapped_argument(text: str) -> str | None:
     if len(words) != 3:
         return None
     shell = words[0].replace("\\", "/").rsplit("/", 1)[-1]
-    if shell not in _SHELLS or _SHELL_COMMAND_FLAG_RE.fullmatch(words[1]) is None:
+    if shell not in _SHELLS or _SHELL_RUNS_COMMAND_FLAG_RE.fullmatch(words[1]) is None:
         return None
     return words[2]
 

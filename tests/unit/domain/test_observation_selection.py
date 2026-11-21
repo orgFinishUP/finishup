@@ -214,6 +214,20 @@ def test_python_module_runs_and_build_named_scripts(command: str, runner: str) -
     assert command_runner_class({"command": command}) == runner
 
 
+@pytest.mark.parametrize(
+    "command", ["bash -nc 'pytest -q'", "bash -cn 'pytest -q'", "sh -lnc 'pytest -q'"]
+)
+def test_a_noexec_shell_wrapper_is_not_classed_as_the_command_it_only_reads(command: str) -> None:
+    """``bash -nc X`` reads ``X`` without running it, so it is no test run (#1444)."""
+
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    assert command_runner_class({"command": command}) == "other"
+    argv: list[JsonValue] = list(command.replace("'", "").split(" ", 2))
+    assert native_command_runner_class(argv) == "other"
+    assert command_runner_class({"command": "bash -lc 'pytest -q'"}) == "test"
+
+
 def test_a_codex_post_event_is_not_a_success_fact() -> None:
     """n7 RC1: Codex fires ``PostToolUse`` for a non-zero exit, so the echo proves nothing."""
 

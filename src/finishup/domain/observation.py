@@ -190,7 +190,9 @@ OBSERVATION_COMMAND_COMMITMENT_DOMAIN: Final = b"yoetz/observation-command-commi
 _MAX_OBSERVED_COMMAND_CHARS: Final = 16_384
 _MAX_OBSERVED_ARGV: Final = 1_024
 _SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
+# A ``-c`` cluster that runs its argument: the noexec flag ``n`` (``bash -nc X``) reads ``X``
+# without running it, so that form is never unwrapped into ``X`` (#1444).
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-mo-z]*c[a-mo-z]*$", re.ASCII)
 
 # A summary is an observation-store record.  It is intentionally kept separate
 # from the task-ledger event families: the local writer can account for every

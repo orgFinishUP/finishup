@@ -131,7 +131,9 @@ _FAILURE_STATUSES: Final = {
 }
 _PARTIAL_STATUSES: Final = frozenset({"partial", "partially_completed"})
 _SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
+# A ``-c`` cluster that runs its argument: the noexec flag ``n`` (``bash -nc X``) reads ``X``
+# without running it, so that form is never unwrapped into ``X`` (#1444).
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-mo-z]*c[a-mo-z]*$", re.ASCII)
 
 # ``rg --pre`` and related forms invoke an arbitrary preprocessor.  Git's
 # ext-diff/textconv/output paths likewise cross the read-only boundary.
