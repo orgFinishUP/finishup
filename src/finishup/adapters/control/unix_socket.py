@@ -267,27 +267,36 @@ class UnixEndpointListener:
         return self._socket.fileno()
 
     async def accept(self) -> AuthenticatedUnixStream:
+        """Accept one authenticated connection, holding an admission slot until it closes.
+
+        The slot passes to the returned stream; every other exit — a failed accept, a refused
+        peer, or a cancellation while waiting (an expired or cancelled secret ceremony) — closes
+        any accepted socket and returns the slot, so cancelled waits never exhaust admission.
+        """
+
         if self._closed:
             raise LocalControlTransportError("listener_closed")
         await self._slots.acquire()
         accepted: socket.socket | None = None
+        handed_off = False
         try:
             accepted, _address = await asyncio.get_running_loop().sock_accept(self._socket)
             accepted.setblocking(False)
             accepted.set_inheritable(False)
             peer = authenticate_peer(accepted)
-            return AuthenticatedUnixStream(accepted, peer, _release_slot=self._slots)
+            stream = AuthenticatedUnixStream(accepted, peer, _release_slot=self._slots)
+            handed_off = True
+            return stream
         except LocalControlTransportError:
-            if accepted is not None:
-                accepted.close()
-            self._slots.release()
             raise
         except OSError as exc:
-            if accepted is not None:
-                accepted.close()
-            self._slots.release()
             reason = "listener_closed" if self._closed else "connection_failed"
             raise LocalControlTransportError(reason) from exc
+        finally:
+            if not handed_off:
+                if accepted is not None:
+                    accepted.close()
+                self._slots.release()
 
     async def aclose(self) -> None:
         if self._closed:

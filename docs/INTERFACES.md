@@ -10457,7 +10457,9 @@ facade and are never MCP tools.
   overload or TCP fallback. Framing/schema/state-machine ownership remains in the ordinary and
   confidential protocol modules; these transport values never enter public workflow results.
   Ordinary-control connection admission is bounded: each accepted stream holds one of a fixed
-  listener capacity (128) until the stream closes. The daemon enforces private wall-clock
+  listener capacity (128) until the stream closes; an accept that fails, is refused, or is
+  cancelled while waiting (such as an expired or cancelled secret ceremony) returns its slot,
+  so only open accepted streams count against the capacity. The daemon enforces private wall-clock
   liveness bounds on that path (no wire fields, error reasons, configuration options, or public
   APIs): an ordinary-control client must complete the entire handshake — including partial-frame
   drip — within **5 seconds**, and after handshake a session with no active requests may remain

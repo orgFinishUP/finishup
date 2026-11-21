@@ -17,6 +17,7 @@ import pytest
 import finishup.adapters.control as control_package
 import finishup.service.daemon as daemon_module
 from finishup.adapters.control.unix_socket import (
+    _MAX_ACTIVE_CONNECTIONS,  # pyright: ignore[reportPrivateUsage]
     CONTROL_ENDPOINT_BASENAME,
     ENDPOINT_MODE,
     HUMAN_CONTROL_ENDPOINT_BASENAME,
@@ -153,6 +154,41 @@ async def test_three_fixed_endpoints_are_owner_only_and_bidirectional(
             await close_endpoint(listener)
 
     assert not tuple(runtime_directory.glob("*.sock"))
+
+
+@pytest.mark.anyio
+async def test_cancelled_accepts_return_their_admission_slots(
+    runtime_directory: Path,
+) -> None:
+    """A waiting accept that is cancelled (an expired or cancelled secret ceremony) must not
+    keep its admission slot: more cancellations than the connection bound leave the endpoint
+    accepting."""
+
+    listener = await bind_secret_listener()
+    try:
+        for _ in range(_MAX_ACTIVE_CONNECTIONS + 1):
+            waiting = asyncio.create_task(listener.accept())
+            await asyncio.sleep(0)  # one step: the slot is taken and the accept is waiting
+            assert not waiting.done()
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+
+        accept_task = asyncio.create_task(listener.accept())
+        client = await connect_secret()
+        try:
+            async with asyncio.timeout(5):
+                server = await accept_task
+            try:
+                await client.send_all(b"after cancellations")
+                assert await server.receive() == b"after cancellations"
+            finally:
+                await server.aclose()
+        finally:
+            accept_task.cancel()
+            await client.aclose()
+    finally:
+        await close_endpoint(listener)
 
 
 @pytest.mark.anyio
