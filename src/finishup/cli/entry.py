@@ -443,10 +443,49 @@ def _record_spawned_service_refusal(argv: list[str], error: BaseException, token
         return
 
 
-def _run_full_cli() -> None:
-    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows."""
+# Full-CLI commands that serve until stopped; their import heap is never frozen.
+_SERVING_COMMANDS: tuple[list[str], ...] = (
+    ["service", "run"],
+    ["service", "rest", "run"],
+    ["helper", "run"],
+)
 
-    from finishup.cli.app import main as app_main
+
+def _run_full_cli() -> None:
+    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows.
+
+    The import builds a large heap that a short command never frees. Cyclic collection stays off
+    while it loads, and the result is frozen out of the collector's reach, so neither the
+    command's collections nor the one at interpreter exit rescan it. Collection is on again
+    before any command runs, even when the import raises. Garbage that already exists is
+    collected first, so nothing dead is ever frozen and its finalizers still run; an in-process
+    caller that is the first to load the CLI keeps its then-live objects frozen, as the command
+    process does. Three cases keep collection exactly as it was: ``mcp serve`` (collection is
+    already off; the bridge freezes its own heap), the processes that serve until stopped
+    (``service run``, ``service rest run`` including its native edge that runs the service
+    in-process, and ``helper run``) so their long-lived memory and collection cadence do not
+    change, and an in-process caller that has already loaded the CLI (nothing new to freeze).
+    An interactive session such as ``menu`` is frozen like a short command: its import heap
+    lives for the whole session anyway.
+    """
+
+    import gc
+
+    argv = sys.argv[1:]
+    fresh = (
+        gc.isenabled()
+        and "finishup.cli.app" not in sys.modules
+        and not any(argv[: len(server)] == server for server in _SERVING_COMMANDS)
+    )
+    if fresh:
+        gc.collect()
+        gc.disable()
+    try:
+        from finishup.cli.app import main as app_main
+    finally:
+        if fresh:
+            gc.freeze()
+            gc.enable()
 
     app_main()
 
