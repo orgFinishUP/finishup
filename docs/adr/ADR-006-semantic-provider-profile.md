@@ -892,7 +892,14 @@ single attempt requires only the effort its budget selected, and a missing effor
 The pinned app-server v2 protocol has no per-turn output ceiling. FinishUP therefore enforces the
 selected output limit on the runtime's own cumulative `thread/tokenUsage/updated` counters.
 Only visible output counts (`output_tokens − reasoning_output_tokens`), because reasoning
-tokens are governed by the effort. The check is applied to each valid snapshot. A snapshot over
+tokens are governed by the effort. The limit is per turn, as an API route's per-request
+`max_output_tokens` is: on a held reviewer thread (#1118) each turn counts only its own visible
+output, the thread's total less its visible output when the turn started. That start is the
+total the previous turn left, or, when that turn reported no usage or had a snapshot refused,
+the total before the turn's first reported request (that snapshot's `total` less its `last`).
+Until that request is reported, the last known total stands in, so a turn is never charged less
+than its own output. A one-shot check and a review's first turn start at zero. The check is
+applied to each valid snapshot. A snapshot over
 the limit interrupts the turn and ends it as the existing closed `output_oversize` stage
 (`invalid/response_schema_invalid`). That outcome is content-shaped, like API-path
 `max_output_tokens` truncation: it is never retried and never engages the fallback. When the

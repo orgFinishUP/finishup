@@ -6786,8 +6786,10 @@ factory only for the duration of one physical dispatch, and dispatches outside a
 effort and output limit:
 
 - `runtime_evidence.reasoning_effort` is the effort the attempt sent in `turn/start`.
-- `sampling_params.max_output_tokens` is the per-check output limit FinishUP enforced on the
-  runtime's visible output counters (`output_tokens − reasoning_output_tokens`).
+- `sampling_params.max_output_tokens` is the output limit FinishUP enforced on the runtime's
+  visible output counters (`output_tokens − reasoning_output_tokens`) for each turn: on a held
+  reviewer thread, a turn's own visible output (the thread's total less its total when the turn
+  started), as an API route's per-request `max_output_tokens` is.
 - `selection_sha256` is `canonical_digest({"budget_profile", "model", "output_limit",
   "reasoning_effort"})`. Attempts recorded before #571 committed to
   `{"model", "reasoning_effort"}`.

@@ -76,6 +76,7 @@ from finishup.ports.semantic import (
     encode_reviewer_exchange,
     reviewer_exchange,
 )
+from finishup.ports.semantic_budget import LEGACY_SEMANTIC_BUDGET_PROFILE
 from finishup.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -1055,6 +1056,70 @@ async def test_r5_codex_output_limit_gets_no_format_repair(monkeypatch: pytest.M
     turns = [Turn(role, text) for role, text in _FIRST]
     with pytest.raises(ReviewerModelError, match="reviewer_exchange_output_oversize"):
         await model.complete(turns, REVIEWER_REPLY_SCHEMAS.turn, deadline=_DEADLINE)
+    await session.aclose()
+
+
+def _usage_event(
+    runtime: _CodexRuntime, last_output: int, total_output: int, total_input: int
+) -> dict[str, object]:
+    """The next turn's ``thread/tokenUsage/updated``: a 1,000-token request and the thread total."""
+
+    def breakdown(inputs: int, output: int) -> dict[str, int]:
+        return {
+            "inputTokens": inputs, "cachedInputTokens": 0, "cacheWriteInputTokens": 0,
+            "outputTokens": output, "reasoningOutputTokens": 0, "totalTokens": inputs + output,
+        }  # fmt: skip
+
+    usage = {"last": breakdown(1_000, last_output), "total": breakdown(total_input, total_output)}
+    turn = f"turn{len(runtime.answers)}"
+    params = {"threadId": "thr1", "turnId": turn, "tokenUsage": usage}
+    return {"method": "thread/tokenUsage/updated", "params": params}
+
+
+def _stage(result: SemanticResult) -> tuple[str, str | None]:
+    evidence = result.provenance.runtime_evidence
+    return type(result).__name__, None if evidence is None else evidence.failure_stage
+
+
+@pytest.mark.parametrize("first_reported", [True, False])
+async def test_r5_codex_continuation_is_held_to_its_own_output_limit(
+    monkeypatch: pytest.MonkeyPatch, first_reported: bool
+) -> None:
+    runtime = _CodexRuntime(
+        profile_for(record_for(b"c", b"h", version="0.162.1")), [_ACTION, _FINAL, _FINAL]
+    )
+    limit = runtime.profile.review_budget(LEGACY_SEMANTIC_BUDGET_PROFILE).output_limit
+    each = limit - 100  # every turn's own visible output fits; the thread's total does not
+    # The first turn either reports its usage or reports none, leaving the next turn's start to
+    # its own first request's snapshot (the thread's total less that request's own count).
+    runtime.extra_event = _usage_event(runtime, each, each, 1_000) if first_reported else None
+    session = ReviewerSession("review-a", _DEADLINE)
+    first = await _codex_exchange(monkeypatch, runtime, session, _FIRST, [])
+    assert _stage(first) == ("SemanticResultReply", None)
+
+    runtime.extra_event = _usage_event(runtime, each, 2 * each, 2_000)
+    second = await _codex_exchange(monkeypatch, runtime, session, _SECOND, [])
+    assert _stage(second) == ("SemanticResultReply", None)
+    assert second.provenance.sampling_params is not None
+    assert second.provenance.sampling_params.max_output_tokens == limit
+    await session.aclose()
+
+
+async def test_r5_codex_continuation_over_its_own_output_limit_is_oversize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _CodexRuntime(
+        profile_for(record_for(b"c", b"h", version="0.162.1")), [_ACTION, _FINAL]
+    )
+    limit = runtime.profile.review_budget(LEGACY_SEMANTIC_BUDGET_PROFILE).output_limit
+    runtime.extra_event = _usage_event(runtime, 100, 100, 1_000)
+    session = ReviewerSession("review-a", _DEADLINE)
+    assert _stage(await _codex_exchange(monkeypatch, runtime, session, _FIRST, []))[0] == (
+        "SemanticResultReply"
+    )
+    runtime.extra_event = _usage_event(runtime, limit + 1, limit + 101, 2_000)
+    second = await _codex_exchange(monkeypatch, runtime, session, _SECOND, [])
+    assert _stage(second) == ("SemanticResultInvalid", "output_oversize")
     await session.aclose()
 
 

@@ -129,8 +129,10 @@ binding created before routine checkpoints existed keeps using its single effort
 until you choose a routine effort. Pass `--model` to change the model intentionally.
 
 Each profile also has an output limit in tokens: 4096 for routine checkpoints and 8192 for final
-reviews, adjustable from 1 to 8192. A review whose answer exceeds its limit is stopped and
-reported as an invalid answer, and it is not retried. The check result and receipt name the
+reviews, adjustable from 1 to 8192. The limit applies to each answer the reviewer gives, so a
+review that reads evidence over several steps is not charged for its earlier steps' output. A
+review whose answer exceeds its limit is stopped and reported as an invalid answer, and it is not
+retried. The check result and receipt name the
 exact model, reasoning effort, and output limit each review used.
 
 The selected executable can be an npm wrapper with the matching native package nested below that
