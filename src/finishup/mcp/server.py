@@ -115,6 +115,7 @@ from finishup.mcp.status_streak import (
     status_streak_nudge,
 )
 from finishup.mcp.summaries import (
+    prevalidated_wire,
     render_check_reviewer_output,
     render_publish_action_notices,
     render_publish_blocker_notices,
@@ -1610,51 +1611,56 @@ def _result_text(
             return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
         except Exception as exc:  # noqa: BLE001 - fall back to the bounded summary below
             failures.append(("cursor.canonical_json", exc))
-    # The host profile no longer changes any summary text (ADR-033 D1 retired the acceptance
-    # re-read, whose answer differed per host); it is still passed for the render context.
-    rendered = render_safe_compact_summary_detailed(wire, host=host_profile)
-    failures.extend(rendered.failures)
-    compact = rendered.text
-    if wire.get("preparatory_only") is True:
-        parts: tuple[str, ...] = (compact,)
-    else:
-        awaiting = _guarded_text("awaiting", lambda: summary_for_check_awaiting(wire), failures)
-        if awaiting:
-            # A paused check has no verdict; its continuation is the only actionable fact, so it
-            # leads.
-            compact = f"{awaiting}\n{compact}" if compact else awaiting
-        reviewer = _guarded_text(
-            "reviewer_output", lambda: render_check_reviewer_output(wire), failures
-        )
-        totals = _guarded_text("totals", lambda: render_check_totals(wire.get("totals")), failures)
-        manifest = _guarded_text(
-            "manifest",
-            lambda: render_review_input_manifest_compact(wire.get("review_input_manifest")),
-            failures,
-        )
-        if manifest and manifest in compact:
-            manifest = ""
-        # #985: a publish result's fixed finishup-blocker challenge reaches the model, dry runs
-        # included.
-        blocker_notices = _guarded_text(
-            "blocker_notices", lambda: render_publish_blocker_notices(wire), failures
-        )
-        # tb4n5 follow-up: an action the batch recorded with no result naming it, dry runs included.
-        action_notices = _guarded_text(
-            "action_notices", lambda: render_publish_action_notices(wire), failures
-        )
-        # #1139: the counted ledger line leads, ahead of reviewer prose (re-gated: fixed words,
-        # counts and service-minted ids only).
-        status_line = safe_status_line(wire.get("agent_status_line"))
-        parts = (
-            status_line,
-            reviewer,
-            compact,
-            totals,
-            manifest,
-            blocker_notices,
-            action_notices,
-        )
+    # Every section below reads the same body: check it against the canonical profile once.
+    with prevalidated_wire(wire):
+        # The host profile no longer changes any summary text (ADR-033 D1 retired the acceptance
+        # re-read, whose answer differed per host); it is still passed for the render context.
+        rendered = render_safe_compact_summary_detailed(wire, host=host_profile)
+        failures.extend(rendered.failures)
+        compact = rendered.text
+        if wire.get("preparatory_only") is True:
+            parts: tuple[str, ...] = (compact,)
+        else:
+            awaiting = _guarded_text("awaiting", lambda: summary_for_check_awaiting(wire), failures)
+            if awaiting:
+                # A paused check has no verdict; its continuation is the only actionable fact, so it
+                # leads.
+                compact = f"{awaiting}\n{compact}" if compact else awaiting
+            reviewer = _guarded_text(
+                "reviewer_output", lambda: render_check_reviewer_output(wire), failures
+            )
+            totals = _guarded_text(
+                "totals", lambda: render_check_totals(wire.get("totals")), failures
+            )
+            manifest = _guarded_text(
+                "manifest",
+                lambda: render_review_input_manifest_compact(wire.get("review_input_manifest")),
+                failures,
+            )
+            if manifest and manifest in compact:
+                manifest = ""
+            # #985: a publish result's fixed finishup-blocker challenge reaches the model, dry runs
+            # included.
+            blocker_notices = _guarded_text(
+                "blocker_notices", lambda: render_publish_blocker_notices(wire), failures
+            )
+            # tb4n5 follow-up: an action the batch recorded with no result naming it,
+            # dry runs included.
+            action_notices = _guarded_text(
+                "action_notices", lambda: render_publish_action_notices(wire), failures
+            )
+            # #1139: the counted ledger line leads, ahead of reviewer prose (re-gated: fixed words,
+            # counts and service-minted ids only).
+            status_line = safe_status_line(wire.get("agent_status_line"))
+            parts = (
+                status_line,
+                reviewer,
+                compact,
+                totals,
+                manifest,
+                blocker_notices,
+                action_notices,
+            )
     note = (
         _record_summary_degradation(failures, request_id=request_id, operation=operation)
         if failures
