@@ -2,10 +2,49 @@
 
 from __future__ import annotations
 
-from importlib import resources
-from typing import BinaryIO, Literal
+import os
+from typing import IO, BinaryIO, Literal
 
 from finishup.cli.hook_io import claude_context_output, cursor_context_output, stdout_json
+
+_GUIDANCE_DIRECTORY = "guidance"
+_GUIDANCE_FILE = "agent-instructions.md"
+
+
+def _open_guidance() -> IO[bytes]:
+    """Open the packaged guidance exactly where ``importlib.resources`` would find it.
+
+    ``finishup.resources`` is a namespace package. With one filesystem portion,
+    ``resources.files(...).joinpath("guidance/agent-instructions.md")`` lists that directory,
+    takes the entry named exactly ``guidance`` and joins the file name onto it; when there is
+    no such entry, ``MultiplexedPath.joinpath`` falls back to joining the whole relative path
+    onto the portion. Both give the same filesystem path, which the OS then resolves (so a
+    case-insensitive filesystem may still find ``Guidance``). Doing the same with ``os`` skips
+    importing ``importlib.resources`` (pathlib, zipfile and friends) on every SessionStart. Any other
+    layout (several portions, a zip, a regular package) keeps the ``importlib.resources`` path.
+    """
+
+    import finishup.resources as package
+
+    spec = package.__spec__
+    portions = list(package.__path__)
+    if (
+        spec is not None
+        and spec.origin is None
+        and type(spec.loader).__name__ == "NamespaceLoader"
+        and len(portions) == 1
+        and type(portions[0]) is str
+        and os.path.isdir(portions[0])
+    ):
+        base = portions[0]
+        # importlib lists the portion first, so a listing failure surfaces from the same place.
+        # Found or not, it then opens this same joined path through the OS.
+        os.listdir(base)
+        return open(os.path.join(base, _GUIDANCE_DIRECTORY, _GUIDANCE_FILE), "rb")  # noqa: SIM115
+    from importlib import resources
+
+    node = resources.files("finishup.resources").joinpath(f"{_GUIDANCE_DIRECTORY}/{_GUIDANCE_FILE}")
+    return node.open("rb")
 
 
 def handle_startup_context(
@@ -23,8 +62,7 @@ def handle_startup_context(
     # The shared guidance owns the materiality trigger. Read only a bounded
     # packaged prefix; the rest of the workflow remains an on-demand MCP read.
     try:
-        node = resources.files("finishup.resources").joinpath("guidance/agent-instructions.md")
-        with node.open("rb") as stream:
+        with _open_guidance() as stream:
             prefix = stream.read(1_024).decode("utf-8", errors="ignore")
         cue = prefix.split("\n\n", 2)[1].strip()
         if "finishup://guidance/workflow.md" not in cue:
