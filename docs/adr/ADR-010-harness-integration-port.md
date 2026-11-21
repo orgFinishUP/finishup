@@ -505,7 +505,9 @@ Approved checks never execute inside the hook RPC budget. A generation-fenced
 `ObservationVerificationSupervisor` owned by the ready application lifecycle drains pending jobs:
 one job runs per workspace through the enforcing sandbox, newer pending state coalesces older
 pending work, abandoned generation leases recover after restart, and a result becomes current only
-if post-run state still matches. Sandbox absence is an explicit unavailable result, never a pass.
+if post-run state still matches. Returning to a state whose work was superseded, or whose result
+went non-current, re-arms that state's job as the latest work and its new result replaces the
+earlier one. Sandbox absence is an explicit unavailable result, never a pass.
 Bundle migration `0004` owns durable inspection snapshots, workspace→FinishUP-session routes, and
 session-scoped current advice; migration `0003` is immutable. Local advice consumes this
 evidence offline and materializes through existing `finding_recorded`; ordinary
