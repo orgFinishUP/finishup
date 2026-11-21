@@ -32,6 +32,7 @@ from finishup.protocol.guidance_uris import (
     FOCUSED_GUIDANCE_URIS,
     GUIDANCE_DOCUMENT_URIS,
     GUIDANCE_TOPIC_URIS,
+    legacy_guidance_uri,
 )
 from finishup.protocol.models import ReadGuidanceResult
 
@@ -217,3 +218,60 @@ def test_the_remaining_hand_written_routes_name_catalogued_anchors(relative: str
     assert anchors, relative
     for anchor in anchors:
         assert f"{document}#{anchor}" in GUIDANCE_TOPIC_URIS, anchor
+
+
+@pytest.mark.parametrize(
+    "current",
+    (
+        _TEMPLATES,
+        "finishup://guidance/workflow.md",
+        "finishup://guidance/workflow.md#delegation-and-project-coordination",
+        "finishup://guidance/agent-instructions.md",
+    ),
+)
+def test_a_legacy_uri_lists_the_same_sections_in_the_legacy_scheme(current: str) -> None:
+    """ADR-048: a pre-rename ``yoetz://`` read names the same sections in the caller's scheme."""
+
+    legacy = legacy_guidance_uri(current)
+    expected = guidance_sections(current)
+    assert expected
+    listed = guidance_sections(legacy)
+    assert [section.uri for section in listed] == [legacy_guidance_uri(s.uri) for s in expected]
+    assert [section.byte_count for section in listed] == [s.byte_count for s in expected]
+    document = legacy.partition("#")[0]
+    assert all(section.uri.startswith(document + "#") for section in listed)
+    assert legacy not in {section.uri for section in listed}
+
+
+def test_a_legacy_document_lists_the_legacy_title_anchor() -> None:
+    uris = {section.uri for section in guidance_sections("yoetz://guidance/workflow.md")}
+    assert "yoetz://guidance/workflow.md#yoetz-cooperative-workflow" in uris
+    assert "yoetz://guidance/workflow.md#finishup-cooperative-workflow" not in uris
+
+
+@pytest.mark.parametrize("host", ("generic", "claude", "cursor", "codex"))
+def test_page_zero_of_a_legacy_read_carries_the_sections_in_the_legacy_scheme(
+    host: McpHostProfile,
+) -> None:
+    legacy = legacy_guidance_uri(_TEMPLATES)
+    result = _call({"uri": legacy}, host)
+    assert result.isError is False
+    wire = cast(dict[str, object], result.structuredContent)
+    assert wire["page"] == "0"
+    assert wire["uri"] == legacy
+    listed = cast(list[dict[str, object]], wire["sections"])
+    assert [entry["uri"] for entry in listed] == [
+        legacy_guidance_uri(s.uri) for s in guidance_sections(_TEMPLATES)
+    ]
+    ReadGuidanceResult.model_validate(wire)
+    block = result.content[0]
+    assert isinstance(block, types.TextContent)
+    if host == "codex":
+        assert "sections in structuredContent.sections; read only the one you need" in block.text
+    else:
+        _head, marker, trailer = block.text.partition(f"\n{GUIDANCE_SECTIONS_MARKER} ")
+        assert marker
+        assert trailer.startswith(f"document={legacy} count={len(listed)}\n")
+        assembler = GuidancePageAssembler()
+        assembler.add(wire, host_text=block.text)
+        assert assembler.received_pages == (0,)
