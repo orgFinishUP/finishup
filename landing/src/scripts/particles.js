@@ -96,8 +96,8 @@ const rgb = (hex) => [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16) / 25
 
 // `hooks.lost` / `hooks.restored` hear about context loss. Software-rendered WebGL is refused
 // (failIfMajorPerformanceCaveat), so slow machines keep the lighter 2D artwork.
-function glRenderer(canvas, palette, hooks = {}) {
-  const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, failIfMajorPerformanceCaveat: true });
+function glRenderer(canvas, palette, hooks = {}, extraAttrs = {}) {
+  const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, failIfMajorPerformanceCaveat: true, ...extraAttrs });
   if (!gl || typeof gl.createShader !== "function" || gl.isContextLost()) return null;
   const pal = new Float32Array(24);
   palette.forEach((hex, k) => pal.set(rgb(hex), k * 3));
@@ -215,13 +215,16 @@ export function mountParticles(canvas, options = {}) {
       invalidate();
     },
   };
-  const gl = options.glCount && canUseGL() ? glRenderer(canvas, [ "#042F24", "#059669", sun, sun, PALETTE.faint, PALETTE.silver, PALETTE.gold ], glHooks) : null;
+  const gl = options.glCount && canUseGL() ? glRenderer(canvas, [ "#042F24", "#059669", sun, sun, PALETTE.faint, PALETTE.silver, PALETTE.gold ], glHooks, options.preserveDrawingBuffer ? { preserveDrawingBuffer: true } : {}) : null;
   const ctx = gl ? null : canvas.getContext("2d");
   if (gl) AM[3] = 0.78; // the sun's corona carries further in the denser artwork
   // `renderer` tells the page what it got: "webgl", "2d", or "none" (draw nothing; show the
   // static story).
-  if (!gl && !ctx) return { renderer: "none", setScene() {}, setScroll() {}, setAnchor() {}, setTier() {}, setLockup() {}, destroy() {} };
+  if (!gl && !ctx) return { renderer: "none", setScene() {}, setScroll() {}, setAnchor() {}, setTier() {}, setLockup() {}, renderNow() {}, destroy() {} };
   const reduced = !!options.reducedMotion;
+  const centered = !!options.centered;
+  const richBlend = typeof options.blend === "number" ? options.blend : 0.46;
+  const heroHoldAt = typeof options.heroHoldAt === "number" ? options.heroHoldAt : null;
   const N = gl ? Math.max(800, Math.min(200000, options.glCount)) : Math.max(800, Math.min(9000, options.count || 9000));
   // Denser artwork draws finer dots, so the shapes gain grain rather than weight.
   // With WebGL a dot's size follows the scene's scale (px per scene unit) and the dot count, so
@@ -362,6 +365,11 @@ export function mountParticles(canvas, options = {}) {
   let raf = 0;
   let elapsed = 0;
   let lastTime = null;
+  let prevScroll = null;
+  let prevScrollDir = 0;
+  let scrollAct = 0;
+  let prevIa = -1;
+  let prevIb = -1;
 
   const set = (i, x, y, z, c) => {
     tgt[i * 3] = x;
@@ -665,8 +673,8 @@ export function mountParticles(canvas, options = {}) {
         spec.still = true;
         spec.turn = false;
         spec.seaFar = -0.2;
-        // on a phone the closing copy fills the middle of the screen, so the sea sinks away
-        if (narrowLayout) spec.seaDrop = 3;
+        // on a phone (or a centered still card) the closing copy fills the card, so the sea sinks away
+        if (narrowLayout || centered) spec.seaDrop = 3;
         spec.halo = 0;
         // When the page gives it a slot (above "is free."), the lockup fills it, centred.
         let lsc = 0.56, lx = 0, ly = narrowLayout ? -0.62 : -0.7, halo = 0.8;
@@ -738,11 +746,11 @@ export function mountParticles(canvas, options = {}) {
         spec.yawAmp = 0.2;
         // a little faded on arrival, more so by the first stop, then steadily clearer
         // through the check, and greener at the end
-        const fade = Math.max(0, Math.min(1, phase / 0.33));
-        const check = Math.max(0, Math.min(1, (phase - 0.33) / 0.33));
-        const heal = Math.max(0, Math.min(1, (phase - 0.33) / 0.67));
-        const green = Math.max(0, Math.min(1, (phase - 0.6) / 0.4));
-        const gone = (rich ? 0.1 + 0.22 * fade : 0.3 + 0.3 * fade) * (1 - heal);
+        const fade = Math.max(0, Math.min(1, phase / 0.28));
+        const check = Math.max(0, Math.min(1, (phase - 0.28) / 0.22));
+        const heal = Math.max(0, Math.min(1, (phase - 0.33) / 0.45));
+        const green = Math.max(0, Math.min(1, (phase - 0.58) / 0.30));
+        const gone = (rich ? 0.12 + 0.24 * fade : 0.3 + 0.3 * fade) * (1 - heal);
         for (i = I0; i < NS; i += IS) {
           f = i / NS;
           if (f < 0.88) {
@@ -760,9 +768,13 @@ export function mountParticles(canvas, options = {}) {
           } else if (check > 0) {
             const q = (f - 0.88) / 0.12;
             const ck = rich ? -0.42 : 0; // the dense path's robot stands further left
-            if (q < 0.4) seg(i, 0.5 + ck, 0.06, 0.66 + ck, 0.24, 0.07, 1, -0.3);
-            else if (check > 0.45) seg(i, 0.66 + ck, 0.24, 1.0 + ck, -0.2, 0.07, 1, -0.3);
-            else sphere(i, 0.66 + ck, 0.24, -0.3, 0.05, 1);
+            const p1 = Math.min(1, check / 0.38);
+            const p2 = Math.max(0, Math.min(1, (check - 0.35) / 0.65));
+            if (q < 0.36 || p2 <= 0) {
+              seg(i, 0.5 + ck, 0.06, 0.5 + ck + 0.16 * p1, 0.06 + 0.18 * p1, 0.07, 1, -0.3);
+            } else {
+              seg(i, 0.66 + ck, 0.24, 0.66 + ck + 0.34 * p2, 0.24 - 0.44 * p2, 0.07, 1, -0.3);
+            }
           } else if (rich) fromSet(i, pts, 2.5, -0.46, 0.24, 0.14, 0);
           else sphere(i, 0.75, 0, 0, 1.3, 4);
         }
@@ -853,13 +865,16 @@ export function mountParticles(canvas, options = {}) {
       default: {
         // The word between "We use agents for" and "FinishUP makes sure they do it."
         // It changes on its own until the reader scrolls, then holds.
-        if (scroll == null || scroll < (rich ? 0.44 : HERO_HOLD_AT)) heroWord = Math.floor(t / HERO_SECONDS) % HERO_WORDS.length;
+        const holdAt = heroHoldAt != null ? heroHoldAt : (rich ? 0.44 : HERO_HOLD_AT);
+        if (scroll == null || scroll < holdAt) heroWord = Math.floor(t / HERO_SECONDS) % HERO_WORDS.length;
         pts = wordSet(HERO_WORDS[heroWord]);
         spec.yawAmp = 0.12;
         spec.halo = 0.03; // the word must still read
+        const hy = centered ? 0 : -0.16;
+        const hsc = centered ? 1.15 : (narrowLayout ? 0.9 : 1.05);
         for (i = I0; i < NS; i += IS) {
-          if (R[i * 6 + 5] < 0.03) sphere(i, 0, -0.16, 0, 1.0, 1);
-          else fromSet(i, pts, narrowLayout ? 0.9 : 1.05, 0, -0.16, 0.14, 0);
+          if (R[i * 6 + 5] < 0.03) sphere(i, 0, hy, 0, 1.0, 1);
+          else fromSet(i, pts, hsc, 0, hy, 0.14, 0);
         }
       }
     }
@@ -1006,12 +1021,26 @@ export function mountParticles(canvas, options = {}) {
     }
   }
 
-  function frame(t) {
+  function frame(t, dt = 1 / 60) {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
+    const cw = canvas.clientWidth || options.width || 0;
+    const ch = canvas.clientHeight || options.height || 0;
     if (!cw || !ch || (gl && gl.lost)) return;
-    if (rich && !reduced && frames++ > 1) {
+    const h = Math.max(0.25, Math.min(1.5, dt * 60));
+    const scrollDelta = scroll != null && prevScroll != null ? scroll - prevScroll : 0;
+    const scrollVel = Math.abs(scrollDelta) / Math.max(0.008, dt);
+    const reversed = scrollDelta !== 0 && prevScrollDir !== 0 && Math.sign(scrollDelta) !== prevScrollDir;
+    if (scrollDelta !== 0) prevScrollDir = Math.sign(scrollDelta);
+    prevScroll = scroll;
+    scrollAct = Math.max(scrollAct * Math.pow(0.84, h), Math.min(1, scrollVel * 0.45));
+    // On the dense path a scene change is a scroll-coupled storm.
+    const tl = scroll != null ? timeline(scroll, plan, rich ? richBlend : BLEND) : null;
+    const crossing = !!tl && (tl.ia !== prevIa || tl.ib !== prevIb);
+    if (tl) {
+      prevIa = tl.ia;
+      prevIb = tl.ib;
+    }
+    if (rich && !reduced && frames++ > 1 && Math.abs(scrollDelta) <= 0.025 && !crossing && !reversed) {
       IS = 2;
       I0 = 1 - I0;
     } else {
@@ -1022,19 +1051,20 @@ export function mountParticles(canvas, options = {}) {
       canvas.width = Math.round(cw * dpr);
       canvas.height = Math.round(ch * dpr);
     }
-    const S = cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46;
+    const nrw = !centered && cw < 720;
+    narrowLayout = nrw;
+    const S = centered
+      ? (options.scale ? options.scale(cw, ch, scene.form) : Math.min(cw, ch) * 0.48)
+      : (cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46);
     scaleS = S;
     const dotK = gl ? Math.max(0.3, Math.min(1.3, dotRef * S / 368)) : 1;
-    const nrw = cw < 720;
-    narrowLayout = nrw;
-    // On the dense path a scene change is a storm of about a screen of scroll.
-    const tl = scroll != null ? timeline(scroll, plan, rich ? 0.46 : BLEND) : null;
     if (reduced) {
       // Pixel anchors must use the camera that this stable frame will draw with.
-      ox = SCENE_OFFSETS.get(tl ? tl.a : scene.form) || 0;
-      if (tl && tl.b && tl.u > 0) ox += ((SCENE_OFFSETS.get(tl.b) || 0) - ox) * tl.u;
+      ox = centered ? 0 : (SCENE_OFFSETS.get(tl ? tl.a : scene.form) || 0);
+      if (!centered && tl && tl.b && tl.u > 0) ox += ((SCENE_OFFSETS.get(tl.b) || 0) - ox) * tl.u;
     }
-    const cxo = cw / 2 + (nrw ? ox * 0.4 : ox) * cw, cyo = nrw ? ch * 0.36 : ch / 2;
+    const cxo = centered ? cw / 2 : cw / 2 + (nrw ? ox * 0.4 : ox) * cw;
+    const cyo = centered ? ch / 2 : (nrw ? ch * 0.36 : ch / 2);
     if (anchor) anchorN = { x: (anchor.x - cxo) / S, y: (anchor.y - cyo) / S };
     if (tierPx) tierN = { x: (tierPx.x - cxo) / S, y: (tierPx.y - cyo) / S, w: tierPx.w / S, h: tierPx.h / S };
     else tierN = defaultTier;
@@ -1080,6 +1110,7 @@ export function mountParticles(canvas, options = {}) {
           mouse: u < 0.5 ? spec.mouse : specB.mouse,
           still: u < 0.5 ? spec.still : specB.still,
           halo: spec.halo + (specB.halo - spec.halo) * u,
+          focus: (spec.focus || 0) + ((specB.focus || 0) - (spec.focus || 0)) * u,
         };
       }
     } else {
@@ -1106,7 +1137,7 @@ export function mountParticles(canvas, options = {}) {
         }
       }
     }
-    gust += (storm - gust) * 0.06;
+    gust += (storm - gust) * (1 - Math.pow(1 - 0.22, h));
     if (reduced) {
       // One stable rendering per state change, with no spring or camera settling.
       pos.set(tgt);
@@ -1114,39 +1145,44 @@ export function mountParticles(canvas, options = {}) {
       col.set(tcol);
       big.set(tbig);
       tilt = 0;
-      ox = spec.ox;
+      ox = centered ? 0 : spec.ox;
       orb = jit = smx = 0;
     } else {
-      // Each dot is a damped spring on its target: it arrives with a little inertia.
-      // In a storm the springs stiffen, so the dots actually reach the storm's shapes.
-      const k0 = rich ? 0.014 : 0.006, k1 = rich ? 0.01 : 0.006, kg = rich ? gust * 0.038 : 0;
-      const damp = rich ? 0.85 - gust * 0.03 : 0.88;
+      // Each dot is a damped spring on its target: frame-rate independent and scroll-responsive,
+      // so moving up and down tracks the reader's hand without fighting old momentum.
+      const boost = Math.max(gust, scrollAct);
+      const k0 = rich ? 0.03 : 0.012, k1 = rich ? 0.018 : 0.008, kg = rich ? boost * 0.072 : scrollAct * 0.03;
+      const damp = rich ? 0.81 - boost * 0.08 : 0.86 - scrollAct * 0.08;
+      const dampH = Math.pow(damp, h);
+      const revScale = reversed ? 0.65 : 1;
+      const bigLerp = 1 - Math.pow(1 - 0.14, h);
       for (let i = 0; i < N; i++) {
-        const ks = role[i] === 1 && rich && kg < 0.01 ? 0.12 : k0 + R[i * 6 + 4] * k1 + kg;
+        const ks = role[i] === 1 && rich && kg < 0.01 ? 0.14 : k0 + R[i * 6 + 4] * k1 + kg;
         const j = i * 3;
         const dx = tgt[j] - pos[j];
         const dy = tgt[j + 1] - pos[j + 1];
         const dz = tgt[j + 2] - pos[j + 2];
-        vel[j] = (vel[j] + dx * ks) * damp;
-        vel[j + 1] = (vel[j + 1] + dy * ks) * damp;
-        vel[j + 2] = (vel[j + 2] + dz * ks) * damp;
-        pos[j] += vel[j];
-        pos[j + 1] += vel[j + 1];
-        pos[j + 2] += vel[j + 2];
-        if ((rich && gust > 0.05) || dx * dx + dy * dy + dz * dz < 0.02) col[i] = tcol[i];
-        big[i] += (tbig[i] - big[i]) * 0.08;
+        vel[j] = (vel[j] * revScale + dx * ks * h) * dampH;
+        vel[j + 1] = (vel[j + 1] * revScale + dy * ks * h) * dampH;
+        vel[j + 2] = (vel[j + 2] * revScale + dz * ks * h) * dampH;
+        pos[j] += vel[j] * h;
+        pos[j + 1] += vel[j + 1] * h;
+        pos[j + 2] += vel[j + 2] * h;
+        if ((rich && boost > 0.05) || dx * dx + dy * dy + dz * dz < 0.02) col[i] = tcol[i];
+        big[i] += (tbig[i] - big[i]) * bigLerp;
       }
-      tilt += (spec.tilt - tilt) * 0.04;
-      ox += (spec.ox - ox) * 0.04;
-      orb += (spec.orbit - orb) * 0.06;
-      jit += ((spec.still ? 0 : 0.5) - jit) * 0.05;
-      smx += ((spec.mouse ? mx : 0) - smx) * 0.05;
+      const camLerp = 1 - Math.pow(1 - (0.14 + boost * 0.12), h);
+      tilt += (spec.tilt - tilt) * camLerp;
+      ox += (spec.ox - ox) * camLerp;
+      orb += (spec.orbit - orb) * camLerp;
+      jit += ((spec.still ? 0 : 0.5) - jit) * (1 - Math.pow(1 - 0.1, h));
+      smx += ((spec.mouse ? mx : 0) - smx) * (1 - Math.pow(1 - 0.1, h));
     }
     const yaw = reduced ? 0 : Math.sin(t * 0.12) * spec.yawAmp + orb + smx * 0.3;
     const cy0 = Math.cos(yaw), sy0 = Math.sin(yaw), ct = Math.cos(tilt), st = Math.sin(tilt);
-    const narrow = cw < 720;
-    const cx = cw / 2 + (narrow ? ox * 0.4 : ox) * cw;
-    const cy = narrow ? ch * 0.36 : ch / 2;
+    const narrow = !centered && cw < 720;
+    const cx = centered ? cw / 2 - (spec.focus || 0) * S : cw / 2 + (narrow ? ox * 0.4 : ox) * cw;
+    const cy = centered ? ch / 2 : (narrow ? ch * 0.36 : ch / 2);
     const F = 2.6;
     for (let i = 0; i < N; i++) {
       const j = i * 3;
@@ -1234,24 +1270,30 @@ export function mountParticles(canvas, options = {}) {
   function loop(now) {
     raf = 0;
     if (!canRender()) return;
+    let dt = 1 / 60;
     if (!reduced) {
-      if (lastTime !== null) elapsed += Math.max(0, (now - lastTime) / 1000);
+      if (lastTime !== null) {
+        const rawDt = Math.max(0, (now - lastTime) / 1000);
+        elapsed += rawDt;
+        dt = Math.max(0.004, Math.min(0.05, rawDt || 1 / 60));
+      }
       lastTime = now;
     }
     if (!reduced || dirty) {
       dirty = false;
-      frame(reduced ? 0 : elapsed);
+      frame(reduced ? 0 : elapsed, dt);
     }
     schedule();
   }
   const onMove = (e) => {
+    if (e && e.pointerType === "touch") return;
     mx = e.clientX / Math.max(1, window.innerWidth) - 0.5;
   };
   if (!reduced) window.addEventListener("pointermove", onMove, { passive: true });
   window.addEventListener("resize", invalidate);
   document.addEventListener("visibilitychange", syncActivity);
   let io = null;
-  if (typeof IntersectionObserver !== "undefined") {
+  if (!options.manual && typeof IntersectionObserver !== "undefined") {
     io = new IntersectionObserver((en) => {
       if (destroyed) return;
       visible = !!(en[0] && en[0].isIntersecting);
@@ -1259,7 +1301,7 @@ export function mountParticles(canvas, options = {}) {
     });
     io.observe(canvas);
   }
-  if (document.fonts && document.fonts.load) {
+  if (!options.manual && document.fonts && document.fonts.load) {
     document.fonts
       .load('600 120px "Geist"')
       .then(() => {
@@ -1269,7 +1311,7 @@ export function mountParticles(canvas, options = {}) {
       })
       .catch(() => {});
   }
-  schedule();
+  if (!options.manual) schedule();
 
   return {
     renderer: gl ? "webgl" : "2d",
@@ -1303,6 +1345,13 @@ export function mountParticles(canvas, options = {}) {
       lockPx = x == null ? null : { x, y, w, h };
       invalidate();
     },
+    renderNow(width, height) {
+      if (destroyed) return;
+      if (width) options.width = width;
+      if (height) options.height = height;
+      dirty = false;
+      frame(0, 1 / 60);
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -1316,4 +1365,63 @@ export function mountParticles(canvas, options = {}) {
       if (gl) gl.dispose();
     },
   };
+}
+
+// Render a batch of crisp static scene stills using one short-lived offscreen canvas, then
+// immediately release its WebGL/2D context so paused and reduced-motion views keep the full
+// visual beauty of the artwork at zero ongoing CPU/GPU cost.
+export function renderStills(items, options = {}) {
+  if (!items || !items.length) return false;
+  const off = document.createElement("canvas");
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const stillScale = (cw, ch, form) => {
+    if (form === "hero") return Math.min(cw * 0.44, ch * 0.96);
+    if (form === "end") return cw * 0.44;
+    if (form === "swarm") return Math.min(cw / 1.72, ch / 1.66);
+    if (form === "robot") return Math.min(cw / 1.82, ch / 1.56);
+    return Math.min(cw / 1.52, ch / 1.48);
+  };
+  const art = mountParticles(off, {
+    count: options.count || 4200,
+    glCount: options.glCount || 24000,
+    reducedMotion: true,
+    centered: true,
+    manual: true,
+    preserveDrawingBuffer: true,
+    drawTier: false,
+    scale: stillScale,
+  });
+  if (art.renderer === "none") {
+    art.destroy();
+    return false;
+  }
+  try {
+    for (const item of items) {
+      const target = item.canvas;
+      const cw = Math.round(item.width || target.clientWidth || 0);
+      const ch = Math.round(item.height || target.clientHeight || 0);
+      if (!cw || !ch) continue;
+      if (item.form === "end") art.setLockup(cw / 2, ch / 2, cw * 0.9, ch * 0.8);
+      else art.setLockup(null);
+      art.setScene(item.form, item.phase ?? 0);
+      art.renderNow(cw, ch);
+      target.width = Math.round(cw * dpr);
+      target.height = Math.round(ch * dpr);
+      const g = target.getContext("2d");
+      if (g) {
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        g.clearRect(0, 0, target.width, target.height);
+        g.drawImage(off, 0, 0, target.width, target.height);
+      }
+    }
+    return true;
+  } finally {
+    art.destroy();
+    try {
+      const gl = off.getContext("webgl2");
+      gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+      // ignore
+    }
+  }
 }
