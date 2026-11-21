@@ -41,17 +41,16 @@ const structuredData = {
 };
 
 // The scroll story: one scene at a time, in order. `screens` is how many viewport
-// heights the scene spans: a beat and a half for each of the first two lines and
-// 1.2 for each of the robot's three lines.
+// heights the scene spans, tuned so every copy beat and particle transition stay in sync.
 const plan = [
-  ["hero", 0.82],
-  ["alone", 1.5],
-  ["swarm", 1.5],
-  ["robot", 3.6],
-  ["end", 1],
+  ["hero", 0.95],
+  ["alone", 1.25],
+  ["swarm", 1.25],
+  ["robot", 2.85],
+  ["end", 0.95],
 ];
-// Extra screens the finished lockup holds, frozen, before the footer scrolls in.
-const END_HOLD = 0.6;
+// Brief hold for the finished lockup before the footer glides in.
+const END_HOLD = 0.25;
 const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + END_HOLD;
 
 ---
@@ -94,7 +93,6 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           <a class="lnk" href={INSTALL_GUIDE} target="_blank" rel="noopener">Install</a>
           <a class="lnk" href={DOCS} target="_blank" rel="noopener">Docs</a>
           <a class="lnk" href={GITHUB} target="_blank" rel="noopener">GitHub</a>
-          <button class="motion-toggle" id="motion-toggle" type="button" aria-controls="story" aria-label="Pause animation" hidden>Pause</button>
           <button class="btn sm add-agent" type="button" aria-label="Set up with your agent" data-prompt={AGENT_PROMPT} hidden>Set up</button>
         </nav>
       </div>
@@ -107,6 +105,7 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           <div class="copies">
           <div class="copy hero on" data-copy="hero">
             <h1 class="stanza center hero-top">We use agents for <span class="hero-word">work, code, research and more.</span></h1>
+            <canvas class="still-art still-hero" data-still-form="hero" data-still-phase="0" aria-hidden="true"></canvas>
             <div class="hero-bottom">
               <p class="stanza center"><span class="nowrap"><img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span> <span class="accent">helps them finish.</span></p>
               <div class="actions">
@@ -117,20 +116,25 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
             </div>
           </div>
           <div class="copy side" data-copy="alone">
+            <canvas class="still-art still-scene" data-still-form="alone" data-still-phase="0.45" aria-hidden="true"></canvas>
             <p class="stanza copy-right">We used to work alone. <span class="fade">Slowly.</span></p>
           </div>
           <div class="copy side" data-copy="swarm">
+            <canvas class="still-art still-scene" data-still-form="swarm" data-still-phase="0.5" aria-hidden="true"></canvas>
             <div class="copy-right">
               <p class="stanza">Now agents work. <span class="fade">We manage more.</span></p>
             </div>
           </div>
           <div class="copy side" data-copy="robot1">
+            <canvas class="still-art still-scene" data-still-form="robot" data-still-phase="0.22" aria-hidden="true"></canvas>
             <p class="stanza copy-right">But agents aren't human. <span class="fade">They drift. They forget.</span></p>
           </div>
           <div class="copy side" data-copy="robot2">
+            <canvas class="still-art still-scene" data-still-form="robot" data-still-phase="0.55" aria-hidden="true"></canvas>
             <p class="stanza copy-right">FinishUP checks the work record.</p>
           </div>
           <div class="copy side" data-copy="robot3">
+            <canvas class="still-art still-scene" data-still-form="robot" data-still-phase="0.92" aria-hidden="true"></canvas>
             <div class="copy-right">
               <p class="stanza">And shows what remains open.</p>
             </div>
@@ -140,6 +144,7 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
               <div class="end-title">
                 {/* The artwork draws the FinishUP lockup into this room, as the subject of the line below */}
                 <span class="dot-lockup" aria-hidden="true"></span>
+                <canvas class="still-art still-lockup" data-still-form="end" data-still-phase="1" aria-hidden="true"></canvas>
                 <h2 class="display"><span class="end-subject">FinishUP </span>is <strong>free.</strong></h2>
               </div>
               <p class="stanza center sub">Open source. Local checks on your computer.</p>
@@ -170,6 +175,52 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
       </div>
     </footer>
 
+    <nav class="scene-rail" id="scene-rail" aria-label="Story scenes" hidden>
+      <button type="button" class="rail-dot on" data-scene-target="hero" aria-label="Introduction" aria-current="step"></button>
+      <button type="button" class="rail-dot" data-scene-target="alone" aria-label="Working alone"></button>
+      <button type="button" class="rail-dot" data-scene-target="swarm" aria-label="Agents working"></button>
+      <button type="button" class="rail-dot" data-scene-target="robot1" aria-label="FinishUP checks"></button>
+      <button type="button" class="rail-dot" data-scene-target="end" aria-label="FinishUP is free"></button>
+    </nav>
+
+    <aside class="a11y-menu" id="a11y-menu" aria-label="Accessibility options" hidden>
+      <div class="a11y-panel" id="a11y-panel" role="region" aria-label="Accessibility settings" hidden>
+        <div class="a11y-head">
+          <span class="a11y-title">Accessibility</span>
+          <button class="a11y-close" id="a11y-close" type="button" aria-label="Close accessibility menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div class="a11y-row" id="motion-row">
+          <div class="a11y-label">
+            <span class="a11y-name">Pause motion</span>
+            <span class="a11y-desc">Show crisp still artwork</span>
+          </div>
+          <button class="a11y-switch" id="motion-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Pause animation" hidden>
+            <span class="a11y-knob" aria-hidden="true"></span>
+          </button>
+        </div>
+        <p class="a11y-note" id="a11y-reduced-note" hidden>System reduced motion is active — showing still artwork.</p>
+        <div class="a11y-row" id="graphics-row">
+          <div class="a11y-label">
+            <span class="a11y-name">Text only</span>
+            <span class="a11y-desc">Hide decorative dot artwork</span>
+          </div>
+          <button class="a11y-switch" id="graphics-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Hide decorative artwork">
+            <span class="a11y-knob" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+      <button class="a11y-trigger" id="a11y-trigger" type="button" aria-expanded="false" aria-controls="a11y-panel" aria-label="Accessibility options" title="Accessibility options">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="4.5" r="2" />
+          <path d="M4.5 9h15" />
+          <path d="M12 9v5.5" />
+          <path d="M8.5 21 12 14.5 15.5 21" />
+        </svg>
+      </button>
+    </aside>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden>
       <span class="ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>
       <div>
@@ -180,7 +231,7 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
     </div>
 
     <script>
-      import { mountParticles } from "../scripts/particles.js";
+      import { mountParticles, renderStills } from "../scripts/particles.js";
 
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
       // In forced colours the artwork's dots carry no reliable contrast, so the story is static.
@@ -189,8 +240,19 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
       const narrow = window.matchMedia("(max-width: 719px)");
       const canvas = document.getElementById("particles") as HTMLCanvasElement | null;
       const story = document.getElementById("story");
+      const a11yMenu = document.getElementById("a11y-menu");
+      const a11yTrigger = document.getElementById("a11y-trigger") as HTMLButtonElement | null;
+      const a11yPanel = document.getElementById("a11y-panel");
+      const a11yClose = document.getElementById("a11y-close") as HTMLButtonElement | null;
+      const a11yReducedNote = document.getElementById("a11y-reduced-note");
+      const motionRow = document.getElementById("motion-row");
       const motionToggle = document.getElementById("motion-toggle") as HTMLButtonElement | null;
+      const graphicsRow = document.getElementById("graphics-row");
+      const graphicsToggle = document.getElementById("graphics-toggle") as HTMLButtonElement | null;
+      const sceneRail = document.getElementById("scene-rail");
+      const railDots = Array.from(document.querySelectorAll<HTMLButtonElement>(".rail-dot"));
       const copies = Array.from(document.querySelectorAll<HTMLElement>(".copy"));
+      const stillCanvases = Array.from(document.querySelectorAll<HTMLCanvasElement>(".still-art"));
       const mainContent = document.getElementById("main-content");
       const planEl = document.getElementById("story-plan");
       const plan: [string, number][] = planEl ? JSON.parse(planEl.textContent || "[]") : [];
@@ -199,39 +261,128 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
       // Set when the artwork cannot draw (no context, or WebGL lost for good): the static story.
       let artFailed = false;
       let userPaused = false;
+      let userTextOnly = false;
       let layoutFits = true;
+      let activeCopyName = "hero";
       let stopStory = () => {};
+      let stillsWidth = 0;
+      let cancelAutoScroll = () => {};
 
-      // Leave room for the copy's drift. If any scene cannot fit, let the whole story
-      // flow as text instead of clipping it inside the sticky stage.
+      // Leave room for the copy's drift. Measure without scroll-drift transforms so resizing
+      // while scrolled (such as mobile browser bars hiding/showing) never falsely trips fallback.
       function copyFits() {
         if (!canvas || !story) return false;
+        const saved = copies.map((el) => el.style.transform);
+        for (const el of copies) el.style.transform = "none";
         const stage = canvas.getBoundingClientRect();
-        return Array.from(story.querySelectorAll<HTMLElement>(".hero-top, .hero-bottom, .copy-right, .copy-center")).every((el) => {
+        const fits = Array.from(story.querySelectorAll<HTMLElement>(".hero-top, .hero-bottom, .copy-right, .copy-center")).every((el) => {
           const r = el.getBoundingClientRect();
           return r.top >= stage.top + 24 && r.bottom <= stage.bottom - 24
             && r.left >= stage.left && r.right <= stage.right;
         });
+        copies.forEach((el, i) => {
+          if (saved[i]) el.style.transform = saved[i];
+          else el.style.removeProperty("transform");
+        });
+        return fits;
+      }
+
+      function paintStills() {
+        if (!stillCanvases.length || typeof renderStills !== "function") return;
+        const items = stillCanvases.map((el) => ({
+          canvas: el,
+          form: el.dataset.stillForm || "hero",
+          phase: Number(el.dataset.stillPhase || "0"),
+          width: el.clientWidth || (el.classList.contains("still-hero") ? 640 : el.classList.contains("still-lockup") ? 600 : 440),
+          height: el.clientHeight || (el.classList.contains("still-hero") ? 180 : el.classList.contains("still-lockup") ? 125 : 320),
+        }));
+        const ok = renderStills(items, {
+          count: narrow.matches ? 2200 : 4200,
+          glCount: narrow.matches ? 10000 : 24000,
+        });
+        if (!ok) {
+          artFailed = true;
+          syncPresentation();
+        } else {
+          stillsWidth = innerWidth;
+        }
+      }
+
+      // Smooth programmatic scroll for scene-rail jumps that yields immediately to any wheel or touch input.
+      function scrollToY(targetY: number) {
+        cancelAutoScroll();
+        if (reduced.matches) {
+          window.scrollTo({ top: targetY, behavior: "instant" as ScrollBehavior });
+          return;
+        }
+        const startY = window.scrollY;
+        const dist = targetY - startY;
+        if (Math.abs(dist) < 2) return;
+        const duration = Math.min(720, Math.max(260, Math.abs(dist) * 0.35));
+        const t0 = performance.now();
+        let rafId = 0;
+        const stop = () => {
+          cancelAnimationFrame(rafId);
+          window.removeEventListener("wheel", stop);
+          window.removeEventListener("touchstart", stop);
+          window.removeEventListener("pointerdown", stop);
+          window.removeEventListener("keydown", stop);
+          cancelAutoScroll = () => {};
+        };
+        cancelAutoScroll = stop;
+        window.addEventListener("wheel", stop, { passive: true });
+        window.addEventListener("touchstart", stop, { passive: true });
+        window.addEventListener("pointerdown", stop, { passive: true });
+        window.addEventListener("keydown", stop, { passive: true });
+        const step = (now: number) => {
+          const p = Math.min(1, (now - t0) / duration);
+          const eased = 1 - Math.pow(1 - p, 3);
+          window.scrollTo({ top: startY + dist * eased, behavior: "instant" as ScrollBehavior });
+          if (p < 1) rafId = requestAnimationFrame(step);
+          else stop();
+        };
+        rafId = requestAnimationFrame(step);
+      }
+
+      function setA11yOpen(open: boolean) {
+        if (!a11yPanel || !a11yTrigger) return;
+        a11yPanel.hidden = !open;
+        a11yTrigger.setAttribute("aria-expanded", String(open));
       }
 
       function syncPresentation() {
         stopStory();
         stopStory = () => {};
+        cancelAutoScroll();
         // Canvas support is checked without taking a context: a canvas that hands out a 2D
         // context can never give the artwork WebGL.
+        const hasCanvas = !!canvas && typeof CanvasRenderingContext2D !== "undefined" && !!story && plan.length > 0;
+        const canDraw = pageActive && !artFailed && !forced.matches && hasCanvas;
         const canAnimate = pageActive && !artFailed && !reduced.matches && !forced.matches && !compact.matches && layoutFits
           && !!canvas && typeof CanvasRenderingContext2D !== "undefined" && !!story && plan.length > 0;
-        const animated = canAnimate && !userPaused;
+        const animated = canAnimate && !userPaused && !userTextOnly;
+        const showStills = !animated && canDraw && !userTextOnly;
+        if (a11yMenu) a11yMenu.hidden = !canDraw;
         if (motionToggle) {
           motionToggle.hidden = !canAnimate;
-          motionToggle.textContent = userPaused ? "Play" : "Pause";
-          motionToggle.setAttribute("aria-label", userPaused ? "Play animation" : "Pause animation");
+          motionToggle.setAttribute("aria-checked", String(userPaused || userTextOnly));
+          motionToggle.setAttribute("aria-label", userPaused || userTextOnly ? "Play animation" : "Pause animation");
         }
+        if (motionRow) motionRow.hidden = !canAnimate;
+        if (a11yReducedNote) a11yReducedNote.hidden = !(canDraw && reduced.matches && !userTextOnly);
+        if (graphicsToggle) {
+          graphicsToggle.setAttribute("aria-checked", String(userTextOnly));
+          graphicsToggle.setAttribute("aria-label", userTextOnly ? "Show decorative artwork" : "Hide decorative artwork");
+        }
+        if (graphicsRow) graphicsRow.hidden = !canDraw;
+        if (sceneRail) sceneRail.hidden = !animated;
         story?.classList.toggle("animated", animated);
+        story?.classList.toggle("stills", showStills);
         const spacer = story?.querySelector<HTMLElement>(".spacer");
+        const totalScreens = Number(story?.dataset.screens || "0");
         if (spacer && story) {
           const unit = CSS.supports("height", "100svh") ? "svh" : "vh";
-          spacer.style.height = animated ? `${Number(story.dataset.screens) * 100}${unit}` : "";
+          spacer.style.height = animated ? `${totalScreens * 100}${unit}` : "";
         }
         for (const el of copies) {
           el.inert = false;
@@ -240,7 +391,11 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           el.style.removeProperty("transform");
           el.classList.add("on");
         }
-        if (!animated || !canvas || !story) return;
+        if (!animated) {
+          if (showStills) paintStills();
+          return;
+        }
+        if (!canvas || !story) return;
         if (!copyFits()) {
           layoutFits = false;
           syncPresentation();
@@ -254,8 +409,9 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         const tryDots = import.meta.env.DEV ? Number(new URLSearchParams(location.search).get("dots")) : 0;
         const unit = innerWidth < 720 ? innerWidth * 0.42 : Math.min(innerWidth, innerHeight) * 0.46;
         const glCount = tryDots > 0 ? tryDots : Math.round(Math.max(12000, Math.min(60000, 60000 * (unit / 368) ** 2)));
+        const blend = 0.28;
         const art = mountParticles(canvas, {
-          count: narrow.matches ? 2600 : 5500, glCount, plan, drawTier: false,
+          count: narrow.matches ? 2600 : 5500, glCount, plan, blend, heroHoldAt: 0.14, drawTier: false,
           onUnavailable: () => { artFailed = true; syncPresentation(); },
         });
         if (art.renderer === "none") {
@@ -270,51 +426,90 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         let acc = 0;
         for (const [name, len] of plan) { start[name] = [acc, len]; acc += len; }
         const robot = start.robot ?? [0, 3];
-        const COPY_AT: [string, number][] = [
-          ["hero", 0],
-          ["alone", start.alone?.[0] ?? 0],
-          ["swarm", start.swarm?.[0] ?? 0],
-          ["robot1", robot[0]],
-          ["robot2", robot[0] + robot[1] / 3],
-          ["robot3", robot[0] + (2 * robot[1]) / 3],
-          ["end", start.end?.[0] ?? 0],
+        const beat = robot[1] / 3;
+        // Each copy beat is timed directly against the particle storm boundaries (`blend`) so
+        // outgoing text clears before peak storm and incoming text lands as the new form settles.
+        // The three robot beats share one continuous form and crossfade tightly without a blank gap.
+        type CopySpec = {
+          name: string;
+          in0: number; in1: number;
+          out0: number; out1: number;
+          drift: boolean;
+          rail: string;
+        };
+        const a0 = start.alone?.[0] ?? 0.95;
+        const s0 = start.swarm?.[0] ?? 2.2;
+        const r0 = robot[0];
+        const r1 = r0 + beat;
+        const r2 = r0 + 2 * beat;
+        const e0 = start.end?.[0] ?? 6.3;
+        const COPY_SPECS: CopySpec[] = [
+          { name: "hero", in0: -1, in1: -1, out0: a0 - 0.34, out1: a0 - 0.14, drift: true, rail: "hero" },
+          { name: "alone", in0: a0 + 0.14, in1: a0 + 0.32, out0: s0 - 0.34, out1: s0 - 0.14, drift: true, rail: "alone" },
+          { name: "swarm", in0: s0 + 0.14, in1: s0 + 0.32, out0: r0 - 0.34, out1: r0 - 0.14, drift: true, rail: "swarm" },
+          { name: "robot1", in0: r0 + 0.14, in1: r0 + 0.32, out0: r1 - 0.14, out1: r1 + 0.02, drift: true, rail: "robot1" },
+          { name: "robot2", in0: r1 - 0.02, in1: r1 + 0.14, out0: r2 - 0.14, out1: r2 + 0.02, drift: true, rail: "robot1" },
+          { name: "robot3", in0: r2 - 0.02, in1: r2 + 0.14, out0: e0 - 0.34, out1: e0 - 0.14, drift: true, rail: "robot1" },
+          { name: "end", in0: e0 + 0.20, in1: e0 + 0.40, out0: Infinity, out1: Infinity, drift: false, rail: "end" },
         ];
+        const railTargets: Record<string, number> = {
+          hero: 0,
+          alone: a0 + 0.55,
+          swarm: s0 + 0.55,
+          robot1: r0 + 0.5,
+          end: e0 + 0.72,
+        };
         const byCopy: Record<string, HTMLElement> = {};
         for (const el of copies) if (el.dataset.copy) byCopy[el.dataset.copy] = el;
         const ease = (v: number) => { const u = Math.max(0, Math.min(1, v)); return u * u * (3 - 2 * u); };
-        const rest = (-(story.getBoundingClientRect().top + window.scrollY) + canvas.clientHeight * 0.5) / canvas.clientHeight;
+        const screenPx = () => {
+          const h = spacer?.offsetHeight || 0;
+          if (h > 0 && totalScreens > 0) return h / totalScreens;
+          return canvas.clientHeight || 900;
+        };
         const update = () => {
           raf = 0;
-          const vh = canvas.clientHeight || 900;
-          const screens = (-story.getBoundingClientRect().top + vh * 0.5) / vh;
+          const spx = screenPx();
+          const screens = Math.max(0, Math.min(totalScreens, -story.getBoundingClientRect().top / spx));
           let active: HTMLElement | undefined;
-          COPY_AT.forEach(([name, at], k) => {
-            const el = byCopy[name];
-            if (!el) return;
-            const next = k + 1 < COPY_AT.length ? COPY_AT[k + 1][1] : Infinity;
-            const fadeIn = k === 0 ? 1 : ease((screens - (at + 0.05)) / 0.17);
-            const fadeOut = next === Infinity ? 1 : 1 - ease((screens - (next - 0.22)) / 0.17);
+          let activeRail = "hero";
+          for (const spec of COPY_SPECS) {
+            const el = byCopy[spec.name];
+            if (!el) continue;
+            const fadeIn = spec.in0 < 0 ? 1 : ease((screens - spec.in0) / Math.max(0.01, spec.in1 - spec.in0));
+            const fadeOut = spec.out0 === Infinity ? 1 : 1 - ease((screens - spec.out0) / Math.max(0.01, spec.out1 - spec.out0));
             const opacity = Math.min(fadeIn, fadeOut);
-            const from = k === 0 ? rest : at + 0.05;
-            const to = next === Infinity ? from + 1 : next - 0.05;
-            const drift = (k === 0 ? 0 : 12) - 24 * Math.max(0, Math.min(1, (screens - from) / Math.max(0.01, to - from)));
+            let ty = (fadeOut - fadeIn) * 14;
+            if (spec.drift) {
+              const from = spec.in0 < 0 ? 0 : spec.in0;
+              const to = spec.out1 === Infinity ? from + 1 : spec.out1;
+              ty += (spec.in0 < 0 ? 0 : 8) - 16 * Math.max(0, Math.min(1, (screens - from) / Math.max(0.01, to - from)));
+            }
             el.style.opacity = opacity.toFixed(3);
-            el.style.transform = `translateY(${((fadeOut - fadeIn) * 18 + drift).toFixed(1)}px)`;
-            const on = opacity > 0.5;
+            el.style.transform = `translateY(${ty.toFixed(1)}px)`;
+            const on = opacity > 0.45;
             el.classList.toggle("on", on);
             el.inert = !on;
             el.setAttribute("aria-hidden", String(!on));
-            if (on) active = el;
-          });
+            if (on) {
+              active = el;
+              activeCopyName = spec.name;
+              activeRail = spec.rail;
+            }
+          }
+          for (const dot of railDots) {
+            const isCurrent = dot.dataset.sceneTarget === activeRail;
+            dot.classList.toggle("on", isCurrent);
+            if (isCurrent) dot.setAttribute("aria-current", "step");
+            else dot.removeAttribute("aria-current");
+          }
           // Keyboard focus stays in a visible scene when a scroll changes the story.
           const focused = document.activeElement;
           if (focused instanceof HTMLElement && focused.closest(".copy[inert]")) {
             const target = active?.querySelector<HTMLElement>("a, button") ?? mainContent;
             target?.focus({ preventScroll: true });
           }
-          // The artwork draws the closing lockup in dots into the room above "is free.". The
-          // slot moves with the copy's drift, fonts and images, so it is measured after this
-          // update's writes, on scroll, resize and load only: no frame loop of its own.
+          // The artwork draws the closing lockup in dots into the room above "is free.".
           const c = canvas.getBoundingClientRect();
           if (lockupSlot) {
             const r = lockupSlot.getBoundingClientRect();
@@ -323,22 +518,47 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           art.setScroll(screens);
         };
         const onScroll = () => {
+          if (mounted) update();
+        };
+        const onResize = () => {
           if (mounted && !raf) raf = requestAnimationFrame(update);
         };
+        const onRailClick = (e: Event) => {
+          const btn = e.currentTarget as HTMLButtonElement;
+          const target = btn.dataset.sceneTarget;
+          if (!target || !(target in railTargets)) return;
+          const storyTop = story.getBoundingClientRect().top + window.scrollY;
+          scrollToY(Math.max(0, Math.round(storyTop + railTargets[target] * screenPx())));
+        };
+        for (const dot of railDots) dot.addEventListener("click", onRailClick);
         window.addEventListener("scroll", onScroll, { passive: true });
-        window.addEventListener("resize", onScroll);
-        window.addEventListener("load", onScroll);
-        document.fonts?.ready.then(onScroll).catch(() => {});
+        window.addEventListener("resize", onResize);
+        window.addEventListener("load", onResize);
+        document.fonts?.ready.then(onResize).catch(() => {});
         update();
         stopStory = () => {
           mounted = false;
           cancelAnimationFrame(raf);
+          for (const dot of railDots) dot.removeEventListener("click", onRailClick);
           window.removeEventListener("scroll", onScroll);
-          window.removeEventListener("resize", onScroll);
-          window.removeEventListener("load", onScroll);
+          window.removeEventListener("resize", onResize);
+          window.removeEventListener("load", onResize);
           art.destroy();
         };
       }
+
+      // Preserve the reader's place in the story when toggling between animated and still/text views.
+      function preserveReadingPosition(wasAnimated: boolean, sceneName: string) {
+        const isAnimated = !!story?.classList.contains("animated");
+        if (wasAnimated === isAnimated || sceneName === "hero") return;
+        const target = copies.find((el) => el.dataset.copy === sceneName);
+        if (!target) return;
+        if (!isAnimated) {
+          const top = target.getBoundingClientRect().top + window.scrollY - 88;
+          window.scrollTo({ top: Math.max(0, top), behavior: "instant" as ScrollBehavior });
+        }
+      }
+
       reduced.addEventListener("change", syncPresentation);
       forced.addEventListener("change", syncPresentation);
       compact.addEventListener("change", syncPresentation);
@@ -349,13 +569,53 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         if (!layoutFits || (story?.classList.contains("animated") && !copyFits())) {
           layoutFits = true;
           syncPresentation();
+        } else if (story?.classList.contains("stills") && Math.abs(innerWidth - stillsWidth) > 48) {
+          paintStills();
         }
       }
       window.addEventListener("resize", syncLayout);
-      document.fonts?.ready.then(syncLayout).catch(() => {});
+      document.fonts?.ready.then(() => {
+        syncLayout();
+        if (story?.classList.contains("stills")) paintStills();
+      }).catch(() => {});
+
+      a11yTrigger?.addEventListener("click", () => {
+        const open = !!a11yPanel?.hidden;
+        setA11yOpen(open);
+      });
+      a11yClose?.addEventListener("click", () => {
+        setA11yOpen(false);
+        a11yTrigger?.focus();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && a11yPanel && !a11yPanel.hidden) {
+          setA11yOpen(false);
+          a11yTrigger?.focus();
+        }
+      });
+      document.addEventListener("click", (e) => {
+        if (a11yPanel && !a11yPanel.hidden && a11yMenu && !a11yMenu.contains(e.target as Node | null)) {
+          setA11yOpen(false);
+        }
+      });
       motionToggle?.addEventListener("click", () => {
-        userPaused = !userPaused;
+        const wasAnimated = !!story?.classList.contains("animated");
+        const scene = activeCopyName;
+        if (userTextOnly) {
+          userTextOnly = false;
+          userPaused = false;
+        } else {
+          userPaused = !userPaused;
+        }
         syncPresentation();
+        preserveReadingPosition(wasAnimated, scene);
+      });
+      graphicsToggle?.addEventListener("click", () => {
+        const wasAnimated = !!story?.classList.contains("animated");
+        const scene = activeCopyName;
+        userTextOnly = !userTextOnly;
+        syncPresentation();
+        preserveReadingPosition(wasAnimated, scene);
       });
       window.addEventListener("pagehide", () => { pageActive = false; stopStory(); });
       window.addEventListener("pageshow", (e) => {
