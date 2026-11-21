@@ -39,9 +39,11 @@ uv run python scripts/provision_test_instance.py create --base ~/.yz-instances -
 
 What happens, in order:
 
-1. The exact revision is resolved (`--revision` defaults to `HEAD`). A modified working tree is
-   refused unless you pass `--allow-dirty`, which records `source_state: modified`; a non-HEAD
-   revision is exported with `git archive` and built from that clean tree.
+1. The exact revision is resolved (`--revision` defaults to `HEAD`) and exported with
+   `git archive`; the wheel is built from that clean tree, so untracked or ignored files in the
+   checkout never reach it, even for `HEAD`. A working tree whose tracked files differ from `HEAD`
+   is refused unless you pass `--allow-dirty`, which builds the working tree as it stands
+   (untracked and ignored files included) and records `source_state: modified`.
 2. `uv build --no-sources` produces the wheel into `<base>/<tag>/dist/`; its SHA-256 becomes the
    instance's `package_digest`.
 3. `uv venv` plus `uv pip install <wheel>` creates `<base>/<tag>/runtime/`, a runtime holding

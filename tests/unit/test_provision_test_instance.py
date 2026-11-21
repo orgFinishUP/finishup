@@ -995,3 +995,79 @@ def test_a_runtime_with_no_launcher_at_all_is_still_checked_before_its_state_goe
     assert runner.calls == []
     assert (layout["state"] / "state" / "instance-identity.json").is_file()
     assert _dispose(layout)["state"] == "removed"
+
+
+class _BuildReached(Exception):
+    pass
+
+
+def _head_checkout(root: Path) -> Path:
+    checkout = root / "checkout"
+    (checkout / "src" / "demo").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname="demo"\n', encoding="utf-8")
+    (checkout / "src" / "demo" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    git = ["git", "-C", str(checkout), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    return checkout
+
+
+def _create_until_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkout: Path, *, allow_dirty: bool
+) -> set[str]:
+    """Run ``create`` for HEAD and return the files of the tree the wheel would be built from."""
+
+    _accept_base(monkeypatch)
+    built: set[str] = set()
+
+    def build(source: Path, dist: Path) -> Path:
+        built.update(
+            path.relative_to(source).as_posix()
+            for path in source.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(source).parts
+        )
+        raise _BuildReached
+
+    monkeypatch.setattr(_MODULE, "_build_wheel", build)
+    args = argparse.Namespace(
+        base=str(tmp_path / "base"),
+        tag="t1",
+        checkout=str(checkout),
+        revision="HEAD",
+        lifecycle="disposable",
+        expires_in=None,
+        allow_dirty=allow_dirty,
+        python=sys.executable,
+    )
+    with pytest.raises(_BuildReached):
+        _MODULE.command_create(args)
+    return built
+
+
+def test_a_clean_head_build_uses_only_the_files_of_that_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file beside the package that HEAD does not track (a module not yet added, a stray
+    resource, an ignored file) must not reach a wheel recorded as ``source_state: clean``."""
+
+    checkout = _head_checkout(tmp_path)
+    (checkout / "src" / "demo" / "untracked.py").write_text("STRAY = 1\n", encoding="utf-8")
+    (checkout / "src" / "demo" / "ignored.py").write_text("STRAY = 2\n", encoding="utf-8")
+    built = _create_until_build(monkeypatch, tmp_path, checkout, allow_dirty=False)
+    assert built == {".gitignore", "pyproject.toml", "src/demo/__init__.py"}
+
+
+def test_allow_dirty_builds_the_modified_working_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = _head_checkout(tmp_path)
+    (checkout / "src" / "demo" / "__init__.py").write_text("CHANGED = 1\n", encoding="utf-8")
+    with pytest.raises(_MODULE.ProvisionError, match="^checkout_modified: "):
+        _create_until_build(monkeypatch, tmp_path, checkout, allow_dirty=False)
+    built = _create_until_build(monkeypatch, tmp_path, checkout, allow_dirty=True)
+    assert built == {".gitignore", "pyproject.toml", "src/demo/__init__.py"}
+    assert (checkout / "src" / "demo" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "CHANGED = 1\n"
