@@ -12967,8 +12967,11 @@ is a deletion or a submodule, otherwise it is omitted as `not_regular_file` with
 (Git's output for it is discarded). Every blob a shown section reads (`src`, and a non-zero `dst`,
 of mode 100644, 100755 or 120000) is verified: a loose object must be a regular, owner-only file
 (any link count) whose descriptor still has the recorded identity before and after it is read, and
-is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file blob`
-(at most 8 MiB each, 64 MiB in all) and hashed. Either mismatch omits the section as
+is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file`
+(at most 8 MiB each, 64 MiB in all) and hashed. With three or more such blobs, one
+`cat-file --batch-check` and one `cat-file --batch` read them, holding at most 8 MiB at once and
+using at most half the time left (none when under 5 seconds are left); any blob that batch does not
+answer cleanly is read on its own with `git cat-file blob`. Either mismatch omits the section as
 `object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld. The
 adapter overwrites the compressed and inflated buffers it owns. Tracked and untracked files whose
 base name is on the adapter's credential-name list are listed by name only (`credential_name`). The

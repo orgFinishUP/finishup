@@ -521,3 +521,42 @@ def _private_group_is(value: bool) -> Callable[[int, int], bool]:
         return value
 
     return answer
+
+
+def test_runner_writes_standard_input_only_when_asked(tmp_path: Path) -> None:
+    """A batch command reads its input while its answers are drained; otherwise stdin is null."""
+
+    repository = _repository(tmp_path)
+    workspace = open_local_workspace(repository)
+    blob = _git(repository, "rev-parse", "HEAD:tracked.txt").strip()
+    # Far more input and output than a pipe buffer holds, so writing all of it before reading
+    # any answer would deadlock.
+    missing = [f"{index:040x}".encode("ascii") for index in range(1, 4_001)]
+    request = b"".join(oid + b"\n" for oid in (*missing, blob))
+
+    _, answer = git_subject_state_module.run_read_only_git(
+        workspace,
+        ("cat-file", "--batch-check"),
+        stdout_limit=1_048_576,
+        stdin_bytes=request,
+    )
+
+    assert answer == b"".join(oid + b" missing\n" for oid in missing) + blob + b" blob 9\n"
+    # Without ``stdin_bytes`` Git still reads ``/dev/null``: an empty batch.
+    assert (
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64
+        )[1]
+        == b""
+    )
+    # Empty input closes Git's standard input at once.
+    assert (
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64, stdin_bytes=b""
+        )[1]
+        == b""
+    )
+    with pytest.raises(ValueError, match="git_output_limit"):
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64, stdin_bytes=request
+        )
