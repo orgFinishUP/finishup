@@ -976,6 +976,14 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   tuple[JsonValue, ...] | Mapping[str, JsonValue]`; arbitrary `Sequence` implementations are not
   protocol arrays.
 - `canonical_encode(value: JsonValue) -> bytes` — restricted-JCS bytes (ADR-002).
+  A value made only of exact `dict`, `list`, `tuple`, `str`, `int`, `bool` and `None` nodes is
+  checked in one walk and then written by the C JSON encoder; every other value takes the
+  node-by-node walker, with the same bytes and the same errors in the same order. The checked
+  value is read twice, so a caller must not mutate a value while it is being encoded: a value
+  that another thread or a finalizer changes between the check and the write can be encoded
+  as text the walker would reject, or raise the C encoder's `ValueError` instead of the
+  walker's `ProtocolValueError`
+  ([startup and hot-path performance](runbooks/startup-and-hot-path-performance.md)).
 - `canonical_digest(value) -> str` — `"sha256:" + hex(sha256(canonical_encode(value)))`.
 - `strict_json_parse(data: bytes | bytearray) -> JsonValue` — snapshots a `bytearray` once to
   immutable bytes, then performs strict UTF-8 parsing and rejects BOM/NUL, duplicate keys,
