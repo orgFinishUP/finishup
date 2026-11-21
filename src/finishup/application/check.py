@@ -1329,6 +1329,10 @@ _PROJECT_ADVICE_AUTHORITY_REFUSALS: Final = frozenset(
 )
 
 
+_MAX_PROJECT_ADVISORY_NOTES: Final = 64
+"""``CheckCommitResult.advisory_notes`` and the ``check-result`` wire both hold at most 64."""
+
+
 async def _current_project_advisory_notes(
     app: Application,
     task_id: str,
@@ -1508,7 +1512,9 @@ async def _current_project_advisory_notes(
                     if final_members != counterpart_ids:
                         counterpart_ids = ()
                         duplicate_task_ids = ()
-            if counterpart_ids:
+            # A project can add two notes, so the bound is checked before each one: the cut
+            # stays deterministic in project order and never exceeds the result's own limit.
+            if counterpart_ids and len(notes) < _MAX_PROJECT_ADVISORY_NOTES:
                 try:
                     notes.append(
                         CheckAdvisoryNote(
@@ -1522,7 +1528,7 @@ async def _current_project_advisory_notes(
                     # IDs are validated again at the structural result boundary.  An invalid adapter
                     # row is not allowed to become a public note or affect the check itself.
                     pass
-            if counterpart_ids and duplicate_task_ids:
+            if counterpart_ids and duplicate_task_ids and len(notes) < _MAX_PROJECT_ADVISORY_NOTES:
                 try:
                     notes.append(
                         CheckAdvisoryNote(
@@ -1534,7 +1540,7 @@ async def _current_project_advisory_notes(
                     )
                 except (TypeError, ValueError):
                     pass
-        if len(notes) >= 64:
+        if len(notes) >= _MAX_PROJECT_ADVISORY_NOTES:
             break
     return tuple(notes)
 
@@ -2403,7 +2409,19 @@ async def _attach_current_project_advisory_notes(
     """Attach current advice without changing the frozen result or replay semantics."""
 
     notes = await _current_project_advisory_notes(app, task_id, result.findings)
-    return result if result.advisory_notes == notes else replace(result, advisory_notes=notes)
+    if result.advisory_notes == notes:
+        return result
+    try:
+        return replace(result, advisory_notes=notes)
+    except (TypeError, ValueError) as exc:
+        # The check is already committed (or is being replayed). Advice the result cannot carry
+        # is dropped with a diagnostic; it never turns a recorded verdict into a failed request.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="project_advisory_attach",
+        )
+        return result
 
 
 @dataclass(frozen=True, slots=True)

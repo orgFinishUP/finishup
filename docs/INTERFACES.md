@@ -3433,6 +3433,10 @@ MCP text summaries retain only identities, counts, digests, and allowlisted gap 
 carry raw paths.
 The ordinary advice view carries the counterpart task and an exact project/detection/generation
 selector; its resource field follows the same sink-bound hydration and omission rules.
+The check result's project advisory notes (`live_member_present`, `duplicate_finding`) are current
+projection context attached after the check commits and on its exact replay. They hold at most 64
+notes, filled in project-id order and cut at that bound even between one project's two notes.
+Advice the result cannot carry is dropped with a diagnostic; it never fails the recorded check.
 
 **Bounded reversal and retired guards.** Live, consented project membership may disclose bounded
 sibling task identity and state through the service status projection. It never authorizes attach,

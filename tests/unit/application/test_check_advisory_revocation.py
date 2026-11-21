@@ -1,4 +1,4 @@
-"""Revocation fences for current project advisory notes."""
+"""Revocation fences and the result bound for current project advisory notes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import finishup.application.check as check
+from builders.projection_workflow import run_projection_workflow
 from finishup.domain.coordination import CoordinationError, CoordinationErrorCode
+from finishup.ports.ledger import CheckCommitResult
 
 _PROJECT = "prj_00000000-0000-4000-8000-000000000001"
 _REQUESTER = "tsk_00000000-0000-4000-8000-000000000001"
@@ -157,3 +159,107 @@ async def test_unexpected_advisory_failure_still_records_diagnostic(
     diagnostics.assert_called_once_with(
         failure, component="check", operation="project_advisory_read"
     )
+
+
+def _many_project_app(projects: tuple[str, ...]) -> SimpleNamespace:
+    async def live_members(
+        task_id: str, *, project: str, expected_generation: int
+    ) -> tuple[str, ...]:
+        assert task_id == _REQUESTER
+        assert project in projects
+        assert expected_generation == 1
+        return (_COUNTERPART,)
+
+    return SimpleNamespace(
+        project_application=SimpleNamespace(
+            catalog=SimpleNamespace(
+                list_task_project_ids=AsyncMock(return_value=projects),
+                project_state=AsyncMock(return_value=SimpleNamespace(membership_generation=1)),
+            ),
+            live_admitted_member_task_ids=live_members,
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_project_advisory_notes_stop_at_the_result_bound_inside_a_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first project yields one note and every later project two, so the bound of 64 falls
+    # between a project's member note and its duplicate note.
+    projects = tuple(f"prj_00000000-0000-4000-8000-{index:012d}" for index in range(1, 40))
+
+    async def duplicates(
+        _app: object, _task: str, project_id: str, *_args: object, **_kwargs: object
+    ) -> tuple[str, ...]:
+        return () if project_id == projects[0] else (_REQUESTER, _COUNTERPART)
+
+    monkeypatch.setattr(check, "_duplicate_project_advisory_task_ids", duplicates)
+    notes_reader = cast(
+        Callable[[object, str, tuple[object, ...]], Awaitable[tuple[object, ...]]],
+        getattr(check, "_current_project_advisory_notes"),
+    )
+
+    notes = await notes_reader(_many_project_app(projects), _REQUESTER, ())
+
+    assert len(notes) == 64
+    # The cut is deterministic in project order: the 33rd project keeps its member note only.
+    assert getattr(notes[-1], "kind") == "live_member_present"
+    assert getattr(notes[-1], "project_id") == projects[32]
+    assert {getattr(note, "project_id") for note in notes} == set(projects[:33])
+
+
+@pytest.mark.anyio
+async def test_attaching_bounded_project_advice_to_a_committed_check_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = await run_projection_workflow("disabled")
+    committed = workflow.case("check").internal
+    assert isinstance(committed, CheckCommitResult)
+    projects = tuple(f"prj_00000000-0000-4000-8000-{index:012d}" for index in range(1, 40))
+
+    async def duplicates(
+        _app: object, _task: str, project_id: str, *_args: object, **_kwargs: object
+    ) -> tuple[str, ...]:
+        return () if project_id == projects[0] else (_REQUESTER, _COUNTERPART)
+
+    monkeypatch.setattr(check, "_duplicate_project_advisory_task_ids", duplicates)
+    attach = cast(
+        Callable[[object, str, CheckCommitResult], Awaitable[CheckCommitResult]],
+        getattr(check, "_attach_current_project_advisory_notes"),
+    )
+
+    attached = await attach(_many_project_app(projects), _REQUESTER, committed)
+
+    assert len(attached.advisory_notes) == 64
+    assert attached.findings == committed.findings
+
+
+@pytest.mark.anyio
+async def test_unattachable_project_advice_leaves_the_committed_check_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = await run_projection_workflow("disabled")
+    committed = workflow.case("check").internal
+    assert isinstance(committed, CheckCommitResult)
+    note = check.CheckAdvisoryNote("live_member_present", _PROJECT, (_COUNTERPART,), 1)
+    # A projection that breaks the result's own invariants (here, a repeated note) is advice that
+    # cannot be shown; it must never fail the already committed check.
+    monkeypatch.setattr(
+        check, "_current_project_advisory_notes", AsyncMock(return_value=(note, note))
+    )
+    diagnostics = Mock()
+    monkeypatch.setattr(check, "record_unexpected_exception_without_raising", diagnostics)
+    attach = cast(
+        Callable[[object, str, CheckCommitResult], Awaitable[CheckCommitResult]],
+        getattr(check, "_attach_current_project_advisory_notes"),
+    )
+
+    attached = await attach(SimpleNamespace(), _REQUESTER, committed)
+
+    assert attached is committed
+    diagnostics.assert_called_once()
+    assert diagnostics.call_args.kwargs == {
+        "component": "check",
+        "operation": "project_advisory_attach",
+    }
