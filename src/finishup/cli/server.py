@@ -467,6 +467,32 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "'finishup server code forget' in each repository",
         _UNSAFE,
     ),
+    # 'server code exclude|allow|level' (ADR-054 decision 10): this computer's own record of the
+    # owner's choices, never a server fault; fixed text, never a path or pattern.
+    "code_copy_settings_limit": (
+        "FinishUP already keeps the most code-copy choices it allows for that server (256 "
+        "patterns and 256 allowed files for each repository, and choices for 256 repositories), "
+        "so nothing was changed; remove one first with 'finishup server code exclude remove', "
+        "'allow remove' or 'level default'",
+        _USAGE,
+    ),
+    "code_copy_settings_invalid": (
+        "this computer's record of your code-copy choices for that server (code-copy.json in "
+        "that server's folder of this computer's FinishUP state) is damaged, so no copy of any "
+        "repository's code is sent to it and its choices cannot be read or changed; remove that "
+        "file and record your choices again with 'finishup server code exclude add', 'allow "
+        "add' and 'level L1' before work there syncs again, since until then only the "
+        "always-excluded names and the server's own are left out",
+        _UNSAFE,
+    ),
+    "code_copy_settings_unsafe": (
+        "this computer's record of your code-copy choices for that server (code-copy.json in "
+        "that server's folder of this computer's FinishUP state) is not owner-only or is a link, "
+        "so no copy of any repository's code is sent to it and its choices cannot be read or "
+        "changed; make it a regular file only you can read and write (mode 600) in an "
+        "owner-only folder, then run this command again",
+        _UNSAFE,
+    ),
 }
 
 DISCLOSURE_LINES: Final = (

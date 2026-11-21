@@ -395,6 +395,120 @@ def test_allow_remove_sends_less_with_no_question_and_is_idempotent(
     assert [path for path, _digest in _allowed(remote)] == ["other.ini"]
 
 
+# --- a full or unusable record of the choices ---------------------------------------------------
+
+
+def _fill(
+    record: targets.ServerTarget,
+    worktree: Path,
+    *,
+    exclude: int = 0,
+    allow: int = 0,
+) -> bytes:
+    """Record ``exclude`` patterns and ``allow`` entries for ``worktree``; the record's bytes."""
+
+    from dataclasses import replace
+
+    from finishup.client.code_copy_settings import settings_path, update_settings
+
+    key = server_cli.repository_here(str(worktree)).key
+    patterns = tuple(sorted(f"p{index:04d}/" for index in range(exclude)))
+    allowed = tuple(sorted((f"f{index:04d}.ini", "sha256:" + "0" * 64) for index in range(allow)))
+    root = targets.target_root(record.target_id)
+    with targets.registry_lock():
+        update_settings(
+            root,
+            record.target_id,
+            key,
+            lambda settings: replace(settings, exclude=patterns, allow=allowed),
+        )
+    return settings_path(root).read_bytes()
+
+
+def test_a_full_list_is_refused_as_full_on_this_computer_and_nothing_is_changed(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.code_copy_settings import settings_path
+
+    before = _fill(remote, repository, exclude=256, allow=256)
+    path = settings_path(targets.target_root(remote.target_id))
+    server = _server(monkeypatch, _Server())
+    console = _Console(b"lab")
+    _console(monkeypatch, console)
+    (repository / "aws.ini").write_bytes(b"key\n")
+    for arguments in (("exclude", "add", "one-more/"), ("allow", "add", "aws.ini")):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code == 2, result.output
+        assert result.stderr.startswith("code_copy_settings_limit:"), result.output
+        assert "remove one first" in result.stderr
+        assert server_cli._DEFAULT_REMEDY not in result.output  # pyright: ignore[reportPrivateUsage]
+    # Nothing was asked, of the owner or of a server, and the record is as it was.
+    assert console.opened == 0 and server.asked == []
+    assert path.read_bytes() == before
+    # A pattern already on the full list is still recorded (nothing changes).
+    again = _RUNNER.invoke(app, ["server", "code", "exclude", "add", "p0000/"])
+    assert again.exit_code == 0, again.output
+    assert path.read_bytes() == before
+
+
+def test_a_repository_past_the_most_this_computer_keeps_is_refused_as_full(
+    remote: targets.ServerTarget, repository: Path
+) -> None:
+    from dataclasses import replace
+
+    from finishup.client.code_copy_settings import settings_path, update_settings
+
+    root = targets.target_root(remote.target_id)
+    with targets.registry_lock():
+        for index in range(256):
+            update_settings(
+                root,
+                remote.target_id,
+                "sha256:" + f"{index:064x}",
+                lambda settings: replace(settings, level="L1"),
+            )
+    before = settings_path(root).read_bytes()
+    del repository
+    result = _RUNNER.invoke(app, ["server", "code", "exclude", "add", "data/"])
+    assert result.exit_code == 2, result.output
+    assert result.stderr.startswith("code_copy_settings_limit:"), result.output
+    assert settings_path(root).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [("malformed", "code_copy_settings_invalid"), ("shared", "code_copy_settings_unsafe")],
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [("exclude", "list"), ("exclude", "add", "data/"), ("allow", "list"), ("level", "L1")],
+    ids=" ".join,
+)
+def test_an_unusable_record_of_the_choices_names_its_repair_never_a_server_fault(
+    remote: targets.ServerTarget,
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    reason: str,
+    arguments: tuple[str, ...],
+) -> None:
+    from finishup.client.code_copy_settings import settings_path
+
+    del repository
+    path = settings_path(targets.target_root(remote.target_id))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_bytes(b"{not json}\n")
+    os.chmod(path, 0o644 if damage == "shared" else 0o600)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code == 20, result.output
+    assert result.stderr.startswith(f"{reason}:"), result.output
+    assert server_cli._DEFAULT_REMEDY not in result.output  # pyright: ignore[reportPrivateUsage]
+    assert "code-copy.json" in result.stderr and "no copy" in result.stderr
+    assert server.asked == []
+    assert path.read_bytes() == b"{not json}\n"
+
+
 # --- forget --all ---------------------------------------------------------------------------------
 
 _FORGOT = {

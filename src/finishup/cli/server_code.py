@@ -840,6 +840,15 @@ def _update(
         raise ServerCommandRefused(error.reason) from None
 
 
+def _room_for(entries: tuple[object, ...], entry: object) -> None:
+    """Refuse adding ``entry`` to a list already holding the most entries a repository keeps."""
+
+    from finishup.client.code_copy_settings import MAX_ENTRIES
+
+    if entry not in entries and len(entries) >= MAX_ENTRIES:
+        raise ServerCommandRefused("code_copy_settings_limit")
+
+
 def _confirm(record: ServerTarget, lines: tuple[str, ...]) -> None:
     from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
@@ -870,6 +879,7 @@ def server_code_exclude_add(pattern: str, repository: _REPOSITORY_OPTION = None)
     here = repository_here(repository)
 
     def add(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        _room_for(settings.exclude, pattern)
         return replace(settings, exclude=tuple(sorted({*settings.exclude, pattern})))
 
     _update(record, here.key, add)
@@ -967,6 +977,8 @@ def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> N
     finally:
         os.close(descriptor)
     content = "sha256:" + digest.hexdigest()
+    # A full list is refused before the owner is asked anything (and again under the lock).
+    _room_for(_settings(record, here.key).allow, (relative, content))
     _confirm(
         record,
         (
@@ -978,6 +990,7 @@ def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> N
     )
 
     def allow(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        _room_for(settings.allow, (relative, content))
         return replace(settings, allow=tuple(sorted({*settings.allow, (relative, content)})))
 
     _update(record, here.key, allow)

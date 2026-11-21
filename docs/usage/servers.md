@@ -558,6 +558,13 @@ it changes, it is scanned again. `allow list` shows the allowed paths and a shor
 their contents, never the contents. An exclusion wins over an allowed file. None of these takes
 back what was already sent; only forget does.
 
+FinishUP keeps up to 256 patterns and 256 allowed files for each project, for up to 256 projects
+per server; past that, the command changes nothing and asks you to remove one first. These choices
+live in a file on this computer, kept readable only by you. If that file is damaged or others can
+read it, no copy of any project's code is sent to that server, and these commands say so and how
+to repair it: make it readable only by you again, or remove it and record your choices again
+before work there syncs.
+
 ### Removing a server that keeps copies
 
 `finishup server remove lab` asks you first, on your own terminal, whether to forget the copies

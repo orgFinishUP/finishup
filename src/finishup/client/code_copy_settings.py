@@ -15,8 +15,10 @@ One owner-only record per remote target, ``<target root>/config/code-copy.json``
 
 Reading never raises for a missing record (no choices) and raises ``CodeCopySettingsError`` with a
 closed reason for one that is not owner-only, a link, too large, malformed or another target's;
-the exporter then refuses to build anything (fail closed). Writers hold
-``targets.registry_lock()``; paths and patterns appear only on owner displays.
+the exporter then refuses to build anything (fail closed). A change that would keep more than
+``MAX_ENTRIES`` patterns or allowed contents for one repository, or choices for more than 256
+repositories, is refused as ``code_copy_settings_limit`` and the intact record is left as it was.
+Writers hold ``targets.registry_lock()``; paths and patterns appear only on owner displays.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json
 __all__ = [
     "SETTINGS_FILE_NAME",
     "SETTINGS_SCHEMA",
+    "MAX_ENTRIES",
     "CodeCopySettingsError",
     "RepositoryCodeSettings",
     "read_settings",
@@ -49,14 +52,15 @@ SETTINGS_SCHEMA: Final = "yoetz.server-code-copy/1"
 SETTINGS_FILE_NAME: Final = "code-copy.json"
 _MAX_RECORD_BYTES: Final = 1_048_576
 _MAX_REPOSITORIES: Final = 256
-_MAX_ENTRIES: Final = 256
+MAX_ENTRIES: Final = 256
 _KEY: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TARGET_ID: Final = re.compile(r"^t_[0-9a-f]{8,64}$")
 _DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class CodeCopySettingsError(Exception):
-    """The record cannot be used; ``reason`` is ``code_copy_settings_unsafe`` or ``_invalid``."""
+    """The record cannot be used or changed as asked; ``reason`` is ``code_copy_settings_unsafe``,
+    ``code_copy_settings_invalid`` or, for a change past a limit, ``code_copy_settings_limit``."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -76,14 +80,14 @@ class RepositoryCodeSettings:
             raise CodeCopySettingsError("code_copy_settings_invalid")
         if (
             type(self.exclude) is not tuple
-            or len(self.exclude) > _MAX_ENTRIES
+            or len(self.exclude) > MAX_ENTRIES
             or list(self.exclude) != sorted(set(self.exclude))
             or not all(valid_pattern(pattern) for pattern in self.exclude)
         ):
             raise CodeCopySettingsError("code_copy_settings_invalid")
         if (
             type(self.allow) is not tuple
-            or len(self.allow) > _MAX_ENTRIES
+            or len(self.allow) > MAX_ENTRIES
             or list(self.allow) != sorted(set(self.allow))
             or not all(
                 type(path) is str
@@ -246,7 +250,8 @@ def update_settings(
     updated = change(settings.get(key, RepositoryCodeSettings()))
     settings[key] = updated
     if len([entry for entry in settings.values() if not entry.empty]) > _MAX_REPOSITORIES:
-        raise CodeCopySettingsError("code_copy_settings_invalid")
+        # The record read was intact, so only this change can have passed the limit.
+        raise CodeCopySettingsError("code_copy_settings_limit")
     path = settings_path(root)
     try:
         ensure_owner_only_dir(path.parent)

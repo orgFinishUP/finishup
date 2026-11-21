@@ -484,7 +484,15 @@ or a named pipe as not a regular file; `allow list` shows the paths with `sha256
 12 hex digits, never contents; `allow remove` is idempotent, says when the path was not allowed,
 and says that what was already sent stays until it is forgotten. An exclusion is checked before
 the scan, so `exclude add` of an allowed path keeps it out again. A server that keeps no copies
-refuses the commands that reach it (`server_level_unavailable`).
+refuses the commands that reach it (`server_level_unavailable`). The record keeps at most 256
+patterns and 256 allowed contents per repository and choices for 256 repositories: a change past
+either is refused as `code_copy_settings_limit` (usage, nothing written; `allow add` refuses before
+it asks), never as a damaged record. A record that cannot be read refuses these commands as
+`code_copy_settings_invalid` or `code_copy_settings_unsafe` (exit 20, like every unsafe local
+state): the fixed text says it is this computer's record, not a server, that no copy is sent
+while it stands, and how to repair it (make it an owner-only regular file, or remove it and record
+the choices again before work syncs). None of these reasons asks a server, and none reads as a
+server that did not respond.
 
 ### 11. The release switch: `L2_RELEASED` is true, and what it rests on
 
