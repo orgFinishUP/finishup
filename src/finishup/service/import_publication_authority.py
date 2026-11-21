@@ -41,6 +41,57 @@ _MAX_LINES: Final = 20_000
 _MAX_BATCHES: Final = 1_024
 
 
+# Consent-store states that clear on their own or on the owner's next step: a review that is still
+# open, the authorization another import holds until it finishes, a legacy pending that was just
+# discarded (a retry prepares a fresh one), and a contended or unwritable lock/cleanup.
+_RETRY_LATER_REASONS: Final = frozenset(
+    {
+        "review_in_progress",
+        "import_publication_authorization_active",
+        "legacy_pending_invalidated",
+        "pending_lock_failed",
+        "pending_clear_failed",
+        "import_publication_authorization_clear_failed",
+    }
+)
+_UNREADABLE_REASONS: Final = frozenset(
+    {"pending_corrupt", "pending_tampered", "import_publication_authorization_corrupt"}
+)
+
+
+def _consent_state_error(exc: ElevatedBootstrapError) -> PublicOperationError | None:
+    """Map a consent-store refusal to a bounded public error; other reasons stay invariant bugs."""
+
+    if exc.reason == "import_publication_authorization_active":
+        return PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "Another authorized import must finish before this plan can be authorized.",
+            True,
+            safe_details={"operation": "import_publication", "state": "pending"},
+        )
+    if exc.reason == "review_in_progress":
+        return PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "A consent review is in progress; replay this import after it finishes.",
+            True,
+            safe_details={"operation": "import_publication", "state": "pending"},
+        )
+    if exc.reason in _RETRY_LATER_REASONS:
+        return PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "The local consent state is busy; replay this import.",
+            True,
+            safe_details={"operation": "import_publication", "state": "pending"},
+        )
+    if exc.reason in _UNREADABLE_REASONS:
+        return PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The local consent record for this import is unreadable; inspect consent status.",
+            False,
+        )
+    return None
+
+
 @dataclass(slots=True)
 class _ActiveImport:
     target_digest: str
@@ -129,11 +180,17 @@ class ImportPublicationAuthority:
     def activate(self, allocation: ImportAllocation) -> object:
         preview = self._preview(allocation)
         target_digest = cast(str, preview["authorization_target_digest"])
-        authorization = load_import_publication_authorization(
-            target_digest, _state=self._state_path
-        )
+        try:
+            authorization = load_import_publication_authorization(
+                target_digest, _state=self._state_path
+            )
+            pending = None if authorization is not None else load_pending(_state=self._state_path)
+        except ElevatedBootstrapError as exc:
+            mapped = _consent_state_error(exc)
+            if mapped is None:
+                raise
+            raise mapped from exc
         if authorization is None:
-            pending = load_pending(_state=self._state_path)
             if pending is None:
                 try:
                     prepare_pending(
@@ -143,18 +200,11 @@ class ImportPublicationAuthority:
                         _state=self._state_path,
                     )
                 except ElevatedBootstrapError as exc:
-                    if exc.reason == "import_publication_authorization_active":
-                        raise PublicOperationError(
-                            PublicErrorCode.OPERATION_PENDING,
-                            "Another authorized import must finish before this plan can be authorized.",
-                            True,
-                            safe_details={
-                                "operation": "import_publication",
-                                "state": "pending",
-                            },
-                        ) from exc
                     if exc.reason != "pending_already_active":
-                        raise
+                        mapped = _consent_state_error(exc)
+                        if mapped is None:
+                            raise
+                        raise mapped from exc
             elif (
                 pending.operation != "import_publication" or pending.target_digest != target_digest
             ):
@@ -218,9 +268,14 @@ class ImportPublicationAuthority:
     def reconcile_completed(self, allocation: ImportAllocation) -> None:
         preview = self._preview(allocation)
         target_digest = cast(str, preview["authorization_target_digest"])
-        authorization = load_import_publication_authorization(
-            target_digest, _state=self._state_path
-        )
+        try:
+            authorization = load_import_publication_authorization(
+                target_digest, _state=self._state_path
+            )
+        except ElevatedBootstrapError:
+            # The replayed import is already terminal. Preserve its truthful result; an unreadable
+            # owner-only record stays for local consent recovery instead of failing the replay.
+            return
         if authorization is None:
             return
         try:

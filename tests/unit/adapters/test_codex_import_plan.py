@@ -22,6 +22,7 @@ from finishup.domain.values import Timestamp, request_id, session_id, task_id, w
 from finishup.ports.clock import ClockPort
 from finishup.ports.ids import IdPort
 from finishup.ports.importer import (
+    ImportAllocation,
     ImportAllocationOutcome,
     ImportByteSource,
     ImportCaptureInput,
@@ -34,11 +35,14 @@ from finishup.protocol.canonical import canonical_digest, strict_json_parse
 from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 from finishup.protocol.models import PublishWorkRequestModel
 from finishup.service.elevated_bootstrap import (
+    _import_authorization_path,  # pyright: ignore[reportPrivateUsage]
     claim_pending_for_review,
     complete_review,
     load_import_publication_authorization,
     load_pending,
+    pending_path,
     record_import_publication_authorization,
+    review_path,
 )
 from finishup.service.import_publication_authority import ImportPublicationAuthority
 
@@ -226,3 +230,126 @@ async def test_production_plan_is_persisted_and_immediately_resumable_for_consen
     assert (
         load_import_publication_authorization(authorization.target_digest, _state=tmp_path) is None
     )
+
+
+async def _consent_paused_allocation() -> ImportAllocation:
+    """Capture, plan, and persist one Codex import exactly as the first import call does."""
+
+    task = ids.task_id("codex-plan")
+    session = ids.session_id("codex-plan")
+    writer = ids.writer_id("codex-plan")
+    id_port = FixedIds()
+    objects = MemoryObjects(id_port)
+    plans = CodexImportPlans(
+        task_id=task,
+        objects=cast(ObjectStorePort, objects),
+        clock=cast(ClockPort, FixedClock()),
+        ids=cast(IdPort, id_port),
+    )
+    importer = MemoryImporter(
+        task_id=task,
+        admitted_session_id=session,
+        ownership_fence=ownership_fence(),
+        state=MemoryImportState(),
+        transaction_lock=asyncio.Lock(),
+        objects=cast(ObjectStorePort, objects),
+        ledger=cast(LedgerPort, object()),
+        clock=cast(ClockPort, FixedClock()),
+        ids=cast(IdPort, id_port),
+        plan_preparer=plans.prepare,
+        plan_reader=plans.read,
+    )
+    captured = await importer.capture(
+        ImportCaptureInput(
+            cast(ImportByteSource, _Bytes(b'{"type":"turn.started"}\n')),
+            "0.139.0",
+            "codex-exec-jsonl/0.139.0/v1",
+            (),
+            "control-import",
+            0,
+            Timestamp("2026-07-19T12:00:00.000Z"),
+            "stdin",
+        )
+    )
+    identity = ImportSourceIdentity(
+        task_id(task),
+        captured.source_commitment,
+        captured.codex_capability_profile_id,
+        CODEX_JSONL_MAPPING_VERSION,
+        canonical_digest(
+            {
+                "codex_capability_profile_id": captured.codex_capability_profile_id,
+                "mapping_version": CODEX_JSONL_MAPPING_VERSION,
+                "source_commitment": captured.source_commitment,
+                "task_id": task,
+            }
+        ),
+    )
+    request = ids.request_id("plan-1")
+    allocation = await importer.reserve_or_resume(
+        ImportCommand(
+            session_id(session),
+            writer_id(writer),
+            request_id(request),
+            canonical_digest({"request_id": request}),
+            identity,
+            CODEX_JSONL_MAPPING_VERSION,
+        ),
+        captured,
+    )
+    plan = await importer.prepare_plan(allocation)
+    return await importer.publish_plan(allocation, plan)
+
+
+@pytest.mark.anyio
+async def test_import_retried_while_its_consent_is_under_review_is_a_retryable_pending(
+    tmp_path: Path,
+) -> None:
+    allocation = await _consent_paused_allocation()
+    authority = ImportPublicationAuthority(state_path=tmp_path)
+    with pytest.raises(PublicOperationError) as first:
+        authority.activate(allocation)
+    assert first.value.code is PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
+
+    claimed = claim_pending_for_review(_state=tmp_path)
+    with pytest.raises(PublicOperationError) as during_review:
+        authority.activate(allocation)
+    assert during_review.value.code is PublicErrorCode.OPERATION_PENDING
+    assert during_review.value.retryable is True
+    # The retry neither authorized the plan nor disturbed the owner's review.
+    assert load_import_publication_authorization(claimed.target_digest, _state=tmp_path) is None
+    assert review_path(_state=tmp_path).is_file()
+
+    complete_review(claimed, outcome="denied", _state=tmp_path)
+    with pytest.raises(PublicOperationError) as after_denial:
+        authority.activate(allocation)
+    assert after_denial.value.code is PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("record", ["pending", "authorization"])
+async def test_unreadable_import_consent_record_is_a_bounded_storage_refusal(
+    tmp_path: Path,
+    record: str,
+) -> None:
+    allocation = await _consent_paused_allocation()
+    authority = ImportPublicationAuthority(state_path=tmp_path)
+    with pytest.raises(PublicOperationError):
+        authority.activate(allocation)
+    if record == "authorization":
+        claimed = claim_pending_for_review(_state=tmp_path)
+        record_import_publication_authorization(claimed, _state=tmp_path)
+        complete_review(claimed, outcome="approved", _state=tmp_path)
+        damaged = _import_authorization_path(_state=tmp_path)
+    else:
+        damaged = pending_path(_state=tmp_path)
+    assert damaged.is_file()
+    damaged.write_bytes(b"{not json")
+
+    with pytest.raises(PublicOperationError) as caught:
+        authority.activate(allocation)
+    assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert caught.value.retryable is False
+
+    # Replaying an already-completed import keeps its truthful result; cleanup stays best effort.
+    authority.reconcile_completed(allocation)

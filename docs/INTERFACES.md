@@ -7154,7 +7154,11 @@ that publication only once. The record stays available across restart until term
 completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
 profile/version, mapping-version, or limit change produces another target digest and cannot reuse
 the decision. This is a local intake permission and does not authorize AI-powered review or other
-egress.
+egress. A replay while the pending consent is claimed for review, while another import's
+authorization holds the slot, or while the owner-only consent store is contended returns retryable
+`OPERATION_PENDING`; an unreadable or tampered pending or authorization record returns
+non-retryable `STORAGE_CORRUPT`. Neither publishes anything, and neither surfaces as an internal
+error. Replaying an already-completed import never fails on that record's cleanup.
 
 Importer publication identity is permanently reserved in both directions: the publishing
 writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
