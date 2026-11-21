@@ -87,12 +87,6 @@ from finishup.ports.control import (
     WorkspaceLocator,
     WorkspaceReply,
 )
-from finishup.ports.privacy import (
-    LocalDisclosureReceiptView,
-    NetworkEgressReceiptView,
-    PrivacyReceiptPage,
-    PrivacyReceiptView,
-)
 from finishup.ports.workspace_agent import outcome_for_reason
 from finishup.protocol.canonical import (
     canonical_encode,
@@ -146,6 +140,7 @@ from finishup.service.control_protocol import (
 
 if TYPE_CHECKING:
     from finishup.client.helper_status import HelperStamp
+    from finishup.ports.privacy import PrivacyReceiptPage, PrivacyReceiptView
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
     from finishup.service.lifecycle import SingletonHolder
 
@@ -624,6 +619,9 @@ class PrivacyReceiptFound:
     def __post_init__(self) -> None:
         if self.schema_version != "1.0.0" or self.outcome != "found":
             raise ValueError("privacy_receipt_get_result_invalid")
+        # ports.privacy pulls in ports.semantic and the kernel; only receipt callers pay for it.
+        from finishup.ports.privacy import LocalDisclosureReceiptView, NetworkEgressReceiptView
+
         if type(self.receipt) not in {
             NetworkEgressReceiptView,
             LocalDisclosureReceiptView,
@@ -1096,6 +1094,8 @@ def _receipt_capacity_from_wire(value: object) -> ReceiptCapacity | None:
 
 
 def _receipt_view_from_wire(value: object) -> PrivacyReceiptView:
+    from finishup.ports.privacy import LocalDisclosureReceiptView, NetworkEgressReceiptView
+
     wrapper = _object(value)
     receipt = _object(wrapper["receipt"])
     # Stage-less v1.0 receipts cannot prove whether scanning reached a prepared case.  Preserve
@@ -1174,6 +1174,8 @@ def _receipt_page_from_wire(value: JsonObject) -> PrivacyReceiptPage:
     raw_undecodable_ids = source.get("undecodable_receipt_ids", ())
     if type(raw_undecodable_ids) is not tuple:
         raise ValueError("privacy_receipt_wire_invalid")
+    from finishup.ports.privacy import PrivacyReceiptPage
+
     return PrivacyReceiptPage(
         snapshot_generation=_decimal(source["snapshot_generation"]),
         receipts=tuple(_receipt_view_from_wire(item) for item in receipt_members),
