@@ -3310,6 +3310,78 @@ longer say the selector takes only the check request id: a review's `exchange_ca
 its first provider request id (the attempt's `provider_request_id`), which no owner surface marks as
 a review's, so the report without a selector is the documented way to find it.
 
+## Amendment — 2026-11-21: measured cost of the reply-schema change, and why review behaviour stays as it is (#1172)
+
+Status: proposed for maintainer acceptance. No behavior changes.
+
+**What was measured.** On 2026-11-21, at the maintainer's request, the reviewer's request shape was
+sent through the maintainer's own signed-in Codex CLI: codex-cli 0.171.0 `app-server`, which is not
+one of the reviewed reviewer releases (0.162.1, 0.164.0), run with its default Codex home rather
+than FinishUP's private evaluator home, so absolute token counts include that home's own additions.
+The model was `gpt-6.1-sol` at low reasoning effort, with FinishUP's launch overrides, thread and
+turn settings, the real reviewer loop instruction and strict reply schemas, and only a synthetic
+packet and synthetic read results: 8 ephemeral threads, 26 turns, each sent as soon as the previous
+one ended, one sample per shape. The figures are cached of input tokens as that run reported them
+for each turn. They are observations of one route on one day, not a provider guarantee, and they
+say nothing yet about the reviewed releases, other models or efforts, or the stateless API routes.
+
+**Observed.**
+
+- With one schema for the whole review, each later turn in every run was served from the cache at
+  least the previous turn's whole prompt rounded down to whole 128-token blocks (in two turns one
+  block less). In the one-schema run: 26,496 of 29,484, then 29,696 of 32,557, and on the final
+  turn, which adds only the `FINAL_PHASE` notice, 32,768 of 32,913.
+- A last turn that switched to the read-free schema (today's rule once the repair is spent; the
+  measured turn carried `FINAL_PHASE` and the final-phase repair note) was served 3,584 of 32,364 in
+  one run and 0 of 32,528 in a second run of the same shape, against 32,768 on the one-schema
+  run's final turn. A schema that differed from the full one only in its last bytes cost the same
+  (3,584 of 33,046), one that differed about half way through was served 0 of 26,308, and a turn
+  sent with no schema 0 of 29,356, its answer also dropping the `reply` wrapper the decoder
+  requires. Where the two schemas differ did not change the cost.
+- After a switch, a further turn under the new schema was served its whole prefix again (33,152 of
+  33,334; the loop sends no such turn, since the switch turn always ends the review), and a turn
+  that went back to an earlier schema reused what had last been sent under it (26,112 of 27,137).
+  The cache behaved as keyed by the schema together with the message prefix.
+- A fresh ephemeral thread sending a byte-identical first exchange under a minute later was served
+  0 of 26,580, and one sharing only the instruction and schema 0 of 26,046: no reuse across reviews
+  on this route, consistent with the reading in "packet order and cross-review reuse stay as they
+  are" that Codex keys a fresh thread's cache on its own id.
+- The rendered strict reply schema accounted for about 3,770 input tokens.
+
+**Decision.** As measured, within a review the request shape is already at the cache's ceiling
+while the schema stays: each turn reused the previous prompt whole. A change anywhere in the
+schema cost nearly the whole prompt in every shape measured, so on this evidence no reordering of
+the schema bytes, the messages or the notices would recover the switch turn. The one remaining
+FinishUP-caused miss is the read-free schema after a spent repair ("one reply schema per review",
+above): about one whole prompt, once, only in a review that spends its repair and reaches the
+final phase. Each way to remove it changes observable review behaviour, so none is adopted in this
+change:
+
+- *Keep the full schema and enforce "judgment only" in the loop alone.* A route that enforces the
+  schema could then end a review on a read, the regression #1173 removed.
+- *Keep the full schema and add one read-free correction turn when a read comes back.* The
+  guarantee holds, but on that path the review gains an exchange beyond today's seven (five read
+  attempts, the final judgment, one repair) and is exposed to one more turn's failures (deadline,
+  transport, provider, format); the exchanges that switch today would be approved under media type
+  `application/vnd.finishup.reviewer-turn+json`, not `…reviewer-final+json`; the Codex thread
+  would hold one more rejected answer; and whether it saves anything depends on how often a model
+  reads again after a repair, which is unmeasured.
+- *Drop the schema on that turn, or pre-warm the read-free one.* Measured above: no schema cached
+  nothing and lost the wrapper, and since the cache behaved as keyed by the schema together with
+  the message prefix, warming it would take a request carrying the whole conversation under it,
+  itself uncached.
+- *A provider cache key or reusing a thread across reviews* stays out of bounds for the reasons in
+  "packet order and cross-review reuse stay as they are", and a longer cache retention would not
+  help: the turns of one review were sent back to back, and the miss followed the schema, not time.
+
+**When to revisit.** Revisit once the reviewer cache report (`finishup service diagnostics
+--reviewer-cache`, "reviewer cache accounting keeps every exchange", above) shows over real reviews
+what share of `uncached_input.tokens` its `uncached_input.shortfall.schema_or_settings_change` part
+carries, and how often reviews pay it (`miss_labels.schema_or_settings_change` beside
+`coverage.reviews`; model and effort are constant within a review, so there the label marks the
+switch). The correction-turn design can then be weighed against that number, with the behaviour
+differences above listed in its own amendment.
+
 ## Amendment — 2026-10-21: routine correctness advisory dispositions (#1162)
 
 Routine `code_defect` notes remain advisory and non-blocking. In addition to their immediate

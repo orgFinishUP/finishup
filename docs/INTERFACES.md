@@ -14038,8 +14038,11 @@ beside the messages differs from the previous exchange's: the Codex `turn/start`
 `input` and `threadId`, or the API body except `input`/`messages`); `retry` (an otherwise
 unexplained shortfall on the review's one format-repair exchange, which the history shows by not
 carrying the previous answer; the repair appends its note after the unchanged previous input on
-every route, so the repair itself is not what breaks the prefix); `unexplained`. The state between a
-review's exchanges is `ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts,
+every route, so the repair itself is not what breaks the prefix); `unexplained`. What the reviewer's
+switch to the read-free schema cost as `schema_or_settings_change` in a measurement, and why it
+stays, is recorded in the ADR-006 amendment "measured cost of the reply-schema change, and why
+review behaviour stays as it is". The state between a review's exchanges is
+`ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts,
 the last history's message count and that settings digest, never content. Recording never changes an
 outcome: any failure in it is dropped. A record is at most 656 bytes (one without counts at most
 359), inside the ring's 1,024-byte line cap.
