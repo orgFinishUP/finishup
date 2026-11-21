@@ -6,6 +6,7 @@ import errno
 import fcntl
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -108,7 +109,7 @@ def test_interpreter_links_target_the_base_not_the_replaceable_installation(
 def test_source_change_during_copy_never_publishes_a_generation(
     prefix: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    copyfile = runtimes.shutil.copyfile
+    copyfile = shutil.copyfile
     changed = False
 
     def copy(source: Path, destination: Path, *, follow_symlinks: bool) -> str:
@@ -119,11 +120,32 @@ def test_source_change_during_copy_never_publishes_a_generation(
             (prefix / "pyvenv.cfg").write_text("home = /changed-python\n")
         return str(result)
 
-    monkeypatch.setattr(runtimes.shutil, "copyfile", copy)
+    # The module imports shutil only where it copies, so patch the module it then binds.
+    monkeypatch.setattr(shutil, "copyfile", copy)
     with pytest.raises(runtimes.ReleaseRuntimeError, match="release_runtime_changed_retry"):
         runtimes.prepare_release_runtime(prefix)
     with runtimes.release_update_lock(prefix) as root:
         assert [p.name for p in root.iterdir()] == [".lock"]
+
+
+def test_importing_the_launcher_module_defers_generation_only_imports() -> None:
+    """Every hook's launcher imports this module; only creating or pruning a copy needs these."""
+
+    deferred = ("tempfile", "shutil", "importlib.util", "py_compile")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            "import finishup.adapters.release_runtime\n"
+            f"print(sorted(name for name in {deferred!r} if name in sys.modules))\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout == "[]\n"
 
 
 def test_prune_retains_a_running_generation_until_lease_released(prefix: Path) -> None:
