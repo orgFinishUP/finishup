@@ -1188,3 +1188,32 @@ async def test_undecodable_pending_resume_is_quarantined_not_latched(
         "quarantine_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
     }
     persisted_db.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("vector", ["all-event-families", "supersession-redaction"])
+async def test_stored_state_digest_matches_the_full_projection_digest_after_each_append(
+    vector: str,
+) -> None:
+    # The ledger re-encodes only changed projection records for state_digest; every stored
+    # digest must equal the digest of the whole replayed projection, including after redaction.
+    records = replay_records(vector)
+    store = MemoryObjects(FixedIds())
+    db = apsw.Connection(":memory:")
+    ledger: SqliteLedger | None = None
+    for position, record in enumerate(records):
+        command, _ = command_from_records(
+            [record],
+            request_number=position + 1,
+            expected_frontier=position,
+            objects=store,
+        )
+        if ledger is None:
+            ledger = sqlite_for(command, store, db)
+        await ledger.append_batch(command)
+        durable = tuple([row async for row in ledger.load_events(command.session_id)])
+        stored = db.execute(
+            "SELECT applied_through_seq,state_digest FROM projection_state "
+            "WHERE projection_name='work'"
+        ).fetchone()
+        assert stored == (position + 1, projection_digest(replay(durable)))
