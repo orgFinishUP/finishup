@@ -49,6 +49,13 @@ def test_escaped_nul_or_lone_surrogate_in_a_string_value_reads_as_null(escape: b
     }
 
 
+def test_integers_longer_than_any_safe_integer_read_as_null() -> None:
+    # 5000 digits is past the interpreter's integer-string conversion limit.
+    raw = b'{"huge": ' + b"1" * 5000 + b', "negative": -' + b"1" * 5000 + b', "kept": 7}'
+
+    assert parse_host_config_json(raw) == {"huge": None, "negative": None, "kept": 7}
+
+
 @pytest.mark.parametrize(
     ("raw", "reason"),
     [

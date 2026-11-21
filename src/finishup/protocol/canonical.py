@@ -34,6 +34,10 @@ type JsonValue = (
 MAX_JSON_DEPTH: Final = 64
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
+# JSON integer literals carry no leading zero, so a literal with more digits than the largest
+# safe integer is out of range before conversion; checking the length first keeps ``int()`` off
+# literals past the interpreter's integer-string conversion limit (and its quadratic cost).
+_MAX_SAFE_INTEGER_DIGITS: Final = len(str(_MAX_SAFE_INTEGER))
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
 _MIN_SQLITE_SIGNED_INTEGER: Final = -(2**63)
 _REQUEST_DIGEST_FENCE_KEYS: Final = frozenset(
@@ -177,6 +181,8 @@ def strict_json_parse(data: bytes | bytearray, *, validate: bool = True) -> Json
     def _parse_int(literal: str) -> int:
         if literal == "-0":
             raise ProtocolValueError("float_forbidden")
+        if len(literal) - literal.startswith("-") > _MAX_SAFE_INTEGER_DIGITS:
+            raise ProtocolValueError("integer_out_of_safe_range")
         value = int(literal)
         if not -_MAX_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER:
             raise ProtocolValueError("integer_out_of_safe_range")

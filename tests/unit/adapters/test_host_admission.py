@@ -344,6 +344,9 @@ def test_claude_foreign_rules_are_reported_and_never_edited(
     ("content", "detail"),
     [
         (b"{not json", "file_invalid"),
+        pytest.param(
+            b'{"cleanupPeriodDays": ' + b"1" * 5000 + b"}", "file_invalid", id="huge-integer"
+        ),
         (b"[]", "shape_invalid"),
         (b'{"permissions": null}', "shape_invalid"),
         (b'{"permissions": {"allow": null}}', "shape_invalid"),

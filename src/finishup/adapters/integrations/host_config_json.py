@@ -29,6 +29,7 @@ from finishup.protocol.canonical import MAX_JSON_DEPTH, JsonValue, ensure_canoni
 from finishup.protocol.errors import ProtocolValueError
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
+_MAX_SAFE_INTEGER_DIGITS: Final = len(str(_MAX_SAFE_INTEGER))
 
 
 class _Unrepresentable:
@@ -56,6 +57,10 @@ def parse_host_config_json(data: bytes) -> JsonValue:
         return _UNREPRESENTABLE
 
     def _integer(literal: str) -> object:
+        # A literal longer than the largest safe integer is out of range without converting it,
+        # which also keeps ``int()`` off literals past the interpreter's conversion limit.
+        if len(literal) - literal.startswith("-") > _MAX_SAFE_INTEGER_DIGITS:
+            return _UNREPRESENTABLE
         value = int(literal)
         if literal == "-0" or not -_MAX_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER:
             return _UNREPRESENTABLE
