@@ -876,165 +876,175 @@ class LocalBundleRuntime(BundleRuntimePort):
             self._require_ready()
             close_before_open: _Entry | None = None
             rebind_entry: _Entry | None = None
-            async with self._lock:
-                entry = self._entries.get(task_id)
-                if entry is not None and not entry.poisoned:
-                    if (
-                        self._same_route(entry.inspection.route, inspection.route)
-                        and entry.scope == scope
-                        and required_authority.issubset(entry.authority)
-                    ):
-                        # An admitted start gets a chance to drain the old session. Otherwise
-                        # repeated background reads could keep rebinding busy indefinitely.
-                        if entry.rebind_waiters and provision_mode is None:
-                            raise _error(
-                                PublicErrorCode.BUNDLE_BUSY,
-                                _BUSY,
-                                retryable=True,
-                                safe_details={"reason_code": "runtime_rebind_busy"},
-                            )
-                        # Claim a pending lease before release so rebind cannot race the
-                        # validate_fence window in _lease where usages is still zero.
-                        if entry.pending >= self._policy.max_pending_leases_per_task:
-                            raise self._capacity_error(
-                                "task_pending_leases",
-                                entry.pending,
-                                self._policy.max_pending_leases_per_task,
-                            )
-                        entry.pending += 1
-                        self._entries.move_to_end(task_id)
-                        return entry
-                    # Same-bundle session rebind: attach keeps task/route generation/identity and
-                    # only changes session/writer. Reuse the open ports and fence instead of
-                    # poison-close-reopen, which would destroy the only writable handle on failure.
-                    # Block rebind while any lease is live or still validating (pending > 0).
-                    if (
-                        self._same_bundle_route(entry.inspection.route, inspection.route)
-                        and entry.scope == scope
-                        and entry.usages == 0
-                        and entry.pending == 0
-                        and required_authority.issubset(entry.authority)
-                    ):
-                        entry.inspection = inspection
-                        entry.pending += 1
-                        self._entries.move_to_end(task_id)
-                        rebind_entry = entry
-                    elif entry.usages or entry.pending:
+            try:
+                async with self._lock:
+                    entry = self._entries.get(task_id)
+                    if entry is not None and not entry.poisoned:
                         if (
-                            provision_mode is not None
-                            and self._same_bundle_route(entry.inspection.route, inspection.route)
+                            self._same_route(entry.inspection.route, inspection.route)
                             and entry.scope == scope
                             and required_authority.issubset(entry.authority)
                         ):
-                            if entry.rebind_waiters >= self._policy.max_pending_leases_per_task:
-                                raise self._capacity_error(
-                                    "task_pending_leases",
-                                    entry.rebind_waiters,
-                                    self._policy.max_pending_leases_per_task,
-                                )
-                            entry.rebind_waiters += 1
-                            waiting_entry = entry
-                            for callback in tuple(entry.rebind_callbacks.values()):
-                                try:
-                                    callback()
-                                except Exception:
-                                    # A cooperative background owner cannot make the foreground
-                                    # start fail closed. Its lease remains counted until the owner
-                                    # retires normally, and the bounded wait still applies.
-                                    continue
-                            try:
-                                # Condition.wait releases the cache lock used by release and
-                                # pending-lease cleanup. Cancellation removes only this waiter.
-                                async with asyncio.timeout_at(rebind_deadline):
-                                    await self._idle.wait_for(
-                                        lambda: (
-                                            self._closed
-                                            or waiting_entry.poisoned
-                                            or (
-                                                waiting_entry.usages == 0
-                                                and waiting_entry.pending == 0
-                                            )
-                                        )
-                                    )
-                            except TimeoutError as exc:
-                                for operation, count in (
-                                    ("runtime_rebind_timeout_usages", waiting_entry.usages),
-                                    ("runtime_rebind_timeout_pending", waiting_entry.pending),
-                                    (
-                                        "runtime_rebind_timeout_callbacks",
-                                        len(waiting_entry.rebind_callbacks),
-                                    ),
-                                ):
-                                    record_bounded_counts_without_raising(
-                                        component="service.runtime",
-                                        operation=operation,
-                                        outcome="runtime_rebind_busy",
-                                        counts={"operation_count": count},
-                                    )
+                            # An admitted start gets a chance to drain the old session. Otherwise
+                            # repeated background reads could keep rebinding busy indefinitely.
+                            if entry.rebind_waiters and provision_mode is None:
                                 raise _error(
                                     PublicErrorCode.BUNDLE_BUSY,
                                     _BUSY,
                                     retryable=True,
                                     safe_details={"reason_code": "runtime_rebind_busy"},
-                                ) from exc
-                            finally:
-                                entry.rebind_waiters -= 1
-                            continue
-                        raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
-                    else:
-                        entry.poisoned = True
-                        self._entries.pop(task_id, None)
-                        close_before_open = entry
-                if rebind_entry is None:
-                    opening = self._opening.get(task_id)
-                    if opening is None:
-                        total = len(self._entries) + len(self._opening)
-                        if total >= self._policy.max_open_bundle_tasks:
-                            raise self._capacity_error(
-                                "open_bundle_tasks", total, self._policy.max_open_bundle_tasks
-                            )
-                        if needs_writer:
-                            writers = sum(
-                                RuntimeCapability.WRITE in candidate.authority
-                                for candidate in self._entries.values()
-                            ) + len(self._opening_writers)
-                            if writers >= self._policy.max_writer_connections:
-                                raise self._capacity_error(
-                                    "writer_connections",
-                                    writers,
-                                    self._policy.max_writer_connections,
                                 )
-                        self._scope_capacity(scope, needs_writer=needs_writer)
-                        opening = asyncio.create_task(
-                            self._open_entry(
-                                inspection,
-                                access,
-                                scope=scope,
-                                provision_mode=provision_mode,
+                            # Claim a pending lease before release so rebind cannot race the
+                            # validate_fence window in _lease where usages is still zero.
+                            if entry.pending >= self._policy.max_pending_leases_per_task:
+                                raise self._capacity_error(
+                                    "task_pending_leases",
+                                    entry.pending,
+                                    self._policy.max_pending_leases_per_task,
+                                )
+                            entry.pending += 1
+                            self._entries.move_to_end(task_id)
+                            return entry
+                        # Same-bundle session rebind: attach keeps task/route generation/identity and
+                        # only changes session/writer. Reuse the open ports and fence instead of
+                        # poison-close-reopen, which would destroy the only writable handle on failure.
+                        # Block rebind while any lease is live or still validating (pending > 0).
+                        if (
+                            self._same_bundle_route(entry.inspection.route, inspection.route)
+                            and entry.scope == scope
+                            and entry.usages == 0
+                            and entry.pending == 0
+                            and required_authority.issubset(entry.authority)
+                        ):
+                            entry.inspection = inspection
+                            entry.pending += 1
+                            self._entries.move_to_end(task_id)
+                            rebind_entry = entry
+                        elif entry.usages or entry.pending:
+                            if (
+                                provision_mode is not None
+                                and self._same_bundle_route(
+                                    entry.inspection.route, inspection.route
+                                )
+                                and entry.scope == scope
+                                and required_authority.issubset(entry.authority)
+                            ):
+                                if entry.rebind_waiters >= self._policy.max_pending_leases_per_task:
+                                    raise self._capacity_error(
+                                        "task_pending_leases",
+                                        entry.rebind_waiters,
+                                        self._policy.max_pending_leases_per_task,
+                                    )
+                                entry.rebind_waiters += 1
+                                waiting_entry = entry
+                                for callback in tuple(entry.rebind_callbacks.values()):
+                                    try:
+                                        callback()
+                                    except Exception:
+                                        # A cooperative background owner cannot make the foreground
+                                        # start fail closed. Its lease remains counted until the owner
+                                        # retires normally, and the bounded wait still applies.
+                                        continue
+                                try:
+                                    # Condition.wait releases the cache lock used by release and
+                                    # pending-lease cleanup. Cancellation removes only this waiter.
+                                    async with asyncio.timeout_at(rebind_deadline):
+                                        await self._idle.wait_for(
+                                            lambda: (
+                                                self._closed
+                                                or waiting_entry.poisoned
+                                                or (
+                                                    waiting_entry.usages == 0
+                                                    and waiting_entry.pending == 0
+                                                )
+                                            )
+                                        )
+                                except TimeoutError as exc:
+                                    for operation, count in (
+                                        ("runtime_rebind_timeout_usages", waiting_entry.usages),
+                                        ("runtime_rebind_timeout_pending", waiting_entry.pending),
+                                        (
+                                            "runtime_rebind_timeout_callbacks",
+                                            len(waiting_entry.rebind_callbacks),
+                                        ),
+                                    ):
+                                        record_bounded_counts_without_raising(
+                                            component="service.runtime",
+                                            operation=operation,
+                                            outcome="runtime_rebind_busy",
+                                            counts={"operation_count": count},
+                                        )
+                                    raise _error(
+                                        PublicErrorCode.BUNDLE_BUSY,
+                                        _BUSY,
+                                        retryable=True,
+                                        safe_details={"reason_code": "runtime_rebind_busy"},
+                                    ) from exc
+                                finally:
+                                    entry.rebind_waiters -= 1
+                                continue
+                            raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
+                        else:
+                            entry.poisoned = True
+                            self._entries.pop(task_id, None)
+                            close_before_open = entry
+                    if rebind_entry is None:
+                        opening = self._opening.get(task_id)
+                        if opening is None:
+                            total = len(self._entries) + len(self._opening)
+                            if total >= self._policy.max_open_bundle_tasks:
+                                raise self._capacity_error(
+                                    "open_bundle_tasks", total, self._policy.max_open_bundle_tasks
+                                )
+                            if needs_writer:
+                                writers = sum(
+                                    RuntimeCapability.WRITE in candidate.authority
+                                    for candidate in self._entries.values()
+                                ) + len(self._opening_writers)
+                                if writers >= self._policy.max_writer_connections:
+                                    raise self._capacity_error(
+                                        "writer_connections",
+                                        writers,
+                                        self._policy.max_writer_connections,
+                                    )
+                            self._scope_capacity(scope, needs_writer=needs_writer)
+                            opening = asyncio.create_task(
+                                self._open_entry(
+                                    inspection,
+                                    access,
+                                    scope=scope,
+                                    provision_mode=provision_mode,
+                                )
                             )
-                        )
-                        self._opening[task_id] = opening
-                        self._opening_access[task_id] = access
-                        self._opening_scopes[task_id] = scope
-                        if needs_writer:
-                            self._opening_writers.add(task_id)
-                        self._schedule_opening_adoption(task_id, opening)
-                    elif not required_authority.issubset(
-                        self._authority_for(self._opening_access[task_id])
-                    ):
-                        # Do not let a read-only opening be handed out as a write-capable runtime.
-                        # The caller can retry after the existing opener is published and evicted.
-                        raise _error(
-                            PublicErrorCode.BUNDLE_BUSY,
-                            "The task runtime is opening with insufficient authority; retry.",
-                            retryable=True,
-                            safe_details={
-                                "reason_code": "runtime_opening_authority",
-                                "action": "retry_after_open",
-                            },
-                        )
-                else:
-                    opening = None
+                            self._opening[task_id] = opening
+                            self._opening_access[task_id] = access
+                            self._opening_scopes[task_id] = scope
+                            if needs_writer:
+                                self._opening_writers.add(task_id)
+                            self._schedule_opening_adoption(task_id, opening)
+                        elif not required_authority.issubset(
+                            self._authority_for(self._opening_access[task_id])
+                        ):
+                            # Do not let a read-only opening be handed out as a write-capable runtime.
+                            # The caller can retry after the existing opener is published and evicted.
+                            raise _error(
+                                PublicErrorCode.BUNDLE_BUSY,
+                                "The task runtime is opening with insufficient authority; retry.",
+                                retryable=True,
+                                safe_details={
+                                    "reason_code": "runtime_opening_authority",
+                                    "action": "retry_after_open",
+                                },
+                            )
+                    else:
+                        opening = None
+            except BaseException:
+                # An entry evicted to reopen with different authority, route, or scope is no
+                # longer reachable from release() or close(); a refused reopen (capacity
+                # ceilings, opening-authority mismatch) must still close its handles and fence.
+                if close_before_open is not None:
+                    await self._close_entry(close_before_open)
+                raise
             if rebind_entry is not None:
                 try:
                     await self._factories.validate_fence(
