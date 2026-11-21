@@ -412,6 +412,11 @@ there until it expires.
 
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
+`export-desired --output` writes the file whole or not at all: an existing file at that path is
+replaced only once the new one is complete. A path that cannot be written (an existing folder, a
+read-only folder, or a file where a folder should be) stops with
+`privacy_desired_output_unwritable` and exit code 2; nothing is saved, so choose a writable file
+path in an existing folder and export again.
 
 Privacy commands bind to the repository derived from their actual working directory. The service
 resolves symlinks and Git's common root and commits it under the installation key. It never stores

@@ -5921,7 +5921,11 @@ def privacy_export_desired(
 
     async def _run() -> int:
         from finishup.adapters.privacy.catalog import decode_privacy_policy_canonical
-        from finishup.config.privacy_desired import write_privacy_desired_toml
+        from finishup.config.privacy_desired import (
+            PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY,
+            PrivacyDesiredOutputUnwritable,
+            write_privacy_desired_toml,
+        )
 
         # Machine scope is a local construction; resolve it before connecting so a broken
         # installation marker stops here without any service request (issue #517).
@@ -5945,7 +5949,13 @@ def privacy_export_desired(
             )
         except Exception:
             return _usage_failure()
-        path = write_privacy_desired_toml(policy, output)
+        try:
+            path = write_privacy_desired_toml(policy, output)
+        except PrivacyDesiredOutputUnwritable as error:
+            # A path the caller chose that cannot be written is a named refusal with its remedy,
+            # never an internal error; neither the path nor the OS message is echoed.
+            _stderr(f"{error.reason_code}: {PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY}")
+            return 2
         _human_or_json(
             # Frozen legacy identifier (ADR-048): machine-readable report tag agents parse.
             {"path": str(path), "schema": "yoetz.privacy-desired/1"},

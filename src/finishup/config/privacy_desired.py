@@ -6,6 +6,8 @@ Desired-state files declare nonsecret policy intent. Apply maps onto existing
 
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
 from dataclasses import fields, is_dataclass
 from datetime import datetime
@@ -20,7 +22,10 @@ from finishup.domain.values import format_rfc3339_millis
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 __all__ = [
+    "PRIVACY_DESIRED_OUTPUT_UNWRITABLE",
+    "PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY",
     "PRIVACY_DESIRED_SCHEMA",
+    "PrivacyDesiredOutputUnwritable",
     "load_privacy_desired_canonical",
     "render_privacy_desired_toml",
     "write_privacy_desired_toml",
@@ -28,6 +33,24 @@ __all__ = [
 
 # Frozen legacy identifier (ADR-048): the schema tag stored in existing desired-privacy files.
 PRIVACY_DESIRED_SCHEMA: Final = "yoetz.privacy-desired/1"
+
+# The one way an export can fail after the policy was read: the chosen path cannot be written.
+PRIVACY_DESIRED_OUTPUT_UNWRITABLE: Final = "privacy_desired_output_unwritable"
+PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY: Final = (
+    "Nothing was saved. Choose a writable file path in an existing directory and export again."
+)
+
+
+class PrivacyDesiredOutputUnwritable(Exception):
+    """The export destination could not be written; nothing was saved.
+
+    Carries only its fixed reason code, never the caller's path or the operating-system message.
+    """
+
+    reason_code: Final = PRIVACY_DESIRED_OUTPUT_UNWRITABLE
+
+    def __init__(self) -> None:
+        super().__init__(PRIVACY_DESIRED_OUTPUT_UNWRITABLE)
 
 
 def _to_json(value: object) -> object:
@@ -92,8 +115,36 @@ def render_privacy_desired_toml(policy: PrivacyPolicy) -> str:
 
 
 def write_privacy_desired_toml(policy: PrivacyPolicy, path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_privacy_desired_toml(policy), encoding="utf-8")
+    """Write the desired-state TOML to *path* whole, or raise without leaving anything behind.
+
+    The file is written to a temporary file in the same directory, flushed, and renamed into
+    place, so a failed export never leaves a truncated file. A path that cannot be written (an
+    existing directory, a forbidden or read-only parent, a parent that is a file) raises
+    ``PrivacyDesiredOutputUnwritable``; the path and the operating-system
+    message are never carried in the error.
+    """
+
+    data = render_privacy_desired_toml(policy).encode("utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+    except OSError as error:
+        raise PrivacyDesiredOutputUnwritable from error
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException as error:
+        # Never leave a stray temporary beside the target, even on an interrupt.
+        temporary.unlink(missing_ok=True)
+        if isinstance(error, OSError):
+            raise PrivacyDesiredOutputUnwritable from error
+        raise
     return path
 
 
