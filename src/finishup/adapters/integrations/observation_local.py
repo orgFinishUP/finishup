@@ -956,19 +956,67 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         raise
 
 
-def _read_bytes(path: Path, *, maximum: int) -> bytes | None:
+def _state_corrupt() -> PublicOperationError:
+    return _error(
+        PublicErrorCode.STORAGE_CORRUPT, "Observation workspace state is invalid.", retryable=False
+    )
+
+
+def _state_unreadable(exc: OSError) -> PublicOperationError:
+    if exc.errno == errno.ELOOP:
+        return _error(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Observation workspace state is unsafe.",
+            retryable=False,
+        )
+    return _error(
+        PublicErrorCode.STORAGE_UNSAFE,
+        "Observation workspace state is unavailable.",
+        retryable=exc.errno not in {errno.EACCES, errno.EPERM},
+    )
+
+
+def _read_state_bytes(path: Path, *, maximum: int) -> bytes | None:
+    """Read one workspace state document; ``None`` only when no file exists at all.
+
+    Only an absent document may start a fresh, empty state that a writer is allowed to save. A
+    document that exists but cannot be read raises ``STORAGE_UNSAFE`` (retryable unless the
+    refusal is a permission or symlink one), and one that is not a regular file or holds no
+    bytes or more than ``maximum`` bytes raises ``STORAGE_CORRUPT``/``STORAGE_UNSAFE``: saving
+    an empty state over it would silently destroy consent and accepted outbox rows (ADR-029).
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        if not path.is_file() or path.is_symlink():
-            return None
-        size = path.stat().st_size
-        if size <= 0 or size > maximum:
-            return None
-        data = path.read_bytes()
-        if len(data) > maximum:
-            return None
-        return data
-    except OSError:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise _state_unreadable(exc) from exc
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode):
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation workspace state is unsafe.",
+                retryable=False,
+            )
+        if facts.st_size <= 0 or facts.st_size > maximum:
+            raise _state_corrupt()
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining > 0 and (chunk := os.read(descriptor, remaining)):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise _state_unreadable(exc) from exc
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    if not data or len(data) > maximum:
+        raise _state_corrupt()
+    return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -11883,7 +11931,17 @@ class LocalObservationStore:
                 continue
             digest = path.stem
             workspace = f"hmac-sha256:{digest}"
-            result.append((workspace, self._load(workspace)))
+            try:
+                state = self._load(workspace)
+            except PublicOperationError as exc:
+                # A cross-workspace scan skips a document that is invalid or refused for good,
+                # as it did when such a document read as empty; that document still refuses
+                # every direct read and write, so nothing replaces it. A transient read failure
+                # propagates so the caller retries instead of deciding without that workspace.
+                if exc.retryable:
+                    raise
+                continue
+            result.append((workspace, state))
         return result
 
     def _stat_key(self, path: Path) -> tuple[int, int, int, int] | None:
@@ -11992,7 +12050,9 @@ class LocalObservationStore:
             cached = self._state_cache.get(workspace_commitment)
         if cached is not None and before is not None and cached[0] == before:
             return _copy_state(cached[1])
-        raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
+        # Only an absent document starts fresh; one that exists but cannot be read or parsed
+        # raises, so no writer can save an empty state over it (ADR-029).
+        raw = _read_state_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
         hydrate_started = self._now_mono()
@@ -12000,10 +12060,10 @@ class LocalObservationStore:
             try:
                 parsed = strict_json_parse(raw, validate=False)
                 envelope_keys = _validate_state_document(parsed)
-            except ProtocolValueError:
-                return _WorkspaceState()
+            except ProtocolValueError as exc:
+                raise _state_corrupt() from exc
             if not isinstance(parsed, Mapping):
-                return _WorkspaceState()
+                raise _state_corrupt()
             state = self._state_from_json(
                 cast(Mapping[str, JsonValue], parsed), envelope_keys=envelope_keys
             )

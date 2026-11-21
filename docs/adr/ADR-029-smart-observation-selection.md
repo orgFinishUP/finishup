@@ -91,6 +91,13 @@ optional work; it does not rewrite accepted individual rows as summaries or move
 into quarantine merely to fit the state file. Disposable read caches and bounded diagnostic
 detail are reclaimed first. When a safe write cannot preserve accepted records, it fails without
 replacing the previous durable state.
+A workspace state document starts fresh only when no file exists. One that exists but cannot be
+read raises `STORAGE_UNSAFE` (retryable unless the refusal is a permission or symlink one), and one
+that is not a regular file or is empty, oversize, or not a valid state document raises
+`STORAGE_CORRUPT`/`STORAGE_UNSAFE`; every read and write of that workspace fails and the file is
+left byte-identical for repair, never replaced by an empty state that would drop consent and
+accepted rows. A hook pass records it as `observe_exception_public_operation_error`;
+cross-workspace scans skip such a document and propagate a retryable failure (issue #1391).
 
 ### Capacity, pressure, and setting lifetime
 

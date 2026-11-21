@@ -276,3 +276,26 @@ def test_invalid_key_material_fails_the_pass_instead_of_reading_as_unconsented(
     assert json.loads(stdout.getvalue().decode()) == {}
     assert _reasons(tmp_path) == ["observe_exception_public_operation_error"]
     assert key_path.read_bytes() == b"\x01" * 16
+
+
+def test_corrupt_workspace_state_fails_the_pass_and_is_not_replaced(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    state_path = (
+        tmp_path / "observation" / "workspaces" / (workspace.removeprefix("hmac-sha256:") + ".json")
+    )
+    state_path.write_bytes(b"{")
+    stdout = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "s1", "tool_name": "shell"}).encode(),
+        stdout=stdout,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert json.loads(stdout.getvalue().decode()) == {}
+    assert _reasons(tmp_path) == ["observe_exception_public_operation_error"]
+    assert state_path.read_bytes() == b"{"

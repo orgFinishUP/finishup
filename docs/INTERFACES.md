@@ -7596,6 +7596,10 @@ rewrites. An existing key that cannot be read, is not a regular file, or is not 
 raises `STORAGE_UNSAFE` and is left untouched (`existing_workspace_commitment` raises the same
 rather than reporting no consent); a hook pass records that as
 `observe_exception_public_operation_error`, never as an unconsented workspace (issue #1390).
+A workspace state document (`observation/workspaces/<digest>.json`) starts fresh only when absent;
+one that exists but cannot be read, is not a regular file, or is empty, oversize, or invalid raises
+`STORAGE_UNSAFE` or non-retryable `STORAGE_CORRUPT` on every read and write and is never replaced
+(ADR-029, issue #1391).
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. A safe project root is the running user's own directory that no other account can
