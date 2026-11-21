@@ -46,6 +46,7 @@ from finishup.adapters.integrations.codex_plugin import (
     PluginHookPresence,
     activation_cache_mcp_binding,
     inspect_plugin,
+    plugin_unmanaged_files_continuation,
 )
 from finishup.adapters.integrations.codex_skill import (
     CodexSkillIntegration,
@@ -2184,9 +2185,15 @@ async def _codex_integration_step(
             "presence": plugin_preview.presence_before.value,
             "reason": error.reason.value,
         }
+        unmanaged = error.safe_details.get("unmanaged_files") is True
         return {
             "outcome": "failed",
             "reason": "plugin_install_failed",
+            **(
+                {"next_step": plugin_unmanaged_files_continuation(Path(project.project_root))}
+                if unmanaged
+                else {}
+            ),
             "state": mcp_preview.state_before.value,
             "plugin": plugin_report,
             "plugin_activation": {

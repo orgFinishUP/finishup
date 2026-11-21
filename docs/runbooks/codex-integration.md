@@ -736,6 +736,17 @@ skill at `.agents/skills/finishup`, installs managed structural plugin/hook sour
 entry. The plugin source directory, marketplace entry, or enabled config table alone is not
 evidence that Codex activated a plugin.
 
+Installing the plugin source replaces `.agents/plugins/finishup` as a whole directory, so it
+proceeds only when every file there is FinishUP's: this release's managed files and marker, or a
+prior render that byte-matches its own valid marker (ADR-023 §6, §9). A directory holding any
+other file, whether an owner note added to an installed tree or a hand-made directory with no
+marker, is refused as `destination_conflict` (`unmanaged_files: true`) and left untouched;
+`replace_modified` covers edited managed files only and never authorizes removing unmanaged
+files. Setup reports `plugin_install_failed` with a continuation: move those files, or the whole
+directory, outside `.agents/plugins`, then rerun setup. Plugin inspection reports such a tree as
+not exact (`installed_untrusted_unknown`), its digest binds the unmanaged files, and activation
+preview refuses it as `destination_conflict` before any Codex command.
+
 Activation is a standing-trust mutation for future sessions in one owner-selected Codex home. The
 owner must explicitly supply an existing absolute, non-symlink home; setup never derives it from a
 wrapper basename, ambient environment, or a pre-consent Codex diagnostic. Setup binds the exact

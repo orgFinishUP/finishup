@@ -1400,8 +1400,13 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         # render), then bind the preview to the intended version-specific bytes.
         # Apply still requires an exact current renderer variant at its first
         # source fence before any mutation.
-        if plugin_tree_matches_marker(_read_managed_tree(source)):
+        installed = _read_managed_tree(source)
+        if plugin_tree_matches_marker(installed):
             return expected
+        # Files outside the managed inventory are owner content the source install refuses
+        # to remove (ADR-023 §9), not a partial FinishUP install.
+        if not installed.keys() <= expected.keys():
+            raise _error(IntegrationReason.DESTINATION_CONFLICT)
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
     for candidate in source.rglob("*"):
