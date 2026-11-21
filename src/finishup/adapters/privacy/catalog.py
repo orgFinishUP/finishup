@@ -258,13 +258,17 @@ def _integer(value: JsonValue) -> int:
 
 
 def _uint_from_json(value: JsonValue) -> int:
-    """Accept catalog ints or wire decimal-string counters (``"0"``, ``"300"``)."""
+    """Accept catalog ints or wire decimal-string counters (``"0"``, ``"300"``).
+
+    A wire counter is ASCII ``0|[1-9][0-9]*`` as the frozen schemas spell it; ``isdecimal`` alone
+    would also admit fullwidth or other Unicode digits the schema refuses.
+    """
 
     if type(value) is int:
         if value < 0:
             raise ValueError("privacy_audit_row_corrupt")
         return value
-    if type(value) is str and value.isdecimal():
+    if type(value) is str and value.isascii() and value.isdecimal():
         if value != "0" and value.startswith("0"):
             raise ValueError("privacy_audit_row_corrupt")
         return int(value)
