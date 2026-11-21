@@ -8812,7 +8812,9 @@ preimages/proposals, installed managed source-tree digest, cache root
 `<home>/plugins/cache/finishup/finishup` and cache preimage/intended tree digest, and exact post-consent
 `plugin list --marketplace finishup --json` and `plugin add finishup@finishup --json` commands. Preview runs
 the version probe with both home variables set to a fresh owner-private temporary home, removes its
-scratch afterward, and performs no selected-home inventory read. After consent, apply forces both
+scratch afterward, and performs no selected-home inventory read. While one connection plan is
+prepared, its activation inspections and preview share one such probe of the same executable and
+home; a plan status and an apply probe afresh. After consent, apply forces both
 home variables to the approved home, re-probes under its lock, and CAS-fences each write. A later
 failure preserves approved partial marketplace/config/cache state for retry and performs no
 pathname rollback that could race a concurrent replacement.

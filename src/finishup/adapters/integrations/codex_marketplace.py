@@ -12,6 +12,7 @@ byte-identical is a conflict; another project's legacy activation is left alone.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -23,7 +24,8 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -77,6 +79,7 @@ except ImportError:  # pragma: no cover - supported Codex plugin hosts are POSIX
     fcntl = None  # type: ignore[assignment]
 
 __all__ = [
+    "probe_window",
     "ActivationInspection",
     "ActivationPreview",
     "ActivationState",
@@ -432,6 +435,35 @@ def _command_output(
     return _BoundedCommandOutput(completed.returncode, raw)
 
 
+# Probes already made in the open observation window (`probe_window`).
+_PROBE_WINDOW: ContextVar[dict[tuple[str, str], _CodexBinaryProbe] | None] = ContextVar(
+    "codex_probe_window", default=None
+)
+
+
+@contextlib.contextmanager
+def probe_window() -> Generator[None]:
+    """Probe one Codex executable once per read-only observation, not once per inspection.
+
+    One connection plan inspects the activation and previews it, and each binds the executable
+    to its version and digest by starting it. Inside one window that makes no change and waits
+    for nobody, a later probe of the same executable and home returns the first one's binding:
+    the answer it would give if the executable changed just after the window instead. Only
+    probes through the real subprocess runner are remembered, and a refused probe is not. The
+    window ends with its block, so an apply and a later status probe afresh. A window opened
+    inside another one shares it.
+    """
+
+    if _PROBE_WINDOW.get() is not None:
+        yield
+        return
+    token = _PROBE_WINDOW.set({})
+    try:
+        yield
+    finally:
+        _PROBE_WINDOW.reset(token)
+
+
 def _probe_codex_binary(
     executable_path: str,
     *,
@@ -440,6 +472,23 @@ def _probe_codex_binary(
 ) -> _CodexBinaryProbe:
     """Bind an exact executable/version to one explicitly controlled Codex home."""
 
+    window = _PROBE_WINDOW.get() if _run is subprocess.run else None
+    if window is None or type(executable_path) is not str:
+        return _probe_codex_binary_once(executable_path, codex_home=codex_home, _run=_run)
+    key = (executable_path, str(codex_home))
+    probe = window.get(key)
+    if probe is None:
+        probe = _probe_codex_binary_once(executable_path, codex_home=codex_home, _run=_run)
+        window[key] = probe
+    return probe
+
+
+def _probe_codex_binary_once(
+    executable_path: str,
+    *,
+    codex_home: Path | str | None,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> _CodexBinaryProbe:
     if (
         type(executable_path) is not str
         or not executable_path

@@ -662,3 +662,52 @@ async def test_upgrade_preview_binds_obsolete_members_and_marker(tmp_path: Path)
             ),
         )
     assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+
+
+def test_a_resource_manifest_is_validated_once_per_distinct_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from finishup.adapters.integrations import codex_skill as module
+
+    validate = module._validated_resource_manifest  # pyright: ignore[reportPrivateUsage]
+    validations: list[bytes] = []
+
+    def counted(raw: bytes) -> object:
+        validations.append(raw)
+        return validate(raw)
+
+    monkeypatch.setattr(module, "_VALIDATED_RESOURCE_MANIFESTS", {})
+    monkeypatch.setattr(module, "_validated_resource_manifest", counted)
+    resources = _resources()
+    first = load_packaged_skill_source(resources)
+    assert load_packaged_skill_source(resources) == first
+    assert load_packaged_skill_source(_resources()) == first
+    assert len(validations) == 1
+    # Equal results to an unremembered validation of the same bytes.
+    raw = resources.read_bytes("manifest.json")
+    assert module._resource_entries(resources) == validate(raw)  # pyright: ignore[reportPrivateUsage]
+    # The packaged manifest is its own key, also checked once.
+    load_packaged_skill_source()
+    load_packaged_skill_source()
+    assert len(validations) == 2
+
+
+def test_an_invalid_resource_manifest_is_refused_every_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from finishup.adapters.integrations import codex_skill as module
+
+    monkeypatch.setattr(module, "_VALIDATED_RESOURCE_MANIFESTS", {})
+    resources = _resources()
+    manifest = dict(
+        module._canonical_json(  # pyright: ignore[reportPrivateUsage]
+            resources.files["manifest.json"], IntegrationReason.SOURCE_INVALID
+        )
+    )
+    manifest["resource_set_digest"] = "sha256:" + "0" * 64
+    resources.files["manifest.json"] = canonical_encode(manifest)
+    for _ in range(2):
+        with pytest.raises(IntegrationError) as caught:
+            load_packaged_skill_source(resources)
+        assert caught.value.reason is IntegrationReason.SOURCE_INVALID
+    assert module._VALIDATED_RESOURCE_MANIFESTS == {}  # pyright: ignore[reportPrivateUsage]

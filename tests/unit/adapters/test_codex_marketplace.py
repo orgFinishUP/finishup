@@ -2974,3 +2974,77 @@ def _assert_bound_plugin_mcp(cache: Path, *, pinned: str, root: str, foreign: st
     }
     assert foreign not in rendered
     assert "finishup hooks" in (cache / "hooks/hooks.json").read_text(encoding="utf-8")
+
+
+def _versioned_codex(tmp_path: Path) -> tuple[Path, Path]:
+    home = tmp_path / "probe-home"
+    home.mkdir(mode=0o700)
+    executable = tmp_path / "codex-probe"
+    executable.write_text("#!/bin/sh\necho 'codex-cli 0.150.1'\n", encoding="utf-8")
+    executable.chmod(0o700)
+    return executable, home
+
+
+def _counted_probes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    once = module._probe_codex_binary_once  # pyright: ignore[reportPrivateUsage]
+    probes: list[str] = []
+
+    def counted(executable_path: str, **kwargs: object) -> object:
+        probes.append(executable_path)
+        return once(executable_path, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(module, "_probe_codex_binary_once", counted)
+    return probes
+
+
+def test_the_probe_window_starts_one_codex_per_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    probe = module._probe_codex_binary  # pyright: ignore[reportPrivateUsage]
+    executable, home = _versioned_codex(tmp_path)
+    probes = _counted_probes(monkeypatch)
+    unwindowed = probe(str(executable), codex_home=home)
+    assert probe(str(executable), codex_home=home) == unwindowed
+    assert len(probes) == 2  # Outside a window every probe starts Codex, as before.
+    probes.clear()
+    with module.probe_window():
+        assert probe(str(executable), codex_home=home) == unwindowed
+        with module.probe_window():  # A nested window shares the outer one.
+            assert probe(str(executable), codex_home=str(home)) == unwindowed
+        assert len(probes) == 1
+        # Another home is another binding.
+        other = tmp_path / "other-home"
+        other.mkdir(mode=0o700)
+        assert probe(str(executable), codex_home=other).codex_home == other
+        assert len(probes) == 2
+    probes.clear()
+    probe(str(executable), codex_home=home)
+    assert len(probes) == 1
+
+
+def test_the_probe_window_keeps_refusals_and_injected_runners_unremembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    probe = module._probe_codex_binary  # pyright: ignore[reportPrivateUsage]
+    executable, home = _versioned_codex(tmp_path)
+    probes = _counted_probes(monkeypatch)
+    missing = str(tmp_path / "missing-codex")
+    target, _project, fake_home = _target(tmp_path)
+    fake = _FakeCodex(target, fake_home)
+    with module.probe_window():
+        for _ in range(2):
+            with pytest.raises(IntegrationError) as refused:
+                probe(missing, codex_home=home)
+            assert refused.value.reason is IntegrationReason.TARGET_UNSAFE
+        # An injected runner is never answered from the window.
+        probe(str(fake.executable), codex_home=fake_home, _run=fake)
+        probe(str(fake.executable), codex_home=fake_home, _run=fake)
+        assert fake.calls.count((str(fake.executable), "--version")) == 2
+        probe(str(executable), codex_home=home)
+    assert len(probes) == 5
