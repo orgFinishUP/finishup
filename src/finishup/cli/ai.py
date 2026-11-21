@@ -12,7 +12,6 @@ from typing import Annotated, Any, Final, Literal, NoReturn, cast
 import typer
 
 from finishup.cli.bootstrap import control_failure, stdout_json
-from finishup.config.models import ConfigError, ExternalRuntimeProfileConfig
 from finishup.domain.privacy import ConversationReview, EgressChannel
 from finishup.ports.control import ControlError
 from finishup.protocol.canonical import JsonValue
@@ -124,6 +123,7 @@ def key() -> None:
     """Hidden key entry for the configured provider; also the last step of ``ai model``."""
 
     from finishup.cli.app import run_configured_provider_credential
+    from finishup.config.models import ConfigError
 
     try:
         action = _run(key_action)
@@ -163,6 +163,7 @@ async def forget_key() -> Literal["removed", "cancelled", "removed_not_ready"]:
 
     from finishup.cli.setup import restart_service_for_semantic_composition
     from finishup.cli.unlock import HumanCeremonyCliError
+    from finishup.config.models import ConfigError
     from finishup.service.confidential_client import ConfidentialClientError
     from finishup.service.confidential_protocol import ProviderCredentialTarget
     from finishup.service.vault import provider_credential_profile_binding
@@ -324,6 +325,8 @@ def status(
 ) -> None:
     """Show review mode, reviewer, model, key presence, and privacy permission."""
 
+    from finishup.config.models import ConfigError
+
     _refuse_extra_arguments(context)
 
     try:
@@ -417,7 +420,11 @@ def model(
     """Switch model; an API key remains bound to its old model until entered again."""
 
     from finishup.cli.setup import restart_service_for_semantic_composition
-    from finishup.config.models import primary_external_endpoint
+    from finishup.config.models import (
+        ConfigError,
+        ExternalRuntimeProfileConfig,
+        primary_external_endpoint,
+    )
     from finishup.config.write import (
         PROVIDER_PRESETS,
         config_write_snapshot,
@@ -529,6 +536,7 @@ def _restore_previous_model(previous: object, written_bytes: bytes | None) -> No
     """
 
     from finishup.cli.setup import restart_service_for_semantic_composition
+    from finishup.config.models import ConfigError
     from finishup.config.write import write_config_toml_if_unchanged
 
     try:
