@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Final
 
 from finishup.adapters.check_sandbox import default_check_sandbox
+from finishup.adapters.process_group import reap_group_members
 from finishup.observability.privacy import redact_high_confidence_content
 from finishup.ports.approved_checks import (
     APPROVED_CHECK_FORMAT,
@@ -257,27 +258,12 @@ def _enable_child_subreaper() -> bool:
 def _reap_posix_group_members(group_id: int) -> tuple[int, bool]:
     """Reap every waitable member of ``group_id``; return (reaped_count, waitable_remaining).
 
-    ``waitpid(-group_id, WNOHANG)`` is scoped to the isolated check's own process group, so it
-    can never steal an unrelated child of this runner. It may reap the leader out from under its
-    ``Popen``; that is harmless because ``Popen`` treats ``ChildProcessError`` as "already
-    exited" and the timeout result never reports an exit status.
+    It may reap the leader out from under its ``Popen``; that is harmless because ``Popen``
+    treats ``ChildProcessError`` as "already exited" and the timeout result never reports an
+    exit status.
     """
 
-    if os.name == "nt" or not hasattr(os, "waitpid"):
-        return 0, False
-    reaped = 0
-    while True:
-        try:
-            pid, _status = os.waitpid(-group_id, os.WNOHANG)
-        except ChildProcessError:
-            # No member of the group is a child of ours: nothing here is waitable.
-            return reaped, False
-        except OSError:
-            return reaped, reaped > 0
-        if pid == 0:
-            # Live children remain but none has exited yet.
-            return reaped, True
-        reaped += 1
+    return reap_group_members(group_id)
 
 
 def _taskkill_tree(pid: int) -> bool:

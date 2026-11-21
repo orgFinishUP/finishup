@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Final, Literal, cast
 from urllib.parse import urlsplit
 
+from finishup.adapters.process_group import group_has_only_exited_members, reap_group_members
 from finishup.adapters.providers.codex_capability import (
     CODEX_CODE_MODE_HOST_NAME,
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -1093,13 +1094,22 @@ async def _cleanup(
     process_exited = process.returncode is not None
 
     def group_exists() -> bool:
+        """Whether a live member of the app-server's process group remains.
+
+        Once the leader's exit is observed, members that are this process's children (it
+        inherits them as a child subreaper) are reaped, and a group whose remaining members
+        have all exited counts as gone: zombies still answer ``killpg(group, 0)``.
+        """
+
+        if process.returncode is not None:
+            reap_group_members(process.pid)
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
             return False
         except PermissionError:
             return True
-        return True
+        return not group_has_only_exited_members(process.pid)
 
     async def await_group_exit(timeout: float) -> bool:
         deadline = asyncio.get_running_loop().time() + timeout

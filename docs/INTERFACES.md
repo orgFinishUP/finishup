@@ -13977,6 +13977,11 @@ the final exchange's evidence with that outcome before anything is persisted, so
 `runtime-attempt-evidence` 1.1.0 is unchanged and `retained` never reaches a stored record.
 If closing the held session reports `failed`, the final judgment is withheld: the result is
 `unavailable`, failure class `transport`, runtime stage and reviewer ending `cleanup_unconfirmed`.
+Cleanup is confirmed when no live member of the app-server's process group remains: after the
+leader exits, members the service inherited as a child subreaper (see the approved-check runner)
+are reaped, and a group whose remaining members have all exited counts as gone. A member that
+is still running after TERM and KILL still makes the outcome `failed`. Capability probes follow the
+same rule.
 An acknowledged Codex turn maps to `outcome_unknown`, preserving the existing no-retry rule.
 
 Active Codex turns account for notifications by four closed families (`control`, `telemetry`,

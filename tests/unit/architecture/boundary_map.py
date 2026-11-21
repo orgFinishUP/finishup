@@ -91,6 +91,8 @@ MODULE_SIDES: Final[dict[str, Side]] = {
     "finishup.adapters.git_version": "WORKSPACE",
     "finishup.adapters.home_project_reads": "WORKSPACE",
     "finishup.adapters.input_summary": "WORKSPACE",
+    # Process-group reaping shared by the approved-check runner and the Codex cleanups.
+    "finishup.adapters.process_group": "WORKSPACE",
     "finishup.adapters.task_input_read": "WORKSPACE",
     "finishup.adapters.workspace_inspect": "WORKSPACE",
     "finishup.adapters.workspace_root": "WORKSPACE",
