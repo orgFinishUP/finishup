@@ -6503,7 +6503,9 @@ external LLM construction and external task/user-content disclosure but is not a
 for the four non-LLM rows. `ReviewSelectionPolicy` is the closed sections/excerpt-kinds/relevance/
 finding-prose/exact-command/caps value owned by `domain/privacy.md`; overlays meet by set
 intersection, stricter relevance, logical AND for both booleans, and minimum caps. Selector growth
-or disabling the current-data-use guard is a policy loosening. Among those four rows, v0.1 owns a
+or disabling the current-data-use guard is a policy loosening. A composed policy keeps that guard
+when any composed scope sets it, and drops it only where no inference binding survives the meet
+(a `local_only` scope or a different binding), since nothing is left for it to gate. Among those four rows, v0.1 owns a
 production transport only for `update_checks`: a bounded structural PyPI transport behind a real
 setup yes/no (product default on). Setup renders the remaining three rows `unsupported`; enabling
 them returns
