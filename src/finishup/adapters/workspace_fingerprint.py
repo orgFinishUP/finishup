@@ -311,6 +311,19 @@ class _Snapshot:
     settle: tuple[tuple[str, int], ...] = ()
 
 
+def _fresh_class(entry: _Entry, snapshot: _Snapshot, key: bytes, root: str) -> str | None:
+    """A changed entry's class under the running rules, as the reading reports it.
+
+    The post-call walk reuses the pre-call snapshot's classes; that snapshot may come from the
+    build that ran before an upgrade landed mid-call. Only an entry that enters the reading needs
+    the running rules, so only it is classified again. A directory has no class.
+    """
+
+    if entry.write_class is not None:
+        entry.write_class = classify_write_path(snapshot.paths[key], workspace=root, inside=True)
+    return entry.write_class
+
+
 class _Unavailable(Exception):
     __slots__ = ("backoff", "reason")
 
@@ -625,7 +638,9 @@ class WorkspaceFingerprintStore:
                 )
             if lingering:
                 return WorkspaceEffectReading(WORKSPACE_UNAVAILABLE, "process_lingering")
-            after = self._walk(root, deadline=deadline, excluded=excluded)
+            after = self._walk(
+                root, deadline=deadline, excluded=excluded, classified=before.entries
+            )
             hasher = _Hasher(self._content_key, deadline)
             replaced_root = (after.root_dev, after.root_ino) != (
                 before.root_dev,
@@ -650,7 +665,7 @@ class WorkspaceFingerprintStore:
                     if not prior.same_metadata(entry):
                         changed = True
                         changed_entries.add(key)
-                        scopes.update((prior.write_class, entry.write_class))
+                        scopes.update((prior.write_class, _fresh_class(entry, after, key, root)))
                     continue
                 entry.digest = hasher.digest(root, after.paths[key], entry)
                 if (
@@ -661,7 +676,7 @@ class WorkspaceFingerprintStore:
                 ):
                     changed = True
                     changed_entries.add(key)
-                    scopes.update((prior.write_class, entry.write_class))
+                    scopes.update((prior.write_class, _fresh_class(entry, after, key, root)))
             if not changed:
                 if not self._settled(after.settle):
                     # A directory gained, lost or replaced an entry while it was being compared:
@@ -714,7 +729,23 @@ class WorkspaceFingerprintStore:
 
     # -- walking ----------------------------------------------------------------------------------
 
-    def _walk(self, root: str, *, deadline: float, excluded: Iterable[str]) -> _Snapshot:
+    def _walk(
+        self,
+        root: str,
+        *,
+        deadline: float,
+        excluded: Iterable[str],
+        classified: Mapping[bytes, _Entry] | None = None,
+    ) -> _Snapshot:
+        """Snapshot every entry under *root* (the walk both halves of a call make).
+
+        ``classified`` is the call's own pre-call snapshot: an in-workspace class is a function of
+        the relative path alone, which the entry key names, so a non-directory entry it already
+        classified keeps that class instead of being classified again. A class that enters the
+        reading (a changed entry's) is classified again by ``_fresh_class``, so a reading never
+        carries a class from the pre-call snapshot that the running rules would not give.
+        """
+
         try:
             facts = os.stat(root)
         except OSError as exc:
@@ -788,6 +819,7 @@ class WorkspaceFingerprintStore:
                         else:
                             child_mode = _MODE_NORMAL
                     if record:
+                        key = self._key(relative)
                         entry = _Entry(
                             _KIND_OPAQUE if opaque else kind,
                             stat.S_IMODE(info.st_mode),
@@ -801,10 +833,12 @@ class WorkspaceFingerprintStore:
                             max(info.st_mtime_ns, info.st_ctime_ns) >= racy_from
                         )
                         if kind != _KIND_DIR:
-                            entry.write_class = classify_write_path(
-                                relative, workspace=root, inside=True
+                            known = None if classified is None else classified.get(key)
+                            entry.write_class = (
+                                known.write_class
+                                if known is not None and known.write_class is not None
+                                else classify_write_path(relative, workspace=root, inside=True)
                             )
-                        key = self._key(relative)
                         entries[key] = entry
                         paths[key] = relative
                     if child_mode is not None and not opaque:

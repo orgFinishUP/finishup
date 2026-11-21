@@ -1405,3 +1405,149 @@ def test_changed_entry_overflow_falls_back_to_unknown(
     )
     assert reading.effect == "changed"
     assert reading.changed_entries is None
+
+
+def _counted_classifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    real = fingerprint.classify_write_path
+    classified: list[str] = []
+
+    def counted(path: str, **kwargs: Any) -> Any:
+        classified.append(path)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(fingerprint, "classify_write_path", counted)
+    return classified
+
+
+def _effect_with_classes(
+    tmp_path: Path, name: str, change: object, *, reuse: bool
+) -> tuple[object, dict[bytes, str | None]]:
+    """One call's reading and the classes its post-call cache keeps, with or without reuse."""
+
+    root = _workspace(tmp_path / name)
+    for relative in ("docs/guide.md", "NOTES.md", "build/out.js", "src/app.py", "run.log"):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text("before\n")
+    (root / "link").symlink_to("README.md")
+    store = WorkspaceFingerprintStore(tmp_path / name / "fp", _KEY, lingering=_no_lingering)
+    assert store.capture_before(str(root), "call", deadline=time.monotonic() + 10) is None
+    if callable(change):
+        change(root)
+    walk = WorkspaceFingerprintStore._walk  # pyright: ignore[reportPrivateUsage]
+    with pytest.MonkeyPatch.context() as patched:
+        if not reuse:
+
+            def unclassified(self: WorkspaceFingerprintStore, *args: Any, **kwargs: Any) -> Any:
+                kwargs.pop("classified", None)
+                return walk(self, *args, **kwargs)
+
+            patched.setattr(WorkspaceFingerprintStore, "_walk", unclassified)
+        reading = store.effect_after(
+            str(root), "call", deadline=time.monotonic() + 10, call_complete=True
+        )
+    load: Any = getattr(store, "_load")
+    cache = load(tmp_path / name / "fp" / "latest.bin", delete=False)
+    classes = (
+        {} if cache is None else {key: entry.write_class for key, entry in cache.entries.items()}
+    )
+    return reading, classes
+
+
+def _rewrite_kinds(root: Path) -> None:
+    (root / "NOTES.md").write_text("after\n")
+    (root / "docs" / "guide.md").unlink()
+    (root / "docs" / "guide.md").mkdir()
+    (root / "link").unlink()
+    (root / "link").write_text("now a file\n")
+    (root / "src" / "app.py").unlink()
+    (root / "src" / "app.py").symlink_to("../README.md")
+    (root / "fresh.log").write_text("new\n")
+    (root / "build" / "out.js").unlink()
+
+
+@pytest.mark.parametrize("change", [None, _rewrite_kinds])
+def test_post_call_classes_reused_from_the_pre_call_snapshot_equal_fresh_ones(
+    tmp_path: Path, change: object
+) -> None:
+    """The post-call walk keeps the pre-call snapshot's classes; the reading is the same."""
+
+    name = "plain" if change is None else "rewritten"
+    reused = _effect_with_classes(tmp_path / "reused", name, change, reuse=True)
+    fresh = _effect_with_classes(tmp_path / "fresh", name, change, reuse=False)
+
+    assert reused == fresh
+    assert reused[1] and any(value is not None for value in reused[1].values())
+
+
+def test_the_post_call_walk_classifies_only_entries_the_pre_call_walk_did_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _workspace(tmp_path)
+    store = _store(tmp_path)
+    classified = _counted_classifications(monkeypatch)
+    assert store.capture_before(str(root), "call", deadline=time.monotonic() + 10) is None
+    assert sorted(classified) == ["README.md", "src/module.py"]
+    classified.clear()
+    (root / "src" / "new.py").write_text("new\n")
+    (root / "README.md").write_text("changed\n")
+
+    reading = store.effect_after(
+        str(root), "call", deadline=time.monotonic() + 10, call_complete=True
+    )
+
+    assert reading.effect == "changed"
+    assert reading.write_scopes == ("docs", "workspace")
+    # The new entry in the walk; the changed one again for the reading; nothing else.
+    assert classified == ["src/new.py", "README.md"]
+
+
+@pytest.mark.parametrize("change", [None, _rewrite_kinds])
+def test_a_reading_uses_the_running_rules_even_when_the_pre_call_snapshot_did_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: object
+) -> None:
+    """An upgrade that changes the write-scope rules between the two halves of one call.
+
+    The pre-call snapshot keeps the earlier rules' classes; the reading must equal the one the
+    post-call half gives without reuse, which classifies every entry under the running rules.
+    """
+
+    real = fingerprint.classify_write_path
+    upgraded = [False]
+
+    def rules(path: str, **kwargs: Any) -> Any:
+        # The "earlier build" calls every file a docs write; the running one uses the real rules.
+        return real(path, **kwargs) if upgraded[0] else "docs"
+
+    monkeypatch.setattr(fingerprint, "classify_write_path", rules)
+    readings: list[object] = []
+    for reuse in (True, False):
+        upgraded[0] = False
+        name = f"{'reused' if reuse else 'fresh'}-{'plain' if change is None else 'rewritten'}"
+        root = _workspace(tmp_path / name)
+        for relative in ("NOTES.md", "build/out.js", "src/app.py", "run.log"):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text("before\n")
+        (root / "link").symlink_to("README.md")
+        (root / "docs").mkdir(exist_ok=True)
+        (root / "docs" / "guide.md").write_text("before\n")
+        store = WorkspaceFingerprintStore(tmp_path / name / "fp", _KEY, lingering=_no_lingering)
+        assert store.capture_before(str(root), "call", deadline=time.monotonic() + 10) is None
+        if callable(change):
+            change(root)
+        upgraded[0] = True
+        walk = WorkspaceFingerprintStore._walk  # pyright: ignore[reportPrivateUsage]
+        with pytest.MonkeyPatch.context() as patched:
+            if not reuse:
+
+                def unclassified(self: WorkspaceFingerprintStore, *args: Any, **kwargs: Any) -> Any:
+                    kwargs.pop("classified", None)
+                    return walk(self, *args, **kwargs)
+
+                patched.setattr(WorkspaceFingerprintStore, "_walk", unclassified)
+            readings.append(
+                store.effect_after(
+                    str(root), "call", deadline=time.monotonic() + 10, call_complete=True
+                )
+            )
+
+    assert readings[0] == readings[1]
