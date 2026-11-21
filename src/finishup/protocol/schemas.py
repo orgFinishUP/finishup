@@ -200,41 +200,121 @@ _FORMAT_CHECKER.checks("date-time")(_is_rfc3339_date_time)
 
 
 type _KeywordErrors = Iterator[ValidationError]
+# Per branch of one ``anyOf``/``oneOf`` list, the (property, string ``const``) pairs its
+# ``properties`` keyword pins.
+type _BranchPins = tuple[tuple[tuple[str, str], ...], ...]
 
 
-def _any_of_first_error(
-    validator: Any, any_of: Sequence[object], instance: object, schema: object
-) -> _KeywordErrors:
+def _branch_pins(branches: Sequence[object]) -> _BranchPins:
+    """The string ``const`` each branch's ``properties`` keyword requires of a property."""
+
+    pins: list[tuple[tuple[str, str], ...]] = []
+    for branch in branches:
+        pinned: list[tuple[str, str]] = []
+        if type(branch) is dict:
+            properties = cast(dict[str, object], branch).get("properties")
+            if type(properties) is dict:
+                for key, subschema in cast(dict[str, object], properties).items():
+                    if type(subschema) is dict:
+                        const = cast(dict[str, object], subschema).get("const")
+                        if type(const) is str:
+                            pinned.append((key, const))
+        pins.append(tuple(pinned))
+    return tuple(pins)
+
+
+class _BranchScreen:
+    """Skips ``anyOf``/``oneOf`` branches whose string ``const`` an object instance contradicts.
+
+    The control envelopes are ``oneOf`` unions of dozens of branches keyed by ``method`` (and
+    ``outcome``) constants, and descending into each wrong one built its errors before failing.
+    A branch whose ``properties`` pins a property to one string, for an object instance holding
+    a different string there, fails that ``const`` whatever else it says, so skipping it cannot
+    change a verdict. Only exact ``str`` values on both sides are compared, where ``==`` is the
+    keyword's own equality. The pins of each branch list are computed once per checker; the
+    catalog it reads is immutable for the checker's lifetime.
+    """
+
+    __slots__ = ("_pins",)
+
+    def __init__(self) -> None:
+        self._pins: dict[int, tuple[Sequence[object], _BranchPins]] = {}
+
+    def excluded(self, branches: Sequence[object], instance: object) -> tuple[bool, ...] | None:
+        """Per branch, whether *instance* contradicts one of its pins; ``None`` when none can."""
+
+        if type(instance) is not dict:
+            return None
+        entry = self._pins.get(id(branches))
+        if entry is None or entry[0] is not branches:
+            entry = (branches, _branch_pins(branches))
+            self._pins[id(branches)] = entry
+        source = cast(dict[str, object], instance)
+        excluded: list[bool] = []
+        for pinned in entry[1]:
+            contradicted = False
+            for key, const in pinned:
+                value = source.get(key)
+                if type(value) is str and value != const:
+                    contradicted = True
+                    break
+            excluded.append(contradicted)
+        return tuple(excluded)
+
+
+def _any_of_first_error(screen: _BranchScreen) -> Any:
     """``anyOf`` that stops each failing branch at its first error.
 
     The stock keyword runs every failing branch to exhaustion so it can report the best error.
     Validity only depends on whether a branch has *an* error, and a status page's ``page`` is an
     ``anyOf`` over thirteen page shapes, each failing one of which otherwise walked every row
-    (issue #916). This accepts and rejects exactly what the stock keyword does.
+    (issue #916). Branches *screen* proves failing are not entered. This accepts and rejects
+    exactly what the stock keyword does.
     """
 
-    del schema
-    for index, subschema in enumerate(any_of):
-        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
-            return
-    yield ValidationError("instance is not valid under any of the given schemas")
-
-
-def _one_of_first_error(
-    validator: Any, one_of: Sequence[object], instance: object, schema: object
-) -> _KeywordErrors:
-    """``oneOf`` with the stock keyword's decision, stopping each failing branch at one error."""
-
-    del schema
-    branches = enumerate(one_of)
-    for index, subschema in branches:
-        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
-            break
-    else:
+    def keyword(
+        validator: Any, any_of: Sequence[object], instance: object, schema: object
+    ) -> _KeywordErrors:
+        del schema
+        excluded = screen.excluded(any_of, instance)
+        for index, subschema in enumerate(any_of):
+            if excluded is not None and excluded[index]:
+                continue
+            if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+                return
         yield ValidationError("instance is not valid under any of the given schemas")
-        return
-    if any(validator.evolve(schema=each).is_valid(instance) for _, each in branches):
-        yield ValidationError("instance is valid under more than one of the given schemas")
+
+    return keyword
+
+
+def _one_of_first_error(screen: _BranchScreen) -> Any:
+    """``oneOf`` with the stock keyword's decision, stopping each failing branch at one error.
+
+    Branches *screen* proves failing are not entered.
+    """
+
+    def keyword(
+        validator: Any, one_of: Sequence[object], instance: object, schema: object
+    ) -> _KeywordErrors:
+        del schema
+        excluded = screen.excluded(one_of, instance)
+        branches = enumerate(one_of)
+        for index, subschema in branches:
+            if excluded is not None and excluded[index]:
+                continue
+            if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+                break
+        else:
+            yield ValidationError("instance is not valid under any of the given schemas")
+            return
+        if any(
+            validator.evolve(schema=each).is_valid(instance)
+            for index, each in branches
+            if excluded is None or not excluded[index]
+        ):
+            yield ValidationError("instance is valid under more than one of the given schemas")
+
+    return keyword
 
 
 def _ref_resolved_once(
@@ -899,7 +979,8 @@ class _ValidityChecker:
 
     It accepts and rejects exactly what the stock ``Draft202012Validator`` does; its keywords
     differ only in how much they evaluate. ``anyOf`` and ``oneOf`` stop each failing branch at its
-    first error, and ``$ref`` resolves each reference once. Documents drop their root ``$schema``
+    first error and skip a branch whose string ``const`` the instance contradicts, and ``$ref``
+    resolves each reference once. Documents drop their root ``$schema``
     marker because ``jsonschema`` picks the class for a referenced document from it, which would
     hand every cross-document reference back to the stock class; every member is draft 2020-12
     (``_plain_schema`` refuses anything else) and is registered with that specification
@@ -939,14 +1020,15 @@ class _ValidityChecker:
             {id(plain): schema_id for schema_id, plain in stripped.items()}
         )
         extend = cast(Callable[..., Any], getattr(jsonschema_validators, "extend"))
+        screen = _BranchScreen()
 
         def validator_class(memory: _ValidInstanceVerdicts | None) -> Any:
             return extend(
                 Draft202012Validator,
                 {
                     "$ref": _ref_resolved_once({}, document_roots, memory),
-                    "anyOf": _any_of_first_error,
-                    "oneOf": _one_of_first_error,
+                    "anyOf": _any_of_first_error(screen),
+                    "oneOf": _one_of_first_error(screen),
                 },
             )
 
