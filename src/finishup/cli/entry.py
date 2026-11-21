@@ -1,9 +1,9 @@
 """Console entry point that fast-paths bounded commands past the typer graph.
 
 Loading ``finishup.cli.app`` costs a substantial typer/pydantic/protocol-schema import that a Codex
-hook never uses (#242). Only exact hook commands and the ordinary ``service status`` forms are
-fast-pathed; everything else falls through to the full CLI unchanged, so usage errors and
-``--help`` stay byte-identical.
+hook never uses (#242). Only exact hook commands, the ordinary ``service status`` forms, and the
+exact bare ``--version`` and ``version`` forms are fast-pathed; everything else falls through to
+the full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
 """
 
 from __future__ import annotations
@@ -304,6 +304,65 @@ def _claude_observe_fast_path(arguments: list[str]) -> int | None:
     return 0
 
 
+# Typer answers shell-completion requests named by this variable (``prog_name`` is always
+# ``finishup``) before parsing any argument, even with completion installation disabled.
+_COMPLETION_VARIABLE: Final = "_FINISHUP_COMPLETE"
+_VERSION_FAST_ARGUMENTS: Final = (["--version"], ["version"])
+
+
+def _version_fast_path(arguments: list[str]) -> int | None:
+    """Print the bare package version without loading typer, or return None to fall through.
+
+    Only the exact ``--version`` and ``version`` forms qualify. Both print ``__version__`` through
+    ``click.echo`` behind ``cli.app.main``; every outcome of that write is reproduced here: a
+    closed stdout prints nothing and succeeds, a broken pipe exits 1 with both streams pacified,
+    an interrupt exits 130 silently, and any other failure is ``cli.app.main``'s bounded
+    ``internal_error`` line with its diagnostic correlation.
+    """
+
+    if arguments not in _VERSION_FAST_ARGUMENTS or _COMPLETION_VARIABLE in os.environ:
+        return None
+    from finishup import __version__
+
+    try:
+        try:
+            stream = sys.stdout
+            if stream is not None:
+                stream.write(__version__ + "\n")
+                stream.flush()
+        except KeyboardInterrupt:
+            return 130
+        except OSError as error:
+            if error.errno != errno.EPIPE:
+                raise
+            from click.utils import PacifyFlushWrapper
+
+            sys.stdout = PacifyFlushWrapper(sys.stdout)  # pyright: ignore[reportAttributeAccessIssue]
+            sys.stderr = PacifyFlushWrapper(sys.stderr)  # pyright: ignore[reportAttributeAccessIssue]
+            return 1
+    except Exception as error:
+        return _unexpected_cli_failure(error)
+    return 0
+
+
+def _unexpected_cli_failure(error: Exception) -> int:
+    """Report a fast-path failure exactly as ``cli.app.main``'s catch-all does."""
+
+    from finishup.cli.app import (
+        _lifecycle_exit_code,  # pyright: ignore[reportPrivateUsage]
+        _stderr,  # pyright: ignore[reportPrivateUsage]
+        _unexpected_failure_suffix,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    lifecycle_exit = _lifecycle_exit_code(error)
+    if lifecycle_exit is not None:
+        return lifecycle_exit
+    _stderr(
+        "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
+    )
+    return 70
+
+
 def _unsupported_platform_exit(arguments: list[str], *, os_name: str | None = None) -> int | None:
     """Return the bounded exit for native Windows, or None where FinishUP can run.
 
@@ -451,6 +510,9 @@ def main() -> None:
     # After the release-runtime handoff, so a re-executed process prints the notice only once.
     _legacy_alias_notice(argv)
     code = _unsupported_platform_exit(argv)
+    if code is not None:
+        raise SystemExit(code)
+    code = _version_fast_path(argv)
     if code is not None:
         raise SystemExit(code)
     if len(argv) >= 2 and argv[0] == "service" and argv[1] == "status":
