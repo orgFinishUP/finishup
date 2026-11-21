@@ -510,8 +510,10 @@ goes too. The tasks that read the copy lose the captured changes and review exce
 from it, and their receipts say the copy and the excerpts derived from it were deleted, when, and
 whether you forgot it or its time ran out; their findings and checks stay. `forget --all` forgets
 every project this computer sent a copy to that server and names any it could not, with what to
-do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten. `list
---all` shows each of them the same way (`code_copy_list_incomplete` unless every one was listed).
+do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten. A
+project held from that server or kept on this computer whose record names nothing sent there is
+shown as never sent: the server is asked nothing about it, and when every project is like that,
+`forget --all` says that nothing was sent, asked or deleted. `list --all` shows each of them the same way (`code_copy_list_incomplete` unless every one was listed).
 
 These commands send the server only the copy's id: a keyed label for the project that names no
 folder, the same one that server already received when it asked this computer for that copy.

@@ -1633,3 +1633,96 @@ def test_forget_all_and_list_all_ask_nothing_for_a_held_record_naming_nothing_se
         assert text.exit_code == 0, text.output
         assert "never sent; this computer's record of it names nothing sent there" in text.stdout
     assert _Connection.made == [] and connection == [] and folder.exists()
+
+
+def _never_sent_from(record: targets.ServerTarget, worktree: Path) -> Path:
+    """A held repository whose export record for ``record`` names nothing sent there."""
+
+    from finishup.cli.server import repository_here
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import export_folder
+
+    folder = export_folder(record.target_id, repository_here(str(worktree)).key)
+    ExportDatabase(folder).remember_root(Path(os.path.realpath(worktree)))
+    _hold(record, worktree)
+    return folder
+
+
+def test_forget_all_of_only_never_sent_records_says_nothing_was_asked_or_deleted(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+) -> None:
+    """Nothing was sent, so nothing is said to be forgotten there and no task is said to lose
+    what it captured from a copy, matching the JSON's ``forgotten: 0``."""
+
+    _never_sent_from(remote, repository)
+    machine = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert machine.exit_code == 0, machine.output
+    assert json.loads(machine.stdout)["forgotten"] == 0
+    text = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert text.exit_code == 0, text.output
+    lines = text.stdout.splitlines()
+    assert lines[-1] == (
+        "This computer sent lab nothing from these repositories, so FinishUP asked lab nothing; "
+        "nothing was deleted."
+    )
+    assert "is forgotten there" not in text.stdout
+    assert server_code.FORGET_TRAILER not in text.stdout
+    assert _Connection.made == [] and connection == []
+
+
+def test_forget_all_keeps_the_trailer_for_a_forgotten_copy_beside_a_never_sent_one(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = _second_repository(tmp_path)
+    _sent_from(remote, sent)
+    _never_sent_from(remote, repository)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 0, result.output
+    assert [asked[0] for asked in server.asked] == [os.path.realpath(sent)]
+    lines = result.stdout.splitlines()
+    assert lines[-2:] == [
+        "Every copy this computer sent to lab is forgotten there.",
+        server_code.FORGET_TRAILER,
+    ]
+
+
+def test_forget_all_says_no_trailer_when_its_one_sent_copy_was_not_forgotten(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = _second_repository(tmp_path)
+    _sent_from(remote, sent)
+    _never_sent_from(remote, repository)
+    _server(monkeypatch, _Server(refuse={os.path.realpath(sent): "remote_unreachable"}))
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 20, result.output
+    assert "1 of 2 not forgotten: each stays on lab until it expires or is forgotten." in (
+        result.stdout.splitlines()
+    )
+    assert server_code.FORGET_TRAILER not in result.stdout
+
+
+def test_remove_forget_copies_of_only_never_sent_records_says_nothing_was_asked_or_deleted(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _never_sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "This computer sent far nothing from these repositories, so FinishUP asked far nothing; "
+        "nothing was deleted."
+    ) in result.stdout.splitlines()
+    assert "is forgotten there" not in result.stdout
+    assert server_code.FORGET_TRAILER not in result.stdout
+    assert server.asked == [] and console.opened == 0 and "far" not in _names()

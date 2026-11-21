@@ -637,14 +637,23 @@ def forget_lines(record: ServerTarget, outcomes: tuple[ForgetOutcome, ...]) -> t
             )
         lines.append(named + f"not forgotten ({outcome.reason}): {remedy}.")
     missed = sum(1 for outcome in outcomes if not outcome.forgotten)
+    # A ``never_sent`` repository is no miss, but nothing of it was forgotten either (as the
+    # JSON's ``forgotten`` count says): only a copy the server deleted earns the summary and the
+    # trailer about what its deletion takes from the tasks that read it.
+    forgotten = sum(1 for outcome in outcomes if outcome.forgotten and outcome.sent)
     if missed:
         lines.append(
             f"{missed} of {len(outcomes)} not forgotten: each stays on {record.name} until it "
             "expires or is forgotten."
         )
-    else:
+    elif forgotten:
         lines.append(f"Every copy this computer sent to {record.name} is forgotten there.")
-    if missed < len(outcomes):
+    else:
+        lines.append(
+            f"This computer sent {record.name} nothing from these repositories, so FinishUP "
+            f"asked {record.name} nothing; nothing was deleted."
+        )
+    if forgotten:
         lines.append(FORGET_TRAILER)
     return tuple(lines)
 

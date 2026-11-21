@@ -15490,7 +15490,10 @@ short id with `export_record_unreadable`, `repository_folder_unknown`, `reposito
 repositories: [{position, copy, folder, outcome: forgotten|not_forgotten|never_sent, reason,
 answer}], forgotten, not_forgotten}`. A record that kept its `claim` is named by it, whatever became of its
 folder (#1357); a held or kept repository whose record names nothing sent there (no snapshot, no
-claim) is asked nothing and reported `outcome: never_sent` (no miss, not counted as forgotten).
+claim) is asked nothing and reported `outcome: never_sent` (no miss, not counted as forgotten). Its text
+says every copy is forgotten there, and adds what the tasks that read a copy lose, only when one was
+actually forgotten; a run of `never_sent` records alone ends by saying nothing was sent, asked or
+deleted (the same lines serve `server remove --forget-copies`).
 `list --all` reads the same records the same way and exits 20 with `code_copy_list_incomplete`
 when any one is `not_listed`; a `never_sent` one is no miss either, so it alone exits 0; its JSON is `{action: status_all, repositories: [{position, copy,
 folder, outcome: listed|not_listed|never_sent, reason, answer}], listed, not_listed}`. `list` and `forget` of a held or kept repository with no export record print
