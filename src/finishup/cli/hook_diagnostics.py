@@ -881,7 +881,9 @@ def _read_rows(
             for line in raw.splitlines():
                 try:
                     parsed: object = json.loads(line)
-                except (UnicodeError, json.JSONDecodeError):
+                except (UnicodeError, json.JSONDecodeError, RecursionError):
+                    # A row nested deeper than the decoder recurses is skipped like any
+                    # other malformed row rather than failing the whole status read.
                     continue
                 if type(parsed) is not dict:
                     continue

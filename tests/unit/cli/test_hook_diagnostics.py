@@ -715,3 +715,14 @@ def test_a_held_or_kept_repository_is_a_closed_diagnostic_reason(
     record_hook_diagnostic(reason, "SessionStart", _state=tmp_path)
     row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text("utf-8"))
     assert row["reason"] == reason
+
+
+def test_a_row_nested_past_the_decoder_limit_is_skipped_not_a_fault(tmp_path: Path) -> None:
+    record_hook_diagnostic("service_unavailable", "PostToolUse", _state=tmp_path)
+    path = tmp_path / "observation/hook-diagnostics.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        # Under the 64 KiB file cap, deeper than the JSON decoder recurses.
+        handle.write("[" * 60_000 + "\n")
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    assert reasons["service_unavailable"]["count"] == 1
