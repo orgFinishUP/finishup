@@ -14,7 +14,9 @@ from finishup.adapters.memory import ledger as module
 from finishup.application import ledger_snapshot
 from finishup.domain.events import LedgerRecord
 from finishup.domain.values import Frontier
+from finishup.kernel import closure_readiness
 from finishup.kernel.projections import ProjectionState
+from finishup.kernel.task_facts import TaskFactSignals
 from finishup.ports.ledger import ProjectionItem, ProjectionQuery, ProjectionView
 from integration.storage.test_append_and_replay import command_from_records, memory_for, sqlite_for
 
@@ -403,3 +405,57 @@ async def test_offloaded_replay_stops_when_the_caller_is_cancelled(
         await task
     # The worker was joined before cancellation propagated and stopped at the next record.
     assert folded == [records[0].ledger.ingestion_sequence]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_compact_page_derives_task_fact_signals_once(
+    backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The compact page's status gaps and its closure-readiness facts read one task-fact
+    # derivation; the page must equal the one built when readiness derived its own.
+    records = replay_records("all-event-families")
+    command, objects = command_from_records(records, expected_frontier=0)
+    db = None
+    if backend == "memory":
+        ledger = memory_for(command, objects)
+    else:
+        db = apsw.Connection(":memory:")
+        ledger = sqlite_for(command, objects, db)
+    try:
+        await ledger.append_batch(command)
+        accepted = tuple([row async for row in ledger.load_events(command.session_id)])
+        head = Frontier(accepted[-1].ledger.ingestion_sequence, accepted[-1].entry_digest)
+        original_signals = module.task_fact_signals
+        original_facts = module.closure_readiness_facts
+        calls = {"signals": 0}
+
+        def signals(
+            projection: ProjectionState, prefix: tuple[LedgerRecord, ...]
+        ) -> TaskFactSignals:
+            calls["signals"] += 1
+            return original_signals(projection, prefix)
+
+        monkeypatch.setattr(module, "task_fact_signals", signals)
+        monkeypatch.setattr(closure_readiness, "task_fact_signals", signals)
+        query = ProjectionQuery(command.session_id, "compact", None, head, 50, None, None)
+        page = await ledger.query_projection(query)
+        assert calls["signals"] == 1
+        assert page.readiness_facts is not None
+
+        def independent(
+            projection: ProjectionState,
+            prefix: tuple[LedgerRecord, ...],
+            *,
+            signals: TaskFactSignals | None = None,
+        ) -> closure_readiness.ClosureReadinessFacts:
+            return original_facts(projection, prefix)
+
+        monkeypatch.setattr(module, "closure_readiness_facts", independent)
+        rebuilt = await ledger.query_projection(query)
+        assert rebuilt == page
+        assert rebuilt.readiness_facts == page.readiness_facts
+        assert calls["signals"] == 3
+    finally:
+        if db is not None:
+            db.close()

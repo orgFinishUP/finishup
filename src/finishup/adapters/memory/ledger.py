@@ -3172,11 +3172,12 @@ class MemoryLedgerAdapter:
                 key=str.encode,
             )
         )
+        drift_codes = plan_drift_signals(effective_projection, prefix).codes
+        # The compact page's readiness facts reuse these same signals (one derivation per call).
+        fact_signals = task_fact_signals(effective_projection, prefix)
         status_gaps = tuple(
             sorted(
-                set(status_gaps)
-                | set(plan_drift_signals(effective_projection, prefix).codes)
-                | set(task_fact_signals(effective_projection, prefix).codes),
+                set(status_gaps) | set(drift_codes) | set(fact_signals.codes),
                 key=str.encode,
             )
         )
@@ -3196,7 +3197,9 @@ class MemoryLedgerAdapter:
             coverage = replace(compact_coverage, known_gaps=status_gaps)
             # Derived for exactly this frontier on every request and never cached, so readiness
             # after a restart, a reattach or an upgrade is recomputed from the recorded prefix.
-            readiness_facts = closure_readiness_facts(effective_projection, prefix)
+            readiness_facts = closure_readiness_facts(
+                effective_projection, prefix, signals=fact_signals
+            )
         else:
             coverage = with_completion_scope_coverage(
                 replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection

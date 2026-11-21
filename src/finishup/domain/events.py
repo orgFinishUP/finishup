@@ -924,6 +924,30 @@ class EventSchema:
         object.__setattr__(self, "version", version)
 
 
+# Exact schemas compared per record on hot paths (locator decode, payload decode, replay scans).
+# Built once: constructing an EventSchema validates both fields on every call.
+_CLAIM_V1_1_SCHEMA: Final = EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION)
+_OBLIGATION_V1_1_SCHEMA: Final = EventSchema("obligation_published", OBLIGATION_SCHEMA_VERSION)
+_DECISION_REVIEW_MODE_SCHEMA: Final = EventSchema(
+    "decision_recorded", DECISION_REVIEW_MODE_SCHEMA_VERSION
+)
+_TASK_STATEMENT_PLAN_SCHEMAS: Final = frozenset(
+    {
+        EventSchema("plan_published", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
+        EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
+    }
+)
+_RESULT_VERIFICATION_SCHEMA: Final = EventSchema(
+    "result_recorded", RESULT_VERIFICATION_SCHEMA_VERSION
+)
+_RESPONSE_V1_1_SCHEMA: Final = EventSchema("response_recorded", RESPONSE_EVENT_SCHEMA_VERSION)
+_REDACTION_SCHEMA: Final = EventSchema("redaction_recorded", SCHEMA_VERSION)
+_EVIDENCE_V1_0_SCHEMA: Final = EventSchema("evidence_recorded", SCHEMA_VERSION)
+_LINEAGE_SESSION_OPENED_SCHEMA: Final = EventSchema(
+    "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+)
+
+
 @dataclass(frozen=True, slots=True)
 class WriterChain:
     writer_id: WriterId
@@ -995,19 +1019,15 @@ def _locator_key_kind(schema: EventSchema) -> str:
     if schema.name not in EVENT_FAMILIES:
         return "none"
     additive = (
-        schema == EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION)
+        schema == _CLAIM_V1_1_SCHEMA
         # Role- and directory-bearing obligations project as the same obligation (issue #1002).
-        or schema == EventSchema("obligation_published", OBLIGATION_SCHEMA_VERSION)
+        or schema == _OBLIGATION_V1_1_SCHEMA
         # A decision carrying a review-mode switch projects as the same decision (ADR-049).
-        or schema == EventSchema("decision_recorded", DECISION_REVIEW_MODE_SCHEMA_VERSION)
+        or schema == _DECISION_REVIEW_MODE_SCHEMA
         # A plan carrying a revised task statement projects as the same plan (issue #908).
-        or schema
-        in {
-            EventSchema("plan_published", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
-            EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
-        }
+        or schema in _TASK_STATEMENT_PLAN_SCHEMAS
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
-        or schema == EventSchema("result_recorded", RESULT_VERIFICATION_SCHEMA_VERSION)
+        or schema == _RESULT_VERIFICATION_SCHEMA
         or (
             schema.name in {"check_recorded", "finding_recorded"}
             and (
@@ -1030,7 +1050,7 @@ def _locator_key_kind(schema: EventSchema) -> str:
                 )
             )
         )
-        or schema == EventSchema("response_recorded", RESPONSE_EVENT_SCHEMA_VERSION)
+        or schema == _RESPONSE_V1_1_SCHEMA
     )
     if schema.version != SCHEMA_VERSION and not additive:
         return "none"
@@ -1105,7 +1125,7 @@ class ProjectionLocator:
                     "finding": finding_id,
                 }
                 constructors[key_kind](self.logical_key)
-        if self.schema == EventSchema("redaction_recorded", SCHEMA_VERSION):
+        if self.schema == _REDACTION_SCHEMA:
             if not events and not objects:
                 raise ProtocolValueError("invalid_projection_locator")
         elif events or objects:
@@ -4979,11 +4999,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         optional = optional - {"outside_reads_kept_back"}
     if schema.name == "evidence_recorded" and schema.version != SCHEMA_VERSION:
         optional = frozenset({*optional, "digest_binding"})
-    if schema == EventSchema("result_recorded", RESULT_VERIFICATION_SCHEMA_VERSION):
+    if schema == _RESULT_VERIFICATION_SCHEMA:
         optional = frozenset({*optional, "verification"})
-    if schema == EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION):
+    if schema == _CLAIM_V1_1_SCHEMA:
         required = frozenset({*required, "limitation_refs", "supersedes_claim_refs"})
-    if schema == EventSchema("decision_recorded", DECISION_REVIEW_MODE_SCHEMA_VERSION):
+    if schema == _DECISION_REVIEW_MODE_SCHEMA:
         optional = frozenset({*optional, "review_mode"})
     elif schema.name == "decision_recorded":
         optional = optional - {"advisory_response"}
@@ -6116,13 +6136,9 @@ def _validate_event_schema_payload(
         has_project_lineage = any(
             value is not None for value in (payload.project_id, payload.membership_generation)
         )
-        if has_lineage and schema != EventSchema(
-            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
-        ):
+        if has_lineage and schema != _LINEAGE_SESSION_OPENED_SCHEMA:
             raise ProtocolValueError("invalid_event_schema")
-        if has_project_lineage and schema != EventSchema(
-            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
-        ):
+        if has_project_lineage and schema != _LINEAGE_SESSION_OPENED_SCHEMA:
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) in {
         SessionOpenedPayload,
@@ -6253,7 +6269,7 @@ def _validate_event_schema_payload(
     if type(payload) is not EvidenceRecordedPayload:
         return
     evidence = payload
-    if schema == EventSchema("evidence_recorded", SCHEMA_VERSION):
+    if schema == _EVIDENCE_V1_0_SCHEMA:
         if evidence.digest_binding is not None:
             raise ProtocolValueError("invalid_event_value_type")
         return
@@ -6695,6 +6711,11 @@ def redaction_targets(
     return frozenset(events), frozenset(objects)
 
 
+_CONTENT_FORGOTTEN_SCHEMA: Final = EventSchema(
+    "content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION
+)
+
+
 def is_content_forgotten_record(record: LedgerRecord) -> bool:
     """Whether ``record`` is a service-written ``content_forgotten`` event (ADR-054, U20).
 
@@ -6705,8 +6726,7 @@ def is_content_forgotten_record(record: LedgerRecord) -> bool:
 
     return (
         type(record) is AcceptedEvent
-        and record.schema
-        == EventSchema("content_forgotten", CONTENT_FORGOTTEN_EVENT_SCHEMA_VERSION)
+        and record.schema == _CONTENT_FORGOTTEN_SCHEMA
         and (record.payload is None or type(record.payload) is ContentForgottenPayload)
         and is_observation_authored(record)
     )
