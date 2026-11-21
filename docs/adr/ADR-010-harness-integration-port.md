@@ -469,6 +469,10 @@ Hook ingress and every consent/control lifecycle entry point derive that commitm
 workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
 directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing
 exact-subdirectory grants remain non-authorizing until an operator explicitly regrants them.
+The observation key behind every workspace and session commitment is created once, only when no
+key file exists, and never rewritten: a key file that exists but cannot be read or is invalid is a
+typed `STORAGE_UNSAFE` failure, never a reason to mint a replacement that would orphan every
+consent, binding, and outbox record keyed by the old commitments (issue #1390).
 
 Hook `PostToolUse` and a completed session-stream tool record (rollout `function_call_output`,
 historically exec-JSONL `item.completed`) for one host call normalize before materialization to

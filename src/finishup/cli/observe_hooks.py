@@ -196,7 +196,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from finishup.protocol.ids import IdKind, is_valid_id
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 
@@ -5836,8 +5836,9 @@ def handle_observe(
             else:
                 try:
                     workspace_commitment = store.workspace_commitment(workspace_locator)
-                except ObservationStoreLockTimeout:
-                    # Contention while creating the key is not a missing consent.
+                except (ObservationStoreLockTimeout, PublicOperationError):
+                    # Contention while creating the key, or an existing key that cannot be
+                    # read, is not a missing consent: fail the pass and name the reason.
                     raise
                 except Exception:
                     workspace_commitment = None

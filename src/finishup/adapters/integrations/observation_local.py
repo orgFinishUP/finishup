@@ -3817,16 +3817,68 @@ class LocalObservationStore:
         # Every hook resolves its workspace commitment through this read;
         # queueing it behind a contended batch turned a lock timeout into a
         # dropped event misreported as an unconsented workspace (#689).
-        existing = _read_bytes(path, maximum=_KEY_BYTES)
-        if existing is not None and len(existing) == _KEY_BYTES:
+        existing = self._existing_key_material()
+        if existing is not None:
             return existing
         with self._lock:
-            existing = _read_bytes(path, maximum=_KEY_BYTES)
-            if existing is not None and len(existing) == _KEY_BYTES:
+            existing = self._existing_key_material()
+            if existing is not None:
                 return existing
             material = os.urandom(_KEY_BYTES)
             _atomic_write(path, material)
             return material
+
+    def _existing_key_material(self) -> bytes | None:
+        """Read the installation key; ``None`` only when no key file exists at all.
+
+        Every commitment is an HMAC under this key, so a key file that exists but cannot be
+        read, is not a regular file, or holds the wrong number of bytes is a typed storage
+        failure, never a reason to create a replacement: rotating it would orphan every
+        consent, session binding, and outbox record keyed by the old commitments.
+        """
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self._root / "key-material.bin", flags)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            message = (
+                "Observation key material is unsafe."
+                if exc.errno == errno.ELOOP
+                else "Observation key material is unavailable."
+            )
+            raise _error(PublicErrorCode.STORAGE_UNSAFE, message, retryable=False) from exc
+        try:
+            facts = os.fstat(descriptor)
+            if not stat.S_ISREG(facts.st_mode) or facts.st_size != _KEY_BYTES:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation key material is invalid.",
+                    retryable=False,
+                )
+            chunks: list[bytes] = []
+            remaining = _KEY_BYTES + 1
+            while remaining > 0 and (chunk := os.read(descriptor, remaining)):
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except OSError as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation key material is unavailable.",
+                retryable=False,
+            ) from exc
+        finally:
+            os.close(descriptor)
+        material = b"".join(chunks)
+        if len(material) != _KEY_BYTES:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation key material is invalid.",
+                retryable=False,
+            )
+        return material
 
     def _cached_key_material(self) -> bytes:
         # The key file is created once and never rewritten, so a per-instance
@@ -4012,10 +4064,12 @@ class LocalObservationStore:
 
         ``None`` means no key exists yet, so no workspace can hold consent; a read-only preview
         uses this instead of :meth:`workspace_commitment`, which creates the key on first use.
+        A key file that exists but cannot be read or is invalid raises ``STORAGE_UNSAFE``
+        rather than reading as "no consent".
         """
 
-        existing = _read_bytes(self._root / "key-material.bin", maximum=_KEY_BYTES)
-        if existing is None or len(existing) != _KEY_BYTES:
+        existing = self._existing_key_material()
+        if existing is None:
             return None
         return workspace_commitment_from_path(existing, path)
 

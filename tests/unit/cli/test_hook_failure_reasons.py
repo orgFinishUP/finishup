@@ -254,3 +254,25 @@ async def test_contended_local_outbox_read_failure_keeps_preflight_reason(
     monkeypatch.setattr(store, "list_pending_outbox_rows", broken_read)
     await _stage_without_lease(tmp_path, store, workspace, _connected)
     assert _reasons(tmp_path) == ["drain_preflight_failed"]
+
+
+def test_invalid_key_material_fails_the_pass_instead_of_reading_as_unconsented(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.grant_consent(store.workspace_commitment(str(tmp_path.resolve())))
+    key_path = tmp_path / "observation" / "key-material.bin"
+    key_path.write_bytes(b"\x01" * 16)
+    stdout = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "s1", "tool_name": "shell"}).encode(),
+        stdout=stdout,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert json.loads(stdout.getvalue().decode()) == {}
+    assert _reasons(tmp_path) == ["observe_exception_public_operation_error"]
+    assert key_path.read_bytes() == b"\x01" * 16

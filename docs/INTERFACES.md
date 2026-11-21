@@ -7590,6 +7590,12 @@ accepted completed-tool session route before optional verification policy setup.
 captured-content selection does not require an approved-check policy.
 
 Observation consent is one workspace-level confirmation recorded as a private workspace commitment.
+The commitment is an HMAC under the installation's observation key, which
+`LocalObservationStore.key_material()` creates once, only while no key file exists, and never
+rewrites. An existing key that cannot be read, is not a regular file, or is not exactly 32 bytes
+raises `STORAGE_UNSAFE` and is left untouched (`existing_workspace_commitment` raises the same
+rather than reporting no consent); a hook pass records that as
+`observe_exception_public_operation_error`, never as an unconsented workspace (issue #1390).
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. A safe project root is the running user's own directory that no other account can
