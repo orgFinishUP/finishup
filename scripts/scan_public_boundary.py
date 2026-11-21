@@ -397,27 +397,47 @@ def _enumerate_source(root: Path) -> tuple[FileEntry, ...]:
 
 
 def _enumerate_evidence(root: Path) -> tuple[FileEntry, ...]:
-    if not root.is_dir():
+    """Enumerate one evidence directory without following symlinks.
+
+    A symlink at any depth (to a file or a directory), a symlinked root, an unreadable directory,
+    or any entry that is neither a directory nor a regular file makes the scan incomplete instead
+    of being skipped.
+    """
+
+    if root.is_symlink() or not root.is_dir():
         raise BoundaryScanError("evidence_dir_missing", detail=str(root))
+    files: list[Path] = []
+    pending: list[Path] = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                for child in iterator:
+                    if child.is_symlink():
+                        raise BoundaryScanError("unscanned_evidence_entry", detail=child.path)
+                    if child.is_dir(follow_symlinks=False):
+                        pending.append(Path(child.path))
+                    elif child.is_file(follow_symlinks=False):
+                        files.append(Path(child.path))
+                    else:
+                        raise BoundaryScanError("unscanned_evidence_entry", detail=child.path)
+        except BoundaryScanError:
+            raise
+        except OSError as exc:
+            raise BoundaryScanError("unscanned_evidence_entry", detail=str(directory)) from exc
+        if len(files) > _MAX_MEMBER_COUNT:
+            raise BoundaryScanError("member_count_exceeded", detail=str(root))
     entries: list[FileEntry] = []
     aggregate = 0
-    for candidate in sorted(root.rglob("*")):
-        if candidate.is_dir():
-            continue
-        if candidate.is_symlink():
-            raise BoundaryScanError("unscanned_evidence_entry", detail=str(candidate))
+    for candidate in sorted(files):
         relative = candidate.relative_to(root).as_posix()
         if not _is_safe_member_path(relative):
             raise BoundaryScanError("unsafe_evidence_path", detail=relative)
-        data = candidate.read_bytes()
-        if len(data) > _MAX_FILE_BYTES:
-            raise BoundaryScanError("file_too_large", detail=relative)
+        data = _read_regular_file(candidate, relative, unscanned="unscanned_evidence_entry")
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
         entries.append(FileEntry(relative_path=relative, size=len(data), data=data))
-    if len(entries) > _MAX_MEMBER_COUNT:
-        raise BoundaryScanError("member_count_exceeded", detail=str(root))
     return tuple(entries)
 
 
@@ -464,7 +484,7 @@ def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
         relative = candidate.relative_to(root).as_posix()
         if not _is_safe_member_path(relative):
             raise BoundaryScanError("unsafe_runtime_path", detail=relative)
-        data = _read_runtime_file(candidate, relative)
+        data = _read_regular_file(candidate, relative, unscanned="unscanned_runtime_entry")
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
@@ -472,8 +492,11 @@ def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
     return tuple(entries)
 
 
-def _read_runtime_file(candidate: Path, relative: str) -> bytes:
-    """Read one regular runtime file through a nonblocking, no-follow descriptor."""
+def _read_regular_file(candidate: Path, relative: str, *, unscanned: str) -> bytes:
+    """Read one regular file through a nonblocking, no-follow descriptor.
+
+    Anything that is not a regular file when opened, or cannot be read, raises ``unscanned``.
+    """
 
     flags = os.O_RDONLY
     flags |= getattr(os, "O_NONBLOCK", 0)
@@ -481,11 +504,11 @@ def _read_runtime_file(candidate: Path, relative: str) -> bytes:
     try:
         descriptor = os.open(candidate, flags)
     except OSError as exc:
-        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+        raise BoundaryScanError(unscanned, detail=str(candidate)) from exc
     try:
         facts = os.fstat(descriptor)
         if not stat.S_ISREG(facts.st_mode):
-            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
+            raise BoundaryScanError(unscanned, detail=str(candidate))
         if facts.st_size > _MAX_FILE_BYTES:
             raise BoundaryScanError("file_too_large", detail=relative)
         chunks: list[bytes] = []
@@ -502,7 +525,7 @@ def _read_runtime_file(candidate: Path, relative: str) -> bytes:
     except BoundaryScanError:
         raise
     except OSError as exc:
-        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+        raise BoundaryScanError(unscanned, detail=str(candidate)) from exc
     finally:
         os.close(descriptor)
 
