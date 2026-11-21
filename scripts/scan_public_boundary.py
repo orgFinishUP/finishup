@@ -147,7 +147,8 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "medium",
         "publication",
         "content",
-        r"(?<![\w/.])[A-Za-z]:\\\\Users\\\\[A-Za-z0-9_.\-]+",
+        # One backslash is the literal path; two are its JSON or source-code escape.
+        r"(?<![\w/.])[A-Za-z]:\\{1,2}Users\\{1,2}[A-Za-z0-9_.\-]+",
         "A maintainer's absolute Windows home path must never reach a public artifact.",
         "release-maintainer",
     ),
