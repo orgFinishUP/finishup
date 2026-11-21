@@ -497,7 +497,11 @@ executable is gone; `unbound` — portable or legacy `/1` marker; `unobserved`);
 `package_version`, the `control-result` schema version, and `resource_manifest_digest` with the
 runtime reading status (`observed: false` when it cannot answer). `mcp.runtime.executable_activation`
 compares live Cursor-helper children with the installed launcher: `executable_mismatch` forces
-`activation: full_restart_required`. A tree rendered before issue #468 stays marker-valid and shows
+`activation: full_restart_required`. On macOS the live children come from the `ps` table, which
+joins argv with spaces; a project child whose `--project-root` workspace path contains whitespace
+(for example `~/Documents/My Project`) is still classified from that text form, as Linux and WSL 2
+classify it from `/proc`, and a row longer than 4,096 characters is left unclassified on both,
+never read from a cut-off prefix. A tree rendered before issue #468 stays marker-valid and shows
 `state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
 fully quit Cursor.
 
