@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -30,6 +30,7 @@ __all__ = [
     "append_diagnostic_record",
     "diagnostic_log_path",
     "lookup_diagnostic_records",
+    "lookup_exchange_cache_records",
 ]
 
 DIAGNOSTIC_FILENAME: Final = "service.diagnostics.jsonl"
@@ -218,10 +219,41 @@ def lookup_diagnostic_records(
         validate_id(IdKind.CORRELATION, correlation_id)
     if request_id is not None:
         validate_id(IdKind.REQUEST, request_id)
+    matches: list[Mapping[str, object]] = []
+    for source in _ring_sources(root):
+        if correlation_id is not None and source.get("correlation_id") != correlation_id:
+            continue
+        if request_id is not None and source.get("request_id") != request_id:
+            continue
+        matches.append(_public_view(source))
+    return tuple(matches)
+
+
+def lookup_exchange_cache_records(
+    *, request_id: str | None = None, root: Path | None = None
+) -> tuple[Mapping[str, object], ...]:
+    """Every ``exchange_cache`` record still in the ring, oldest first, or one review's (#1172).
+
+    ``request_id`` is the review's first provider request id, which every exchange of the review
+    records. The same bounded projection as ``lookup_diagnostic_records``; no ledger is read.
+    """
+
+    if request_id is not None:
+        validate_id(IdKind.REQUEST, request_id)
+    return tuple(
+        _public_view(source)
+        for source in _ring_sources(root)
+        if source.get("operation") == "exchange_cache"
+        and (request_id is None or source.get("request_id") == request_id)
+    )
+
+
+def _ring_sources(root: Path | None) -> Iterator[dict[str, object]]:
+    """Each line of the ring that decodes to a JSON object, oldest first."""
+
     path = diagnostic_log_path(root=root)
     if not path.is_file() or path.is_symlink():
-        return ()
-    matches: list[Mapping[str, object]] = []
+        return
     with path.open("rb") as handle:
         for raw in handle:
             line = raw.strip()
@@ -231,15 +263,8 @@ def lookup_diagnostic_records(
                 parsed: object = json.loads(line.decode("ascii"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            if type(parsed) is not dict:
-                continue
-            source = cast(dict[str, object], parsed)
-            if correlation_id is not None and source.get("correlation_id") != correlation_id:
-                continue
-            if request_id is not None and source.get("request_id") != request_id:
-                continue
-            matches.append(_public_view(source))
-    return tuple(matches)
+            if type(parsed) is dict:
+                yield cast(dict[str, object], parsed)
 
 
 def _build_record(

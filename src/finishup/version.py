@@ -148,7 +148,8 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # ADR-054: +1 schema (config 1.4.0 with the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
 # ADR-054 (U20): +1 schema (content-forgotten 1.0.0), +1 bundle migration (0020).
 # main (#1348): +2 schemas (receipt-result 1.4.1 and version manifest 2.3.1, frozen here).
-REVIEWED_RESOURCE_COUNT: Final = 372
+# #1172: +1 schema (reviewer-cache-report 1.0.0, the owner-only reviewer cache report).
+REVIEWED_RESOURCE_COUNT: Final = 373
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -203,6 +204,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("respond-result", "1.1.0"),
     ("review-packet-row", "2.0.0"),
     ("review-result", "7.0.0"),
+    ("reviewer-cache-report", "1.0.0"),
     ("reviewer-reply", "1.0.0"),
     ("rest-agent", "1.0.0"),
     ("rest-agent-declaration", "1.0.0"),

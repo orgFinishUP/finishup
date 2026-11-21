@@ -3282,6 +3282,34 @@ thread before the note; the stateless routes leave it out), so the repair is not
 prefix. `retry` marks a shortfall that no compaction, first turn or settings change explains and
 that fell on the review's repair exchange. No egress or outcome changes.
 
+The records are now also summed, at the maintainer's request, because the revisit condition of
+"packet order and cross-review reuse stay as they are" (whether `first_turn` input is still the
+largest uncached share) could only be answered by joining JSON lines by hand. `finishup service
+diagnostics --reviewer-cache` prints a deterministic report of the `exchange_cache` records still in
+the diagnostics ring, for every review or, with `--request-id`, for one (`--json`:
+`reviewer-cache-report` 1.0.0; fields and rules in INTERFACES, "Reviewer cache report"). Per review
+and in total it gives the exchanges seen, duplicated and known missing, the provider-reported sums
+with how many exchanges reported each (a count no exchange reported is `null`, never 0), the cached
+share as an exact pair and floor basis points over the input of the exchanges that reported a cached
+count, the miss labels, cold and warm first turns, and the uncached input split exactly by cause.
+The split attributes only what the recorded integers show: a record keeps its first request's
+cached count but sums the rest, so an exchange of several requests has only its first request's
+shortfall attributed, and anything the integers cannot place goes to an explicit `unattributed`
+part instead of a guessed label. A malformed record is counted unreadable and adds nothing else,
+as is a record that would carry a sum past 2^53-1, the bound of every report integer, decided in
+one canonical record order; duplicates (a restarted attempt that kept its request id) are all
+summed, so record order never changes the report.
+
+The report is an owner-only CLI reading of records FinishUP already keeps. It adds no request,
+egress, retention, identifier or ledger read, and its coverage is the ring's: the ring keeps its
+newest 256 KiB, so an older review may be absent entirely, and the report says it covers only what
+the log still holds. It is not offered over MCP tools, hook events or the terminal
+interface. That decision is the same for Codex, Claude Code and Cursor, because the owner
+diagnostics command does not depend on the agent host. The `--request-id` help and INTERFACES no
+longer say the selector takes only the check request id: a review's `exchange_cache` records carry
+its first provider request id (the attempt's `provider_request_id`), which no owner surface marks as
+a review's, so the report without a selector is the documented way to find it.
+
 ## Amendment — 2026-10-21: routine correctness advisory dispositions (#1162)
 
 Routine `code_defect` notes remain advisory and non-blocking. In addition to their immediate
