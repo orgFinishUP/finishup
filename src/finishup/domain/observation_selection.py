@@ -1238,6 +1238,9 @@ def _compound_runner_class(raw: str, own_launchers: frozenset[str] = frozenset()
 # Text that runs a command the splitter does not see as a segment: command and process
 # substitution. Refused anywhere in the command, a here-document body included.
 _HIDDEN_EXECUTION_MARKERS: Final = ("$(", "`", "<(", ">(")
+# Separators after which the outer exit status no longer reports every command's result. ``&&``
+# and a subshell's parentheses keep it; ``|&`` and ``;;`` are reported as ``|`` and ``;``.
+_NESTED_STATUS_MASKING_SEPARATORS: Final = frozenset({";", "||", "|", "&", "\n"})
 
 
 def _compound_is_read_only(
@@ -1278,8 +1281,11 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
 
     The outer exit code remains authoritative for the shell process. A plain ``&&`` chain with a
     zero exit proves each command in that chain returned zero, so it needs no extra gap. ``;``,
-    ``||``, pipelines, background jobs, command substitution, and malformed shell text can hide a
-    nested result; those shapes receive the bounded ``compound_outcome_unavailable`` coverage gap.
+    ``||``, pipelines, background jobs, line breaks, command or process substitution, and
+    malformed shell text can hide a nested result; those shapes receive the bounded
+    ``compound_outcome_unavailable`` coverage gap. Separators are read quote-aware, at every
+    wrapper depth: a redirection (``2>&1``, ``>&2``, ``&>``, ``&>> log``) or a separator inside
+    quotes (``git commit -m 'a; b'``) leaves one exit status and is no masking shape (#1447).
     Output text is never inspected.
     """
 
@@ -1290,8 +1296,13 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
         shlex.split(raw, posix=True)
     except ValueError:
         return True
-    without_and = raw.replace("&&", "")
-    return any(marker in without_and for marker in ("\n", "\r", ";", "|", "&", "`", "$("))
+    separators = command_separators(raw)
+    if separators is None or separators & _NESTED_STATUS_MASKING_SEPARATORS:
+        return True
+    # Substitution runs a command whose status the outer one never reports; double quotes do not
+    # stop it, so the raw text is searched (conservative for a single-quoted marker). A bare
+    # carriage return, which the splitter keeps inside a word, stays a gap as it always was.
+    return "\r" in raw or any(marker in raw for marker in _HIDDEN_EXECUTION_MARKERS)
 
 
 def _routine_facts(payload: Mapping[str, CanonicalJsonValue]) -> _RoutineFacts:

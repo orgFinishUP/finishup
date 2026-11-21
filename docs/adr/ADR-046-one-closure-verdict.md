@@ -219,7 +219,9 @@ conformance test freezes that against the table's own predecessor. The changes, 
   `semantic_review_not_configured` are disclosed on a deterministic-only route (the check asked for
   no review) and stay bounding on a route that required one.
 * **G3 (`compound_outcome_unavailable`).** Joins the guarded host-observation set: a piped or
-  chained command has one exit status.
+  chained command has one exit status. Only a shape that can hide a nested result raises it
+  (`;`, `||`, a pipe, a background `&`, a line break, substitution, unparseable text); an `&&`
+  chain, an fd redirection such as `2>&1` or `&> log`, and a separator inside quotes do not.
 * **G2 (`check_current_as_of_earlier_frontier`).** Follows `CheckStanding`, not a suffix guess.
 * **G1 (`semantic_review_not_requested`).** Follows the route the check recorded.
 

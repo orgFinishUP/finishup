@@ -400,6 +400,30 @@ def test_and_compound_shell_zero_proves_each_chain_member() -> None:
     assert "compound_outcome_unavailable" not in envelope.gap_codes
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -q 2>&1", "cd /app && pytest -q 2>&1", "pytest -q &> log", "git commit -m 'a; b'"],
+)
+def test_redirection_or_quoted_separator_records_no_nested_gap(command: str) -> None:
+    """``2>&1`` is a redirection, not a background job: one exit status, no gap (#1447)."""
+
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "call-redirect",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0, "output": ""},
+        },
+        session_commitment="hmac-sha256:" + ("1c" * 32),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert envelope.structural_payload["exit_status"] == 0
+    assert "compound_outcome_unavailable" not in envelope.gap_codes
+
+
 def test_runner_class_is_derived_instead_of_copied_from_host_payload() -> None:
     envelope = map_hook_payload_to_envelope(
         "PostToolUse",
