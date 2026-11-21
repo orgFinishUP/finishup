@@ -12,7 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, Final, Literal, Protocol, cast
 
-from finishup import __version__
+import finishup
 from finishup.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
@@ -1418,7 +1418,7 @@ def _status_request(
             "client": {
                 # Frozen legacy identifier (ADR-048): the client kind wire enum value.
                 "kind": "yoetz_cli",
-                "version": __version__,
+                "version": finishup.__version__,
                 "integration": "local_cli",
             },
             "session_id": mapping.finishup_session_id,

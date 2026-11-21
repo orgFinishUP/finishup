@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-from finishup import __version__
+import finishup
 from finishup.config.paths import ensure_owner_only_dir, state_dir
 from finishup.domain.bounded_text import Part, compose_parts
 from finishup.domain.task_fact_tokens import (
@@ -1349,7 +1349,11 @@ def _status_request(session_id: str, writer_id: str, actor_id: str) -> StatusReq
         "request_id": new_id(IdKind.REQUEST),
         "actor": {"actor_id": actor_id, "actor_type": "harness"},
         # Frozen legacy identifier (ADR-048): client-info wire enum value.
-        "client": {"kind": "yoetz_cli", "version": __version__, "integration": "local_cli"},
+        "client": {
+            "kind": "yoetz_cli",
+            "version": finishup.__version__,
+            "integration": "local_cli",
+        },
         "session_id": session_id,
         "writer_id": writer_id,
         "view": "compact",
