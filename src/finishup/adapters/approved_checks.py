@@ -189,6 +189,25 @@ def _posix_process_group_id(process: subprocess.Popen[bytes]) -> int | None:
     return group_id
 
 
+def _check_exit_status(returncode: int | None) -> int | None:
+    """Map a finished check's return code into the result's ``0..255`` exit-status range.
+
+    A check that ends by a signal reports ``-signal`` here (on Linux the bubblewrap leader shares
+    the check's process group, so a group signal ends it too); it is recorded with the shell's
+    ``128 + signal`` convention. A code no POSIX exit status can carry (a Windows status above
+    255) is recorded without an exit status. Either way the run is a failed nonzero exit, never
+    a protocol error.
+    """
+
+    if returncode is None:
+        return 0
+    if returncode < 0:
+        return min(128 - returncode, 255)
+    if returncode > 255:
+        return None
+    return returncode
+
+
 def _signal_posix_group(group_id: int, sig: int) -> bool:
     kill_group = getattr(os, "killpg", None)
     if not callable(kill_group):
@@ -521,7 +540,7 @@ class ApprovedCheckRunner:
             )
             _drain_completed_check_group(process, process_group_id)
             duration_ms = int((time.monotonic() - started) * 1000)
-            exit_status = int(process.returncode or 0)
+            exit_status = _check_exit_status(process.returncode)
             # Output goes to the encrypted store; heuristic-only matches are redacted at egress.
             # A private key without its END line withholds the whole output (#1248, P-D4).
             safe_output, redacted = redact_high_confidence_content(bytes(stdout))
