@@ -3467,7 +3467,7 @@ async def _integration(action: str, harness: str, json_output: bool) -> int:
         _human_or_json(result, json_output=json_output)
         return 0
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
 
 
 @integrate_app.callback()
@@ -4407,7 +4407,7 @@ async def _service_unlock(json_output: bool) -> int:
         finally:
             await client.close()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if status.vault_mode == "os_keyring":
         return await _unlock_call(_unlock_operation("retry_keyring"), json_output)
     if status.vault_mode == "passphrase":
@@ -4605,7 +4605,7 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
         finally:
             await client.close()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if status.vault_mode == "uninitialized":
         # An orphan left by a failed initialization attempt (#511) is removed with verified
         # read-back, but only under the bundle-scoped guard with the vault state re-proven
@@ -4623,7 +4623,7 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
                         finally:
                             await client.close()
                     except ControlError as error:
-                        return _control_failure(error)
+                        return _control_failure(error, json_output=json_output)
                     if proven.state.value != "locked" or proven.vault_mode != "uninitialized":
                         _stderr(
                             "auto_unlock_repair_unproven: the vault state changed; rerun "
@@ -5939,7 +5939,7 @@ def privacy_export_desired(
             finally:
                 await client.close()
         except ControlError as error:
-            return _control_failure(error)
+            return _control_failure(error, json_output=json_output)
         plain = _plain_json(effective)
         if type(plain) is not dict or "policy" not in plain:
             return _usage_failure()
@@ -5996,7 +5996,7 @@ def privacy_apply_desired(
             finally:
                 await client.close()
         except ControlError as error:
-            return _control_failure(error)
+            return _control_failure(error, json_output=json_output)
         plain = _plain_json(effective)
         if type(plain) is not dict or "policy" not in plain:
             return _usage_failure()
@@ -6100,7 +6100,7 @@ async def _privacy_pending(json_output: bool) -> int:
     except (ProtocolValueError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if json_output:
         _human_or_json(result, json_output=True)
         return 0
