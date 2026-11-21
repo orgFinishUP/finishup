@@ -3116,6 +3116,22 @@ def test_rollout_item_decisions_never_change_once_made() -> None:
     assert _decisions(early, copy, pending, other)["item-b"] == "pending"
 
 
+def test_rollout_item_paired_by_call_id_consumes_its_posts_stated_exit() -> None:
+    """#910: a stated post has one copy, whichever order its own item and it arrive in."""
+
+    post_a = _decide_row(1, hook=True, identity="post-a", call_id="call-a", exit_status=0)
+    item_a = _decide_row(2, hook=False, identity="item-a", call_id="call-a", exit_status=0)
+    post_b = _decide_row(3, hook=True, identity="post-b", call_id="call-b")
+    item_b = _decide_row(4, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    expected = {"item-a": "copy", "item-b": "carrier"}
+    for a_rows in ((post_a, item_a), (item_a, post_a)):
+        for b_rows in ((post_b, item_b), (item_b, post_b)):
+            assert _decisions(*a_rows, *b_rows) == expected
+    # A duplicate item of the already-paired call is still that call's copy.
+    again = _decide_row(5, hook=False, identity="item-a2", call_id="call-a", exit_status=0)
+    assert _decisions(post_a, item_a, again, post_b, item_b) == {**expected, "item-a2": "copy"}
+
+
 def test_pending_rollout_items_persist_until_settled(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
