@@ -25,6 +25,7 @@ from finishup.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
+    pending_mapping_paths,
     queue_mapping_clear,
     queue_mapping_store,
     scoped_child_session_id,
@@ -3753,12 +3754,8 @@ def _queue_and_reconcile_mapping(
             _session_lock_owned=True,
         ).pending:
             return False
-        pending = mapping_path(mapping.codex_session_id, _state=_state).with_name(
-            f".{mapping.codex_session_id}.pending.json"
-        )
-        applying = pending.with_name(pending.name + ".applying")
         return load_mapping(mapping.codex_session_id, _state=_state) == mapping and not (
-            pending.exists() or pending.is_symlink() or applying.exists() or applying.is_symlink()
+            pending_mapping_paths(mapping.codex_session_id, _state=_state)
         )
 
 

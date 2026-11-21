@@ -11,7 +11,7 @@ from finishup.adapters.integrations.codex_lifecycle import (
     acquire_session_lock,
     load_mapping,
     mapping_from_start_ids,
-    mapping_path,
+    pending_mapping_paths,
     queue_mapping_store,
     scoped_child_session_id,
     store_mapping,
@@ -297,7 +297,7 @@ def test_applying_and_pending_child_aliases_cannot_change_owner(tmp_path: Path) 
     )
     store_mapping(original, _state=tmp_path)
     queue_mapping_store(original, _state=tmp_path)
-    pending = mapping_path(host_lane, _state=tmp_path).with_name(f".{host_lane}.pending.json")
+    (pending,) = pending_mapping_paths(host_lane, _state=tmp_path)
     applying = pending.with_name(pending.name + ".applying")
     pending.replace(applying)
     queue_mapping_store(newer, _state=tmp_path)

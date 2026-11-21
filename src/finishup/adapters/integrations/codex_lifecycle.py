@@ -43,6 +43,7 @@ __all__ = [
     "mapping_path",
     "load_route_history",
     "parse_frontier_token",
+    "pending_mapping_paths",
     "queue_mapping_clear",
     "queue_mapping_store",
     "is_scoped_child_session_id",
@@ -538,9 +539,63 @@ def clear_mapping(codex_session_id: str, *, _state: Path | None = None) -> None:
             history.unlink()
 
 
+_PENDING_CLAIM_SUFFIX: Final = ".applying"
+
+
 def _pending_mapping_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
     session_id = validate_codex_session_id(codex_session_id)
+    directory = codex_lifecycle_dir(_state=_state) / "pending"
+    _ensure_lifecycle_dir(directory)
+    # Queued operations live in their own directory for the same reason as
+    # route history: a dot-prefixed sibling name such as ``.abc.pending.json``
+    # is also the mapping file of the valid session id ``.abc.pending``.
+    return directory / f"{session_id}.json"
+
+
+def _legacy_pending_mapping_path(codex_session_id: str, *, _state: Path | None = None) -> Path:
+    """Return the pre-directory queue path an older writer may still have left behind."""
+
+    session_id = validate_codex_session_id(codex_session_id)
     return codex_lifecycle_dir(_state=_state) / f".{session_id}.pending.json"
+
+
+def _claim_path(pending: Path) -> Path:
+    return pending.with_name(pending.name + _PENDING_CLAIM_SUFFIX)
+
+
+def _is_legacy_pending_operation(codex_session_id: str, path: Path, *, _state: Path | None) -> bool:
+    # The legacy queue name is also the mapping file of the session id
+    # ``.<id>.pending``.  Only a versioned pending document for this exact
+    # session is a queued operation; anything else belongs to that other
+    # session and is never claimed, counted, or removed here.
+    return (
+        _load_pending_mapping_operation(codex_session_id, _state=_state, claimed_path=path)
+        is not None
+    )
+
+
+def pending_mapping_paths(codex_session_id: str, *, _state: Path | None = None) -> tuple[Path, ...]:
+    """Return the present queued-operation files for one session, oldest first.
+
+    Order matches replay order: a legacy claim, a legacy queued operation, the
+    current claim, then the current queued operation. A current-layout file
+    counts as soon as it exists (malformed state stays pending, fail closed); a
+    legacy dot-prefixed queue file counts only when it is a pending operation
+    for this session, because that name is also another session's mapping.
+    """
+
+    pending = _pending_mapping_path(codex_session_id, _state=_state)
+    legacy = _legacy_pending_mapping_path(codex_session_id, _state=_state)
+    present: list[Path] = []
+    for candidate in (_claim_path(legacy), legacy, _claim_path(pending), pending):
+        if not (candidate.exists() or candidate.is_symlink()):
+            continue
+        if candidate == legacy and not _is_legacy_pending_operation(
+            codex_session_id, candidate, _state=_state
+        ):
+            continue
+        present.append(candidate)
+    return tuple(present)
 
 
 def _queue_mapping_operation(
@@ -620,17 +675,44 @@ def apply_pending_mapping(codex_session_id: str, *, _state: Path | None = None) 
     """Apply and remove one queued mapping operation; caller holds the session lock."""
 
     pending = _pending_mapping_path(codex_session_id, _state=_state)
-    path = pending.with_name(pending.name + ".applying")
+    path = _claim_path(pending)
+    legacy = _legacy_pending_mapping_path(codex_session_id, _state=_state)
+    legacy_claim = _claim_path(legacy)
+    # An older writer queued beside the mappings; its operations predate any
+    # current-layout queue entry, so they replay first.
+    if legacy_claim.exists() or legacy_claim.is_symlink():
+        path = legacy_claim
+    elif (legacy.exists() or legacy.is_symlink()) and _is_legacy_pending_operation(
+        codex_session_id, legacy, _state=_state
+    ):
+        try:
+            os.replace(legacy, legacy_claim)
+        except FileNotFoundError:
+            return False
+        path = legacy_claim
     # Only the session-lock owner claims work. Producers replace only `pending`,
     # so a new update cannot be removed when this claimed operation completes.
     # A crash leaves the claimed operation available for idempotent replay.
-    if not path.exists() and not path.is_symlink():
+    elif not path.exists() and not path.is_symlink():
         try:
             os.replace(pending, path)
         except FileNotFoundError:
             return False
     operation = _load_pending_mapping_operation(codex_session_id, _state=_state, claimed_path=path)
     if operation is None:
+        if path == legacy_claim:
+            # The legacy name was replaced by the other session's mapping
+            # between the check and the claim: hand it back untouched. If that
+            # session has already rewritten its mapping, the claimed copy is
+            # stale and only the claim is dropped.
+            try:
+                os.link(legacy_claim, legacy)
+            except FileExistsError:
+                pass
+            except OSError:
+                return False
+            with contextlib.suppress(OSError):
+                legacy_claim.unlink()
         return False
     kind, mapping = operation
     if kind == "clear":
