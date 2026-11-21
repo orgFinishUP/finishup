@@ -7,7 +7,7 @@ import hashlib
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -761,11 +761,13 @@ def _validate_document_references(
     schema: dict[str, JsonValue],
     registry: SchemaRegistry,
     known_ids: frozenset[str],
+    refs: Iterable[str] | None = None,
 ) -> None:
     """Admit and resolve every ``$ref`` one catalog document carries.
 
     *registry* must hold every document *known_ids* names that this document references; the full
     catalog passes all of them, the lazy catalog the document's transitive reference closure.
+    *refs*, when given, is ``list(_walk_refs(schema))`` already collected by the caller.
     """
 
     resolver = registry.resolver(schema_id)
@@ -773,7 +775,7 @@ def _validate_document_references(
     # repeated one (about half of all) is already known good; refs keep first-occurrence order,
     # so the first refusal is the same one.
     admitted: set[str] = set()
-    for ref in _walk_refs(schema):
+    for ref in _walk_refs(schema) if refs is None else refs:
         if ref in admitted:
             continue
         split = urlsplit(ref)
@@ -983,6 +985,40 @@ def _uses_dynamic_reference(value: JsonValue) -> bool:
     if type(value) is list:
         return any(_uses_dynamic_reference(item) for item in cast(list[JsonValue], value))
     return False
+
+
+_DYNAMIC_REFERENCE: Final = 1
+_NON_STRING_REFERENCE: Final = 2
+
+
+def _scan_refs(value: JsonValue, refs: list[str]) -> int:
+    """One walk standing in for ``_uses_dynamic_reference`` and ``_walk_refs`` over *value*.
+
+    Appends every string ``$ref`` to *refs* in ``_walk_refs`` order and returns flags:
+    ``_DYNAMIC_REFERENCE`` when ``_uses_dynamic_reference`` is true, ``_NON_STRING_REFERENCE``
+    when ``_walk_refs`` would refuse a ``$ref`` that is not a string. With neither flag, *refs*
+    is exactly ``list(_walk_refs(value))``; with either, the caller refuses and discards *refs*.
+    """
+
+    flags = 0
+    if type(value) is dict:
+        for key, item in cast(dict[str, JsonValue], value).items():
+            if key == "$ref":
+                if type(item) is str:
+                    refs.append(item)
+                    continue
+                flags |= _NON_STRING_REFERENCE
+            elif key == "$dynamicRef" or key == "$recursiveRef":
+                flags |= _DYNAMIC_REFERENCE
+            kind = type(item)  # not narrowed: *item* stays ``JsonValue`` for the recursion
+            if kind is dict or kind is list:
+                flags |= _scan_refs(item, refs)
+    elif type(value) is list:
+        for item in cast(list[JsonValue], value):
+            kind = type(item)
+            if kind is dict or kind is list:
+                flags |= _scan_refs(item, refs)
+    return flags
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,12 +1260,16 @@ class _LazyCatalog:
             checker = self._checker
             if checker is not None and schema_id in checker.plain_by_id:
                 return checker
-            added = self._closure_of(schema_id)
+            added, refs_by_id = self._closure_of(schema_id)
             plain = {**self._plain, **added}
             registry = _build_registry(plain)
             for document_id in sorted(added, key=str.encode):
                 _validate_document_references(
-                    document_id, added[document_id], registry, self.index.known_ids
+                    document_id,
+                    added[document_id],
+                    registry,
+                    self.index.known_ids,
+                    refs_by_id[document_id],
                 )
             # Commit only a closure that passed every check.
             self._plain = plain
@@ -1244,10 +1284,17 @@ class _LazyCatalog:
             self._checker = checker
             return checker
 
-    def _closure_of(self, schema_id: str) -> dict[str, dict[str, JsonValue]]:
-        """Parse and check every not-yet-loaded document reachable from *schema_id*."""
+    def _closure_of(
+        self, schema_id: str
+    ) -> tuple[dict[str, dict[str, JsonValue]], dict[str, list[str]]]:
+        """Parse and check every not-yet-loaded document reachable from *schema_id*.
+
+        Returns the documents and, per document, its ``$ref`` values in ``_walk_refs`` order, so
+        reference validation does not walk the document again.
+        """
 
         added: dict[str, dict[str, JsonValue]] = {}
+        refs_by_id: dict[str, list[str]] = {}
         pending = [schema_id]
         while pending:
             document_id = pending.pop()
@@ -1259,16 +1306,24 @@ class _LazyCatalog:
             plain = _plain_schema(data, digest_verified=True)
             if plain.get("$id") != document_id:
                 _protocol_error("schema_id_mismatch")
-            if _uses_dynamic_reference(plain):
+            # One walk yields both refusals; they keep their precedence: a dynamic reference
+            # anywhere first, then a non-string ``$ref`` (``_walk_refs`` raised on it mid-walk,
+            # which committed nothing either).
+            refs: list[str] = []
+            flags = _scan_refs(plain, refs)
+            if flags & _DYNAMIC_REFERENCE:
                 # The full catalog builds no checker at all then; its stock path decides.
                 raise _LazyCatalogCannotDecide
+            if flags & _NON_STRING_REFERENCE:
+                _protocol_error("schema_reference_unresolved")
             added[document_id] = plain
-            for ref in _walk_refs(plain):
+            refs_by_id[document_id] = refs
+            for ref in refs:
                 if not ref.startswith("#"):
                     base, _ = urldefrag(ref)
                     if base in self.index.known_ids:
                         pending.append(base)
-        return added
+        return added, refs_by_id
 
 
 _LAZY_CATALOG_LOCK: Final = threading.Lock()
