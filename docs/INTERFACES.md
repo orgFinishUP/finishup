@@ -11646,7 +11646,8 @@ placeholder-only quote, or a span with control or format characters, proves noth
 snippet is the verbatim span the quote matched: sent text, or for a JSON row the decoded string the
 reviewer read. If a response is recovered without the index,
 nothing is proven sent: quote-bearing challenges become `ref_not_carried` advisory concerns and
-verification rows with quotes are dropped.
+verification rows with quotes are dropped as snippet losses. Each item is decided on its own, so
+quote-free challenges and rows beside them are kept as recorded (issue #1409).
 
 Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
 current diff, then the latest output per identified verification command (with the last failure

@@ -4105,6 +4105,11 @@ def _validate_reviewer_snippets(
 
     A verified row reads as support, so it keeps the stricter rule: it is dropped when any cited
     ref was not sent or its required quote cannot be proved.
+
+    A recovered response has no text index, so each item is decided on its own: a quote-free
+    challenge or verified row is kept as recorded, a quote-bearing challenge is handled as one
+    with no sent ref, and a quote-bearing verified row is dropped as a snippet loss. One item's
+    quote never changes how its siblings are fenced.
     """
 
     from finishup.application.review_quotes import prove_quote
@@ -4120,33 +4125,10 @@ def _validate_reviewer_snippets(
         if citable_refs is None
         else citable_refs & included_refs
     )
-    # A recovered response from before the exact provider-bound text index existed has no proof
-    # for a newly added quote. Keep legacy judgments without snippets readable.
-    if (
-        provider_input_text_by_ref is None
-        and not any(challenge.snippet is not None for challenge in judgment.challenges)
-        and not any(item.snippet is not None for item in judgment.verified)
-    ):
-        remaining = judgment.strongest_remaining_check
-        if remaining is None:
-            return _ReviewerQuoteFence(judgment)
-        # One left with no recorded-sent ref is removed and disclosed, as on a fresh run.
-        kept_refs = tuple(
-            ref
-            for ref in remaining.cited_refs
-            if recorded_sent is not None and ref in recorded_sent
-        )
-        if len(kept_refs) == len(remaining.cited_refs):
-            return _ReviewerQuoteFence(judgment)
-        return _ReviewerQuoteFence(
-            replace(
-                judgment,
-                strongest_remaining_check=(
-                    replace(remaining, cited_refs=kept_refs) if kept_refs else None
-                ),
-            ),
-            refs_reduced=1,
-        )
+    # A recovered response (no text index) has no proof for a quote, but a quote-free item needs
+    # none: it is kept as recorded. Each item is decided on its own, so one quote-bearing item
+    # never changes how a quote-free sibling is fenced (issue #1409).
+    recovered = provider_input_text_by_ref is None
 
     # Without the text index nothing is proven sent.
     sent = frozenset(() if provider_input_text_by_ref is None else provider_input_text_by_ref)
@@ -4158,6 +4140,9 @@ def _validate_reviewer_snippets(
     snippet_losses = 0
     challenges: list[ReviewerChallenge] = []
     for challenge in judgment.challenges:
+        if recovered and challenge.snippet is None:
+            challenges.append(challenge)
+            continue
         kept_refs = tuple(ref for ref in challenge.cited_refs if ref in carried)
         if not kept_refs:
             if citable_refs is not None and not any(
@@ -4185,6 +4170,13 @@ def _validate_reviewer_snippets(
 
     verified: list[VerifiedReviewItem] = []
     for item in judgment.verified:
+        if recovered:
+            if item.snippet is None:
+                verified.append(item)
+            else:
+                # Its required quote cannot be proved without the text index.
+                snippet_losses += 1
+            continue
         if any(ref not in carried for ref in item.cited_refs):
             refs_reduced += 1
             continue

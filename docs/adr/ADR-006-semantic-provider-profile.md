@@ -1904,7 +1904,8 @@ claiming completion was never judged for completeness. Decisions:
   `citable_refs` lists only carried refs (content rows and surviving local assessment rows, the
   same set the text index holds); a challenge keeps the cited refs that were sent (disclosed as
   `semantic_review_refs_reduced`); a challenge with no sent ref — or any quote-bearing challenge
-  recovered without the text index — mints no finding but is counted as `ref_not_carried` and its
+  recovered without the text index, while its quote-free siblings stand as recorded (#1409) —
+  mints no finding but is counted as `ref_not_carried` and its
   summary and message are appended to the recorded review summary as an advisory, unverified
   concern. A verified row citing any unsent ref is still dropped. Quote proof tolerates transport
   form (whitespace, JSON escapes, typographic punctuation, a placeholder for FinishUP's `[REDACTED]`

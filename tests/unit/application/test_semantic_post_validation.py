@@ -190,6 +190,62 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
     assert "sent-safe-row" not in recovered_without_text.review_summary
 
 
+def test_recovered_review_fences_quoted_items_without_dropping_quote_free_siblings() -> None:
+    """Without the text index only a quote-bearing item is unprovable; its siblings stand.
+
+    Each challenge is fenced independently, so one quoted challenge or verified row in a
+    recovered response must not turn every quote-free challenge beside it into an unanchored
+    concern.
+    """
+
+    case = make_case(extra_refs=(clm(1), clm(2)))
+    refs = frozenset({str(clm(1)), str(clm(2))})
+
+    def recovered(judgment: SemanticJudgment) -> SemanticJudgmentReview:
+        return validate_semantic_judgment(
+            case,
+            (),
+            judgment,
+            _provenance(),
+            expected_frontier=case.frontier,
+            citable_refs=refs,
+            provider_input_text_by_ref=None,
+            included_refs=refs,
+        )
+
+    plain = _challenge(str(clm(2)), summary="Second concern")
+    quoted = _challenge(str(clm(1)), summary="First concern", snippet="some quote")
+
+    alone = recovered(SemanticJudgment("challenges_returned", (plain,)))
+    assert [c.summary for c in alone.candidates] == ["Second concern"]
+    assert alone.rejected_by_reason == ()
+
+    together = recovered(SemanticJudgment("challenges_returned", (quoted, plain)))
+    assert [c.summary for c in together.candidates] == ["Second concern"]
+    assert together.rejected_by_reason == ((SEMANTIC_REJECTED_REF_NOT_CARRIED, 1),)
+    assert together.challenges_returned == 2
+    assert together.challenges_rejected == 1
+    assert "First concern" in together.review_summary
+    assert "some quote" not in together.review_summary
+
+    with_quoted_row = recovered(
+        SemanticJudgment(
+            "challenges_returned",
+            (plain,),
+            verified=(
+                VerifiedReviewItem("Claim quoted", "supported", (str(clm(1)),), "some quote"),
+                VerifiedReviewItem("Claim open", "not_assessable", (str(clm(2)),)),
+            ),
+        )
+    )
+    assert [c.summary for c in with_quoted_row.candidates] == ["Second concern"]
+    assert with_quoted_row.rejected_by_reason == ()
+    # The quoted row is dropped for its unprovable quote; the quote-free row stands.
+    assert [item.requirement_or_claim for item in with_quoted_row.verified] == ["Claim open"]
+    assert with_quoted_row.snippets_rejected == 1
+    assert with_quoted_row.refs_reduced == 0
+
+
 @pytest.mark.parametrize("conclusion", ["no_material_discrepancy", "challenges_returned"])
 def test_dropped_verified_rows_are_not_counted_as_rejected_challenges(conclusion: str) -> None:
     """A verified row the fence drops is a disclosed snippet loss, never a rejected challenge.
