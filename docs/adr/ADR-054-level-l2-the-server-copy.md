@@ -364,7 +364,10 @@ commits, trees, size and file count; else `code_manifest_mismatch`) and bound to
 worktree as at commit, then the stored manifest takes its metadata (subject state, sync time,
 revision, policy, completeness), and the record the retention of the consent as it is now and
 `last_sync_at`. So a consent changed from `until_forgotten` to `days:7` holds without a new tree,
-and a copy in use never expires as if it were idle.
+and a copy in use never expires as if it were idle. The refreshed snapshot also becomes the copy's
+newest, as a re-upload would make it: a client that reverts to a snapshot the copy already holds
+is served that snapshot offline as the copy as last synced, never the edit it reverted, and it is
+the last to leave the 64 newest.
 
 ### 7. Forget, the tombstone, the fence and every repository at once
 

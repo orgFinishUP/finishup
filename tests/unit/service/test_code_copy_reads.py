@@ -328,6 +328,25 @@ def test_an_offline_client_s_reads_come_from_the_copy_as_last_synced_and_checks_
     assert raised.value.reason == "no_agent"
 
 
+def test_an_offline_read_after_a_revert_comes_from_the_snapshot_synced_last(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, _routed = _service(tmp_path, root)
+    first = copies.sync_blocking(HANDLE, purpose="check")
+    (root / "a.py").write_bytes(b"b\n")
+    second = copies.sync_blocking(HANDLE, purpose="check")
+    assert first.outcome == second.outcome == "synced" and second.snapshot != first.snapshot
+    # The client reverts: the copy already holds its snapshot, an unchanged sync.
+    (root / "a.py").write_bytes(b"a\n")
+    reverted = copies.sync_blocking(HANDLE, purpose="check")
+    assert reverted.outcome == "unchanged" and reverted.snapshot == first.snapshot
+    hub.offline = True
+    view, _base = copies.git_view(HANDLE, purpose="check", base=None, task_id=None)
+    assert view is not None and view.stale
+    assert view.manifest.snapshot == first.snapshot  # never the edit the client reverted
+
+
 def test_a_reviewer_read_after_an_offline_check_is_a_stale_read_and_a_fresh_sync_ends_it(
     tmp_path: Path,
 ) -> None:

@@ -38,7 +38,10 @@ forget since refuses, ``code_copy_forgotten``), the client's manifest is checked
 stored (the same synthetic commits, trees, size and file count) and bound to the revision and
 worktree as at ``commit``, then the stored manifest takes its metadata (subject state, sync time,
 revision, policy and completeness), the record its retention (the consent as it is now) and
-``last_sync_at``, so a changed retention holds and a copy in use does not expire as if idle.
+``last_sync_at``, so a changed retention holds and a copy in use does not expire as if idle. The
+snapshot becomes the copy's newest, as a re-upload makes it: a client that reverts to a snapshot
+the copy holds is then served that snapshot as the copy as last synced (``latest``), and it is the
+last to leave the recent window.
 
 **Forget (§4.3, U20, §8.7).** ``forget`` first advances the copy's **epoch** in the tombstone record
 (fsynced), so an upload begun before it is refused at ``commit`` (``code_copy_forgotten``), records
@@ -908,13 +911,23 @@ class CodeStore:
                     canonical_encode(manifest_to_json(fresh)),
                 ),
             )
+            # Synced last, so the copy's newest (``latest``, the have-set, the recent window), as
+            # ``_admit`` makes a snapshot uploaded again.
+            snapshots = [
+                item for item in cast(list[str], record["snapshots"]) if item != fresh.snapshot
+            ]
+            snapshots.append(fresh.snapshot)
             record.update(
                 {
+                    "snapshots": cast(JsonValue, _window(snapshots, record)),
                     "last_sync_at": format_rfc3339_ms(self._clock()),
                     "retention": {"kind": kind, "days": days},
                 }
             )
             self._write_record(copy_key, record)
+            # A snapshot past the recent window that no pin names leaves now (a pinned one this
+            # sync brought back into the window can push the oldest recent one out).
+            _drop_manifests(self._copy_folder(copy_key), record)
             return fresh
 
     def _admit(
