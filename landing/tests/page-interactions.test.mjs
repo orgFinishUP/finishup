@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const page = readFileSync(new URL("../src/pages/index.astro", import.meta.url), "utf8");
 const script = stripTypeScriptTypes(page.match(/<script>\s*([\s\S]*?)<\/script>/)[1]
-  .replace(/import \{ mountParticles \} from [^;]+;/, "")
+  .replace(/import \{[^}]+\} from [^;]+;/, "")
   .replaceAll("import.meta.env.DEV", "false"));
 
 // Run the actual page controller with controlled layout, events and timers. Artwork is
@@ -29,13 +29,20 @@ function environment({ fits = true } = {}) {
     dataset = {};
     attributes = new Map();
     classes = new Set();
-    style = { removeProperty() {} };
+    clientWidth = 460;
+    clientHeight = 320;
+    offsetHeight = 0;
+    style = {
+      transform: "",
+      removeProperty(name) { if (name === "transform") this.transform = ""; },
+    };
     classList = {
       add: (name) => this.classes.add(name),
       remove: (name) => this.classes.delete(name),
       contains: (name) => this.classes.has(name),
       toggle: (name, on) => on ? this.classes.add(name) : this.classes.delete(name),
     };
+    focus() {}
     setAttribute(name, value) { this.attributes.set(name, value); }
     removeAttribute(name) { this.attributes.delete(name); }
     contains(el) { return el === this || el?.parent === this; }
@@ -44,14 +51,21 @@ function environment({ fits = true } = {}) {
     getBoundingClientRect() { return { top: 100, bottom: 500, left: 32, right: 700, width: 668, height: 400 }; }
   }
   const ids = Object.fromEntries([
-    "particles", "story", "motion-toggle", "main-content", "story-plan",
+    "particles", "story", "a11y-menu", "a11y-trigger", "a11y-panel", "a11y-close",
+    "a11y-reduced-note", "motion-row", "motion-toggle", "graphics-row", "graphics-toggle",
+    "scene-rail", "main-content", "story-plan",
     "toast", "toast-title", "toast-sub", "toast-close",
   ].map((id) => [id, new Element()]));
-  ids["story-plan"].textContent = JSON.stringify([["hero", 0.82], ["alone", 1.5], ["swarm", 1.5], ["robot", 3.6], ["end", 1]]);
+  ids["a11y-panel"].hidden = true;
+  ids["a11y-panel"].parent = ids["a11y-menu"];
+  ids["a11y-trigger"].parent = ids["a11y-menu"];
+  ids["story-plan"].textContent = JSON.stringify([["hero", 0.95], ["alone", 1.25], ["swarm", 1.25], ["robot", 2.85], ["end", 0.95]]);
   ids.particles.clientHeight = 800;
   ids.particles.getBoundingClientRect = () => ({ top: 0, bottom: 800, left: 0, right: 1280 });
-  ids.story.dataset.screens = "12";
-  ids.story.querySelector = () => new Element();
+  ids.story.dataset.screens = "7.5";
+  const spacer = new Element();
+  spacer.offsetHeight = 6000;
+  ids.story.querySelector = () => spacer;
   const content = new Element();
   content.getBoundingClientRect = () => ({ top: 100, bottom: fits ? 500 : 850, left: 32, right: 700 });
   ids.story.querySelectorAll = () => [content];
@@ -66,12 +80,28 @@ function environment({ fits = true } = {}) {
     el.dataset.copy = copy;
     return el;
   });
+  const stills = ["hero", "alone", "swarm", "robot", "robot", "robot", "end"].map((form) => {
+    const el = new Element();
+    el.dataset.stillForm = form;
+    el.dataset.stillPhase = "0.5";
+    return el;
+  });
+  const railDots = ["hero", "alone", "swarm", "robot1", "end"].map((target) => {
+    const el = new Element();
+    el.dataset.sceneTarget = target;
+    return el;
+  });
   let finishFonts;
   const doc = Object.assign(new Events(), {
     activeElement: setup,
     fonts: { ready: new Promise((resolve) => { finishFonts = resolve; }) },
     getElementById: (id) => ids[id],
-    querySelectorAll: (selector) => selector === ".copy" ? copies : [setup],
+    querySelectorAll: (selector) => {
+      if (selector === ".copy") return copies;
+      if (selector === ".still-art") return stills;
+      if (selector === ".rail-dot") return railDots;
+      return [setup];
+    },
     querySelector: () => null,
   });
   const queries = new Map();
@@ -79,8 +109,10 @@ function environment({ fits = true } = {}) {
   const frames = new Map();
   let nextId = 0;
   let activeArt = 0;
+  let stillRenders = 0;
   const win = Object.assign(new Events(), {
     scrollY: 0,
+    scrollTo({ top }) { this.scrollY = top; },
     matchMedia(query) {
       const media = Object.assign(new Events(), { matches: false });
       queries.set(query, media);
@@ -93,17 +125,23 @@ function environment({ fits = true } = {}) {
     window: win, document: doc, innerWidth: 1280, innerHeight: 800,
     HTMLElement: Element, CanvasRenderingContext2D: class {}, CSS: { supports: () => true },
     navigator: { clipboard: { writeText: async () => {} } },
+    performance: { now: () => 0 },
     requestAnimationFrame(fn) { const id = ++nextId; frames.set(id, fn); return id; },
     cancelAnimationFrame(id) { frames.delete(id); },
     mountParticles() {
       activeArt++;
       return { renderer: "webgl", setScroll() {}, setLockup() {}, destroy() { activeArt--; } };
     },
+    renderStills(items) {
+      stillRenders += items.length;
+      return true;
+    },
   });
   vm.runInContext(script, context, { timeout: 1000 });
   return {
-    ids, doc, win, setup, toastLink, copies, queries, timers, finishFonts,
+    ids, doc, win, setup, toastLink, copies, stills, railDots, queries, timers, finishFonts,
     get activeArt() { return activeArt; },
+    get stillRenders() { return stillRenders; },
     setFits(value) { fits = value; },
     expireTimers() {
       const callbacks = [...timers.values()];
@@ -135,15 +173,20 @@ test("a hovered toast survives focus leaving, and expires only after hover and f
   assert.equal(env.ids.toast.hidden, true);
 });
 
-test("pause destroys the artwork and exposes every scene; play restores animation", async () => {
+test("pause destroys the artwork, renders static stills, and play restores animation", async () => {
   const env = environment();
   const toggle = env.ids["motion-toggle"];
   assert.equal(toggle.hidden, false);
+  assert.equal(env.ids["a11y-menu"].hidden, false);
   assert.equal(env.activeArt, 1);
+  assert.equal(env.stillRenders, 0);
   await toggle.dispatch("click");
   assert.equal(env.activeArt, 0);
   assert.equal(env.ids.story.classList.contains("animated"), false);
+  assert.equal(env.ids.story.classList.contains("stills"), true);
+  assert.equal(env.stillRenders, 7, "every scene receives a crisp static still");
   assert.equal(toggle.attributes.get("aria-label"), "Play animation");
+  assert.equal(toggle.attributes.get("aria-checked"), "true");
   assert.ok(env.copies.every((el) => !el.inert && !el.attributes.has("aria-hidden")));
   await env.win.dispatch("resize");
   await env.win.dispatch("pagehide");
@@ -152,13 +195,37 @@ test("pause destroys the artwork and exposes every scene; play restores animatio
   await toggle.dispatch("click");
   assert.equal(env.activeArt, 1);
   assert.equal(env.ids.story.classList.contains("animated"), true);
+  assert.equal(env.ids.story.classList.contains("stills"), false);
   assert.equal(toggle.attributes.get("aria-label"), "Pause animation");
+  assert.equal(toggle.attributes.get("aria-checked"), "false");
 });
 
-test("copy that cannot fit uses static flow and animation returns when room is available", async () => {
+test("text-only toggle hides decorative stills and restores presentation cleanly", async () => {
+  const env = environment();
+  const trigger = env.ids["a11y-trigger"];
+  const panel = env.ids["a11y-panel"];
+  const graphics = env.ids["graphics-toggle"];
+  assert.equal(panel.hidden, true);
+  await trigger.dispatch("click");
+  assert.equal(panel.hidden, false);
+  assert.equal(trigger.attributes.get("aria-expanded"), "true");
+  await graphics.dispatch("click");
+  assert.equal(env.activeArt, 0);
+  assert.equal(env.ids.story.classList.contains("animated"), false);
+  assert.equal(env.ids.story.classList.contains("stills"), false);
+  assert.equal(graphics.attributes.get("aria-checked"), "true");
+  await env.doc.dispatch("keydown", { key: "Escape" });
+  assert.equal(panel.hidden, true);
+  await graphics.dispatch("click");
+  assert.equal(env.activeArt, 1);
+  assert.equal(env.ids.story.classList.contains("animated"), true);
+});
+
+test("copy that cannot fit uses stills flow and animation returns when room is available", async () => {
   const env = environment({ fits: false });
   assert.equal(env.activeArt, 0, "do not mount artwork for a clipped story");
   assert.equal(env.ids.story.classList.contains("animated"), false);
+  assert.equal(env.ids.story.classList.contains("stills"), true);
   assert.equal(env.ids["motion-toggle"].hidden, true);
   env.setFits(true);
   await env.win.dispatch("resize");
@@ -166,19 +233,30 @@ test("copy that cannot fit uses static flow and animation returns when room is a
   env.setFits(false);
   env.finishFonts();
   await Promise.resolve();
-  assert.equal(env.activeArt, 0, "a font load that makes copy overflow also switches to static flow");
+  assert.equal(env.activeArt, 0, "a font load that makes copy overflow also switches to stills flow");
 });
 
-test("reduced motion and forced colours keep animation off regardless of the play control", async () => {
-  for (const query of ["(prefers-reduced-motion: reduce)", "(forced-colors: active)"]) {
-    const env = environment();
-    const media = env.queries.get(query);
-    media.matches = true;
-    await media.dispatch("change");
-    assert.equal(env.activeArt, 0);
-    assert.equal(env.ids["motion-toggle"].hidden, true);
-    media.matches = false;
-    await media.dispatch("change");
-    assert.equal(env.activeArt, 1);
-  }
+test("reduced motion shows stills while forced colours keep plain text only", async () => {
+  const reducedEnv = environment();
+  const reducedMedia = reducedEnv.queries.get("(prefers-reduced-motion: reduce)");
+  reducedMedia.matches = true;
+  await reducedMedia.dispatch("change");
+  assert.equal(reducedEnv.activeArt, 0);
+  assert.equal(reducedEnv.ids.story.classList.contains("stills"), true);
+  assert.equal(reducedEnv.ids["motion-toggle"].hidden, true);
+  assert.equal(reducedEnv.ids["a11y-reduced-note"].hidden, false);
+  reducedMedia.matches = false;
+  await reducedMedia.dispatch("change");
+  assert.equal(reducedEnv.activeArt, 1);
+
+  const forcedEnv = environment();
+  const forcedMedia = forcedEnv.queries.get("(forced-colors: active)");
+  forcedMedia.matches = true;
+  await forcedMedia.dispatch("change");
+  assert.equal(forcedEnv.activeArt, 0);
+  assert.equal(forcedEnv.ids.story.classList.contains("stills"), false);
+  assert.equal(forcedEnv.ids["a11y-menu"].hidden, true);
+  forcedMedia.matches = false;
+  await forcedMedia.dispatch("change");
+  assert.equal(forcedEnv.activeArt, 1);
 });
