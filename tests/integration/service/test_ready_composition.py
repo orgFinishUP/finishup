@@ -80,7 +80,7 @@ from finishup.ports.control import (
     ServiceState,
 )
 from finishup.ports.diagnostics import StartupCheckResult
-from finishup.ports.keys import BundleKeys, WrapKeyHandle
+from finishup.ports.keys import BundleKeys, KeyStoreError, KeyStoreReason, WrapKeyHandle
 from finishup.ports.ledger import CheckCommitResult
 from finishup.ports.privacy import (
     EffectivePrivacyPolicy,
@@ -1429,6 +1429,133 @@ async def test_startup_bundle_upgrade_failure_closes_catalog_and_blocks_ready_gr
     assert raised.value.retryable is True
     assert events == ["upgrade"]
     assert db.close_count == 1
+
+
+@pytest.mark.anyio
+async def test_relock_after_catalog_open_closes_catalog_when_privacy_composition_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vault relock that fails a later composition phase still closes the catalog writer."""
+
+    root = tmp_path / "bundle"
+    root.mkdir(mode=0o700)
+    opened: list[object] = []
+    real_open = ready_composition_module.open_ready_catalog
+
+    class _RelockingVault:
+        ready = True
+        generation = 2
+        mode = "passphrase"
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            if not self.ready:
+                raise KeyStoreError(KeyStoreReason.VAULT_LOCKED)
+            return _Lookup()
+
+    vault = _RelockingVault()
+
+    async def open_catalog(*args: Any, **kwargs: Any) -> object:
+        catalog = await real_open(*args, **kwargs)
+        opened.append(catalog)
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        # A lock command lands while the composition awaits the upgrade phase, which succeeds.
+        vault.ready = False
+
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(
+        ready_composition_module, "verify_private_local_bundle", _accept_private_path
+    )
+
+    with pytest.raises(KeyStoreError) as raised:
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=vault,  # type: ignore[arg-type]
+            config=FinishUpConfig(),
+            paths=_Paths(root),
+            clock=_Clock(),
+            secret_memory=object(),
+            startup_bundle_upgrade=upgrade,
+        )
+
+    assert raised.value.reason is KeyStoreReason.VAULT_LOCKED
+    assert len(opened) == 1
+    db = cast(apsw.Connection, getattr(opened[0], "_db"))
+    try:
+        with pytest.raises(apsw.ConnectionClosedError):
+            db.execute("SELECT 1").fetchone()
+    finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_failure_after_privacy_composition_closes_privacy_and_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase failing after the privacy coordinator exists closes it before the catalog."""
+
+    events: list[str] = []
+
+    class _DB:
+        def close(self, *, force: bool = False) -> None:
+            assert force
+            events.append("catalog_closed")
+
+    class _Catalog:
+        def __init__(self) -> None:
+            self._db = _DB()
+
+    class _Privacy:
+        policy_application = None
+
+        async def close(self) -> None:
+            events.append("privacy_closed")
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        return _Catalog()
+
+    async def privacy(**_kwargs: object) -> tuple[object, object, object]:
+        return _Privacy(), object(), object()
+
+    def failing_endpoint(_config: object) -> object:
+        raise RuntimeError("endpoint_probe_failed")
+
+    def accept(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(ready_composition_module, "SqliteLineageStore", accept)
+    monkeypatch.setattr(ready_composition_module, "SqliteHostLineageRegistry", accept)
+    monkeypatch.setattr(ready_composition_module, "LineageCoordinator", accept)
+    monkeypatch.setattr(ready_composition_module, "build_privacy_coordinator", privacy)
+    monkeypatch.setattr(ready_composition_module, "primary_external_endpoint", failing_endpoint)
+
+    with pytest.raises(RuntimeError, match="endpoint_probe_failed"):
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=FinishUpConfig(),
+            paths=_Paths(tmp_path),
+            clock=_Clock(),
+            secret_memory=object(),
+        )
+
+    assert events == ["privacy_closed", "catalog_closed"]
 
 
 @pytest.mark.anyio
