@@ -7492,7 +7492,10 @@ Independent verification support (local control, not MCP):
   and the verification worker records no coverage gap. The `not_configured` status object carries
   the same keys as `trusted`/`untrusted` (`policy_digest: null`, `sandbox`, empty
   `executable_checks`, `network_check_state: not_requested`) plus a fixed `note`. Any other policy
-  read or parse fault stays `invalid_policy`; workspace or store faults report `unavailable`. Each
+  read or parse fault stays `invalid_policy`, including a check whose `timeout_seconds` falls
+  outside 0.1–300 (however large the number) or whose id or argv the approval model refuses: the
+  parser raises `invalid_approved_check_policy` for each. Workspace or store faults report
+  `unavailable`. Each
   policy failure line is followed by a fixed continuation stating that the route is optional owner
   configuration and never a `finishup-blocker`.
 - `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task

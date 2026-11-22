@@ -237,7 +237,9 @@ current rather than reusable. When no enforcing sandbox is available the outcome
 
 Approved checks are optional. In a workspace without `.finishup/checks.toml`, `status` reports
 `state: not_configured` and exits successfully; `preview`, `trust`, and `run` stop with
-`policy_not_configured`. A file that exists but cannot be read or parsed reports `invalid_policy`.
+`policy_not_configured`. A file that exists but cannot be read or parsed reports `invalid_policy`,
+as does a check the file describes in a form FinishUP cannot approve, such as a `timeout_seconds`
+outside 0.1 to 300.
 Other local faults (for example an unreadable workspace) report `unavailable`. Configuring or
 trusting a policy is the owner's choice and no finding asks an agent for it, so neither state is a
 reason for an agent to stop; a limit it leaves unproven stays disclosed in the receipt.

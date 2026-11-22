@@ -1939,13 +1939,28 @@ def test_checks_operations_name_missing_policy_and_say_it_is_not_a_blocker(
     assert "not a task blocker" in err
 
 
+_WELL_FORMED_CHECK = (
+    b'format = "yoetz.approved-check-policy/1"\n[[checks]]\nid = "unit"\n'
+    b'argv = ["pytest"]\nnetwork = false\ntimeout_seconds = '
+)
+
+
 @pytest.mark.parametrize("operation", ["status", "preview", "trust", "run"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        b"format = 1\n",
+        _WELL_FORMED_CHECK + b"9" * 400 + b"\n",
+        _WELL_FORMED_CHECK + b"1000\n",
+    ],
+    ids=["broken_toml_shape", "timeout_too_large_for_a_float", "timeout_out_of_range"],
+)
 def test_checks_operations_keep_invalid_policy_for_a_broken_file(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str, policy: bytes
 ) -> None:
     workspace = tmp_path / "workspace"
     (workspace / ".finishup").mkdir(parents=True)
-    (workspace / ".finishup" / "checks.toml").write_bytes(b"format = 1\n")
+    (workspace / ".finishup" / "checks.toml").write_bytes(policy)
     kwargs: dict[str, object] = {"workspace": str(workspace), "_state": tmp_path / "state"}
     if operation == "trust":
         kwargs["policy_digest"] = "sha256:" + "0" * 64
