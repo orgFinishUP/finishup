@@ -990,29 +990,51 @@ def shell_command_segments(command: str) -> list[list[str]]:
     a comment and a heredoc body are data. Words lose their quotes; a redirection and its operand
     (a target, a source, a heredoc delimiter) are not words of the command. Text is read up to
     ``MAX_SHELL_WRITE_CHARS`` (``bound_command``); a command the bound cuts short is dropped, and
-    text the lexer cannot read with certainty has no segments.
+    text the lexer cannot read with certainty has no segments. An unquoted word that ends in a
+    command substitution (``echo $(pip install x)``, ``v="$(pip install x)"``) also contributes
+    the segments of the command it runs, a bounded number of levels deep.
     """
 
     text, cut = _bounded(command)
-    lexed = _lex(text, partial=cut)
+    return _command_segments(text, partial=cut, depth=0)
+
+
+_MAX_SUBSTITUTION_DEPTH: Final = 3
+
+
+def _command_segments(text: str, *, partial: bool, depth: int) -> list[list[str]]:
+    lexed = _lex(text, partial=partial)
     if lexed is None:
         return []
     tokens, incomplete = lexed
-    segments: list[list[str]] = [[]]
+    # Each segment's words, then the segments of the substitutions it runs.
+    segments: list[tuple[list[str], list[list[str]]]] = [([], [])]
     operand = False
     for token in tokens:
         if token.kind == "op" and token.text in _SEPARATORS:
-            segments.append([])
+            segments.append(([], []))
             operand = False
         elif token.kind == "op":
             operand = True  # a redirection: its next word is its operand
         elif operand:
             operand = False
         else:
-            segments[-1].append(token.text)
+            words, substituted = segments[-1]
+            words.append(token.text)
+            start = token.text.find("$(")
+            if (
+                not token.literal
+                and start >= 0
+                and token.text.endswith(")")
+                and depth < _MAX_SUBSTITUTION_DEPTH
+            ):
+                inner = token.text[start + 2 : -1]
+                substituted.extend(_command_segments(inner, partial=False, depth=depth + 1))
     if incomplete:
         segments.pop()
-    return [segment for segment in segments if segment]
+    return [words for words, _ in segments if words] + [
+        segment for _, substituted in segments for segment in substituted
+    ]
 
 
 def shell_write_scope(

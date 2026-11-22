@@ -138,6 +138,14 @@ def test_a_newline_that_is_not_a_command_separator_splits_nothing(env: dict[str,
     assert _target("cat <<EOF\npipx install ruff\nEOF\npip install x", env) == "system"
 
 
+def test_an_install_inside_a_command_substitution_is_classified(env: dict[str, Path]) -> None:
+    assert _target("echo $(pip install x)", env) == "system"
+    assert _target('log="$(pipx install ruff)"', env) == "private_env"
+    assert _target("echo $(echo $(pip install x))", env) == "system"
+    assert _target("echo '$(pip install x)'", env) is None
+    assert _target("echo $(pip list)", env) is None
+
+
 # --- task interpreter (tb4n1 regressions) ------------------------------------------------------
 
 

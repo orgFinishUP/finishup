@@ -1139,6 +1139,20 @@ def test_command_segments_split_where_the_shell_does() -> None:
     assert segments("pip install 'x") == []
 
 
+def test_command_segments_read_the_command_a_substitution_runs() -> None:
+    segments = shell_writes.shell_command_segments
+    assert segments("echo $(pip install x)") == [
+        ["echo", "$(pip install x)"],
+        ["pip", "install", "x"],
+    ]
+    assert segments('v="$(pip install x)"; ls') == [
+        ["v=$(pip install x)"],
+        ["ls"],
+        ["pip", "install", "x"],
+    ]
+    assert segments("echo '$(pip install x)'") == [["echo", "$(pip install x)"]]
+
+
 def test_command_segments_drop_a_command_the_bound_cuts() -> None:
     command = "ls\npip install " + "x" * MAX_SHELL_WRITE_CHARS
     assert shell_writes.shell_command_segments(command) == [["ls"]]
