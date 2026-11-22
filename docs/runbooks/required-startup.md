@@ -39,8 +39,8 @@ uses tools and needs a plan in required mode. Optional mode keeps its usual triv
 
 Tool/schema discovery, the FinishUP skill, registered guidance, clarification and FinishUP workflow calls
 remain possible. Direct commands through the current runtime's exact FinishUP launcher for service
-status/diagnostics/restart, consent catalog/prepare/status/review/authorize and vault unlock reach
-normal host admission. Pipelines, substitutions, compound commands and other launchers do not
+status/diagnostics/restart/unlock and consent catalog/prepare/status/review/authorize reach normal
+host admission; `service unlock` is the vault unlock the `vault_locked` continuation names. Pipelines, substitutions, compound commands and other launchers do not
 qualify. This grants no repair, consent, credential or disclosure authority: the typed continuation,
 current user instruction and existing owner ceremony still apply.
 

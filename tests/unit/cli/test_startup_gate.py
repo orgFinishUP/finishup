@@ -834,6 +834,46 @@ def test_recovery_admits_this_runtimes_launcher_or_its_legacy_alias(launcher: st
         assert not bootstrap_tool(payload, "claude", "PreToolUse")
 
 
+@pytest.mark.parametrize("launcher", ["finishup", "yoetz"])
+def test_recovery_admits_the_real_vault_unlock_command(launcher: str) -> None:
+    """``service unlock`` is the unlock the ``vault_locked`` continuation names; no ``vault`` group."""
+
+    command = f"{sys.prefix}/bin/{launcher} service unlock"
+    payload: dict[str, JsonValue] = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert bootstrap_tool(payload, "claude", "PreToolUse")
+    payload = {
+        "tool_name": "Bash",
+        "tool_input": {"command": f"{sys.prefix}/bin/{launcher} vault unlock"},
+    }
+    assert not bootstrap_tool(payload, "claude", "PreToolUse")
+
+
+def test_required_startup_leaves_service_unlock_to_host_admission(host: Host) -> None:
+    command = f"{sys.prefix}/bin/finishup service unlock"
+    assert host.denied()
+    response = host.call(
+        "PreToolUse" if host.host == "claude" else "preToolUse",
+        tool_name="Bash" if host.host == "claude" else "Shell",
+        tool_input={"command": command},
+    )
+    if host.host == "claude":
+        assert response == {}
+    else:
+        assert response.get("permission") != "deny"
+
+
+def test_every_recovery_command_is_a_registered_cli_command() -> None:
+    from typer.main import get_command
+
+    from finishup.cli.app import app
+
+    root = get_command(app)
+    commands = getattr(root, "commands", {})
+    for group, name in startup_gate_module.RECOVERY_COMMANDS:
+        assert group in commands, group
+        assert name in getattr(commands[group], "commands", {}), (group, name)
+
+
 def test_bare_legacy_launcher_resolves_through_path_to_this_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

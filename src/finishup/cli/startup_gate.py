@@ -58,6 +58,22 @@ _BOOTSTRAP_GUIDANCE_URIS = frozenset(
 _SKILLS = frozenset(FINISHUP_SKILL_NAMES)
 _DISCOVERY = frozenset({"ToolSearch", "AskUserQuestion", "AskQuestion", "ListMcpResources"})
 _PRE = frozenset({"PreToolUse", "preToolUse", "beforeMCPExecution"})
+# Direct launcher commands required startup leaves to the host's normal tool
+# admission: service status, diagnosis, restart and vault unlock, and the
+# consent decision path. Each pair names a registered ``finishup`` command.
+RECOVERY_COMMANDS = frozenset(
+    {
+        ("service", "status"),
+        ("service", "diagnostics"),
+        ("service", "restart"),
+        ("service", "unlock"),
+        ("consent", "catalog"),
+        ("consent", "prepare"),
+        ("consent", "status"),
+        ("consent", "review"),
+        ("consent", "authorize"),
+    }
+)
 _POST = frozenset({"PostToolUse", "PostToolUseFailure", "afterMCPExecution"})
 _RESET = frozenset({"SessionStart", "sessionStart", "UserPromptSubmit", "beforeSubmitPrompt"})
 _TRACKED_WRITES = frozenset({"start", "publish_work"})
@@ -171,17 +187,7 @@ def bootstrap_tool(payload: Mapping[str, JsonValue], host: str, event: str) -> b
         # This only leaves the host's normal tool admission in force. It does
         # not authorize a named repair, consent decision, OS presence or unlock;
         # the existing runtime ceremony and current user instruction still do.
-        return (argv[1], argv[2]) in {
-            ("service", "status"),
-            ("service", "diagnostics"),
-            ("service", "restart"),
-            ("consent", "catalog"),
-            ("consent", "prepare"),
-            ("consent", "status"),
-            ("consent", "review"),
-            ("consent", "authorize"),
-            ("vault", "unlock"),
-        }
+        return (argv[1], argv[2]) in RECOVERY_COMMANDS
     return False
 
 
