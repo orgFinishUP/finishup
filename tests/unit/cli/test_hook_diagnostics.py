@@ -726,3 +726,24 @@ def test_a_row_nested_past_the_decoder_limit_is_skipped_not_a_fault(tmp_path: Pa
     summary = hook_diagnostic_summary(_state=tmp_path)
     reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
     assert reasons["service_unavailable"]["count"] == 1
+
+
+@pytest.mark.parametrize("stamp", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:00:00-05:00"])
+def test_a_stamp_with_no_utc_moment_is_undatable_not_a_fault(tmp_path: Path, stamp: str) -> None:
+    """A stamp that parses but has no representable UTC moment counts as undated, never live."""
+
+    record_hook_diagnostic("service_unavailable", "PostToolUse", _state=tmp_path)
+    path = tmp_path / "observation/hook-diagnostics.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event": "Stop", "reason": "service_unavailable", "ts": stamp}))
+        handle.write("\n")
+        handle.write(json.dumps({"event": "Stop", "kind": "timing", "ms": 4_000, "ts": stamp}))
+        handle.write("\n")
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    assert reasons["service_unavailable"]["count"] == 2
+    assert reasons["service_unavailable"]["recent"] == 1
+    assert summary["count"] == 2
+    assert summary["recent_count"] == 1
+    assert summary["first_seen"] == summary["last_seen"]
+    assert summary["first_seen"] is not None
