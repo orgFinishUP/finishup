@@ -123,13 +123,17 @@ def test_payload_refuses_anything_outside_its_closed_shape(changes: dict[str, ob
         _payload(**changes)
 
 
-@pytest.mark.parametrize("mutation", ["extra_key", "missing_key", "foreign_provenance"])
+@pytest.mark.parametrize(
+    "mutation", ["extra_key", "missing_key", "foreign_provenance", "zero_read_not_an_integer"]
+)
 def test_decode_refuses_an_open_or_foreign_payload(mutation: str) -> None:
     value = cast(dict[str, Any], json.loads(json.dumps(encode_payload(_payload()), default=dict)))
     if mutation == "extra_key":
         value["extra"] = 1
     elif mutation == "missing_key":
         del value["objects_erased"]
+    elif mutation == "zero_read_not_an_integer":
+        value["provenance"]["reads"]["client_check"] = False
     else:
         value["provenance"]["schema"] = "other/1"
     with pytest.raises(ProtocolValueError):

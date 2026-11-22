@@ -70,6 +70,8 @@ def test_plus_adds_counts_and_keeps_the_later_snapshot_and_marker() -> None:
         lambda: EvidenceProvenance({"server_read": 1}),  # pyright: ignore[reportArgumentType]
         lambda: EvidenceProvenance({"server_copy_read": -1}),
         lambda: EvidenceProvenance({"server_copy_read": True}),
+        lambda: EvidenceProvenance({"outside_read": False}),
+        lambda: EvidenceProvenance({"outside_read": 0.0}),  # pyright: ignore[reportArgumentType]
         lambda: EvidenceProvenance(fenced_reads=-1),
         lambda: CopySnapshotRef("2026-11-10T11:00:00Z", _TREE),
         lambda: CopySnapshotRef(_AT, "A" * 40),
@@ -83,7 +85,16 @@ def test_invalid_values_are_refused(build: object) -> None:
 
 @pytest.mark.parametrize(
     "case",
-    ["schema", "no_fenced", "extra", "token_missing", "snapshot_open", "marker_open"],
+    [
+        "schema",
+        "no_fenced",
+        "extra",
+        "token_missing",
+        "zero_false",
+        "zero_float",
+        "snapshot_open",
+        "marker_open",
+    ],
 )
 def test_decoder_refuses_anything_but_the_canonical_form(case: str) -> None:
     wire: dict[str, object] = dict(EvidenceProvenance({"server_copy_read": 1}).to_json())
@@ -97,6 +108,10 @@ def test_decoder_refuses_anything_but_the_canonical_form(case: str) -> None:
         wire["extra"] = 1
     elif case == "token_missing":
         del reads["client_check"]
+    elif case == "zero_false":
+        reads["outside_read"] = False
+    elif case == "zero_float":
+        reads["outside_read"] = 0.0
     elif case == "snapshot_open":
         wire["snapshot"] = {"synced_at": _AT}
     else:

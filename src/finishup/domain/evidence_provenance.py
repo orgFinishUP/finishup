@@ -209,11 +209,12 @@ class EvidenceProvenance:
         reads = cast(Mapping[object, object], given)
         if any(token not in EVIDENCE_PROVENANCE_TOKENS for token in reads):
             raise _invalid()
-        frozen = {
-            token: _count(reads[token])
-            for token in EVIDENCE_PROVENANCE_TOKENS
-            if token in reads and reads[token] != 0
+        # Every present count is checked before zeros are dropped, so a zero that is not an
+        # integer (false, 0.0) is refused like any other non-integer count.
+        counted = {
+            token: _count(reads[token]) for token in EVIDENCE_PROVENANCE_TOKENS if token in reads
         }
+        frozen = {token: count for token, count in counted.items() if count != 0}
         object.__setattr__(self, "reads", MappingProxyType(frozen))
         _count(self.fenced_reads)
         if self.snapshot is not None and type(self.snapshot) is not CopySnapshotRef:
