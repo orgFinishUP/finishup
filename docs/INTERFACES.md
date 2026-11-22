@@ -7499,7 +7499,7 @@ Independent verification support (local control, not MCP):
   read or parse fault stays `invalid_policy`, including a check whose `timeout_seconds` falls
   outside 0.1–300 (however large the number) or whose id or argv the approval model refuses: the
   parser raises `invalid_approved_check_policy` for each. Workspace or store faults report
-  `unavailable`. Each
+  `observation_checks_<op>_failed:unavailable` with exit 20 on every verb, `revoke` included. Each
   policy failure line is followed by a fixed continuation stating that the route is optional owner
   configuration and never a `finishup-blocker`.
 - `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task

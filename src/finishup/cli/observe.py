@@ -2639,10 +2639,15 @@ def observe_checks_status(
 
 
 def observe_checks_revoke(*, workspace: str | None, _state: Path | None = None) -> int:
-    root = _resolve_workspace(workspace)
-    store = LocalObservationStore(_state=_state)
-    commitment = store.workspace_commitment(str(root))
-    store.revoke_policy_trust(commitment)
+    # Revoke is the way out of a trusted policy: an unresolvable workspace or a store fault is the
+    # same bounded `unavailable` refusal its sibling verbs give, never an untyped crash (#428).
+    try:
+        root = _resolve_workspace(workspace)
+        store = LocalObservationStore(_state=_state)
+        commitment = store.workspace_commitment(str(root))
+        store.revoke_policy_trust(commitment)
+    except Exception as error:
+        return _check_policy_failure("revoke", error)
     typer.echo("observation_checks_revoked")
     return 0
 

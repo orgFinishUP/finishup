@@ -1235,6 +1235,46 @@ def test_other_observe_verbs_share_the_typed_workspace_refusal(
         assert captured.err.startswith(f"observation_{verb}_failed:workspace_unresolvable: ")
 
 
+@pytest.mark.parametrize("workspace", ["", "/nonexistent-finishup-workspace/SECRET-NAME"])
+def test_checks_revoke_refuses_an_unresolvable_workspace_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    workspace: str,
+) -> None:
+    """`observe checks revoke` shares its siblings' bounded refusal, not `internal_error` (#428)."""
+    import finishup.adapters.integrations.observation_local as local
+    from finishup.cli.app import main
+
+    monkeypatch.setattr(local, "state_dir", lambda: tmp_path)
+    for verb in ("preview", "revoke"):
+        monkeypatch.setattr(
+            sys, "argv", ["finishup", "observe", "checks", verb, "--workspace", workspace]
+        )
+        with pytest.raises(SystemExit) as exit_:
+            main()
+        captured = capsys.readouterr()
+        assert exit_.value.code == 20, captured.err
+        assert captured.err == f"observation_checks_{verb}_failed:unavailable\n"
+        assert "SECRET-NAME" not in captured.out + captured.err
+
+
+def test_checks_revoke_bounds_a_store_fault(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.config.paths import PathSafetyError
+
+    def unsafe_store(*args: object, **kwargs: object) -> object:
+        raise PathSafetyError("path_contains_symlink")
+
+    monkeypatch.setattr(observe_cli, "LocalObservationStore", unsafe_store)
+    code = observe_cli.observe_checks_revoke(workspace=str(tmp_path), _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 20
+    assert captured.out == ""
+    assert captured.err == "observation_checks_revoke_failed:unavailable\n"
+
+
 def _enqueue_shell_rows(root: Path, session_id: str, ordinals: tuple[int, ...]) -> None:
     for ordinal in ordinals:
         handle_observe(
