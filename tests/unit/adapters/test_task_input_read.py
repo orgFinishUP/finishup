@@ -70,6 +70,24 @@ def test_binary_bytes_become_a_summary_and_text_stays_text() -> None:
     assert text is not None and not text.summary and text.text == b"# Design\n"
 
 
+@pytest.mark.parametrize("size", [4_000, 12_000, 15_000, 16_384, 24_000, 40_000])
+def test_a_non_utf8_text_is_kept_within_the_bound_whatever_its_size(size: int) -> None:
+    """A Latin-1 text stays text: a replaced byte grows to three, yet nothing short is dropped."""
+
+    content = (b"caf\xe9," * size)[:size]
+    item = task_input_from_bytes("data/menu.csv", content)
+    assert item is not None and not item.summary
+    assert item.size == size and 1 <= len(item.text) <= MAX_TASK_INPUT_TEXT_BYTES
+    assert item.text.startswith(b"caf")
+    if size <= 4_000:
+        assert item.text == content.decode("utf-8", errors="replace").encode("utf-8")
+
+
+def test_a_short_input_with_no_decodable_byte_is_summarized_not_dropped() -> None:
+    item = task_input_from_bytes("data/blob.txt", b"\xe9" * 12_000)
+    assert item is not None and item.summary and item.size == 12_000
+
+
 @pytest.mark.parametrize(
     ("path", "origin", "summary", "valid"),
     [
@@ -140,6 +158,28 @@ def test_the_repository_read_summarizes_a_binary_and_a_large_untracked_input(
     assert rows.path == "big.csv" and not rows.summary and rows.size == len(big)
     assert rows.text.endswith(b"END_MARKER\n")
     assert decode_check_change(encode_check_change(capture)) == capture
+
+
+def test_the_repository_read_keeps_a_short_windows_1252_input_like_a_long_one(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    row = "Ren\xe9e,M\xfcller,Gar\xe7on,Jos\xe9\n".encode("cp1252")
+    (repository / "short.csv").write_bytes((row * 1000)[:15_000])
+    (repository / "long.csv").write_bytes((row * 3000)[:30_000])
+    _git(repository, "add", "--", "short.csv", "long.csv")
+    _git(repository, "commit", "-q", "-m", "inputs")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    (repository / "work.py").write_text("x = 1\n", encoding="utf-8")
+
+    capture = adapter.capture(os.fspath(repository), base, input_paths=("short.csv", "long.csv"))
+
+    kept = {item.path: item for item in capture.inputs}
+    assert set(kept) == {"short.csv", "long.csv"}
+    assert kept["short.csv"].size == 15_000 and not kept["short.csv"].summary
+    assert kept["short.csv"].text.startswith(b"Ren")
+    assert all(len(item.text) <= MAX_TASK_INPUT_TEXT_BYTES for item in capture.inputs)
 
 
 @pytest.fixture

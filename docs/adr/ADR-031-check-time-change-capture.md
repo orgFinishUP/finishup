@@ -479,7 +479,9 @@ unchanged. The owner authorized the privacy/egress content-selection change on 2
    nested repository, is not credential-named, is a regular, singly linked file of the service user
    reached without a link, is at most 1 MiB and holds no NUL byte in its first 8000 bytes. An
    ignored file is never read: it is neither tracked nor listed. Each keeps at most 16 KiB, whole
-   or head and tail with the cut marked. The read is point-in-time, after the change proved
+   or head and tail with the cut marked; a byte that is not UTF-8 becomes U+FFFD in a whole text,
+   or is dropped (as in a head and tail) when those three-byte replacements would push a short
+   text past 16 KiB, so a short input is never lost to them. The read is point-in-time, after the change proved
    stable. Inputs are stored in the same encrypted
    check-change object (optional `inputs`, so every object without them keeps its bytes), redacted
    one by one with the same detector (one that cannot be fully redacted is dropped; any redaction
