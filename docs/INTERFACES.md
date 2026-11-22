@@ -15184,7 +15184,8 @@ over REST.
   `active|revoked|expired`; never a secret); `revoke KEY_ID` ("Revoked API key KEY_ID." or "… was
   already revoked."). Refusals (exit 2 unless noted): `api_keys_damaged` (20), `api_keys_unsafe`
   (20), `api_key_unknown`, `api_key_label_invalid`, `api_key_scope_invalid`,
-  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit`, `api_key_output_exists`,
+  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit` (256 unrevoked keys; revoking one
+  frees its slot, and a full file drops its oldest revoked record), `api_key_output_exists`,
   `trusted_console_required`, `api_key_not_shown` (the key was revoked) and
   `api_key_output_failed` (20; the key was revoked).
 - `finishup service rest run --listen HOST:PORT (--tls-cert F --tls-key F | --behind-proxy)

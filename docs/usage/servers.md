@@ -663,6 +663,7 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 | `rest_listen_invalid` | `--listen` is not `HOST:PORT` with an IP address or `localhost`. | For example `--listen 0.0.0.0:8443`; port 0 picks a free one. |
 | `rest_listener_unavailable` | That address could not be used (in use, or not this computer's). | Choose another port or address. |
 | `service_already_running` | `--edge native` runs the service itself, and it is already running. | Stop it first (`finishup service stop`), or use the default gateway beside it. |
+| `api_key_limit` | This server already has 256 keys that are not revoked (expired ones count until you revoke them). | Revoke keys you no longer use (`finishup service api-key revoke KEY_ID`), then make the new one. |
 | `api_key_output_exists` | `--output-file` names a file that already exists. | Choose a new path; a key is never written over a file. |
 | `trusted_console_required` | A key is shown only on your own terminal, and the command ran without one; no key was made. | Run the command in your own terminal, or pass `--output-file`. |
 | `api_key_not_shown`, `api_key_output_failed` | The new key could not be shown, or written to the file, so it was revoked at once and nobody can use it. | Run the command again in your own terminal, or with a new `--output-file` path. |
