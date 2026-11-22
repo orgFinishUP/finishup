@@ -986,7 +986,9 @@ could have reached a provider (`authorization_missing` and `provider_unavailable
 refused admission writes no attempt, never claims review, and is reported with the coverage gap
 `advice_semantic_deferred`; the service schedules an in-memory revisit that rebuilds advice when
 the interval elapses, so the trailing condition is reviewed without waiting for another hook (the
-next hook re-derives the same deferral after a restart). A terminal non-success is never sticky:
+next hook re-derives the same deferral after a restart). Each session keeps one revisit at the
+earliest requested time: a sooner request replaces a later one, because each candidate identity has
+its own deferral. A terminal non-success is never sticky:
 the same identity is re-admitted as `<identity>#<generation>`, keeping every earlier receipt, after
 a backoff from its terminal time. `superseded` retries immediately; other pre-provider reasons
 (`authorization_missing`, `provider_unavailable`, `queue_full`) wait the base interval, and
