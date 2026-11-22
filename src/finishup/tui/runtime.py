@@ -2791,7 +2791,9 @@ class FinishUpRuntime:
         )
         return WorkDetail(
             item=item,
-            evidence_count=(None if open_obligation_count is None else int(open_obligation_count)),
+            open_obligation_count=(
+                None if open_obligation_count is None else int(open_obligation_count)
+            ),
             coverage=gaps or ("no gaps recorded",),
             limitations=tuple(str(code) for code in getattr(compact, "gaps", ()) or ()),
             receipt_available=False,

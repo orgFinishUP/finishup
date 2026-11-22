@@ -260,8 +260,36 @@ def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> 
         "Unreadable plan scope", session, compact
     )
 
-    assert detail.evidence_count is None
+    assert detail.open_obligation_count is None
     assert detail.coverage == ("redacted_event",)
+
+
+def test_opened_task_shows_open_obligations_under_their_own_label(tmp_path: Path) -> None:
+    from finishup.tui.render import render_work_detail
+
+    runtime = FinishUpRuntime(cwd=tmp_path)
+    session = _WorkSession(
+        task_id="tsk_00000000-0000-4000-8000-000000000001",
+        session_id="ses_00000000-0000-4000-8000-000000000002",
+        writer_id="wri_00000000-0000-4000-8000-000000000003",
+        frontier=SimpleNamespace(sequence="2"),
+    )
+    compact = SimpleNamespace(
+        coverage=SimpleNamespace(known_gaps=()),
+        gaps=(),
+        ledger_freshness="current",
+        open_obligation_count="7",
+        unanswered_finding_count="0",
+        receipt_blocking_finding_count="0",
+    )
+
+    detail = runtime._work_detail("Seven open items", session, compact)  # pyright: ignore[reportPrivateUsage]
+    lines = render_work_detail(detail, 100)
+
+    # The compact view reports open obligations, never an evidence count: seven promised items
+    # still open must not read as seven pieces of evidence.
+    assert not any(line.startswith("Evidence") for line in lines), lines
+    assert "Open obligations     7" in lines
 
 
 async def test_store_provider_credential_supplies_the_scoped_reauthentication_secret(

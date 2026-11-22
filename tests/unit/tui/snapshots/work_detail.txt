@@ -1,7 +1,7 @@
 Add rate limiting to the upload endpoint
 
 State                current
-Evidence             3
+Open obligations     3
 Open findings        2
 Last check           local only
 Frontier sequence    412

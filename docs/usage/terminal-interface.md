@@ -272,8 +272,9 @@ readiness.
 
 ### `/work`, `/check`, `/receipt`
 
-`/work` opens a task by the title the agent used and shows its claims, evidence count, checks,
-coverage, findings, limitations, and whether a receipt is available. **FinishUP has no browsable
+`/work` opens a task by the title the agent used and shows its claims, how many promised items
+are still open (or "unknown" when the service did not say), checks, coverage, findings,
+limitations, and whether a receipt is available. **FinishUP has no browsable
 task index** — the local service exposes no task-listing operation and this interface does not
 invent one — so tasks are reached by name.
 

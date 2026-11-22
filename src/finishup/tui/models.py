@@ -661,7 +661,9 @@ class WorkDetail:
 
     item: WorkItem
     claims: tuple[str, ...] = ()
-    evidence_count: int | None = 0
+    # Promised items the service still reports open; ``None`` when it did not say. This is not an
+    # evidence count: the start compact view carries none, so the task detail shows no Evidence row.
+    open_obligation_count: int | None = None
     checks: tuple[str, ...] = ()
     coverage: tuple[str, ...] = ()
     findings: tuple[str, ...] = ()
