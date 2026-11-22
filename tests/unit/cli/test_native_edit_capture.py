@@ -581,6 +581,39 @@ def test_codex_shell_apply_patch_heredoc_is_captured_from_its_only_hook(
     assert ObservationContentKind.WORKSPACE_DIFF not in post
 
 
+@pytest.mark.parametrize(
+    ("opener", "delimiter"), [("<<\\EOF", "EOF"), ("<<'END-PATCH'", "END-PATCH")]
+)
+def test_codex_shell_apply_patch_heredoc_with_any_bash_delimiter_is_captured(
+    opener: str, delimiter: str, tmp_path: Path
+) -> None:
+    """Bash reads ``<<\\EOF`` and ``<<'END-PATCH'`` as heredocs, so Codex's intercepted patch is
+    still captured from its only hook and not again from a post event."""
+
+    workspace = _WORKSPACES[sorted(_WORKSPACES)[0]]
+    command = f"apply_patch {opener}\n" + _patch(f"{workspace}/app/module.py") + delimiter
+    pre = dict(
+        _chunks(
+            "PreToolUse",
+            _codex_bash("PreToolUse", workspace, command),
+            tmp_path / "pre",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    assert b"*** Update File: app/module.py\n" in pre[ObservationContentKind.WORKSPACE_DIFF]
+    post = dict(
+        _chunks(
+            "PostToolUse",
+            _codex_bash("PostToolUse", workspace, command),
+            tmp_path / "post",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    assert ObservationContentKind.WORKSPACE_DIFF not in post
+
+
 @pytest.mark.parametrize("os_name", sorted(_WORKSPACES))
 def test_codex_exec_command_heredoc_write_is_captured_and_scratch_files_skipped(
     os_name: str, tmp_path: Path

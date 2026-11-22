@@ -318,6 +318,18 @@ def test_a_code_section_after_a_padded_delimiter_line_is_a_workspace_write(
     assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
 
 
+@pytest.mark.parametrize("opener", ["git apply <<\\EOF", "git apply <<'END-PATCH'"])
+def test_a_heredoc_patch_with_any_bash_delimiter_is_a_workspace_write(
+    opener: str, tmp_path: Path
+) -> None:
+    delimiter = "END-PATCH" if "END-" in opener else "EOF"
+    command = (
+        f"{opener}\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        f"{delimiter}\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
 def test_shell_redirect_scope(tmp_path: Path) -> None:
     assert (
         _facts("Bash", {"command": "echo x > /opt/elsewhere/y"}, tmp_path)["write_scope"]

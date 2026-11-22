@@ -880,6 +880,79 @@ def test_a_heredoc_patch_ends_where_bash_ends_it(command: str, paths: tuple[str,
     )
 
 
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "git apply <<\\EOF",
+        "git apply <<-\\EOF",
+        "patch -p1 <<\\EOF",
+        "git apply <<E\\OF",
+        "git apply <<'END-PATCH'",
+        'patch -p1 <<"END PATCH"',
+        "git apply <<$'EOF'",
+        "cd /app && git apply <<\\EOF",
+    ],
+)
+def test_a_heredoc_patch_delimiter_is_read_as_bash_reads_it(opener: str) -> None:
+    """A delimiter is the word after ``<<``, quotes and backslashes removed, whatever its
+    characters, so the patch it feeds is a write the patch names."""
+
+    delimiter = "END PATCH" if "END PATCH" in opener else "END-PATCH" if "END-" in opener else "EOF"
+    command = f"{opener}\n{_CODE_SECTION}{delimiter}\npytest -q\n"
+    writes = shell_writes.heredoc_patch_writes(command)
+    assert writes == shell_writes.HeredocPatchWrites(("src/main.py",), False)
+    scope = shell_write_scope(
+        command,
+        workspace="/app",
+        inside=_inside,
+        also_written=writes.paths,
+        unplaced_writes=writes.unplaced,
+    )
+    assert scope == "workspace"
+    # A joined ``bash -lc`` argv is read through its one shell layer.
+    assert shell_writes.heredoc_patch_writes(shlex.join(["/bin/bash", "-lc", command])) == writes
+
+
+@pytest.mark.parametrize("opener", ["apply_patch <<\\EOF", "apply_patch <<'END-PATCH'"])
+def test_an_apply_patch_delimiter_is_read_as_bash_reads_it(opener: str) -> None:
+    delimiter = "END-PATCH" if "END-" in opener else "EOF"
+    command = (
+        f"{opener}\n*** Begin Patch\n*** Update File: src/main.py\n@@\n-x = 1\n+x = 2\n"
+        f"*** End Patch\n{delimiter}\n"
+    )
+    assert shell_writes.heredoc_patch_writes(command) == shell_writes.HeredocPatchWrites(
+        ("src/main.py",), False
+    )
+    # The whole script is the one ``apply_patch`` statement Codex intercepts.
+    assert shell_writes.codex_intercepts_shell_apply_patch(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A ``<<<`` here-string, an arithmetic shift and quoted text open no heredoc, and the patch
+        # after them is still read.
+        f"cat <<<EOF\ngit apply <<'EOF'\n{_CODE_SECTION}EOF\n",
+        f"echo $((1<<2))\ngit apply <<'EOF'\n{_CODE_SECTION}EOF\n",
+        f"echo $((1<<2)); git apply <<'EOF'\n{_CODE_SECTION}EOF\n",
+    ],
+)
+def test_a_false_heredoc_start_does_not_hide_a_patch(command: str) -> None:
+    assert shell_writes.heredoc_patch_writes(command) == shell_writes.HeredocPatchWrites(
+        ("src/main.py",), False
+    )
+
+
+def test_a_patch_fed_a_delimiter_the_reader_cannot_read_is_unplaced() -> None:
+    """``$'E\\x4fF'`` is a delimiter bash decodes and the reader does not: still a write."""
+
+    command = f"git apply <<$'E\\x4fF'\n{_CODE_SECTION}EOF\n"
+    assert shell_writes.heredoc_patch_writes(command) == shell_writes.HeredocPatchWrites((), True)
+    assert shell_writes.heredoc_patch_writes(
+        "echo <<$'E\\x4fF'\nx\nEOF\n"
+    ) == shell_writes.HeredocPatchWrites((), False)
+
+
 def _outside(_path: str) -> bool:
     return False
 

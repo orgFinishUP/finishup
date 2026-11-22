@@ -222,7 +222,8 @@ matter and a false write is worse, so `domain/shell_writes` names no write when 
   quotes removed (`'END-DATA'`, `$'EOF'`; an escape inside `$'...'` is not decoded, so the command
   is unlexable); `<<-` strips leading tabs, and only tabs, when matching the closing line; in an
   unquoted heredoc a body line ending in a backslash continues on the next, and the joined line is
-  what is compared; an unterminated body runs to the end, as in bash. The body of an unquoted heredoc is data here even
+  what is compared; an unterminated body runs to the end, as in bash. The heredoc patch reader
+  (`heredoc_patch_writes`) reads delimiters by this same rule (#1451). The body of an unquoted heredoc is data here even
   though bash expands `$(...)` in it: a write hidden in one is a missed write, accepted. A write
   inside `bash -lc '...'` is attributed (the wrapper's command text is parsed in turn, to a bounded
   depth); a wrapper argument the outer shell expands (`bash -c "... '$OUT'"`) is unknown and names
