@@ -221,7 +221,8 @@ conformance test freezes that against the table's own predecessor. The changes, 
 * **G3 (`compound_outcome_unavailable`).** Joins the guarded host-observation set: a piped or
   chained command has one exit status. Only a shape that can hide a nested result raises it
   (`;`, `||`, a pipe, a background `&`, a line break, substitution, unparseable text); an `&&`
-  chain, an fd redirection such as `2>&1` or `&> log`, and a separator inside quotes do not.
+  chain, an fd redirection such as `2>&1` or `&> log`, and a separator inside quotes do not,
+  unless a shell or `eval` in the command could run that quoted text (`eval 'a; b'`).
 * **G2 (`check_current_as_of_earlier_frontier`).** Follows `CheckStanding`, not a suffix guess.
 * **G1 (`semantic_review_not_requested`).** Follows the route the check recorded.
 
