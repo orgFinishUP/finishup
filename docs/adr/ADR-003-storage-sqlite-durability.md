@@ -27,7 +27,9 @@ fault/contention matrix on both advertised platforms.
    production authorizer, including supported older consent schemas (issue #616).
 3. **Transactions:** `BEGIN IMMEDIATE` for every write path; the append transaction contains only
    bounded indexed reads/writes. All hashing, validation, encryption, object
-   fsync, and network work happens outside. Acknowledge only after COMMIT returns.
+   fsync, and network work happens outside. Acknowledge only after COMMIT returns. The live
+   in-memory view adopts a write only after its COMMIT: a failed BEGIN or COMMIT leaves it equal
+   to the bundle, so the same lease holder can retry (issue #1480).
 4. **Layout:** platform app-data `…/finishup/` with `catalog.sqlite3` + `tasks/<task-id>/` bundles.
    One task per bundle database. Owner-only permissions; symlink/hardlink/
    traversal rejection; repo, cloud-synced, network, and world-readable paths unsupported and

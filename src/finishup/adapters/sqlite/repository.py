@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2199,18 +2199,6 @@ class SqliteLedger:
                 self._db.execute("ROLLBACK")
             raise
 
-    async def _sync_after_mutation(
-        self,
-        new_records: tuple[LedgerRecord, ...] = (),
-        *,
-        pending_capture_task_id: str | None = None,
-    ) -> None:
-        async with self._lock:
-            self._sync_after_mutation_locked(
-                new_records,
-                pending_capture_task_id=pending_capture_task_id,
-            )
-
     async def load_trusted_projection(
         self, session_id: str, frontier: Frontier
     ) -> ProjectionState | None:
@@ -2601,6 +2589,31 @@ class SqliteLedger:
                         reservations.pop(operation_key, None)
             raise
 
+    async def _mutate_clone[T](self, mutate: Callable[[MemoryLedgerAdapter], Awaitable[T]]) -> T:
+        """Run one lifecycle mutation on a clone and adopt it only after its SQLite COMMIT.
+
+        The oracle change and its sync share one lock acquisition, so a failed BEGIN or COMMIT
+        leaves the live state at the bundle and the same lease holder's retry stays admissible.
+        """
+
+        await self._ensure_recovered()
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            result = await mutate(oracle)
+            self._sync_clone_locked(prior, clone)
+            return result
+
     async def advance_check_phase(
         self,
         lease: OperationLease,
@@ -2608,36 +2621,27 @@ class SqliteLedger:
         next_phase: CheckPhase,
         durable_object_ref: ObjectRef | None = None,
     ) -> OperationLease:
-        await self._ensure_recovered()
-        result = await self._oracle().advance_check_phase(
-            lease, expected_phase, next_phase, durable_object_ref
+        return await self._mutate_clone(
+            lambda oracle: oracle.advance_check_phase(
+                lease, expected_phase, next_phase, durable_object_ref
+            )
         )
-        await self._sync_after_mutation()
-        return result
 
     async def enqueue_semantic_job(
         self, lease: OperationLease, case_digest: str, case_object_ref: ObjectRef
     ) -> SemanticJobRecord:
-        await self._ensure_recovered()
-        result = await self._oracle().enqueue_semantic_job(lease, case_digest, case_object_ref)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(
+            lambda oracle: oracle.enqueue_semantic_job(lease, case_digest, case_object_ref)
+        )
 
     async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None:
-        await self._ensure_recovered()
-        await self._oracle().suspend_check_for_repository_grant(lease)
-        await self._sync_after_mutation()
+        await self._mutate_clone(lambda oracle: oracle.suspend_check_for_repository_grant(lease))
 
     async def suspend_check_for_review_input(self, lease: OperationLease) -> None:
-        await self._ensure_recovered()
-        await self._oracle().suspend_check_for_review_input(lease)
-        await self._sync_after_mutation()
+        await self._mutate_clone(lambda oracle: oracle.suspend_check_for_review_input(lease))
 
     async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
-        await self._ensure_recovered()
-        result = await self._oracle().claim_semantic_job(lease, job_id)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(lambda oracle: oracle.claim_semantic_job(lease, job_id))
 
     async def record_attempt_outcome(
         self,
@@ -2647,11 +2651,11 @@ class SqliteLedger:
         terminal_code: SemanticReason | None = None,
         token_usage: RuntimeTokenUsage | None = None,
     ) -> None:
-        await self._ensure_recovered()
-        await self._oracle().record_attempt_outcome(
-            handle, outcome, result_object_ref, terminal_code, token_usage
+        await self._mutate_clone(
+            lambda oracle: oracle.record_attempt_outcome(
+                handle, outcome, result_object_ref, terminal_code, token_usage
+            )
         )
-        await self._sync_after_mutation()
 
     async def fail_semantic_job(
         self,
@@ -2659,10 +2663,9 @@ class SqliteLedger:
         job_id: str,
         terminal_code: SemanticReason,
     ) -> SemanticJobRecord:
-        await self._ensure_recovered()
-        result = await self._oracle().fail_semantic_job(lease, job_id, terminal_code)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(
+            lambda oracle: oracle.fail_semantic_job(lease, job_id, terminal_code)
+        )
 
     async def select_attempt(
         self,
@@ -2670,10 +2673,9 @@ class SqliteLedger:
         handle: SemanticAttemptHandle,
         selected_result_object_ref: ObjectRef,
     ) -> SelectedAttempt:
-        await self._ensure_recovered()
-        result = await self._oracle().select_attempt(lease, handle, selected_result_object_ref)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(
+            lambda oracle: oracle.select_attempt(lease, handle, selected_result_object_ref)
+        )
 
     async def load_semantic_job(
         self, writer_id: str, operation_id: str, case_digest: str | None = None
@@ -2691,10 +2693,9 @@ class SqliteLedger:
         pending_id: str,
         pending_expires_at: datetime,
     ) -> SemanticDisclosureWait:
-        await self._ensure_recovered()
-        result = await self._oracle().record_disclosure_wait(handle, pending_id, pending_expires_at)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(
+            lambda oracle: oracle.record_disclosure_wait(handle, pending_id, pending_expires_at)
+        )
 
     async def load_disclosure_wait(
         self, writer_id: str, operation_id: str
@@ -2703,10 +2704,7 @@ class SqliteLedger:
         return await self._oracle().load_disclosure_wait(writer_id, operation_id)
 
     async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait:
-        await self._ensure_recovered()
-        result = await self._oracle().resolve_disclosure_wait(job_id)
-        await self._sync_after_mutation()
-        return result
+        return await self._mutate_clone(lambda oracle: oracle.resolve_disclosure_wait(job_id))
 
     def _progress_write_locked(
         self,
