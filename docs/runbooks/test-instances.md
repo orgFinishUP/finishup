@@ -347,7 +347,10 @@ state and the pin. The script works in four steps:
    is stopped. If it refuses, the launchers are put back and nothing has changed.
 3. **Remove the root.** The runtime's own `dispose_instance` probes the root's singleton lock,
    sends the stamped holder (and nothing else) a bounded stop, waits up to the drain window,
-   optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. It
+   optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. Before
+   it stops anything, it refuses a retain folder inside the root, with no existing parent, or
+   already holding these logs (`instance_root_invalid`), so a direct `finishup instance dispose`
+   enforces the same retain rules as step 1. It
    keeps the pin, which therefore names a removed root, and a pinned runtime in that state fails
    closed (`isolation_root_invalid`), never ambient.
    - **A typed refusal** comes before anything is deleted, for example `instance_service_running`
