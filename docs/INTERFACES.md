@@ -3698,7 +3698,10 @@ stream is closed and the listener admission slot is released. Active requests ex
 from the inactive timer until the final in-flight call completes; long-running calls are not
 cancelled solely for lack of a subsequent frame. Each control-result write is also wall-clock
 bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
-thus the inactive-session exemption) indefinitely via send backpressure.
+thus the inactive-session exemption) indefinitely via send backpressure. A connection accepted
+while the service is draining or failed is closed at once, before any handshake, on every local
+endpoint (control, secret ingress, human control): it releases its admission slot immediately and
+its peer sees end of stream, which clients treat as retryable.
 
 The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
 closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that

@@ -493,3 +493,39 @@ async def test_a_stalled_frame_is_cut_off_even_while_a_call_is_active(
     finally:
         await client.aclose()
         await _shutdown(daemon, accept_task, listener)
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    not (sys.platform == "darwin" or sys.platform.startswith("linux")),
+    reason="certified local peer APIs are macOS/Linux only",
+)
+@pytest.mark.parametrize("refusing_state", [ServiceState.DRAINING, ServiceState.FAILED])
+async def test_connections_refused_while_draining_close_and_release_their_slots(
+    runtime_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusing_state: ServiceState,
+) -> None:
+    """A connection the lifecycle refuses is closed at once, so it never holds admission capacity."""
+
+    del runtime_directory
+    monkeypatch.setattr(unix_socket_module, "_MAX_ACTIVE_CONNECTIONS", _CAPACITY)
+    # Neither bound may rescue a leaked slot within this test; only the refusal close can.
+    monkeypatch.setattr(daemon_module, "_CONTROL_HANDSHAKE_DEADLINE_SECONDS", 600.0)
+    monkeypatch.setattr(daemon_module, "_CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS", 600.0)
+
+    daemon, accept_task = await _daemon_with_real_listener()
+    listener = daemon.composition.control_listener
+    await daemon.composition.lifecycle.transition(refusing_state)
+    clients: list[AuthenticatedUnixStream] = []
+    try:
+        # More connections than there are slots: each must be closed, and accept must keep going.
+        for _ in range(_CAPACITY + 2):
+            client = await connect_control()
+            clients.append(client)
+            await _assert_server_closed(client)
+        assert not accept_task.done()
+    finally:
+        for client in clients:
+            await client.aclose()
+        await _shutdown(daemon, accept_task, listener)

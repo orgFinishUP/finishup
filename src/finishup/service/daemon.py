@@ -2281,12 +2281,22 @@ class ServiceDaemon:
             await lifecycle.client_connected()
             connected = True
             await handler(stream)
+        except LifecycleError:
+            # A draining or failed service refuses the connection before any handler owns it;
+            # the close below is the refusal. Raised from the handler, the error is its own.
+            if connected:
+                raise
         finally:
             if connected:
                 try:
                     await lifecycle.client_disconnected()
                 except LifecycleError:
                     pass
+            else:
+                # The handler is the stream's only other closer. Without this close a refused
+                # connection keeps its listener admission slot and its peer never sees EOF.
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
 
     async def _resolve_repository_context(
         self, locator: WorkspaceLocator
