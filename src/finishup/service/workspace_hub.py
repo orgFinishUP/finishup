@@ -87,15 +87,15 @@ MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL: Final = 2 * MAX_WORKSPACE_FRAME_BYTES
 _REPLY_GRACE_SECONDS: Final = 1.0
 # Less time than this left for a call is no time at all: it is not sent.
 _MIN_CALL_SECONDS: Final = 0.001
-# Operations that read and change nothing on the client: one whose connection dropped before it
-# answered is sent once more to another live connection of the same claim. An approved check may
-# already have run, so it is never sent twice.
 # Operations whose result is one row per path asked, in the order asked, and the paths asked. A
 # reply with another number of rows decodes, yet answers none of them: it is ``reply_invalid``.
 _PER_PATH_ROWS: Final[dict[WorkspaceOperation, Callable[[Any], tuple[str, ...]]]] = {
     WorkspaceOperation.LSTAT_CANDIDATES: lambda arguments: arguments.paths,
     WorkspaceOperation.PROBE_REQUESTED_PATHS: lambda arguments: arguments.values,
 }
+# Operations that read and change nothing on the client: one whose connection dropped before it
+# answered is sent once more to another live connection of the same claim. An approved check may
+# already have run, so it is never sent twice.
 _REPLAYABLE_OPERATIONS: Final = frozenset(
     operation
     for operation in WorkspaceOperation
