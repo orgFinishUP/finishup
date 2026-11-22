@@ -126,10 +126,18 @@ def _raw_command(tool_input: Mapping[str, JsonValue]) -> str | None:
 
 
 # Prefix-command options that take a separate operand (``sudo -u user``, ``env -u NAME``,
-# ``time -o file``); every other ``-x`` option of a prefix command takes none.
-_PREFIX_OPTIONS_WITH_OPERAND: Final = frozenset(
-    {"-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U", "-o", "-f", "-S"}
-)
+# ``time -o file``), keyed by prefix command: an option one command reads an operand for is
+# operand-less in another (``sudo -S`` reads the password from stdin, ``env -S`` takes a string;
+# ``time -p`` selects POSIX output, ``sudo -p`` takes a prompt). Every other ``-x`` option of a
+# prefix command takes none.
+_PREFIX_OPTIONS_WITH_OPERAND: Final[Mapping[str, frozenset[str]]] = {
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+    "time": frozenset({"-o", "-f"}),
+    "exec": frozenset({"-a"}),
+    "command": frozenset(),
+    "nohup": frozenset(),
+}
 
 
 def _strip_prefix(segment: list[str]) -> list[str]:
@@ -137,15 +145,17 @@ def _strip_prefix(segment: list[str]) -> list[str]:
     while index < len(segment) and (
         _ASSIGNMENT.match(segment[index]) or segment[index] in _PREFIX_COMMANDS
     ):
-        prefix = segment[index] in _PREFIX_COMMANDS
+        operand_options = _PREFIX_OPTIONS_WITH_OPERAND.get(segment[index])
         index += 1
         # ``sudo -H -u builder pip install x``: skip the prefix command's own options.
-        while prefix and index < len(segment) and segment[index].startswith("-"):
+        while (
+            operand_options is not None and index < len(segment) and segment[index].startswith("-")
+        ):
             option = segment[index]
             index += 1
             if option == "--":
                 break
-            if option in _PREFIX_OPTIONS_WITH_OPERAND and index < len(segment):
+            if option in operand_options and index < len(segment):
                 index += 1
     return segment[index:]
 

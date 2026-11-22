@@ -657,6 +657,21 @@ def test_sudo_options_and_attached_target_are_read(env: dict[str, Path], task_ve
     assert _target("pip install -t/opt/deps x", env) == "private_env"
 
 
+def test_prefix_options_take_an_operand_only_where_their_command_reads_one(
+    env: dict[str, Path], task_venv: Path
+) -> None:
+    """``sudo -S`` and ``time -p`` take no operand, so the installer after them is still read."""
+
+    telecom = _venv(env["system"].parent / "tmp" / "telecom_venv", "pip", "python")
+    pip = f"{telecom}/bin/pip"
+    for prefix in ("sudo -S", "time -p", "exec -c", "sudo -S -u builder", "env -i"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    # Options that do take an operand still consume it.
+    for prefix in ("env -S 'A=1'", "env -u NAME", "sudo -p prompt", "time -o out", "exec -a n"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    assert _target(f"echo pw | sudo -S {pip} install x", env) == "private_env"
+
+
 def test_a_conda_environment_is_an_environment_of_its_own(
     env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
