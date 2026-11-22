@@ -229,13 +229,7 @@ class EncryptedVaultStore:
                     generation,
                     plaintext,
                 )
-                digest = f"sha256:{hashlib.sha256(frame).hexdigest()}"
-                self._publish_record(record_id, generation, frame)
-                updated = dict(self._index)
-                updated[record_id] = _IndexEntry(record_id, generation, digest)
-                expected = self._index_path.read_bytes()
-                self._publish_index(updated, expected_bytes=expected)
-                self._index = updated
+                self._commit_generation(record_id, generation, frame)
                 return record_id
             finally:
                 _overwrite(plaintext)
@@ -299,13 +293,7 @@ class EncryptedVaultStore:
                     generation,
                     plaintext,
                 )
-                digest = f"sha256:{hashlib.sha256(frame).hexdigest()}"
-                self._publish_record(record_id, generation, frame)
-                updated = dict(self._index)
-                updated[record_id] = _IndexEntry(record_id, generation, digest)
-                expected = self._index_path.read_bytes()
-                self._publish_index(updated, expected_bytes=expected)
-                self._index = updated
+                self._commit_generation(record_id, generation, frame)
                 return record_id
             finally:
                 _overwrite(plaintext)
@@ -533,13 +521,66 @@ class EncryptedVaultStore:
             raise EncryptedVaultError("record_tampered")
         return data
 
+    def _commit_generation(self, record_id: str, generation: int, frame: bytes) -> None:
+        """Publish one record frame, then commit it by publishing the authenticated index.
+
+        The index alone says which frames exist. When the index publish fails, the frame just
+        written is removed again unless the published index already names it, so a failed write
+        leaves nothing behind that could block its retry.
+        """
+
+        digest = f"sha256:{hashlib.sha256(frame).hexdigest()}"
+        self._publish_record(record_id, generation, frame)
+        updated = dict(self._index)
+        updated[record_id] = _IndexEntry(record_id, generation, digest)
+        try:
+            try:
+                expected = self._index_path.read_bytes()
+            except OSError as exc:
+                raise EncryptedVaultError("io_failure") from exc
+            self._publish_index(updated, expected_bytes=expected)
+        except BaseException:
+            self._discard_uncommitted_frame(record_id, generation)
+            raise
+        self._index = updated
+
+    def _published_index_names(self, record_id: str, generation: int) -> bool:
+        entry = self._read_index().get(record_id)
+        return entry is not None and entry.generation == generation
+
+    def _discard_uncommitted_frame(self, record_id: str, generation: int) -> None:
+        path = self._vault_dir / f"{record_id}.{generation}.yzv"
+        try:
+            if self._published_index_names(record_id, generation):
+                return
+            _verify_private_file(path)
+            path.unlink()
+            _fsync_dir(self._vault_dir)
+        except (OSError, EncryptedVaultError):
+            # Best effort: a frame left here is uncommitted residue that the retry replaces.
+            pass
+
     def _publish_record(self, record_id: str, generation: int, frame: bytes) -> None:
         path = self._vault_dir / f"{record_id}.{generation}.yzv"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(path, flags, 0o600)
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except FileExistsError:
+                # A frame the authenticated index does not name is residue of a write that never
+                # committed (a failed index publish or a crash). Replace it only when it is a
+                # private regular file; a frame either index names is never overwritten.
+                committed = self._index.get(record_id)
+                if (
+                    committed is not None and committed.generation == generation
+                ) or self._published_index_names(record_id, generation):
+                    raise
+                _verify_private_file(path)
+                path.unlink()
+                _fsync_dir(self._vault_dir)
+                descriptor = os.open(path, flags, 0o600)
             with os.fdopen(descriptor, "wb", closefd=True) as stream:
                 stream.write(frame)
                 stream.flush()

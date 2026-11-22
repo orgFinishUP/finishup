@@ -10526,7 +10526,13 @@ facade and are never MCP tools.
   or secret environment/config fallback exists. The keyring adapter additionally owns
   `OSKeyringProbe`, `KeyringInitializationBinding`, `FirstInstallKeyringAuthority`, and the
   mutation-free `authorize_first_install` gate; existing-mode `load` never mints or requires that
-  authority.
+  authority. The encrypted vault writes a record frame `<record_id>.<generation>.yzv` first and
+  commits it only by publishing the authenticated `vault-index.json`; the index alone is current
+  truth. A frame neither the in-memory nor the published index names is uncommitted residue of a
+  failed index publish or a crash: a failed publish removes the frame it just wrote, and a retry
+  of the same write replaces leftover residue that is a private regular file (anything else fails
+  `unsafe_permissions`), so a failed write never blocks its retry (#1393). A frame an index names
+  is never overwritten (`record_exists`).
 - `adapters/privacy/catalog.py`, `adapters/privacy/local_enforcer.py`, and
   `adapters/privacy/gateway.py`: implement policy/audit persistence, local classification and
   minimization, and the sole outbound gateway.

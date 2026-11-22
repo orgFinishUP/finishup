@@ -148,7 +148,10 @@ immutable record generation receives a fresh 256-bit record DEK and random 96-bi
 uses that DEK for exactly one AES-256-GCM encryption with canonical header AAD, and wraps the exact
 record DEK under the IVK using nonce-free AES-256-KW (RFC 3394). Credential rotation creates a new
 generation and fresh record DEK. The encrypted-vault spec freezes no-overwrite/CAS publication and
-the exact header; no independent installation-MAC-key record exists.
+the exact header; no independent installation-MAC-key record exists. No-overwrite protects frames
+the authenticated index commits. A frame the index does not name is uncommitted residue of a
+failed index publish or a crash; the failed write removes it, and a retry of the same write may
+replace it when it is a private regular file, so a failed write never blocks its retry (#1393).
 
 ## Vault startup and locked state
 
