@@ -7612,7 +7612,13 @@ is not a transition: it neither advances the epoch nor invalidates an in-flight 
 read-protection scope, or selection preview (issue #835). A structural grant over paused consent
 resumes it exactly as `resume` does. With no prior consent, or after revocation completes its project
 fence, a grant starts fresh with no ordinary profile; while that fence is pending, the grant is refused.
-Only an explicit profile set, `content-disable`, or revoke removes an arm. The call returns a
+Only the service's observation coordinator completes that fence and clears its durable token.
+`finishup observe revoke` revokes locally first (capture stops at once), then sends the same revoke
+to the service (`observation_revoke`, starting the service when absent), which fences the project
+generations and clears the token; when no service can be reached it says so on stderr
+(`observation_revoke_fence_pending:service_unavailable`) and exits 0, because the revoke itself
+holds. `finishup observe grant` over a pending fence first asks the service to finish it, so a
+fence left by an unreachable service is never a one-way door (issue #1479). Only an explicit profile set, `content-disable`, or revoke removes an arm. The call returns a
 `LocalConsentGrant` (`transition`: `granted`, `resumed`, `updated`, or `unchanged`, plus the
 resulting consent). The setup report's `observation_consent` block adds that `transition` and the
 retained `content_capture_profiles` beside the existing `outcome: granted`. `observe grant` prints

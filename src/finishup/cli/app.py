@@ -1638,7 +1638,7 @@ def observe_resume_cmd(
 def observe_revoke_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
 ) -> None:
-    """Stop new ingest permanently; retained evidence is kept."""
+    """Withdraw observation consent; retained evidence is kept. Grant again to resume."""
 
     _finish(_observe_operation("revoke_observation")(workspace=workspace))
 

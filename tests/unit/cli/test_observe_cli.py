@@ -32,6 +32,7 @@ from finishup.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
+from finishup.domain.values import JsonObject
 from finishup.protocol.ids import IdKind, new_id
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -60,6 +61,150 @@ def test_grant_pause_resume_revoke_roundtrip(tmp_path: Path, capsys: object) -> 
     assert "consent: revoked" in status_out
     assert ObservationLifecycle.STOPPED.value in status_out
     assert workspace not in status_out
+
+
+class _CoordinatorBackedService:
+    """A service connection whose observation_revoke runs the real control handler and
+    observation coordinator over the CLI's own store, with a recording project fence."""
+
+    def __init__(self, state: Path) -> None:
+        from finishup.adapters.integrations.codex_lifecycle import load_mapping
+        from finishup.application.observation_control import build_observation_support_handlers
+        from finishup.application.observation_coordinator import ObservationCoordinator
+        from finishup.application.projects import SourceConsentRevocationPlan
+        from finishup.ports.control import ControlMethod
+
+        self.fenced: list[str] = []
+        self.connections = 0
+
+        async def planner(
+            task_ids: tuple[str, ...], workspace_commitment: str, token: str
+        ) -> SourceConsentRevocationPlan:
+            del task_ids, workspace_commitment
+            return SourceConsentRevocationPlan(token, ())
+
+        async def applier(plan: SourceConsentRevocationPlan) -> SourceConsentRevocationPlan:
+            self.fenced.append(plan.revocation_token)
+            return plan
+
+        class _Ids:
+            def new(self, kind: IdKind) -> str:
+                return new_id(kind)
+
+        coordinator = ObservationCoordinator(
+            runtime=object(),  # type: ignore[arg-type]
+            local=LocalObservationStore(_state=state),
+            clock=object(),  # type: ignore[arg-type]
+            ids=_Ids(),  # type: ignore[arg-type]
+            state_root=state,
+            mapping_loader=load_mapping,
+            consent_invalidation_planner=planner,  # type: ignore[arg-type]
+            consent_invalidation_applier=applier,  # type: ignore[arg-type]
+        )
+        self._revoke = build_observation_support_handlers(coordinator)[
+            ControlMethod.OBSERVATION_REVOKE
+        ]
+
+    async def connect(self, kind: object) -> _CoordinatorBackedService:
+        del kind
+        self.connections += 1
+        return self
+
+    async def observation_revoke(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        del deadline_ms
+        return await self._revoke(request)
+
+    async def close(self) -> None:
+        return None
+
+
+async def _no_service(kind: object) -> object:
+    del kind
+    raise ConnectionRefusedError("service_unavailable")
+
+
+def test_revoke_finishes_its_fence_through_the_service_so_a_later_grant_succeeds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    service = _CoordinatorBackedService(state)
+    connect = service.connect
+
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    assert (
+        observe_cli.revoke_observation(workspace=str(workspace), _state=state, _connect=connect)
+        == 0
+    )
+    revoked = capsys.readouterr()
+    assert "observation_revoked:" in revoked.out
+    assert "fence_pending" not in revoked.err
+
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace.resolve()))
+    assert store.pending_consent_revocation(commitment) is None
+    assert len(service.fenced) == 1
+    consent = store.consent_for(commitment)
+    assert consent is not None and not consent.active
+
+    code = observe_cli.grant_observation(workspace=str(workspace), _state=state, _connect=connect)
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert f"observation_consent_granted:{commitment}" in captured.out
+    regranted = LocalObservationStore(_state=state).consent_for(commitment)
+    assert regranted is not None and regranted.active
+    # The grant found no pending fence and asked the service nothing more.
+    assert service.connections == 1
+
+
+def test_revoke_without_a_service_names_the_pending_fence_and_a_later_grant_finishes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    assert (
+        observe_cli.revoke_observation(
+            workspace=str(workspace),
+            _state=state,
+            _connect=_no_service,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    revoked = capsys.readouterr()
+    assert "observation_revoked:" in revoked.out
+    assert "observation_revoke_fence_pending:service_unavailable" in revoked.err
+    assert "finishup observe revoke" in revoked.err
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace.resolve()))
+    assert store.pending_consent_revocation(commitment) is not None
+    assert str(workspace) not in revoked.out + revoked.err
+
+    # With no service the project fence cannot finish, so the grant stays refused.
+    refused = observe_cli.grant_observation(
+        workspace=str(workspace),
+        _state=state,
+        _connect=_no_service,  # type: ignore[arg-type]
+    )
+    assert refused == 10
+    assert "still being fenced" in capsys.readouterr().err
+
+    # Once the service is reachable, the grant finishes the leftover fence and re-consents.
+    service = _CoordinatorBackedService(state)
+    code = observe_cli.grant_observation(
+        workspace=str(workspace), _state=state, _connect=service.connect
+    )
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert len(service.fenced) == 1
+    assert store.pending_consent_revocation(commitment) is None
+    consent = store.consent_for(commitment)
+    assert consent is not None and consent.active
 
 
 def test_git_subdirectory_consent_and_hook_share_one_canonical_workspace(
