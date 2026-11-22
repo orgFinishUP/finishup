@@ -153,6 +153,62 @@ def test_the_candidate_lstat_of_a_claimed_workspace_is_the_agents() -> None:
     assert isinstance(found, os.stat_result)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("rows", ((), (None, None)))
+async def test_a_candidate_lstat_answered_with_another_row_count_is_a_typed_gap(
+    rows: tuple[object, ...],
+) -> None:
+    """An agent that answers a one-path ``lstat`` with no row or two has not answered it: the
+    admission check ends on the hub's typed ``reply_invalid``, never an internal fault."""
+
+    from finishup.application.check_change import outside_inputs_not_admitted
+    from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
+    from finishup.ports.workspace_agent import WORKSPACE_OPERATION_NAMES, operation_spec
+
+    hub = WorkspaceAgentHub(inline_wait_seconds=1.0, background_wait_seconds=1.0)
+    hub.bind_loop()
+    holder: list[Any] = []
+    sent: list[WorkspaceCall] = []
+
+    async def writer(call: WorkspaceCall) -> None:
+        sent.append(call)
+        spec = operation_spec(call.operation)
+        assert spec is not None
+        reply = WorkspaceReply(
+            "workspace_reply", "1.0", call.call_id, "ok", spec.encode_result(rows), None
+        )
+        asyncio.get_running_loop().call_soon(hub.deliver, holder[0], reply)
+
+    holder.append(
+        await hub.register(
+            handle=_HANDLE,
+            declaration=WorkspaceAgentDeclaration(
+                tuple(sorted(WORKSPACE_OPERATION_NAMES, key=str.encode)), 6_291_456
+            ),
+            service_instance_id="svc_00000000-0000-4000-8000-000000000051",
+            service_generation="7",
+            writer=writer,
+            worktree=None,
+        )
+    )
+    probe = RoutedChangeCapture(cast(Any, _Local()), hub).lstat_probe(_HANDLE)
+    assert probe is not None
+
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await asyncio.to_thread(
+            outside_inputs_not_admitted,
+            ("/data/input.csv",),
+            frozenset(),
+            "/work/repo",
+            (),
+            (),
+            task_started_at=1e12,
+            probe=probe,
+        )
+    assert caught.value.reason == "reply_invalid"
+    assert [call.operation for call in sent] == ["lstat_candidates"]
+
+
 def test_a_reviewer_read_the_agent_refused_reads_as_nothing() -> None:
     reads = ClientWorkspaceReads(
         cast(

@@ -5517,7 +5517,10 @@ a worker thread, never from the hub's own loop. `has_agent(handle)`, `bind_loop(
   `agent_disconnected`, `deadline_exceeded`, `agent_busy`, `operation_not_declared`,
   `reply_invalid`, `agent_unavailable`, `agent_refused`, `agent_failed` (the last three carry the
   agent's own closed `agent_reason`), `arguments_invalid`, `hub_unavailable` or `call_cancelled`. `.refused` is true
-  for `agent_refused`, whose public token is `workspace_agent_refused`. The hub logs closed tokens
+  for `agent_refused`, whose public token is `workspace_agent_refused`. A reply that does not
+  decode as the operation's result is `reply_invalid`, and so is a `lstat_candidates` or
+  `probe_requested_paths` reply whose row count is not the number of paths asked: those rows answer
+  no path, so none is matched up by guess. The hub logs closed tokens
   only and records each delivered answer under the `client_attested` label.
 
 `service/workspace_routing.py` wraps every workspace port and callable the ready composition
