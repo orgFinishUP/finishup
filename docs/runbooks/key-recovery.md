@@ -115,7 +115,12 @@ Provision compact and/or self-contained recovery while the service is ready:
 After unlock loss, run `finishup service recovery status`. If the set is external, stop the daemon and
 run `finishup service recovery import`. An imported archive is only *staged*: its header is not
 authenticated, so it never becomes the active generation on import and whatever generation was
-already in force stays usable if the import turns out to be the wrong one.
+already in force stays usable if the import turns out to be the wrong one. Re-running the import
+with the same archive is a no-op that reports the same staged generation. Importing a different
+archive of the same staged generation (for example the right generation-1 set after another
+installation's generation-1 set failed to restore) replaces the staged set. The replacement is
+refused while a restore ceremony for the staged set is in flight, while a clean-profile snapshot
+installed from it is awaiting its ceremony, and for any generation already in force.
 
 Then run the exact reported `finishup service recovery restore` command. Select the set only in an
 allowlisted native picker when that platform cell exists, otherwise in the trusted terminal.
