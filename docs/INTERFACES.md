@@ -14591,7 +14591,10 @@ recomputation solely because the finding names paths.
   `case_invalid`.
 - `ReviewerRun.read_usage` and `FinalSemanticEvaluation.reviewer_read_usage` hold private
   selector/result rows. `application.reviewer_telemetry.read_usage_from_wire(value)` validates
-  the five-row bound and the closed action args; it returns null for absent/invalid telemetry.
+  the five-row bound, the closed action args and the closed reason set
+  `domain.reviewer_reads.REVIEWER_READ_REASONS` (every reason the broker and the reviewer-read
+  admission issue, declared-test and image limits included); it returns null for absent/invalid
+  telemetry.
   `reviewer_read_usage` is persisted only in the encrypted semantic response and recovered
   with it; it never enters the public reviewer record or result-leaf registry.
 - `application.reviewer_telemetry.export_reviewer_read_metrics(attempts, objects)` accepts

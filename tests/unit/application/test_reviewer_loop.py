@@ -5,6 +5,7 @@ The round-1 review's probes (B1, M1-M6, m1, m2) are regression tests here, asser
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from copy import deepcopy
@@ -1529,3 +1530,88 @@ async def test_a_review_that_never_offers_a_read_keeps_the_read_free_schema(why:
     assert all(t.content != FINAL_PHASE for t in outcome.history)
     assert model.calls[1][0][-1].content.startswith("format_error: envelope_invalid. No reads")
     assert steps.rows[("turn", 1)][0] == b"final"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("changed", [True, False])
+async def test_a_declared_test_refusal_keeps_the_attempts_read_usage(
+    tmp_path: Path, changed: bool
+) -> None:
+    # #1220/#1173: a declared test edited or removed after the check is refused with the
+    # broker's own closed reason; the private usage row must still validate, or the whole
+    # attempt's read usage is dropped as if it were older, unknown telemetry.
+    test = tmp_path.resolve() / "test_x.py"
+    content = "def test_x():\n    assert True\n"
+    test.write_text(content)
+    digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    if changed:
+        test.write_text(content + "# edited after the check\n")
+    else:
+        test.unlink()
+    root = ReadRoot("t1", str(tmp_path.resolve()), pinned=(("dt1", str(test), digest, "clm"),))
+    loop, broker, _model, _ = _setup(_text("t1", "dt1", 1, 2), _FINAL, roots=(root,))
+    (result,) = _observations((await loop.run()).history)
+    expected = "declared_test_changed" if changed else "declared_test_not_visible"
+    assert (result["status"], result["reason"]) == ("unavailable", expected)
+    usage = read_usage_from_wire(broker.read_usage)
+    assert usage is not None and [row["reason"] for row in usage] == [expected]
+
+
+def _issued_read_reasons() -> set[str]:
+    """Every literal read-result reason the broker and the reviewer-read admission can issue."""
+    import ast
+    import inspect
+
+    from finishup.application import egress, reviewer_broker
+
+    def strings(node: ast.expr) -> set[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.IfExp):
+            return strings(node.body) | strings(node.orelse)
+        return set()
+
+    statuses = {"ok", "partial", "unavailable", "denied", "stale"}
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(reviewer_broker))):
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2:  # a selection's (status, reason)
+            if strings(node.elts[0]) & statuses:
+                found |= strings(node.elts[1])
+        elif isinstance(node, ast.Call) and getattr(node.func, "id", None) == "envelope":
+            if len(node.args) >= 2:
+                found |= strings(node.args[1])
+        elif isinstance(node, ast.Assign):  # usage["reason"] = ... and piece.truncation_reason
+            target = node.targets[0]
+            if (isinstance(target, ast.Attribute) and target.attr == "truncation_reason") or (
+                isinstance(target, ast.Subscript) and strings(target.slice) == {"reason"}
+            ):
+                found |= strings(node.value)
+        elif isinstance(node, ast.Dict):  # the usage row's initial "reason"
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is not None and strings(key) == {"reason"}:
+                    found |= strings(value)
+    found |= set(reviewer_broker._DECLARED_TEST_LIMITS)  # pyright: ignore[reportPrivateUsage]
+    admit = ast.parse(inspect.getsource(egress.PrivacyCoordinator.admit_reviewer_read).lstrip())
+    for node in ast.walk(admit):
+        if isinstance(node, ast.Return) and node.value is not None:
+            found |= strings(node.value)
+    return found
+
+
+def test_every_read_reason_the_service_issues_keeps_its_usage_row() -> None:
+    # #1173: owner-local read usage validates against one closed reason set; a reason the broker
+    # or the admission issues but the set lacks drops the attempt's whole usage tuple.
+    from finishup.domain.reviewer_reads import REVIEWER_READ_REASONS
+
+    issued = _issued_read_reasons()
+    assert {"declared_test_changed", "image_permission_required", "deadline"} <= issued
+    assert issued == REVIEWER_READ_REASONS
+    for reason in sorted(issued):
+        row: dict[str, JsonValue] = {
+            "call": 1,
+            "action": "read_ledger",
+            "args": {"view": "findings", "refs": ["f1"], "cursor": None},
+            "status": "unavailable",
+            "reason": reason,
+        }
+        assert read_usage_from_wire([row]) is not None, reason

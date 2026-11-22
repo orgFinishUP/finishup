@@ -3077,6 +3077,10 @@ content reads. Earlier 1.4.0/1.5.0 documents stay byte-identical.
 
 For attribution, each attempt's encrypted `yoetz.semantic-response/1` object gains optional
 `reviewer_read_usage`: at most five rows with call, action, validated args, status and reason.
+The reason is one of the closed set the service itself issues for a read result (the broker's
+refusals and truncations, the #1220 declared-test limits, the image limits and the privacy
+admission's refusals) or the row's own `outcome_unknown`/`deadline`; a row the service wrote is
+never dropped as unknown telemetry.
 Arguments are selector/path fields only; no returned text, hints, packet or judgment is copied.
 This private payload survives response recovery and includes failed reviews. Structural
 diagnostics contain the action/result code, request id and ordinal only; raw selectors/paths
