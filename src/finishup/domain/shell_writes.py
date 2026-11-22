@@ -364,35 +364,59 @@ def _starts_word(text: str, index: int, start: int) -> bool:
     return before in " \t\n;&|("
 
 
+class _HeredocEnd:
+    """Bash's rule for the line that closes one heredoc body, fed one physical line at a time.
+
+    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
+    tabs, and only tabs: never spaces, so a unified-diff context line `` EOF`` is data). In an
+    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
+    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``). Both the token lexer
+    (``_skip_heredocs``) and the heredoc patch reader (``_heredocs``) end a body here.
+    """
+
+    __slots__ = ("_carry", "_dead", "_delimiter", "_quoted", "_strip_tabs")
+
+    def __init__(self, delimiter: str, *, strip_tabs: bool, quoted: bool) -> None:
+        self._delimiter = delimiter
+        self._strip_tabs = strip_tabs
+        self._quoted = quoted
+        self._carry = ""  # the continued lines so far, while they could still equal the delimiter
+        self._dead = False  # ... and once they cannot
+
+    def closes(self, physical: str) -> bool:
+        """Whether *physical* (one line, no newline) closes the body."""
+
+        if not self._quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
+            if not self._dead:
+                self._carry += physical[:-1]
+                if len(self._carry.lstrip("\t")) > len(self._delimiter):
+                    self._carry, self._dead = "", True
+            return False
+        line = self._carry + physical
+        matched = not self._dead and (
+            (line.lstrip("\t") if self._strip_tabs else line) == self._delimiter
+        )
+        self._carry, self._dead = "", False
+        return matched
+
+
 def _skip_heredocs(text: str, index: int, pending: list[tuple[str, bool, bool]]) -> int:
     """The index after the bodies of the heredocs started on the line that just ended.
 
-    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
-    tabs, and only tabs); an unterminated body runs to the end of the text, as in bash. In an
-    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
-    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``).
+    Each body ends at its closing line (``_HeredocEnd``); an unterminated body runs to the end of
+    the text, as in bash.
     """
 
     size = len(text)
     for delimiter, strip_tabs, quoted in pending:
-        carry = ""  # the continued lines so far, while they could still equal the delimiter
-        dead = False  # ... and once they cannot
+        end_rule = _HeredocEnd(delimiter, strip_tabs=strip_tabs, quoted=quoted)
         while index < size:
             end = text.find("\n", index)
             if end < 0:
                 end = size
             physical = text[index:end]
             index = min(end + 1, size)
-            if not quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
-                if not dead:
-                    carry += physical[:-1]
-                    if len(carry.lstrip("\t")) > len(delimiter):
-                        carry, dead = "", True
-                continue
-            line = carry + physical
-            matched = not dead and (line.lstrip("\t") if strip_tabs else line) == delimiter
-            carry, dead = "", False
-            if matched:
+            if end_rule.closes(physical):
                 break
     return index
 
@@ -1272,7 +1296,7 @@ def _placed_docs_class(
 
 
 # A heredoc that feeds a patch tool writes the files the patch names, which no shell token shows.
-_HEREDOC_START: Final = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_HEREDOC_START: Final = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 # A heredoc fed to ``apply_patch``: the line before ``<<`` ends in the command name.
 SHELL_APPLY_PATCH: Final = re.compile(r"(?:^|[\s;&|(])(?:apply_patch|applypatch)\s*$")
 APPLY_PATCH_PATH: Final = re.compile(
@@ -1383,9 +1407,11 @@ def _heredocs(command: str) -> list[_Heredoc]:
         index += 1
         if match is None:
             continue
-        delimiter = match.group(2)
+        end_rule = _HeredocEnd(
+            match.group(3), strip_tabs=bool(match.group(1)), quoted=bool(match.group(2))
+        )
         body: list[str] = []
-        while index < len(lines) and lines[index].strip() != delimiter:
+        while index < len(lines) and not end_rule.closes(lines[index]):
             body.append(lines[index])
             index += 1
         if index >= len(lines):

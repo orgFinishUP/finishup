@@ -13499,7 +13499,9 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `docs` (#1106: counts as an edit and as acting, never advances the latest edit;
   `observed_failures.STALE_EXEMPT_WRITE_TOKENS`, `observed_write_stales_verification(description,
   stale_exempt)`). `shell_writes.heredoc_patch_paths(command)` names the files a complete heredoc
-  fed to `apply_patch`, `git apply` or `patch` writes; `heredoc_patch_writes(command) ->
+  fed to `apply_patch`, `git apply` or `patch` writes (a body ends where bash ends it: on a line
+  exactly its delimiter, leading tabs ignored only for `<<-`, so a patch context line ` EOF` is
+  data, #1450); `heredoc_patch_writes(command) ->
   HeredocPatchWrites(paths, unplaced)` adds whether an applying patch writes files it cannot place
   (`shell_write_scope(..., unplaced_writes=)` then counts it as `workspace`, #1106 r3; any file
   section with no readable `---`/`+++` pair, or a binary one, makes it unplaced, and `git apply`

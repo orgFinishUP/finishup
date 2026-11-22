@@ -817,6 +817,69 @@ def test_a_check_only_or_absent_patch_writes_nothing(command: str) -> None:
     assert shell_writes.heredoc_patch_writes(command) == shell_writes.HeredocPatchWrites((), False)
 
 
+# A README section holding a shell heredoc example: its unified-diff context line `` EOF`` keeps
+# the file's line with one leading space, which bash does not read as the closing delimiter.
+_README_HEREDOC_SECTION = (
+    "--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n cat <<EOF\n-old\n+new\n EOF\n"
+)
+_CODE_SECTION = "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+
+
+@pytest.mark.parametrize("opener", ["git apply <<'EOF'", "patch -p1 <<'EOF'", "git apply <<EOF"])
+def test_a_padded_delimiter_line_in_a_patch_does_not_end_its_heredoc(opener: str) -> None:
+    """Bash closes a heredoc only on a line exactly equal to its delimiter, so a context line
+    `` EOF`` is patch data and the code section after it is still a write the patch names."""
+
+    command = f"{opener}\n{_README_HEREDOC_SECTION}{_CODE_SECTION}EOF\n"
+    writes = shell_writes.heredoc_patch_writes(command)
+    assert writes == shell_writes.HeredocPatchWrites(("README.md", "src/main.py"), False)
+    for workspace, inside, relative_only in (("/app", _inside, False), (None, _outside, True)):
+        scope = shell_write_scope(
+            command,
+            workspace=workspace,
+            inside=inside,
+            relative_only=relative_only,
+            also_written=writes.paths,
+            unplaced_writes=writes.unplaced,
+        )
+        assert scope == "workspace"
+    ((_prefix, _suffix, body),) = shell_writes.shell_heredocs(command)
+    assert body == _README_HEREDOC_SECTION + _CODE_SECTION
+
+
+def test_a_padded_delimiter_line_in_an_apply_patch_does_not_end_its_heredoc() -> None:
+    command = (
+        "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: README.md\n@@\n EOF\n-old\n+new\n"
+        "*** Update File: src/main.py\n@@\n-x = 1\n+x = 2\n*** End Patch\nEOF\n"
+    )
+    writes = shell_writes.heredoc_patch_writes(command)
+    assert writes == shell_writes.HeredocPatchWrites(("README.md", "src/main.py"), False)
+    # The whole script is still the one ``apply_patch`` statement Codex intercepts.
+    assert shell_writes.codex_intercepts_shell_apply_patch(command)
+
+
+@pytest.mark.parametrize(
+    ("command", "paths"),
+    [
+        # Only a ``<<-`` heredoc ignores the closing line's leading tabs, and never its spaces.
+        (f"git apply <<-'EOF'\n{_CODE_SECTION}\t\tEOF\n", ("src/main.py",)),
+        (f"git apply <<'EOF'\n{_CODE_SECTION}\tEOF\n", ()),
+        (f"git apply <<-'EOF'\n{_CODE_SECTION}  EOF\n", ()),
+        (f"git apply <<'EOF'\n{_CODE_SECTION}EOF \n", ()),
+        # An unquoted body joins a line ending in a backslash to the next one, as bash does.
+        (f"git apply <<EOF\n{_CODE_SECTION}+y\\\nEOF\n", ()),
+        (f"git apply <<'EOF'\n{_CODE_SECTION}+y\\\nEOF\n", ("src/main.py",)),
+    ],
+    ids=["dash-tabs", "tab-no-dash", "dash-spaces", "trailing-space", "continued", "quoted"],
+)
+def test_a_heredoc_patch_ends_where_bash_ends_it(command: str, paths: tuple[str, ...]) -> None:
+    """A heredoc with no closing line bash accepts is unterminated: not a complete edit."""
+
+    assert shell_writes.heredoc_patch_writes(command) == shell_writes.HeredocPatchWrites(
+        paths, False
+    )
+
+
 def _outside(_path: str) -> bool:
     return False
 

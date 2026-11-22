@@ -304,6 +304,20 @@ def test_git_apply_and_patch_heredocs_are_workspace_writes(tmp_path: Path) -> No
     assert scope("git apply <<'EOF'\n--- a/src/x.py\n+++ b/src/x.py\n@@\n-a\n+b\n") is None
 
 
+def test_a_code_section_after_a_padded_delimiter_line_is_a_workspace_write(
+    tmp_path: Path,
+) -> None:
+    """A README context line `` EOF`` does not end the heredoc, so the patch's later code section
+    keeps the command an ordinary edit rather than a stale-exempt documentation one."""
+
+    command = (
+        "git apply <<'EOF'\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n cat <<EOF\n"
+        "-old\n+new\n EOF\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "EOF\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
 def test_shell_redirect_scope(tmp_path: Path) -> None:
     assert (
         _facts("Bash", {"command": "echo x > /opt/elsewhere/y"}, tmp_path)["write_scope"]
