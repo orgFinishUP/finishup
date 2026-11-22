@@ -86,7 +86,9 @@ finishup integrate cursor admission preview --project-root . --cursor-config-roo
 finishup integrate <host> admission grant --project-root . --accept --preview-digest <digest>
 ```
 
-The preview shows the exact file and entry, the observed route, and whether the repository's
+Each preview also prints a `next_command`: the grant or revoke to run, repeating the options you
+previewed with and showing paths as placeholders such as `<root>` to fill in. The preview shows the
+exact file and entry, the observed route, and whether the repository's
 privacy grant permits external review. A grant is written only when all of these hold:
 
 - the host's registered FinishUP route is `policy` (a strict route is never admitted; `check` on
@@ -112,7 +114,8 @@ What each host receives:
   `permissions.allow: ["mcp__plugin_finishup_finishup__check"]` for the plugin-owned route in the
   repository's `.claude/settings.local.json`, which Claude Code resolves before its auto-mode
   classifier. Pass `--checkpoint` to write `permissions.ask` instead, which keeps a human prompt
-  on every check that the classifier can never auto-approve. Granting the other mode later moves
+  on every check that the classifier can never auto-approve. The preview's `next_command`
+  already carries `--checkpoint` when you previewed with it. Granting the other mode later moves
   the existing entry between `allow` and `ask`; only granting the mode already set is a no-op.
   Claude Code holds the rules in this file until you trust the folder if the file is tracked in git.
 - **Codex** — `[mcp_servers.finishup.tools.check] approval_mode = "approve"` (or the

@@ -558,6 +558,9 @@ finishup integrate cursor admission preview --project-root <project> --cursor-co
 finishup integrate cursor admission grant --project-root <project> --cursor-config-root <root> ... --accept --preview-digest <digest>
 ```
 
+The preview's `next_command` repeats `--cursor-config-root <cursor-config-root>` and a non-default
+`--mcp-ownership` or `--route-profile` so the apply step reads the same route.
+
 `.cursor/permissions.json` receives `finishup:check` (the docs name the server by its `mcp.json`
 key, which is `finishup` for every FinishUP route). `.cursor/cli.json` receives `Mcp(finishup:check)`
 for an external registration or `Mcp(plugin-finishup-finishup:check)` for the plugin-managed server,

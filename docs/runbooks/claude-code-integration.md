@@ -1604,6 +1604,11 @@ finishup integrate claude admission preview --project-root "$PROJECT_ROOT" \
 finishup integrate claude admission grant --project-root "$PROJECT_ROOT" ... --accept --preview-digest <digest>
 ```
 
+The preview's `next_command` is that apply step with the same selectors in path-free placeholder
+form (`--claude-path <claude-path>` and the other roots, a non-default `--mcp-ownership` or
+`--route-profile`, and `--checkpoint` when the preview used it, for a revoke too); fill in the
+placeholders and run it. The digest covers the checkpoint choice, so applying a `--checkpoint`
+preview without it refuses with `host_admission_preview_stale` and writes nothing.
 The Claude roots are what the route observation needs (`status` on the plugin); without them
 the route is unread and a grant refuses with `host_admission_route_unobserved`. A strict route
 refuses with `route_not_policy`; a grant that does not permit review with

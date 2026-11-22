@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shlex
 from pathlib import Path
 from typing import cast
 
@@ -698,6 +699,116 @@ def test_codex_admission_selectors_round_trip_and_are_path_free(
     assert seen[0]["codex_home"] == home
     assert "--codex-path <codex-path>" in json.loads(out)["next_command"]
     assert "--codex-home <codex-home>" in json.loads(out)["next_command"]
+    assert str(tmp_path) not in out + err
+
+
+def _follow(next_command: str, root: Path, digest: str) -> list[str]:
+    words = shlex.split(next_command)
+    assert words[0] == "finishup"
+    fills = {"<root>": str(root), "<preview_digest>": digest}
+    return [fills.get(word, word) for word in words[1:]]
+
+
+@pytest.mark.parametrize("action", ["grant", "revoke"])
+def test_a_checkpoint_preview_continuation_applies_the_reviewed_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str
+) -> None:
+    _stub_facts(monkeypatch, _facts())
+    runner = CliRunner()
+    settings = tmp_path / ".claude" / "settings.local.json"
+    if action == "revoke":
+        settings.parent.mkdir()
+        settings.write_text(
+            json.dumps({"permissions": {"ask": ["mcp__plugin_finishup_finishup__check"]}}),
+            encoding="utf-8",
+        )
+    code, out, err = _run(
+        monkeypatch,
+        tmp_path,
+        "claude",
+        "admission",
+        "preview",
+        "--action",
+        action,
+        "--checkpoint",
+    )
+    assert code == 0, err
+    preview = json.loads(out)
+    assert "--checkpoint" in shlex.split(preview["next_command"])
+
+    applied = runner.invoke(
+        app, [*_follow(preview["next_command"], tmp_path, preview["preview_digest"]), "--json"]
+    )
+    assert applied.exit_code == 0, applied.stderr
+    if action == "grant":
+        assert json.loads(settings.read_text()) == {
+            "permissions": {"ask": ["mcp__plugin_finishup_finishup__check"]}
+        }
+    else:
+        assert not settings.exists()
+
+
+def test_a_preview_without_checkpoint_continues_without_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_facts(monkeypatch, _facts())
+    code, out, err = _run(monkeypatch, tmp_path, "claude", "admission", "preview")
+    assert code == 0, err
+    assert "--checkpoint" not in json.loads(out)["next_command"]
+
+
+def test_claude_and_cursor_route_selectors_carry_into_the_continuation_path_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_facts(monkeypatch, _facts())
+    private = tmp_path / "private"
+    code, out, err = _run(
+        monkeypatch,
+        tmp_path,
+        "claude",
+        "admission",
+        "preview",
+        "--claude-path",
+        str(private / "claude"),
+        "--claude-config-root",
+        str(private / "config"),
+        "--cache-root",
+        str(private / "cache"),
+        "--marketplace-root",
+        str(private / "market"),
+        "--mcp-ownership",
+        "plugin-managed",
+        "--route-profile",
+        "policy",
+    )
+    assert code == 0, err
+    claude = json.loads(out)["next_command"]
+    for selector in (
+        "--claude-path <claude-path>",
+        "--claude-config-root <claude-config-root>",
+        "--cache-root <cache-root>",
+        "--marketplace-root <marketplace-root>",
+        "--mcp-ownership plugin-managed",
+        "--route-profile policy",
+    ):
+        assert selector in claude
+    assert str(tmp_path) not in out + err
+
+    _stub_facts(monkeypatch, _facts(owner="external"))
+    code, out, err = _run(
+        monkeypatch,
+        tmp_path,
+        "cursor",
+        "admission",
+        "preview",
+        "--cursor-config-root",
+        str(private / "cursor"),
+    )
+    assert code == 0, err
+    cursor = json.loads(out)["next_command"]
+    assert "--cursor-config-root <cursor-config-root>" in cursor
+    assert "--mcp-ownership" not in cursor
+    assert "--route-profile" not in cursor
     assert str(tmp_path) not in out + err
 
 

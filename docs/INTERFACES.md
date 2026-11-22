@@ -9316,7 +9316,10 @@ shows too).
 (preview `--action grant|revoke`; Claude `--checkpoint`; the host roots the route observation
 needs; `--accept --preview-digest` for the apply verbs, exit 3 without them, exit 1
 `host_admission_<reason>` on refusal); raw path, OS, and parser exception text never crosses this
-boundary.
+boundary. The preview's `next_command` is the matching apply verb with `<root>` and
+`<preview_digest>` placeholders, repeating every selector the preview was given: `--checkpoint`
+(which the digest binds, for grant and revoke alike), path selectors as `<flag-name>` placeholders,
+and a non-default `--mcp-ownership plugin-managed` or `--route-profile strict|policy` literally.
 
 `finishup provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
