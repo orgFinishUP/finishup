@@ -22,7 +22,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
 
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from finishup.application.package_update import (
     PackageUpdateAdvisory,
@@ -336,6 +336,17 @@ def _release_version(value: object) -> str | None:
         raise ValueError("recommendation_release_invalid")
     Version(value)
     return value
+
+
+def _release_is_newer(release_version: str | None, running_version: str) -> bool:
+    """Whether a retained release is still ahead; an unknown or uncomparable one is kept."""
+
+    if release_version is None:
+        return True
+    try:
+        return Version(release_version) > Version(running_version)
+    except InvalidVersion:
+        return True
 
 
 def _parse_state(parsed: object) -> RecommendationState:
@@ -769,6 +780,12 @@ async def refresh_pending(
                 # An authority-limited heavy touchpoint (for example the daemon,
                 # which does not own an exact selected Codex home) must not erase
                 # a recommendation established by an earlier exact evaluation.
+                if item.id == "package-update" and not _release_is_newer(
+                    release_version, current_version
+                ):
+                    # The running version is a local fact: an installation upgraded outside
+                    # FinishUP to or past the retained release has nothing left to update to.
+                    continue
                 if item.id in current.pending:
                     pending_ids.append(item.id)
                     if (retained := current.pending_targets.get(item.id)) is not None:

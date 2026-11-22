@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from finishup.application import recommendations
-from finishup.application.package_update import PackageUpdateAdvisory, build_package_update_advisory
+from finishup.application.package_update import (
+    PackageUpdateAdvisory,
+    PackageUpdateOutcome,
+    build_package_update_advisory,
+)
 from finishup.application.recommendations import (
     RECOMMENDED_DEFAULTS,
     RecommendationContext,
@@ -513,6 +517,36 @@ async def test_policy_skipped_advisory_is_unknown_and_retains_pending(tmp_path: 
     )
 
     assert "package-update" in retained.pending
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["skipped_policy", "skipped_unavailable"])
+@pytest.mark.parametrize("running", ["0.2.0", "0.3.0"])
+async def test_skipped_advisory_drops_pending_release_the_installation_caught_up_to(
+    tmp_path: Path, outcome: PackageUpdateOutcome, running: str
+) -> None:
+    # The installation was upgraded outside FinishUP to (or past) the advised release while no
+    # comparison could run: advising an "update" to the running or an older release is never true.
+    await refresh_pending(
+        context=RecommendationContext(package_update=_newer()),
+        root=tmp_path,
+        version="0.1.0",
+    )
+
+    refreshed = await refresh_pending(
+        context=RecommendationContext(
+            package_update=build_package_update_advisory(
+                installed_version=running, latest_version=None, source="none", outcome=outcome
+            )
+        ),
+        root=tmp_path,
+        version=running,
+        force=True,
+    )
+
+    assert "package-update" not in refreshed.pending
+    assert refreshed.pending_package_version is None
+    assert cached_pending_recommendations(root=tmp_path) == ()
 
 
 @pytest.mark.anyio
