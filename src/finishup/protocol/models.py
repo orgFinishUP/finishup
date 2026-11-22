@@ -30,6 +30,7 @@ from pydantic import (
     Field,
     RootModel,
     Tag,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -2091,6 +2092,28 @@ STATUS_DEFAULT_PAGE_LIMIT: Final = "20"
 DELIVERY_HANDLE_MAX_LENGTH: Final = 96
 
 
+def _route_by_status_view(
+    value: object, info: ValidationInfo, routes: Mapping[str, type[BaseModel]]
+) -> object:
+    """Validate a status ``filter`` or ``page`` as the model its sibling ``view`` selects.
+
+    Routing runs as a field validator, after ``view`` (declared earlier) has validated, so a
+    failure inside the routed model surfaces at its own location (``/filter/priority``) beside the
+    request's other field errors, rather than escaping unprefixed before field validation. An
+    invalid or absent ``view`` leaves the value to the field's own union, as before.
+    """
+
+    if value is None:
+        return value
+    view = info.data.get("view")
+    if type(view) is not str:
+        return value
+    routed_type = routes.get(view)
+    if routed_type is None:
+        return value
+    return routed_type.model_validate(value)
+
+
 class StatusRequestModel(PublicRequestModel):
     optional_non_null_fields = frozenset(
         {
@@ -2148,22 +2171,10 @@ class StatusRequestModel(PublicRequestModel):
         | None
     ) = None
 
-    @model_validator(mode="before")
+    @field_validator("filter", mode="before")
     @classmethod
-    def _route_status_filter(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        source = cast(Mapping[object, object], value)
-        raw_filter = source.get("filter")
-        raw_view = source.get("view")
-        if raw_filter is None or type(raw_view) is not str:
-            return cast(object, value)
-        filter_type = _STATUS_FILTER_BY_VIEW.get(raw_view)
-        if filter_type is None:
-            return cast(object, value)
-        routed = dict(source)
-        routed["filter"] = filter_type.model_validate(raw_filter)
-        return routed
+    def _route_status_filter(cls, value: object, info: ValidationInfo) -> object:
+        return _route_by_status_view(value, info, _STATUS_FILTER_BY_VIEW)
 
     @model_validator(mode="after")
     def _validate_status_request(self) -> StatusRequestModel:
@@ -7703,22 +7714,10 @@ class StatusSuccessModel(_ClosedModel):
     # addition to status-result 1.5.0; absent from an earlier 0.3 build.
     task_lifecycle: StatusTaskLifecycleModel | None = None
 
-    @model_validator(mode="before")
+    @field_validator("page", mode="before")
     @classmethod
-    def _route_status_page(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        source = cast(Mapping[object, object], value)
-        raw_page = source.get("page")
-        raw_view = source.get("view")
-        if raw_page is None or type(raw_view) is not str:
-            return cast(object, value)
-        page_type = _STATUS_PAGE_BY_VIEW.get(raw_view)
-        if page_type is None:
-            return cast(object, value)
-        routed = dict(source)
-        routed["page"] = page_type.model_validate(raw_page)
-        return routed
+    def _route_status_page(cls, value: object, info: ValidationInfo) -> object:
+        return _route_by_status_view(value, info, _STATUS_PAGE_BY_VIEW)
 
     @model_validator(mode="after")
     def _validate_status_success(self) -> StatusSuccessModel:
@@ -7835,22 +7834,10 @@ class StatusBriefSuccessModel(_ClosedModel):
     review_mode: StatusReviewModeModel | None = None
     task_lifecycle: StatusTaskLifecycleModel | None = None
 
-    @model_validator(mode="before")
+    @field_validator("page", mode="before")
     @classmethod
-    def _route_status_page(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        source = cast(Mapping[object, object], value)
-        raw_page = source.get("page")
-        raw_view = source.get("view")
-        if raw_page is None or type(raw_view) is not str:
-            return cast(object, value)
-        page_type = _STATUS_PAGE_BY_VIEW.get(raw_view)
-        if page_type is None:
-            return cast(object, value)
-        routed = dict(source)
-        routed["page"] = page_type.model_validate(raw_page)
-        return routed
+    def _route_status_page(cls, value: object, info: ValidationInfo) -> object:
+        return _route_by_status_view(value, info, _STATUS_PAGE_BY_VIEW)
 
     @model_validator(mode="after")
     def _validate_status_brief_success(self) -> StatusBriefSuccessModel:
