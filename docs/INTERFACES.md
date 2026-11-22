@@ -6352,7 +6352,10 @@ such as `parser.token = Token.EOF`, a lower-case object property such as `token:
 Token.ConstKeyword`, or a lower-case Python `token = node.token` assignment inside a valid
 function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.value`,
 call-shaped values such as `password=functionName()`, quoted lookalikes, mixed-language text, and
-malformed source remain withheld. This precision rule does not add an opt-out.
+malformed source remain withheld. The Python exemption covers only the assignment's own bytes,
+located by the line ends Python itself counts (`\r\n`, `\r`, `\n`), so a form feed or Unicode
+line separator earlier in the source cannot move it onto other text (#1458). This precision rule
+does not add an opt-out.
 Since issue #982 the assignment heuristics also skip values that cannot be credential material:
 comparisons and walrus operators (`token == x`, `token := x`); an unquoted next key after a line
 break (an empty `KEY=` followed by `NEXT=`); unquoted language literals and type names (`None`,
