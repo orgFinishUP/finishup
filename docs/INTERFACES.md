@@ -6725,7 +6725,10 @@ Invalid-result reasons stay exact without retaining provider plaintext: empty/no
 constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);
 output truncation / provider `incomplete` / Chat Completions `finish_reason=length` →
 `response_content_invalid` (`failure_class=response_content`); case-bound post-validation
-rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`.
+rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`,
+including an HTTP connect/read/write/pool timeout the OpenAI SDK re-raises as its own timeout
+error (a connection-error subclass), on both the Responses and Chat Completions adapters; only a
+non-timeout connection failure is `transport_unavailable`.
 `incomplete` caused by the output token cap must not be labeled a transport timeout. The public
 pair is closed; for `dispatch_kind=external_runtime_oauth` the exact stage is carried separately as
 `runtime_evidence.failure_stage` (below) so an operator can tell malformed JSON from a wrong

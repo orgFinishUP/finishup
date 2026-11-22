@@ -31,6 +31,7 @@ from finishup.adapters.providers.openai_responses import (
     SEMANTIC_REVIEW_INSTRUCTION,
     STRICT_JUDGMENT_JSON_SCHEMA,
     OneAttemptCredentialTransport,
+    is_transport_timeout,
     normalize_answer_text,
 )
 from finishup.adapters.providers.reviewer_cache_telemetry import (
@@ -435,7 +436,7 @@ def classify_provider_failure(
             failure_class=failure,
         )
 
-    if isinstance(error, httpx.TimeoutException | TimeoutError):
+    if is_transport_timeout(error):
         return SemanticResultTimeout(prov(SemanticStatus.TIMEOUT, SemanticFailureClass.TIMEOUT))
     if isinstance(error, httpx.TransportError):
         return SemanticResultUnavailable(

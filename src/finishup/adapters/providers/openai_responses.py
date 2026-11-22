@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import importlib
 import re
+import sys
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -119,6 +120,7 @@ __all__ = [
     "RenderedOpenAIRequest",
     "RenderedRequest",
     "classify_provider_failure",
+    "is_transport_timeout",
     "normalize_answer_text",
     "normalize_judgment",
     "normalize_response",
@@ -2350,6 +2352,28 @@ def normalize_answer_text(
     return SemanticResultLate(prov(SemanticStatus.LATE, None)) if late else result
 
 
+def is_transport_timeout(error: BaseException) -> bool:
+    """Whether ``error`` is a timeout, including the SDK's wrapper around an HTTP timeout.
+
+    The OpenAI SDK re-raises every ``httpx`` timeout as its own ``APITimeoutError`` (a
+    connection-error subclass) chained ``from`` the original, so the explicit ``__cause__``
+    chain is followed. The SDK class is matched only when the SDK is already loaded.
+    """
+
+    sdk = sys.modules.get("openai")
+    sdk_timeout = getattr(sdk, "APITimeoutError", None) if sdk is not None else None
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.TimeoutException | TimeoutError):
+            return True
+        if isinstance(sdk_timeout, type) and isinstance(current, sdk_timeout):
+            return True
+        current = current.__cause__
+    return False
+
+
 def classify_provider_failure(
     error: BaseException,
     profile: OpenAIProfile,
@@ -2370,7 +2394,7 @@ def classify_provider_failure(
             failure_class=failure,
         )
 
-    if isinstance(error, httpx.TimeoutException | TimeoutError):
+    if is_transport_timeout(error):
         return SemanticResultTimeout(prov(SemanticStatus.TIMEOUT, SemanticFailureClass.TIMEOUT))
     if isinstance(error, httpx.TransportError):
         return SemanticResultUnavailable(

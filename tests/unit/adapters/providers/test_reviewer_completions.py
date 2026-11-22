@@ -48,6 +48,7 @@ from finishup.application.reviewer_loop import (
     ReviewOutcome,
     Turn,
 )
+from finishup.domain.findings import SemanticFailureClass
 from finishup.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
@@ -83,6 +84,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from finishup.protocol.models import SemanticStatus
 
 pytestmark = pytest.mark.anyio
 
@@ -1172,6 +1174,19 @@ async def test_r6_early_failures_name_the_exchange(route: str) -> None:
     result, *_ = await _api_evaluate(route, _FIRST, _Capture(route, fail=True), _Clock())
     assert type(result) is not SemanticResultReply
     assert result.provenance.schema_digest == canonical_digest(REVIEWER_REPLY_SCHEMAS.turn)
+
+
+@pytest.mark.parametrize("route", ["responses", "chat"])
+async def test_r6_an_http_timeout_through_the_sdk_is_a_provider_timeout(route: str) -> None:
+    """The SDK wraps the HTTP timeout in its own error; it is still a timeout, not transport."""
+
+    result, *_ = await _api_evaluate(route, _FIRST, _Capture(route, fail=True), _Clock())
+    assert type(result) is SemanticResultTimeout, (
+        type(result).__name__,
+        result.provenance.failure_class,
+    )
+    assert result.provenance.status is SemanticStatus.TIMEOUT
+    assert result.provenance.failure_class is SemanticFailureClass.TIMEOUT
 
 
 async def test_r3_review_exit_closes_the_thread_when_admission_is_denied(

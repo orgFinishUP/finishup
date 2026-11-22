@@ -21,6 +21,9 @@ from finishup.adapters.providers.openai_chat_completions import (
     ChatCompletionsProfile,
 )
 from finishup.adapters.providers.openai_chat_completions import (
+    classify_provider_failure as classify_chat_failure,
+)
+from finishup.adapters.providers.openai_chat_completions import (
     normalize_response as normalize_chat_response,
 )
 from finishup.adapters.providers.openai_responses import (
@@ -57,6 +60,7 @@ from finishup.ports.semantic import (
     SemanticResultRefused,
     SemanticResultSuccess,
     SemanticResultTimeout,
+    SemanticResultUnavailable,
 )
 from finishup.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 from finishup.protocol.models import (
@@ -700,6 +704,45 @@ def test_transport_timeout_still_maps_to_provider_timeout() -> None:
     )
     assert type(result) is SemanticResultTimeout
     assert result.provenance.failure_class is SemanticFailureClass.TIMEOUT
+
+
+def _sdk_wrapped(cause: httpx.TransportError) -> BaseException:
+    """The error the pinned SDK raises for ``cause``, chained exactly as the SDK chains it."""
+
+    import openai
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    wrapper: openai.APIConnectionError = (
+        openai.APITimeoutError(request=request)
+        if isinstance(cause, httpx.TimeoutException)
+        else openai.APIConnectionError(request=request)
+    )
+    wrapper.__cause__ = cause
+    return wrapper
+
+
+@pytest.mark.parametrize("route", ["responses", "chat"])
+def test_sdk_wrapped_http_failures_keep_timeout_distinct_from_transport(route: str) -> None:
+    def classify(error: BaseException) -> Any:
+        if route == "responses":
+            return classify_provider_failure(
+                error, _responses_profile(), policy_digest=_DIGEST, latency_ms=1
+            )
+        return classify_chat_failure(error, _chat_profile(), policy_digest=_DIGEST, latency_ms=1)
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    for cause in (
+        httpx.ReadTimeout("t", request=request),
+        httpx.ConnectTimeout("t", request=request),
+        httpx.PoolTimeout("t", request=request),
+    ):
+        timeout = classify(_sdk_wrapped(cause))
+        assert type(timeout) is SemanticResultTimeout
+        assert timeout.provenance.failure_class is SemanticFailureClass.TIMEOUT
+
+    connect = classify(_sdk_wrapped(httpx.ConnectError("refused", request=request)))
+    assert type(connect) is SemanticResultUnavailable
+    assert connect.provenance.failure_class is SemanticFailureClass.TRANSPORT
 
 
 def test_conforming_challenge_response_succeeds_on_first_parse() -> None:
