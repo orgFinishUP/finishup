@@ -1014,6 +1014,55 @@ def test_cursor_lifecycle_identifiers_bind_one_conversation_to_one_session(
     assert observed_sessions[-1] == "cursor:c-solo"
 
 
+def test_cursor_full_alias_map_evicts_the_oldest_binding_not_the_smallest_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed_sessions: list[object] = []
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        sanitized = strict_json_parse(cast(bytes, kwargs["stdin_bytes"]))
+        assert isinstance(sanitized, Mapping)
+        observed_sessions.append(sanitized["session_id"])
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+
+    def dispatch(event: str, payload: dict[str, JsonValue]) -> int:
+        return observe_hooks.handle_cursor_observe(
+            event_name=event,
+            stdin_bytes=canonical_encode({"hook_event_name": event, **payload}),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+
+    # Fill the bounded map with older conversations whose ids sort after the
+    # active ones and an active conversation last, then bind one more past the bound.
+    capacity = observe_hooks._MAX_CURSOR_ALIASES  # pyright: ignore[reportPrivateUsage]
+    for index in range(capacity - 1):
+        conversation = f"z{index:03d}"
+        payload: dict[str, JsonValue] = {
+            "conversation_id": conversation,
+            "session_id": f"s-{conversation}",
+        }
+        assert dispatch("sessionStart", payload) == 0
+    assert dispatch("sessionStart", {"conversation_id": "b-active", "session_id": "s-active"}) == 0
+    assert dispatch("sessionStart", {"conversation_id": "a-new", "session_id": "s-new"}) == 0
+
+    # The conversation bound just before the newest one keeps its session; only
+    # the oldest binding is evicted and falls back to its raw conversation.
+    assert dispatch("stop", {"conversation_id": "b-active"}) == 0
+    assert dispatch("stop", {"conversation_id": "a-new"}) == 0
+    assert dispatch("stop", {"conversation_id": "z001"}) == 0
+    assert dispatch("stop", {"conversation_id": "z000"}) == 0
+    assert observed_sessions[-4:] == [
+        "cursor:s-active",
+        "cursor:s-new",
+        "cursor:s-z001",
+        "cursor:z000",
+    ]
+
+
 def test_cursor_mcp_executions_of_finishup_tools_follow_the_self_observation_policy(
     tmp_path: Path,
 ) -> None:

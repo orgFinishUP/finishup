@@ -1452,7 +1452,8 @@ perform one exact previewed replacement (or safe removal) instead of being stran
 timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
 `afterFileEdit`/`afterMCPExecution`, and 3 seconds for `sessionEnd`; `failClosed` remains false.
 `sessionStart` uses Cursor's documented `session_id`/`conversation_id` conversation identity and
-persists the validated pair as a bounded local alias, so later events carrying only
+persists the validated pair as a bounded local alias (64 conversations; the oldest binding is
+evicted first, and a rebound conversation counts as newest), so later events carrying only
 `conversation_id` resolve to the same FinishUP session; an event whose pair contradicts the validated
 alias is rejected as `cursor_session_ambiguous` rather than splitting one conversation across
 sessions. Cursor's hooks reference (re-read 2026-08-28) describes `sessionStart`'s `session_id` as

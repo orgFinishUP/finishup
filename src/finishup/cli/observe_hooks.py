@@ -808,7 +808,9 @@ def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path 
             aliases[conversation] = session
             while len(aliases) > _MAX_CURSOR_ALIASES:
                 aliases.pop(next(iter(aliases)))
-            encoded = json.dumps(aliases, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            # The file keeps binding order (oldest first) so the bound above evicts
+            # the oldest binding; sorting keys would evict the smallest identifier.
+            encoded = json.dumps(aliases, separators=(",", ":")).encode("utf-8")
             temporary = path.with_name(path.name + ".tmp")
             descriptor = os.open(
                 temporary,
