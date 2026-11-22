@@ -1034,6 +1034,34 @@ async def test_r5_truncated_answer_ends_without_another_inference() -> None:
     assert outcome.reason == "reviewer_exchange_response_content"
 
 
+async def test_responses_refusal_ends_the_review_refused_without_a_repair() -> None:
+    from openai.types.responses import Response
+
+    profile, seen = _api_profile("responses"), list[bytes]()
+    assert isinstance(profile, OpenAIProfile)
+
+    async def dispatch(payload: bytes, media_type: str, deadline: Deadline) -> SemanticResult:
+        seen.append(payload)
+        response = Response.model_validate(
+            {
+                "id": "r1", "object": "response", "created_at": 0, "model": profile.model,
+                "status": "completed", "parallel_tool_calls": False, "tool_choice": "none",
+                "tools": [], "output": [{
+                    "type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                    "content": [{"type": "refusal", "refusal": "I can't help with that."}],
+                }],
+            }
+        )  # fmt: skip
+        exchange = reviewer_exchange(media_type, payload, REVIEWER_REPLY_SCHEMAS)
+        return normalize_response(
+            response, profile, policy_digest=_DIGEST, latency_ms=1, exchange=exchange
+        )
+
+    outcome = await _loop(dispatch, _Clock())
+    assert outcome.status == "incomplete" and len(seen) == 1
+    assert outcome.reason == "reviewer_exchange_refused"
+
+
 async def test_r5_codex_output_limit_gets_no_format_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _CodexRuntime(profile_for(record_for(b"c", b"h", version="0.162.1")), [_FINAL])
     usage = {

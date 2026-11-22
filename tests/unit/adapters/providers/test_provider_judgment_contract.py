@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -196,7 +197,17 @@ class _ResponsesResponse:
     ) -> None:
         self.output_text = output_text
         self.status = status
-        self.refusal = refusal
+        # The SDK carries a refusal as a content part of an output message, never top-level.
+        self.output = (
+            []
+            if refusal is None
+            else [
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(type="refusal", refusal=refusal)],
+                )
+            ]
+        )
         self.id = response_id
 
 
@@ -656,6 +667,17 @@ def test_cancelled_is_refused_not_timeout() -> None:
         latency_ms=5,
     )
     assert type(result) is SemanticResultRefused
+
+
+def test_refusal_part_of_a_completed_message_is_refused() -> None:
+    result = normalize_responses_response(
+        _ResponsesResponse(output_text="", refusal="I cannot help with that."),
+        _responses_profile(),
+        policy_digest=_DIGEST,
+        latency_ms=5,
+    )
+    assert type(result) is SemanticResultRefused
+    assert result.provenance.failure_class is None
 
 
 def test_chat_length_finish_reason_is_content_invalid() -> None:

@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import importlib
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, cast
@@ -2229,6 +2229,9 @@ def normalize_response(
 
     Inspection order is fixed: explicit refusal surface first, then the generation status (only a
     completed generation is an answer), parse/schema validity next, and late-arrival state last.
+    The Responses API reports a refusal as a ``refusal`` content part of an output message, on a
+    generation whose status is ``completed`` and whose ``output_text`` is empty; it is a refusal,
+    never an empty answer. The refusal text is read only for presence and is never kept.
 
     ``policy_digest`` is the policy digest that authorized this dispatch, carried by the approved
     case. The adapter never mints one of its own; the outbound gateway rebinds it authoritatively
@@ -2252,8 +2255,7 @@ def normalize_response(
             exchange=exchange,
         )
 
-    refusal = getattr(response, "refusal", None)
-    if type(refusal) is str and refusal:
+    if _response_refused(response):
         return SemanticResultRefused(prov(SemanticStatus.REFUSED))
 
     status = getattr(response, "status", None)
@@ -2279,6 +2281,35 @@ def normalize_response(
     return normalize_answer_text(
         getattr(response, "output_text", None), prov, late=late, reply=exchange is not None
     )
+
+
+def _response_refused(response: object) -> bool:
+    """Whether a Responses result declines the task: a non-empty refusal content part.
+
+    The SDK model carries a refusal inside ``output[*].content[*]`` as ``{"type": "refusal",
+    "refusal": str}``. A top-level ``refusal`` string, which a compatible endpoint may add as an
+    extra field, counts too. Only presence is read; the text itself is never returned or kept.
+    """
+
+    legacy = getattr(response, "refusal", None)
+    if type(legacy) is str and legacy:
+        return True
+    output = getattr(response, "output", None)
+    if not isinstance(output, list | tuple):
+        return False
+    for item in cast(Sequence[object], output):
+        if getattr(item, "type", None) != "message":
+            continue
+        content = getattr(item, "content", None)
+        if not isinstance(content, list | tuple):
+            continue
+        for part in cast(Sequence[object], content):
+            if getattr(part, "type", None) != "refusal":
+                continue
+            refusal = getattr(part, "refusal", None)
+            if type(refusal) is str and refusal:
+                return True
+    return False
 
 
 type _Provenance = Callable[
