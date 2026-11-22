@@ -1134,6 +1134,34 @@ def test_mcp_ownership_reads_a_used_claude_config_with_decimal_values(tmp_path: 
     assert observed.observed is True
 
 
+@pytest.mark.parametrize("escape", ["\\ud83d", "\\u0000"])
+def test_mcp_ownership_reads_a_claude_config_with_an_unholdable_string_value(
+    tmp_path: Path, escape: str
+) -> None:
+    """A truncated emoji or escaped NUL in host-recorded text leaves the MCP tables readable."""
+
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    config = tmp_path / "config"
+    plugin.mkdir()
+    project.mkdir()
+    config.mkdir()
+    (config / ".claude.json").write_text(
+        '{"numStartups": 3, "tipsHistory": {"note": "cut ' + escape + '"},'
+        f' "projects": {{"{project}": {{"lastCost": 22.0157}}}}}}',
+        encoding="utf-8",
+    )
+
+    observed = observe_claude_code_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        claude_config_root=config,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.ABSENT
+    assert observed.observed is True
+
+
 def test_mcp_ownership_reads_a_claude_config_larger_than_plugin_files(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     project = tmp_path / "project"

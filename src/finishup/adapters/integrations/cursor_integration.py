@@ -2281,7 +2281,7 @@ def _config_entries(
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
             return None, None, False
-        # Host-owned and only observed here: tolerate host decimals (#1278).
+        # Host-owned and only observed here: tolerate host decimals and strings (#1278, #1389).
         parsed = parse_host_config_json(path.read_bytes())
     except (OSError, ProtocolValueError, UnicodeError):
         return None, None, False

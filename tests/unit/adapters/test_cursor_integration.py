@@ -1722,6 +1722,31 @@ def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) ->
     assert observed.present_sources == (CursorMcpSource.USER,)
 
 
+@pytest.mark.parametrize("escape", ["\\ud83d", "\\u0000"])
+def test_mcp_configuration_with_an_unholdable_string_value_stays_observable(
+    tmp_path: Path, escape: str
+) -> None:
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    user = tmp_path / "user"
+    plugin.mkdir()
+    project.mkdir()
+    user.mkdir()
+    (user / "mcp.json").write_text(
+        '{"mcpServers": {"other": {"command": "other", "description": "cut ' + escape + '"}}}',
+        encoding="utf-8",
+    )
+
+    observed = observe_cursor_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        user_config_root=user,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.ABSENT
+    assert observed.observed is True
+
+
 def test_sdk_profiles_require_explicit_sources_and_pin_bridge_protocol(tmp_path: Path) -> None:
     package_json = tmp_path / "package.json"
     package_json.write_text('{"name":"@cursor/sdk","version":"1.0.23"}', encoding="utf-8")
