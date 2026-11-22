@@ -6729,6 +6729,11 @@ rejection → `semantic_judgment_rejected`; real transport/deadline timeout → 
 including an HTTP connect/read/write/pool timeout the OpenAI SDK re-raises as its own timeout
 error (a connection-error subclass), on both the Responses and Chat Completions adapters; only a
 non-timeout connection failure is `transport_unavailable`.
+An HTTP error status is `unavailable` and records the same `failure_class` on both adapters: 401 →
+`authentication`, 403 → `authorization`, 404 (the endpoint does not serve that path) →
+`unsupported_profile`, 429 → `rate_limited` (public `provider_rate_limited`), 5xx →
+`provider_outage`, any other status → `transport`; every class but `rate_limited` reads publicly
+as `transport_unavailable`, with the exact class kept as the owner-only diagnostic.
 `incomplete` caused by the output token cap must not be labeled a transport timeout. The public
 pair is closed; for `dispatch_kind=external_runtime_oauth` the exact stage is carried separately as
 `runtime_evidence.failure_stage` (below) so an operator can tell malformed JSON from a wrong

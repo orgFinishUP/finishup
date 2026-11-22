@@ -745,6 +745,31 @@ def test_sdk_wrapped_http_failures_keep_timeout_distinct_from_transport(route: s
     assert connect.provenance.failure_class is SemanticFailureClass.TRANSPORT
 
 
+@pytest.mark.parametrize("route", ["responses", "chat"])
+def test_sdk_http_status_errors_map_to_the_same_failure_class_on_both_routes(route: str) -> None:
+    import openai
+
+    def classify(error: BaseException) -> Any:
+        if route == "responses":
+            return classify_provider_failure(
+                error, _responses_profile(), policy_digest=_DIGEST, latency_ms=1
+            )
+        return classify_chat_failure(error, _chat_profile(), policy_digest=_DIGEST, latency_ms=1)
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    for error_type, status, failure_class in (
+        (openai.AuthenticationError, 401, SemanticFailureClass.AUTHENTICATION),
+        (openai.PermissionDeniedError, 403, SemanticFailureClass.AUTHORIZATION),
+        (openai.NotFoundError, 404, SemanticFailureClass.UNSUPPORTED_PROFILE),
+        (openai.RateLimitError, 429, SemanticFailureClass.RATE_LIMITED),
+        (openai.InternalServerError, 503, SemanticFailureClass.PROVIDER_OUTAGE),
+    ):
+        response = httpx.Response(status, request=request, json={"error": {"message": "no"}})
+        result = classify(error_type("no", response=response, body=None))
+        assert type(result) is SemanticResultUnavailable
+        assert result.provenance.failure_class is failure_class, (status, route)
+
+
 def test_conforming_challenge_response_succeeds_on_first_parse() -> None:
     body = json.dumps(
         _judgment(

@@ -2413,6 +2413,10 @@ def classify_provider_failure(
         failure_class = SemanticFailureClass.AUTHORIZATION
     elif status_code == 429:
         failure_class = SemanticFailureClass.RATE_LIMITED
+    elif status_code == 404:
+        # An endpoint that does not serve the Responses path is an unsupported profile, not a
+        # transport fault; the Chat Completions classifier records the same condition alike.
+        failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
     elif type(status_code) is int and status_code >= 500:
         failure_class = SemanticFailureClass.PROVIDER_OUTAGE
     return SemanticResultUnavailable(prov(SemanticStatus.UNAVAILABLE, failure_class))
