@@ -1128,3 +1128,19 @@ def test_a_long_patch_whose_tail_says_cd_is_still_docs() -> None:
     assert len(command) > MAX_SHELL_WRITE_CHARS
     assert shell_writes.command_working_directory(command) == (None, False)
     assert shell_writes.command_working_directory(command + "cd tests\n") == (None, True)
+
+
+def test_command_segments_split_where_the_shell_does() -> None:
+    segments = shell_writes.shell_command_segments
+    assert segments("cd /w\nuv pip install x") == [["cd", "/w"], ["uv", "pip", "install", "x"]]
+    assert segments("make |& tee log 2>&1; ls") == [["make"], ["tee", "log"], ["ls"]]
+    assert segments("echo 'a\nb' > out\n# pip install x") == [["echo", "a\nb"]]
+    assert segments("cat <<EOF\npip install x\nEOF\nls") == [["cat"], ["ls"]]
+    assert segments("pip install 'x") == []
+
+
+def test_command_segments_drop_a_command_the_bound_cuts() -> None:
+    command = "ls\npip install " + "x" * MAX_SHELL_WRITE_CHARS
+    assert shell_writes.shell_command_segments(command) == [["ls"]]
+    long_quote = "ls\necho 'a\n" + "x" * MAX_SHELL_WRITE_CHARS + "'"
+    assert shell_writes.shell_command_segments(long_quote) == [["ls"]]

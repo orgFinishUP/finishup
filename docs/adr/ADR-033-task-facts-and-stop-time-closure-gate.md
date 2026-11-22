@@ -277,7 +277,10 @@ agent must not be able to stop silently with known work left.
    interpreter running pip (its user site is imported by that interpreter; pip refuses it in a
    virtual environment). A conda environment (`conda-meta/`) counts as an environment of its own
    like a venv, and a prefix command's own options (`sudo -H -u builder`) and pip's attached
-   `-t/dir` are read. `uv pip install` without `--python` stays `unresolved`. `write_scope`
+   `-t/dir` are read. `uv pip install` without `--python` stays `unresolved`. Every simple
+   command of a shell call is classified, split by the same shell lexer `write_scope` reads: an
+   unquoted newline separates commands like `;`, `|&` like `|`, while a quoted newline, a comment
+   or a heredoc body installs nothing (#1434). `write_scope`
    ignores writes into temporary scratch space (tb4n1 E6, #1000: 28 of 33 firings were `/tmp`
    logs, none a misplaced deliverable): `/tmp`, `/private/tmp`, `/var/tmp`, `/private/var/tmp`,
    `/dev/shm`, anything under `/dev/`, the macOS per-user `/var/folders/*/*/T`, and the

@@ -115,6 +115,29 @@ def test_unbalanced_quotes_do_not_raise(env: dict[str, Path]) -> None:
     assert _target("pip install 'x", env) is None
 
 
+def test_an_install_on_a_later_line_is_classified(env: dict[str, Path]) -> None:
+    # A newline ends a command exactly as ``;`` does (#1434).
+    assert _target("cd /w\nuv pip install requests", env) == "unresolved"
+    assert _target("echo start\npipx install ruff", env) == "private_env"
+    assert _target(f"cd {env['workspace']}\n{env['private']}/bin/pip install x", env) == (
+        "private_env"
+    )
+    assert _target("echo one\n\n  pip install x\n", env) == "system"
+    assert _target("make 2>&1 |& tee log\npipx install ruff", env) == "private_env"
+    assert _target("make |& pipx install ruff", env) == "private_env"
+
+
+def test_a_newline_that_is_not_a_command_separator_splits_nothing(env: dict[str, Path]) -> None:
+    # Inside quotes, after a backslash, in a comment or in a heredoc body a newline (or a line
+    # that reads as an install) is data.
+    assert _target("echo 'first\npip install x'", env) is None
+    assert _target('git commit -m "notes\npipx install ruff"', env) is None
+    assert _target("pip \\\n  install x", env) == "system"
+    assert _target("# pip install x\nls", env) is None
+    assert _target("cat <<'EOF' > notes.md\npipx install ruff\nEOF\nls", env) is None
+    assert _target("cat <<EOF\npipx install ruff\nEOF\npip install x", env) == "system"
+
+
 # --- task interpreter (tb4n1 regressions) ------------------------------------------------------
 
 

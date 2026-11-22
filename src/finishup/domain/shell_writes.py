@@ -52,6 +52,7 @@ __all__ = [
     "heredoc_patch_paths",
     "heredoc_patch_writes",
     "patch_command_words",
+    "shell_command_segments",
     "shell_command_text",
     "shell_heredocs",
     "shell_write_paths",
@@ -979,6 +980,39 @@ def shell_write_paths(command: str) -> list[str]:
     """
 
     return list(_write_targets(command))
+
+
+def shell_command_segments(command: str) -> list[list[str]]:
+    """The words of each simple command in *command*, as this module's lexer reads them.
+
+    The same segments the write reader scans (#1434): an unquoted newline ends a command as
+    ``;``, ``&&``, ``||``, ``|``, ``|&`` and ``&`` do, while a quoted or backslash-escaped newline,
+    a comment and a heredoc body are data. Words lose their quotes; a redirection and its operand
+    (a target, a source, a heredoc delimiter) are not words of the command. Text is read up to
+    ``MAX_SHELL_WRITE_CHARS`` (``bound_command``); a command the bound cuts short is dropped, and
+    text the lexer cannot read with certainty has no segments.
+    """
+
+    text, cut = _bounded(command)
+    lexed = _lex(text, partial=cut)
+    if lexed is None:
+        return []
+    tokens, incomplete = lexed
+    segments: list[list[str]] = [[]]
+    operand = False
+    for token in tokens:
+        if token.kind == "op" and token.text in _SEPARATORS:
+            segments.append([])
+            operand = False
+        elif token.kind == "op":
+            operand = True  # a redirection: its next word is its operand
+        elif operand:
+            operand = False
+        else:
+            segments[-1].append(token.text)
+    if incomplete:
+        segments.pop()
+    return [segment for segment in segments if segment]
 
 
 def shell_write_scope(
