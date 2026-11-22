@@ -3073,6 +3073,9 @@ class ObservationCoordinator:
                                 captured_content = ()
                                 content_unavailable = True
                                 capture_ticket_revoked = True
+                                # The capture-only reason and the structural
+                                # gap set read the local, so set it too.
+                                capture_budget_exhausted = True
                                 self._capture_budget_exhausted = True
                                 await self._local(
                                     partial(
