@@ -487,10 +487,12 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     ),
     "code_copy_settings_unsafe": (
         "this computer's record of your code-copy choices for that server (code-copy.json in "
-        "that server's folder of this computer's FinishUP state) is not owner-only or is a link, "
-        "so no copy of any repository's code is sent to it and its choices cannot be read or "
-        "changed; make it a regular file only you can read and write (mode 600) in an "
-        "owner-only folder, then run this command again",
+        "that server's folder of this computer's FinishUP state) is not an owner-only regular "
+        "file, is a link, is larger than FinishUP reads, or could not be read or written, so no "
+        "copy of any repository's code is sent to it and its choices cannot be read or changed; "
+        "make it a regular file only you can read and write (mode 600) in an owner-only folder, "
+        "or, if it is larger than 1 MiB, remove it and record your choices again before work "
+        "there syncs, then run this command again",
         _UNSAFE,
     ),
 }
