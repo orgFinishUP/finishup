@@ -88,6 +88,72 @@ async def test_non_codex_plugin_layers_use_selected_host_state(
     assert layers[1].state is LayerState.UNPROVEN
 
 
+@pytest.mark.parametrize("host", ["claude", "cursor-ide", "cursor-cli"])
+async def test_unreadable_host_connection_reports_registration_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
+) -> None:
+    from finishup.application.host_connection import ConnectionError as HostConnectionError
+    from finishup.tui.models import (
+        LayerState,
+        PrivacyPosture,
+        ProviderPosture,
+        ReadinessLayer,
+        VaultPosture,
+    )
+
+    runtime = FinishUpRuntime(cwd=tmp_path)
+    option = HarnessOption("/opt/agent", "1.0.0", "Selected agent", "", host=host)
+
+    async def unreadable(_option: object) -> dict[str, object]:
+        raise HostConnectionError("connection_status_unreadable")
+
+    async def vault() -> VaultPosture:
+        return VaultPosture(reachable=False, state=None, vault_mode=None)
+
+    async def provider() -> ProviderPosture:
+        return ProviderPosture(
+            endpoint_bound=False,
+            provider_id=None,
+            model=None,
+            endpoint_profile_id=None,
+            credential_connected=None,
+            llm_inference_enabled=None,
+            semantic_enabled=False,
+            semantic_ready=False,
+            readiness_determinable=False,
+        )
+
+    async def privacy() -> PrivacyPosture:
+        return PrivacyPosture(profile=None, llm_inference_enabled=None, readable=False)
+
+    monkeypatch.setattr(runtime, "discover_harnesses", lambda: (option,))
+    monkeypatch.setattr(runtime, "_host_connection_status", unreadable)
+    monkeypatch.setattr(runtime, "vault_posture", vault)
+    monkeypatch.setattr(runtime, "provider_posture", provider)
+    monkeypatch.setattr(runtime, "privacy_posture", privacy)
+
+    def no_consent(_root: Path) -> bool:
+        return False
+
+    def policy_digest(_root: Path) -> ReadinessLayer:
+        return ReadinessLayer("policy_digest_trusted", "p", LayerState.NOT_CONFIGURED)
+
+    monkeypatch.setattr(runtime, "_consent_active", no_consent)
+    monkeypatch.setattr(runtime, "_policy_digest_layer", policy_digest)
+
+    snapshot = await runtime.status_snapshot()
+
+    plugin = snapshot.layer("plugin_installed")
+    registered = snapshot.layer("mcp_registered")
+    verified = snapshot.layer("mcp_verified")
+    assert plugin is not None and plugin.state is LayerState.UNKNOWN
+    assert registered is not None and registered.state is LayerState.UNKNOWN
+    assert registered.detail == "connection_status_unreadable"
+    assert verified is not None and verified.state is LayerState.UNKNOWN
+    # The connection screens and header still read the unreadable state as plain "unknown".
+    assert await runtime.mcp_state(option) == "unknown"
+
+
 async def test_detect_reports_connected_when_the_second_installation_is_owned(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

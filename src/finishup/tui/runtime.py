@@ -804,10 +804,18 @@ class FinishUpRuntime:
 
         Only Codex registrations carry a legacy key FinishUP reads here; another host's Yoetz-era
         install is reported with its plugin layer instead, so its legacy value is ``none``.
+        An unreadable connection status raises, as an unreadable Codex registration does, so the
+        readiness layers say unknown instead of not configured.
         """
 
         if option.host != "codex":
-            return await self.mcp_state(option), "none"
+            state = await self.mcp_state(option)
+            if state == "unknown":
+                raise RuntimeError_(
+                    "connection_status_unreadable",
+                    "the agent connection status could not be read",
+                )
+            return state, "none"
         from finishup.adapters.integrations.codex_mcp import CodexMcpAdapter
         from finishup.application.harness_mcp import HarnessMcpService
         from finishup.ports.harness_mcp import McpRegistrationError

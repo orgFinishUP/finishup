@@ -140,8 +140,10 @@ Type `/` to open the filtered command list.
 
 ### `/status`
 
-Reports each readiness layer separately, because they can and do disagree. `D` opens the full
-list:
+Reports each readiness layer separately, because they can and do disagree. A layer whose fact
+could not be read is shown as unknown, never as not configured: when the agent's connection status
+cannot be read, MCP registered, MCP verified, and Guidance installed all say unknown. `D` opens the
+full list:
 
 ```text
 Harness detected                    Local service reachable
