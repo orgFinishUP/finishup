@@ -9007,7 +9007,11 @@ observed, and the SHA-256 of every file it would write. `apply_host_admission` r
 preview, rechecks each exact byte preimage immediately before mutation, and refuses `preview_stale`
 on pre-mutation drift. It writes each surface atomically (`0600`, created folder `0700`, file or
 folder link refused), deletes a file that held nothing but a FinishUP entry, and re-reads and
-verifies the resulting state. A mutating preview carries `host_config_not_compare_and_swap`:
+verifies the resulting state: a grant must leave the host `present`; a revoke must leave every
+surface it edited `absent` and every surface it left alone in its previewed state, so a Cursor
+revoke that removes the exact `.cursor/cli.json` entry beside a `foreign` `.cursor/permissions.json`
+rule succeeds with `state_after` `foreign` (and a sweep reports `removed` with the changed surface),
+never `write_failed`. A mutating preview carries `host_config_not_compare_and_swap`:
 ordinary host files cannot exclude a non-cooperating same-UID writer in the final syscall window,
 so callers must quiesce host configuration writers during apply; a conflict after an earlier
 surface changed is `write_failed`, not an atomic rollback claim. For Codex, an exact table belonging

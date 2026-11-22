@@ -1432,13 +1432,23 @@ def apply_host_admission(
         after = observe_host_admission(preview.host, root, owner=preview.owner)
     except HostAdmissionError as error:
         raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from error
-    expected_state = (
-        HostAdmissionState.PRESENT
-        if preview.requested_action is HostAdmissionAction.GRANT
-        else HostAdmissionState.ABSENT
-    )
-    if after.state is not expected_state:
-        raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED)
+    if preview.requested_action is HostAdmissionAction.GRANT:
+        if after.state is not HostAdmissionState.PRESENT:
+            raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED)
+    else:
+        # A revoke is verified per surface: every surface it edited is now ``absent``, and every
+        # surface it left alone still holds the state it was previewed in. On a host with more
+        # than one surface (Cursor), a foreign surface the revoke never edits keeps the combined
+        # state ``foreign``; that retained rule is the intended result, not a write failure.
+        before_by_surface = {entry.surface: entry.state for entry in fresh.entries}
+        for entry in after.entries:
+            expected_surface_state = (
+                HostAdmissionState.ABSENT
+                if entry.surface in fresh.files_after
+                else before_by_surface.get(entry.surface)
+            )
+            if entry.state is not expected_surface_state:
+                raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED)
     retiring = (
         preview.requested_action is HostAdmissionAction.REVOKE or preview.legacy_name == "unused"
     )

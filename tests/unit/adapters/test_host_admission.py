@@ -23,6 +23,7 @@ from finishup.adapters.integrations.host_admission import (
     CLAUDE_PLUGIN_CHECK_TOOL_NAME,
     CODEX_EXTERNAL_ADMISSION_TABLE,
     CODEX_PLUGIN_ADMISSION_TABLE,
+    CURSOR_CLI_EXTERNAL_ENTRY,
     CURSOR_CLI_PLUGIN_ENTRY,
     CURSOR_IDE_ENTRY,
     HostAdmissionAction,
@@ -773,6 +774,65 @@ def test_sweep_removes_exactly_finishup_entries_across_hosts_and_reports_each(
         "absent",
         "retained_foreign",
     ]
+
+
+def _cursor_exact_cli_entry_beside_foreign_ide_rule(root: Path) -> Path:
+    _write_json(root / ".cursor/permissions.json", {"mcpAllowlist": ["finishup:*"]})
+    cli = root / ".cursor/cli.json"
+    _write_json(cli, {"permissions": {"allow": [CURSOR_CLI_EXTERNAL_ENTRY]}})
+    return cli
+
+
+def test_cursor_revoke_beside_a_foreign_surface_removes_the_exact_entry_and_succeeds(
+    tmp_path: Path,
+) -> None:
+    cli = _cursor_exact_cli_entry_beside_foreign_ide_rule(tmp_path)
+    ide_before = (tmp_path / ".cursor/permissions.json").read_bytes()
+    preview = preview_host_admission(
+        "cursor", tmp_path, HostAdmissionAction.REVOKE, route_profile=None, grant_permits=None
+    )
+    assert preview.action is HostAdmissionAction.REVOKE
+    assert "foreign_entry_retained" in preview.warnings
+
+    result = apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+
+    assert result.action is HostAdmissionAction.REVOKE
+    assert result.surfaces_changed == (".cursor/cli.json",)
+    assert result.state_after is HostAdmissionState.FOREIGN
+    assert not cli.exists()
+    assert (tmp_path / ".cursor/permissions.json").read_bytes() == ide_before
+
+
+def test_cursor_sweep_beside_a_foreign_surface_reports_the_removal(tmp_path: Path) -> None:
+    cli = _cursor_exact_cli_entry_beside_foreign_ide_rule(tmp_path)
+
+    (outcome,) = sweep_host_admission(tmp_path, ("cursor",))
+
+    assert (outcome.outcome, outcome.surfaces_changed) == ("removed", (".cursor/cli.json",))
+    assert not cli.exists()
+    # Nothing of FinishUP's is left; the foreign rule is retained and reported as such.
+    assert sweep_host_admission(tmp_path, ("cursor",))[0].outcome == "retained_foreign"
+
+
+def test_cursor_revoke_beside_a_foreign_surface_fails_if_the_untouched_surface_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cursor_exact_cli_entry_beside_foreign_ide_rule(tmp_path)
+    preview = preview_host_admission(
+        "cursor", tmp_path, HostAdmissionAction.REVOKE, route_profile=None, grant_permits=None
+    )
+    original = module._delete_or_write  # pyright: ignore[reportPrivateUsage]
+
+    def write_then_admit_on_the_ide_surface(
+        path: Path, payload: bytes, *, expected_digest: str | None
+    ) -> None:
+        original(path, payload, expected_digest=expected_digest)
+        _write_json(tmp_path / ".cursor/permissions.json", {"mcpAllowlist": [CURSOR_IDE_ENTRY]})
+
+    monkeypatch.setattr(module, "_delete_or_write", write_then_admit_on_the_ide_surface)
+    with pytest.raises(HostAdmissionError) as failure:
+        apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+    assert failure.value.reason is HostAdmissionReason.WRITE_FAILED
 
 
 def test_sweep_with_no_owner_removes_both_codex_forms(tmp_path: Path) -> None:
