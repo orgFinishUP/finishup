@@ -1241,6 +1241,12 @@ _HIDDEN_EXECUTION_MARKERS: Final = ("$(", "`", "<(", ">(")
 # Separators after which the outer exit status no longer reports every command's result. ``&&``
 # and a subshell's parentheses keep it; ``|&`` and ``;;`` are reported as ``|`` and ``;``.
 _NESTED_STATUS_MASKING_SEPARATORS: Final = frozenset({";", "||", "|", "&", "\n"})
+# Programs that run a quoted argument as shell text. A quoted separator in their arguments can be
+# a real one that the quote-aware parse never descends into (``eval 'a; b'``, ``sudo bash -c
+# 'a; b'``, ``bash -c 'a; b' arg0``, a wrapper nested past the walk's depth), so when one is
+# present the raw text decides, with only fd redirections (``2>&1``, ``&> log``) set aside.
+_SHELL_TEXT_RUNNERS: Final = _SHELL_WRAPPERS | frozenset({"eval", "su", "runuser", "ssh", "watch"})
+_FD_REDIRECTION_RE: Final = re.compile(r"[0-9]*[<>]&(?:[0-9]+-?|-)?|&>>?", re.ASCII)
 
 
 def _compound_is_read_only(
@@ -1286,6 +1292,8 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
     ``compound_outcome_unavailable`` coverage gap. Separators are read quote-aware, at every
     wrapper depth: a redirection (``2>&1``, ``>&2``, ``&>``, ``&>> log``) or a separator inside
     quotes (``git commit -m 'a; b'``) leaves one exit status and is no masking shape (#1447).
+    A quoted separator still counts when a shell or ``eval`` could run that quoted text
+    (``_SHELL_TEXT_RUNNERS``): ``eval 'a; b'`` and ``sudo bash -c 'a; b'`` keep the gap.
     Output text is never inspected.
     """
 
@@ -1293,12 +1301,16 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
     if raw is None or not _is_shell_compound(raw):
         return False
     try:
-        shlex.split(raw, posix=True)
+        words = shlex.split(raw, posix=True)
     except ValueError:
         return True
     separators = command_separators(raw)
     if separators is None or separators & _NESTED_STATUS_MASKING_SEPARATORS:
         return True
+    if any(word.rsplit("/", 1)[-1] in _SHELL_TEXT_RUNNERS for word in words):
+        unredirected = _FD_REDIRECTION_RE.sub("", raw).replace("&&", "")
+        if any(marker in unredirected for marker in ("\n", ";", "|", "&")):
+            return True
     # Substitution runs a command whose status the outer one never reports; double quotes do not
     # stop it, so the raw text is searched (conservative for a single-quoted marker). A bare
     # carriage return, which the splitter keeps inside a word, stays a gap as it always was.

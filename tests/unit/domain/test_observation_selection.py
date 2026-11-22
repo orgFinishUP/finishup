@@ -490,3 +490,21 @@ def test_redirections_and_quoted_separators_hide_no_nested_status(command: str) 
 )
 def test_masking_shapes_keep_the_compound_gap(command: str) -> None:
     assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "eval 'pytest -q; true'",
+        "bash -c 'pytest -q; true' arg0",
+        "bash -l -c 'pytest -q || true'",
+        "sudo bash -c 'pytest -q; true'",
+        "timeout 60 sh -c 'pytest -q | tail'",
+        "xargs sh -c 'pytest -q; true'",
+        'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"pytest -q; true\\\\\\"\\"\'"',
+    ],
+)
+def test_a_quoted_separator_that_a_shell_runs_keeps_the_compound_gap(command: str) -> None:
+    """Quoted text a shell or ``eval`` runs is shell text, even where the walk does not reach it."""
+
+    assert compound_verification_gap_required({"command": command}) is True
