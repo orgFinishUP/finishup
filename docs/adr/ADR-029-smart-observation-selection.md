@@ -662,7 +662,8 @@ record that it had looked. The review packet cannot carry images, so the agent h
   `image/webp`, else `image/unknown`), and the pixel width and height read from the header only
   (PNG `IHDR`, JPEG `SOFn` with a bounded segment walk, GIF, WebP `VP8`/`VP8L`/`VP8X`). An
   unreadable or zero-size header is `image/unknown` with no dimensions. A string that does not
-  decode is not attested. The host's own media label never decides the type.
+  decode is not attested and does not count toward the 8, so the first 8 decodable images in
+  document order are recorded. The host's own media label never decides the type.
 - These facts travel as the closed structural `observed_images` member of a `PostToolUse`
   envelope (control-request 2.9.0, unreleased, additive in place): 1-8 objects with exactly
   `content_digest`, `byte_count`, `media_type`, and optionally both `width` and `height`. The

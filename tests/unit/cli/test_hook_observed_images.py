@@ -17,6 +17,7 @@ import uuid
 import zlib
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -28,6 +29,7 @@ from finishup.cli.hook_io import (
     OBSERVED_IMAGE_MEDIA_TYPES,
     image_header_facts,
     observed_image_facts,
+    read_cursor_hook_ingress,
     read_hook_ingress,
 )
 from finishup.cli.observe_hooks import handle_claude_observe, handle_cursor_observe, handle_observe
@@ -146,6 +148,57 @@ def test_at_most_eight_images_are_recorded() -> None:
         for index in range(12)
     ]
     assert len(observed_image_facts({"tool_response": blocks})) == MAX_OBSERVED_IMAGES
+
+
+def _undecodable_then_inline(inline: bytes) -> list[JsonValue]:
+    """URL-sourced image blocks (no decodable bytes) ahead of one inline image."""
+
+    blocks: list[JsonValue] = [
+        {"type": "input_image", "image_url": f"https://images.example.com/screens/shot-{i}.png"}
+        for i in range(MAX_OBSERVED_IMAGES)
+    ]
+    blocks.extend(
+        {"type": "image", "source": {"type": "url", "url": f"https://example.com/shot-{i}.png"}}
+        for i in range(MAX_OBSERVED_IMAGES)
+    )
+    blocks.append({"type": "input_image", "image_url": "data:image/png;base64," + _b64(inline)})
+    return blocks
+
+
+def test_undecodable_image_strings_do_not_use_up_the_image_limit() -> None:
+    inline = _png(3, 2)
+    facts = observed_image_facts({"tool_response": _undecodable_then_inline(inline)})
+    assert facts == [
+        {
+            "byte_count": len(inline),
+            "content_digest": "sha256:" + hashlib.sha256(inline).hexdigest(),
+            "media_type": "image/png",
+            "width": 3,
+            "height": 2,
+        }
+    ]
+
+
+@pytest.mark.parametrize("reader", [read_hook_ingress, read_cursor_hook_ingress])
+def test_every_ingress_records_an_inline_image_after_undecodable_ones(
+    reader: Callable[[bytes], tuple[object, bool]],
+) -> None:
+    inline = _png(3, 2)
+    body: dict[str, JsonValue] = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "s1",
+        "tool_name": "view_image",
+        "tool_input": {},
+        "tool_response": _undecodable_then_inline(inline),
+    }
+    payload, omitted = reader(json.dumps(body).encode())
+    assert omitted is False
+    assert isinstance(payload, dict)
+    facts = cast(dict[str, JsonValue], payload).get("observed_images")
+    assert isinstance(facts, list) and len(facts) == 1, facts
+    fact = facts[0]
+    assert isinstance(fact, dict)
+    assert fact["content_digest"] == "sha256:" + hashlib.sha256(inline).hexdigest()
 
 
 # --- per host, end to end through the hook and the materializer --------------------------------

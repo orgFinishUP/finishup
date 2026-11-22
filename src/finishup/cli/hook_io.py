@@ -820,12 +820,21 @@ def _inline_image_string(value: str) -> bool:
     return header.startswith("data:image/") and ";base64," in header
 
 
-def _image_strings(value: JsonValue, *, in_image: bool, found: list[str]) -> None:
+def _image_strings(value: JsonValue, *, in_image: bool, found: list[bytes]) -> None:
+    """Collect the decoded bytes of the first ``MAX_OBSERVED_IMAGES`` images, in document order.
+
+    The limit counts decoded images, not candidate strings: a candidate that does not decode (a
+    URL-sourced image block, say) is not an image and must not crowd out a later inline one.
+    Each string is decoded at most once, so the work stays linear in the bounded body size.
+    """
+
     if len(found) >= MAX_OBSERVED_IMAGES:
         return
     if type(value) is str:
         if (in_image and len(value) >= _MIN_IMAGE_STRING_CHARS) or _inline_image_string(value):
-            found.append(value)
+            decoded = _decode_image_string(value)
+            if decoded is not None:
+                found.append(decoded)
         return
     if isinstance(value, Mapping):
         mapping = cast(Mapping[str, JsonValue], value)
@@ -925,16 +934,14 @@ def observed_image_facts(payload: Mapping[str, JsonValue]) -> list[JsonValue]:
 
     An image is a decodable base64 string inside an image block (MCP and Claude ``image``,
     Responses ``input_image``, an object declaring an ``image/`` media type) or an image ``data:``
-    URL anywhere. A string that does not decode is not an image FinishUP can attest and is skipped.
+    URL anywhere. A string that does not decode is not an image FinishUP can attest and is skipped;
+    it does not count toward the limit, so the first ``MAX_OBSERVED_IMAGES`` decodable images win.
     """
 
-    found: list[str] = []
+    found: list[bytes] = []
     _image_strings(cast(JsonValue, payload), in_image=False, found=found)
     facts: list[JsonValue] = []
-    for text in found:
-        decoded = _decode_image_string(text)
-        if decoded is None:
-            continue
+    for decoded in found:
         media, width, height = image_header_facts(decoded)
         fact: dict[str, JsonValue] = {
             "byte_count": len(decoded),
