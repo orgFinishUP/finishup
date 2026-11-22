@@ -1414,6 +1414,28 @@ async def test_empty_native_refusals_do_not_count_as_content_reads(tmp_path: Pat
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("value", ("Zq9" * 30, "plainvalue"), ids=("redacted", "plain"))
+async def test_a_line_past_the_end_is_not_recorded_even_when_redaction_shortened_the_file(
+    tmp_path: Path, value: str
+) -> None:
+    # An over-size file is withheld before redaction, so a start line past the last line names
+    # a missing line, never a spent result budget, whether or not a value was replaced.
+    (tmp_path / "settings.yaml").write_text(f'password: "{value}"\nrole: admin\n')
+    loop, broker, _, _ = _setup(
+        _text("w1", "settings.yaml", 10, 2),
+        _FINAL,
+        roots=[ReadRoot("w1", str(tmp_path.resolve()))],
+        policy=replace(
+            with_llm(minimal_external_policy()), credential_heuristic=CredentialHeuristic.DISABLED
+        ),
+    )
+    (result,) = _observations((await loop.run()).history)
+    assert (result["status"], result["reason"]) == ("unavailable", "not_recorded")
+    assert "Correct the relative path/line" in cast(str, result["continuation"])
+    assert broker.content_reads == 0
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("static_admitted", [True, False])
 async def test_correction_metadata_is_admitted_and_never_contains_item_content(
     static_admitted: bool,

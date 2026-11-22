@@ -879,7 +879,9 @@ class ReviewerBroker:
         starts = [0, *(m.end() for m in re.finditer(b"\n", data))]
         first, last = args.start_line - 1, args.start_line - 1 + args.line_count
         if first >= len(starts) or starts[first] >= len(data):
-            return ("unavailable", "byte_budget" if size > len(data) else "not_recorded")
+            # An over-size file was withheld above, before redaction; a shorter redacted file
+            # still names a missing line, not a spent result budget.
+            return ("unavailable", "not_recorded")
         stop = starts[last] if last < len(starts) else len(data)
         try:
             data[starts[first] : stop].decode()
