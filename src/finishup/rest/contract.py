@@ -252,6 +252,7 @@ _REVISION_HEADER: Final = re.compile(
 )
 _AGENT_ID: Final = re.compile(r"^agt_[0-9a-f]{32}$", re.ASCII)
 _SHA256: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
+_REST_MAJOR: Final = re.compile(r"[0-9]{1,3}", re.ASCII)
 _CLIENT_KINDS: Final = frozenset(kind.value for kind in ControlClientKind)
 _HOST_PROFILES: Final = frozenset({"generic", "codex", "claude", "cursor"})
 _BINDINGS: Final = frozenset({"none", "client_claim"})
@@ -499,7 +500,7 @@ class Discovery:
             or not self.rest_majors
             or len(self.rest_majors) > 8
             or any(
-                type(item) is not str or not item.isdigit() or len(item) > 3
+                type(item) is not str or not _REST_MAJOR.fullmatch(item)
                 for item in self.rest_majors
             )
             or list(self.rest_majors) != sorted(set(self.rest_majors), key=int)

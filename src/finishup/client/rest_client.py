@@ -654,7 +654,9 @@ class RestTransport:
                     # Never followed: a redirect would carry the key elsewhere (design v2 §8.8).
                     raise RestUnavailable("remote_incompatible")
                 declared = response.headers.get("content-length")
-                if declared is not None and (not declared.isdigit() or int(declared) > limit):
+                if declared is not None and (
+                    not declared.isascii() or not declared.isdigit() or int(declared) > limit
+                ):
                     raise RestUnavailable("remote_incompatible")
                 chunks: list[bytes] = []
                 total = 0
