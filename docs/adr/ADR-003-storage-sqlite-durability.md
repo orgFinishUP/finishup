@@ -49,7 +49,13 @@ fault/contention matrix on both advertised platforms.
    consent authority, not by a Claude/Cursor content profile. Codex session-stream content remains
    on its separate path. Orphans are
    collectable after a 24 h safety window, never while referenced by a maintenance pin or an
-   outstanding capture ticket.
+   outstanding capture ticket. A retry that stages a reserved object id (such as a project
+   operation's persisted title or description id) does not wait out that window: a staging temp
+   for that id that no stage in the running service can still finalize is the remnant of a killed
+   attempt, and the retry removes it and writes a fresh one. A temp a live stage owns, or any entry
+   that is not a private regular file of the exact temp shape, still refuses the stage as
+   `object_destination_collision`. The service singleton lock is what rules out a second process
+   owning such a temp.
 7. **Backup/restore/migration:** online Backup API only (APSW destination-side `backup`);
    frontier-pinned manifests; restore into a quarantined new bundle then atomic catalog switch;
    canonical event bytes never rewritten by migration; newer unknown write-schema fails closed.
