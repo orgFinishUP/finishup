@@ -183,13 +183,15 @@ async def test_public_delegation_retries_every_phase_boundary_without_duplicates
 
         if boundary in {"lineage_reserved", "child_bundle_ready"}:
             original = cast(
-                Callable[[Application, DelegationOperation], Awaitable[None]],
+                Callable[[Application, DelegationOperation, object], Awaitable[None]],
                 start_module._provision_delegated_child,  # pyright: ignore[reportPrivateUsage]
             )
 
-            async def fail_at_bundle(app_arg: Application, operation: DelegationOperation) -> None:
+            async def fail_at_bundle(
+                app_arg: Application, operation: DelegationOperation, base_capture: object = None
+            ) -> None:
                 if boundary == "child_bundle_ready":
-                    await original(app_arg, operation)
+                    await original(app_arg, operation, base_capture)
                 raise RuntimeError(f"simulated_{boundary}")
 
             monkeypatch.setattr(start_module, "_provision_delegated_child", fail_at_bundle)

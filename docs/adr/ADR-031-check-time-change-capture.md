@@ -64,8 +64,8 @@ remains refused. The same seam supplies CLI, MCP, hook-triggered checks, TUI and
    the task route's own. Request bodies, environment variables and ambient discovery never select
    a directory.
 3. **The task base is the commit HEAD named when the task was created.** A `start` that creates a
-   task (including a delegated child) records it before its result returns, so no agent edit or
-   commit precedes it. An empty repository records the empty tree. The base is an encrypted
+   task (including a delegated child, in the child's own bundle, and a parent-registered child)
+   records it before its result returns, so no agent edit or commit precedes it. An empty repository records the empty tree. The base is an encrypted
    `change_capture` object; the task bundle keeps its pointer in `bundle_meta` and inventories the
    object as a root. Attach and resume never record a base, because a later base would silently
    hide the commits made in between. A task without one (created before this decision, or whose

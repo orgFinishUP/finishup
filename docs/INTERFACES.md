@@ -13038,7 +13038,10 @@ included), `changed_during_capture` (the working tree moved during every attempt
 is withheld whole), recorded as a bounded `semantic_composition/check_time_change_unavailable` (or
 `start/task_change_base_unavailable`) diagnostic and never as text.
 
-- **Base.** A `start` whose outcome is `created` or `delegated` records
+- **Base.** A `start` that creates a task records, in that task's own bundle, before its result
+  returns: a `created` start, a parent-registered child (outcome `attached`, its session opened by
+  that start), and a `delegated` child (in the child's bundle when it is provisioned, never the
+  parent's); a handle attach, reattach, resume or replay records none. It records
   `TaskChangeBase(object_format, commit)` (the empty tree for an unborn repository) as an encrypted
   `change_capture` object of media type `application/vnd.yoetz.task-change-base+json`, schema
   `yoetz.task-change-base/1`. A `task_start` base also carries the task-start snapshot of the
