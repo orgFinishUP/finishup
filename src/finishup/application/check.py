@@ -3045,7 +3045,7 @@ def _response_identity(
     assessment: DeterministicAssessment,
     fact_code: str,
 ) -> tuple[FindingBasisRef, ...] | None:
-    """Return the (finding, response event, admissible evidence) refs a response rule reported."""
+    """Return every (finding, response event, admissible evidence) ref a response rule reported."""
 
     for fact in assessment.basis.observed_facts:
         if fact.fact_code == fact_code:
@@ -3065,21 +3065,30 @@ def _collapse_response_overlap(
     re-deriving its predicate inside work-integrity -- means a research pack that was deselected,
     scope-excluded, skipped as unavailable, or that failed leaves the work-integrity finding
     standing instead of silently losing it.
+
+    Each rule reports every response on one subject together (#1453). The work-integrity finding
+    is dropped only when research-evidence reported every response it names on the same subject;
+    one stale or work-only response in the group keeps it standing.
     """
 
-    rejected = {
-        identity
-        for item in assessments
-        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION
-        and (identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)) is not None
-    }
+    rejected: dict[tuple[str, ...], frozenset[FindingBasisRef]] = {}
+    for item in assessments:
+        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION and (
+            identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)
+        ):
+            rejected[tuple(item.candidate.subject_refs)] = frozenset(identity)
     if not rejected:
         return assessments
+
+    def covered(item: DeterministicAssessment) -> bool:
+        reported = _response_identity(item, WORK_RESPONSE_PRESENT_FACT)
+        research = rejected.get(tuple(item.candidate.subject_refs))
+        return reported is not None and research is not None and research.issuperset(reported)
+
     return tuple(
         item
         for item in assessments
-        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE
-        or _response_identity(item, WORK_RESPONSE_PRESENT_FACT) not in rejected
+        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE or not covered(item)
     )
 
 

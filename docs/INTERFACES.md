@@ -1578,6 +1578,14 @@ composition layer resolves the overlap, dropping `weak_or_stale_response` only w
 `questionable_finding_rejection` was actually produced for the same finding and response event in
 the same run, so one response yields one actionable finding.
 
+Local findings of different rules can share a subject (a claim citing evidence captured at another
+tree draws both `evidence_does_not_support_claim` and `diff_does_not_match_account` on one
+subject), and a finding's identity is its policy, rule and subject. Each response rule therefore
+reports every qualifying response on one subject as one finding whose facts name each responded
+finding and response event; rejecting several findings on one subject never makes a pack fail. The
+collapse drops that `weak_or_stale_response` only when `questionable_finding_rejection` on the same
+subject names every response it reports; a stale or work-only response in the group keeps it.
+
 The collapse is keyed on the assessment research-evidence really emitted, not on re-deriving its
 predicate. When that pack is deselected via `policy_packs`, excluded by scope, skipped as
 materially unavailable, or fails, `weak_or_stale_response` stands, so a hollow rejection is never

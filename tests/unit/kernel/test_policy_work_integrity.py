@@ -47,12 +47,14 @@ from finishup.domain.events import (
     ResultRecordedPayload,
 )
 from finishup.domain.findings import (
+    FINDING_KIND_TRAITS,
     Finding,
     FindingKind,
     FindingOrigin,
     SamplingParams,
     SemanticDispatchKind,
     SemanticProvenance,
+    WaiverScope,
 )
 from finishup.domain.values import (
     SubjectStateRef,
@@ -1081,6 +1083,64 @@ def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
         coverage_overrides={evd(1): legacy_unknown},
     )
     assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(work_only_gap)
+
+
+def test_weak_responses_to_findings_sharing_a_subject_yield_one_finding() -> None:
+    """Two local findings of different rules can name one subject; rejecting both hollowly must not
+    make the pack fail. The rule reports that subject once and names every response it covers."""
+
+    first = _recorded_finding()
+    second = replace(
+        first,
+        finding_id=fnd(2),
+        kind=FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        priority=FINDING_KIND_TRAITS[FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE][0],
+    )
+    hollow = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.REJECTED,
+        reason="Rejected",
+    )
+    stale = replace(
+        hollow,
+        finding_id=fnd(2),
+        disposition=ResponseDisposition.WAIVED,
+        waiver_scope=WaiverScope.FINDING_ONLY,
+        finding_frontier=replace(FRONTIER, sequence=FRONTIER.sequence - 1),
+    )
+    case = make_case(
+        findings={fnd(1): record(first, 1), fnd(2): record(second, 2)},
+        responses={fnd(1): record(hollow, 3), fnd(2): record(stale, 4)},
+        extra_refs=(evt(99),),
+    )
+
+    result = run_deterministic_policies(case, WORK_INTEGRITY_POLICY_PACK)
+    responses = [
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.WEAK_OR_STALE_RESPONSE
+    ]
+    assert len(responses) == 1
+    basis = responses[0].basis
+    observed = {fact.fact_code: fact.subject_refs for fact in basis.observed_facts}
+    missing = {fact.fact_code: fact.subject_refs for fact in basis.required_but_missing_facts}
+    first_event = case.projection.responses[fnd(1)].source_event_id
+    second_event = case.projection.responses[fnd(2)].source_event_id
+    assert set(observed["finding_response_present"]) == {
+        fnd(1),
+        fnd(2),
+        first_event,
+        second_event,
+    }
+    # Staleness stays attributed to the response it describes.
+    assert set(observed["response_state_stale"]) == {fnd(2), second_event}
+    assert set(missing["response_basis_insufficient"]) == {
+        fnd(1),
+        fnd(2),
+        first_event,
+        second_event,
+    }
 
 
 def test_provenance_dispute_does_not_trigger_weak_response_penalty() -> None:
