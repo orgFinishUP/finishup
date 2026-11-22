@@ -766,7 +766,7 @@ class FinishUpTui(App[int]):
         assert option is not None
         assert codex_home is not None
         # ADR-049: every answer registers the policy route; the privacy policy decides egress.
-        if not await self._connect(option, codex_home, "policy"):
+        if not await self._connect(option, codex_home, "policy", setting_up=detection):
             return
         await self._choose_storage(detection)
         await self._run_initial_review(review, connected=True, option=option, codex_home=codex_home)
@@ -1247,14 +1247,22 @@ class FinishUpTui(App[int]):
         option: HarnessOption,
         codex_home: Path,
         route_profile: Literal["policy", "strict"] | None = None,
+        *,
+        setting_up: Detection | None = None,
     ) -> bool:
+        """Connect Codex; ``setting_up`` carries first run's detection while first run is open.
+
+        A refused foreign entry returns False; when first run continues locally from it,
+        ``_handle_foreign_entry`` finishes first run there.
+        """
+
         try:
             plan = await self.runtime.integration_plan(option, codex_home, route_profile)
         except RuntimeError_ as error:
             self._report(error)
             return False
         if plan.foreign_entry:
-            await self._handle_foreign_entry(option)
+            await self._handle_foreign_entry(option, setting_up=setting_up)
             return False
         if plan.legacy_registration_route_conflict:
             # The owned ``yoetz`` entry a project still needs stays beside ``finishup`` and
@@ -1295,7 +1303,7 @@ class FinishUpTui(App[int]):
         if not await self._approve_plan(plan):
             self.say(Level.OPTIONAL, "This project was left unchanged.")
             return False
-        return await self._apply_plan(option, plan)
+        return await self._apply_plan(option, plan, setting_up=setting_up)
 
     async def _approve_plan(self, plan: IntegrationPlan) -> bool:
         view = ApprovalView(
@@ -1309,7 +1317,13 @@ class FinishUpTui(App[int]):
         view.technical_details = render_integration_technical_details(plan, self.body_width)
         return await self.ask(view) == "approve"
 
-    async def _apply_plan(self, option: HarnessOption, plan: IntegrationPlan) -> bool:
+    async def _apply_plan(
+        self,
+        option: HarnessOption,
+        plan: IntegrationPlan,
+        *,
+        setting_up: Detection | None = None,
+    ) -> bool:
         self.say(Level.ACTIVE, "Connecting FinishUP (esc to interrupt)")
         try:
             outcome = await self.runtime.apply_integration(option, plan)
@@ -1317,7 +1331,7 @@ class FinishUpTui(App[int]):
             self.settle(Level.BLOCKED, error.message, (f"Reason: {error.reason}",))
             return False
         if outcome.foreign_entry:
-            await self._handle_foreign_entry(option)
+            await self._handle_foreign_entry(option, setting_up=setting_up)
             return False
         lines = render_layers(outcome.layers, self.body_width)
         blocked = [layer for layer in outcome.layers if layer.state is LayerState.BLOCKED]
@@ -1343,7 +1357,18 @@ class FinishUpTui(App[int]):
         )
         return True
 
-    async def _handle_foreign_entry(self, option: HarnessOption) -> None:
+    async def _handle_foreign_entry(
+        self, option: HarnessOption, *, setting_up: Detection | None = None
+    ) -> None:
+        """Refuse a ``finishup`` MCP entry FinishUP does not own, and offer the ways on.
+
+        During first run (``setting_up``), continuing locally ends first run the way every
+        local-only finish does: storage first (#1119), then the recorded "local checks only"
+        answer (ADR-049), and the setup marker only over that recorded answer. The review answer
+        asked before the connection is superseded by this explicit local-only choice. After
+        setup, continuing locally changes nothing: the marker and policy already recorded stay.
+        """
+
         detail = await self.runtime.foreign_entry_detail(option)
         self.say(
             Level.BLOCKED,
@@ -1357,7 +1382,13 @@ class FinishUpTui(App[int]):
                     name="foreign",
                     options=[
                         Option("show", "Show the existing connection"),
-                        Option("local", "Continue with local FinishUP only"),
+                        Option(
+                            "local",
+                            "Continue with local FinishUP only",
+                            "Records local checks only and completes setup."
+                            if setting_up is not None
+                            else "",
+                        ),
                         Option("manual", "Show manual resolution instructions"),
                         Option("exit", "Exit"),
                     ],
@@ -1395,7 +1426,15 @@ class FinishUpTui(App[int]):
                 )
                 continue
             if choice == "local":
-                await self._finish_setup(connected=False)
+                if setting_up is not None:
+                    await self._choose_storage(setting_up)
+                    await self._run_initial_review("local_only", connected=False)
+                else:
+                    self.say(
+                        Level.OPTIONAL,
+                        "FinishUP keeps working locally",
+                        ("/check and /receipt work without the Codex integration.",),
+                    )
             return
 
     async def _choose_storage(self, detection: Detection) -> None:

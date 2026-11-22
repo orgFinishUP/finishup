@@ -109,7 +109,10 @@ finish; if they do not, it offers to finish as local only.
 
 If an MCP entry named `finishup` already exists and FinishUP does not own it, setup stops there. You can
 inspect it, continue locally, or read manual resolution steps. **There is no force-replace option
-and there will not be one.**
+and there will not be one.** Continuing locally during first-run setup finishes it as local only,
+the same way as choosing local only: storage is set up, local checks only is recorded in the
+privacy policy, and setup is marked complete only once that is recorded. From `/connect` on an
+installation that is already set up, continuing locally changes nothing that was already set up.
 
 ## Commands
 
