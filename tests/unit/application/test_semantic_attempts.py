@@ -1966,6 +1966,45 @@ def test_final_status_keeps_the_honest_invalid_after_a_spent_repair() -> None:
     ) == (SemanticStatus.UNAVAILABLE, SemanticReason.RETRY_BUDGET_EXHAUSTED)
 
 
+_NEVER_RETRY_TERMINALS = (
+    (SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED),
+    (SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID),
+    (SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+)
+
+
+@pytest.mark.parametrize("terminal", _NEVER_RETRY_TERMINALS, ids=lambda t: t[1].value)
+def test_final_status_keeps_a_never_retry_reason_on_the_last_slot(
+    terminal: tuple[SemanticStatus, SemanticReason],
+) -> None:
+    for attempts, retries in ((1, 0), (2, 1), (3, 2), (2, 2)):
+        assert (
+            final_status_after_exhaustion(
+                *terminal, attempts_completed=attempts, max_retries=retries
+            )
+            == terminal
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("terminal", _NEVER_RETRY_TERMINALS, ids=lambda t: t[1].value)
+@pytest.mark.parametrize("max_retries", [1, 2])
+async def test_a_never_retry_answer_on_the_last_slot_keeps_its_own_reason(
+    terminal: tuple[SemanticStatus, SemanticReason], max_retries: int
+) -> None:
+    # Transient faults spend every slot but the last; the last attempt then ends on a class
+    # that never retries. Its own reason is the honest terminal, not budget exhaustion.
+    ledger = _FakeLedger(_queued_job(), _lease())
+    transient = [_Eval(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)] * max_retries
+    status, reason, accounting = await _run(
+        ledger, [*transient, _Eval(*terminal)], max_retries=max_retries
+    )
+    assert accounting.attempted_count == max_retries + 1
+    assert (status, reason) == terminal
+    assert ledger.job.state == "failed"
+    assert ledger.job.terminal_code is terminal[1]
+
+
 @pytest.mark.anyio
 async def test_zero_retry_invalid_is_terminal_after_exactly_one_attempt() -> None:
     ledger = _FakeLedger(_queued_job(), _lease())

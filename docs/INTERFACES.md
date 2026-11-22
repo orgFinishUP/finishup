@@ -2614,7 +2614,9 @@ closed as `expired` with that terminal code so it stays in accounting, and a sec
 rows (`repair_retries_from_rows`), not coordinator memory, so it survives an `awaiting_human`
 replay. `response_schema_invalid`, `semantic_judgment_rejected`, policy blocks, human denial, secret
 detection, invalid case, stale frontier, refusal, quota exhaustion, and exhausted authority never
-retry. `confirm_every_request` requires a fresh foreground decision per physical attempt, the repair
+retry, and each keeps its own status and reason even when it ends the attempt on the last slot of
+the budget: `unavailable / retry_budget_exhausted` is reported only when a retriable last outcome
+uses up the budget. `confirm_every_request` requires a fresh foreground decision per physical attempt, the repair
 attempt included. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason
 counts, `exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
 `list_semantic_attempts` — not from memory-only coordinator state. When `enqueue_semantic_job`

@@ -627,16 +627,17 @@ def final_status_after_exhaustion(
 
     A single physical attempt that fails with a retriable class keeps its exact reason
     (``max_retries=0``). Exhaustion after using the full budget surfaces
-    ``unavailable/retry_budget_exhausted``. A repair-class last outcome is a real provider
-    answer, not transport exhaustion: it keeps ``invalid/response_content_invalid`` however many
-    attempts preceded it, so a second invalid answer reads as what it was.
+    ``unavailable/retry_budget_exhausted`` only when the last outcome is itself retriable: that
+    is the one case where the budget, not the answer, ended the job. A repair-class last outcome
+    is a real provider answer, not transport exhaustion: it keeps
+    ``invalid/response_content_invalid`` however many attempts preceded it, so a second invalid
+    answer reads as what it was. A never-retry class (refusal, schema-invalid answer, human
+    denial, and the like) likewise keeps its own reason even when it lands on the last slot.
     """
 
     if is_repairable_semantic_outcome(last_status, last_reason):
         return last_status, last_reason
     budget = physical_attempt_budget(max_retries)
-    if attempts_completed >= budget and attempts_completed > 1:
-        return SemanticStatus.UNAVAILABLE, SemanticReason.RETRY_BUDGET_EXHAUSTED
     if (
         attempts_completed >= budget
         and is_retriable_semantic_outcome(last_status, last_reason)
