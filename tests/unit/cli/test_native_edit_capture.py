@@ -418,6 +418,25 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
     assert b"{user}" not in content
 
 
+def test_cursor_after_file_edit_under_a_differently_folded_root_is_never_mis_sliced(
+    tmp_path: Path,
+) -> None:
+    # Full Unicode case folding turns "ß" into "ss", so a slice at the folded root's length
+    # would cut into the path; NTFS keeps "Straße" and "STRASSE" as different names.
+    workspace = "/mnt/c/Users/{user}/STRASSE"
+    payload = _cursor(
+        "afterFileEdit",
+        workspace,
+        file_path="C:\\Users\\{user}\\Straße\\src\\module.py",
+        edits=[{"old_string": "validate(request)", "new_string": "planted_bug(request)"}],
+    )
+    content = dict(_chunks("PostToolUse", payload, tmp_path, source=_CURSOR, workspace=workspace))[
+        ObservationContentKind.CHANGED_FILE
+    ]
+    assert b'"path":"<outside-workspace>"' in content and b"planted_bug" in content
+    assert b"{user}" not in content and "Straße".encode() not in content
+
+
 # --- Path privacy matrix ------------------------------------------------------------------
 
 
@@ -443,6 +462,14 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
         ("/mnt/c/Users/{user}/proj", "D:\\Users\\{user}\\proj\\a.py", None),
         ("/mnt/c/Users/{user}/proj", "C:relative.py", None),
         ("C:\\Users\\{user}\\proj", "/mnt/c/Users/{user}/proj/src/a.py", "src/a.py"),
+        # Case-insensitive keys fold character by character, so a fold that changes length
+        # ("ß" to "ss", "İ" to "i̇", a ligature) never matches and never shifts the slice.
+        ("/mnt/c/Users/{user}/STRASSE", "C:\\Users\\{user}\\Straße\\src\\x.py", None),
+        ("/mnt/c/Users/{user}/Straße", "C:\\Users\\{user}\\STRASSE\\src\\x.py", None),
+        ("/mnt/c/Users/{user}/Straße", "c:/users/{USER}/straße/src/x.py", "src/x.py"),
+        ("/mnt/c/Users/{user}/İzmir", "/mnt/c/Users/{user}/i̇zmir/src/x.py", None),
+        ("/mnt/c/Users/{user}/office", "/mnt/c/Users/{user}/oﬃce/src/x.py", None),
+        ("//server/share/ÄRGER", "\\\\server\\share\\ärger\\src\\x.py", "src/x.py"),
         # UNC shares (for example \\wsl$ or a network workspace).
         ("//server/share/proj", "\\\\server\\share\\proj\\src\\a.py", "src/a.py"),
         ("//server/share/proj", "\\\\other\\share\\proj\\a.py", None),

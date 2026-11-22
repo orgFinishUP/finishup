@@ -2250,7 +2250,8 @@ home-relative or drive-relative locator, or any `..` path is replaced by `<outsi
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
 (`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
-case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+case-insensitively one character at a time, as NTFS does (`ß` never matches `SS`), and no
+filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 

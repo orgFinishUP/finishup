@@ -1867,7 +1867,8 @@ def _absolute_path_key(value: str) -> tuple[str, bool] | None:
 
     POSIX/macOS paths stay case-sensitive. Windows drive paths (``C:\\x``/``C:/x``) are keyed
     in their WSL 2 ``/mnt/c/x`` spelling so that a Windows-side and a WSL-side locator for the
-    same file compare equal; drive, WSL-mount and UNC keys compare case-insensitively.
+    same file compare equal; drive, WSL-mount and UNC keys compare case-insensitively, one
+    character at a time (``_fold_path_key``).
     """
 
     text = value.replace("\\", "/")
@@ -1882,6 +1883,22 @@ def _absolute_path_key(value: str) -> tuple[str, bool] | None:
     if text.startswith(("/", "~")) or _WINDOWS_DRIVE_RELATIVE.match(text):
         return text, False
     return None
+
+
+def _fold_char(char: str) -> str:
+    upper = char.upper()
+    return upper if len(upper) == 1 else char
+
+
+def _fold_path_key(key: str) -> str:
+    """Fold a case-insensitive path key one character at a time, keeping its length.
+
+    Like the NTFS upcase table, each character maps to exactly one character, so "ß" never
+    becomes "SS" and a ligature never expands: a folded prefix always has the length of the
+    unfolded one, and a name NTFS tells apart never compares equal.
+    """
+
+    return "".join(_fold_char(char) for char in key)
 
 
 def _hook_runtime_facts(
@@ -2019,8 +2036,8 @@ def workspace_relative_edit_path(value: str, workspace_locator: str | None) -> s
         root_key, root_folds = root
         root_key = root_key.rstrip("/")
         folds = path_folds or root_folds
-        compare_path = path_key.casefold() if folds else path_key
-        compare_root = root_key.casefold() if folds else root_key
+        compare_path = _fold_path_key(path_key) if folds else path_key
+        compare_root = _fold_path_key(root_key) if folds else root_key
         if not root_key or not compare_path.startswith(compare_root + "/"):
             return None
         relative = path_key[len(root_key) + 1 :]
