@@ -52,14 +52,23 @@ def _to_json(value: object) -> object:
     raise TypeError("privacy_desired_value_invalid")
 
 
+# TOML basic strings may not carry a raw control character (U+0000-U+001F, U+007F), but the
+# loader accepts one spelled as an escape; spell every one back as an escape so a loaded value
+# always renders to a loadable file.
+_TOML_BASIC_ESCAPES: Final = str.maketrans(
+    {
+        **{code: f"\\u{code:04X}" for code in (*range(0x20), 0x7F)},
+        ord("\\"): "\\\\",
+        ord('"'): '\\"',
+        ord("\n"): "\\n",
+        ord("\r"): "\\r",
+        ord("\t"): "\\t",
+    }
+)
+
+
 def _escape_basic(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
+    return value.translate(_TOML_BASIC_ESCAPES)
 
 
 def render_privacy_desired_toml(policy: PrivacyPolicy) -> str:

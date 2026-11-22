@@ -6,6 +6,7 @@ import fcntl
 import os
 import stat
 import tempfile
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -476,14 +477,23 @@ def _codex_review_budget_fields(runtime: ExternalRuntimeProfileConfig) -> dict[s
     return fields
 
 
+# TOML basic strings may not carry a raw control character (U+0000-U+001F, U+007F), but the
+# loader accepts one spelled as an escape; spell every one back as an escape so a loaded value
+# always renders to a loadable file.
+_TOML_BASIC_ESCAPES: Final = str.maketrans(
+    {
+        **{code: f"\\u{code:04X}" for code in (*range(0x20), 0x7F)},
+        ord("\\"): "\\\\",
+        ord('"'): '\\"',
+        ord("\n"): "\\n",
+        ord("\r"): "\\r",
+        ord("\t"): "\\t",
+    }
+)
+
+
 def _escape_basic(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
+    return value.translate(_TOML_BASIC_ESCAPES)
 
 
 def _toml_str(value: str) -> str:
@@ -670,8 +680,13 @@ def render_config_toml(config: FinishUpConfig) -> str:
     text = "\n".join(lines).rstrip() + "\n"
     # Round-trip through the canonical loader rule, not raw strict validation: a rendered
     # ``storage.data_dir`` is file-shape (a string) and only the loader's normalization makes
-    # the written file provably loadable (#520).
-    validate_config_mapping(load_toml_text(text))
+    # the written file provably loadable (#520). A render the parser rejects is a bounded
+    # ConfigError: the parser's message carries the offending character and its position.
+    try:
+        parsed = load_toml_text(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError("config_value_invalid") from exc
+    validate_config_mapping(parsed)
     return text
 
 
