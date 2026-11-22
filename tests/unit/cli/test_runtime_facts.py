@@ -419,6 +419,34 @@ def test_install_target_fact_is_closed_token_only(env: dict[str, Path], tmp_path
     assert "secret-pkg" not in repr(facts)
 
 
+@pytest.mark.parametrize("shell", ["bash", "/bin/bash"])
+@pytest.mark.parametrize("tool", ["shell", "local_shell"])
+@pytest.mark.parametrize("workspace_known", [True, False])
+def test_a_native_argv_install_is_read_from_its_script(
+    env: dict[str, Path], shell: str, tool: str, workspace_known: bool
+) -> None:
+    """A Codex ``shell`` hook states ``["bash", "-lc", SCRIPT]``; its install target is the
+    script's, the one its session-stream copy (handed that script) carries (#1435)."""
+
+    script = f"{env['private'] / 'bin' / 'pip'} install x"
+    locator = str(env["workspace"]) if workspace_known else None
+
+    def facts(tool_name: str, command: JsonValue) -> dict[str, JsonValue]:
+        return dict(
+            runtime_structural_facts(
+                {"tool_input": {"command": command}},
+                tool_name=tool_name,
+                workspace_locator=locator,
+                inside=_inside(env["workspace"]),
+            )
+        )
+
+    hook = facts(tool, [shell, "-lc", script])
+    stream = facts("Bash", script)
+    assert stream["install_target"] == "private_env"
+    assert hook["install_target"] == stream["install_target"]
+
+
 def test_quoted_text_and_heredoc_bodies_are_not_write_targets(tmp_path: Path) -> None:
     """The hook entry point reads the one shared parser (``domain.shell_writes``), and the
     classifier that parser feeds decides every written path, outside ones included."""

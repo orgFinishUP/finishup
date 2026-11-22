@@ -4178,7 +4178,8 @@ Host decisions for Codex; the shared classifier parts apply to Claude Code and C
   missing user fact never stands for its opposite: `verification_only_as_root` is decided over the
   verification runs that state a user and, when none does, over the commands that do. A completed
   `CommandExecution` item records an argv (`["/bin/bash", "-lc", CMD]`); its writes and heredoc
-  patch paths are read from that script, however long. A call whose row was written but which
+  patch paths are read from that script, however long. A legacy `shell` hook states the same argv
+  shape, and its install target is read from that script too, as its stream copy's is (#1435). A call whose row was written but which
   Codex never ran (an interrupted turn, a declined approval) still counts as a verification run
   with an unknown outcome, as a declined `PreToolUse` already did (gap kept; follow-up is the
   #1106 owner's). Supported.

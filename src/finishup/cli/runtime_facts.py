@@ -446,7 +446,19 @@ def runtime_structural_facts(
     command = _raw_command(tool_input)
     if command is None:
         return facts
-    target = install_target_class(command, workspace_locator)
+    # A native argv is read as its script (``["bash", "-lc", SCRIPT]``), by the install reader
+    # and the write reader alike, exactly as its session-stream copy is handed that script: the
+    # joined argv shows only ``bash`` to the install reader (#1435), and a heredoc patch longer
+    # than the token parsers' bound is still named (#1106 r2).
+    script = next(
+        (
+            text
+            for key in _COMMAND_KEYS
+            if (text := shell_command_text(tool_input.get(key))) is not None and text
+        ),
+        command,
+    )
+    target = install_target_class(script, workspace_locator)
     if target is not None:
         facts["install_target"] = target
     if workspace_locator is not None:
@@ -457,16 +469,6 @@ def runtime_structural_facts(
         # headers name (#1046 review, n7 RC2): no shell token shows them, and for an intercepted
         # ``apply_patch`` Codex fires only this pre-event, so this token is the only record that
         # it changed the work.
-        # A native argv is read as its script (``["bash", "-lc", SCRIPT]``), so a heredoc patch
-        # longer than the token parsers' bound is still named (#1106 r2).
-        script = next(
-            (
-                text
-                for key in _COMMAND_KEYS
-                if (text := shell_command_text(tool_input.get(key))) is not None and text
-            ),
-            command,
-        )
         start, relocated = _working_directory(
             working_directory if working_directory is not None else payload.get("cwd"),
             workspace_locator,
