@@ -10689,6 +10689,13 @@ facade and are never MCP tools.
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
 - `config/write.py` / `config/privacy_desired.py`: atomic nonsecret TOML writers and privacy
   desired-state export/apply classification (widen never silent).
+- `config/toml_text.py`: `load_toml_text()`, the one TOML parse every reader uses. Any document
+  `tomllib` cannot load raises `tomllib.TOMLDecodeError` (`TomlNotLoadable` for an integer past
+  the integer string conversion limit or deep inline nesting, which `tomllib` reports as
+  `ValueError`/`RecursionError`; it carries no message from the document and no position).
+  Each reader therefore keeps its own closed invalid-TOML outcome (`config_toml_invalid`,
+  `not_valid_toml`, `unknown`, `file_invalid`, `source_invalid`,
+  `invalid_approved_check_policy`) for every such file (issue #1484).
 - `config/paths.py`: platformdirs-based `bundle_root()`, `catalog_path()`, path safety checks
   (rejects repo/sync/network/world-readable locations). Ambient roots use one application name for
   every root: `finishup`, or `yoetz` for a Yoetz-era installation adopted in place

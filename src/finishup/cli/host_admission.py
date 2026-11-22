@@ -32,6 +32,7 @@ from finishup.adapters.integrations.host_admission import (
     preview_host_admission,
     sweep_host_admission,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.protocol.canonical import JsonValue, canonical_encode
 
 __all__ = [
@@ -301,7 +302,7 @@ def _codex_config_enables_legacy_plugin(path: Path) -> bool | None:
     if len(raw) > _MAX_CODEX_CONFIG_BYTES:
         return None
     try:
-        parsed = tomllib.loads(raw.decode("utf-8"))
+        parsed = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError):
         return None
     plugins = parsed.get("plugins")

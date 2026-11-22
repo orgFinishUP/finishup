@@ -14,6 +14,7 @@ from finishup.adapters.approved_checks import (
     ApprovedCheckApproval,
     approval_commitment,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.legacy_names import LEGACY_REPOSITORY_DIRECTORY, REPOSITORY_DIRECTORY
 from finishup.protocol.errors import ProtocolValueError
 
@@ -100,7 +101,7 @@ def parse_observation_check_policy(raw: bytes) -> ObservationCheckPolicy:
 
     digest = raw_policy_digest(raw)
     try:
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ProtocolValueError("invalid_approved_check_policy") from exc
     if set(document) != {"format", "checks"} or document.get("format") != CHECK_POLICY_FORMAT:

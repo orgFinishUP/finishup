@@ -48,6 +48,7 @@ from finishup.config.foreign_write import (
     superuser_owned,
     writable_by_others,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.protocol.canonical import (
     JsonValue,
     ProtocolValueError,
@@ -696,7 +697,7 @@ def _observe_codex(read: _Read, owner: McpOwnerForm | None) -> HostAdmissionEntr
     if read.raw is None:
         return HostAdmissionEntry(surface, HostAdmissionState.ABSENT, expected, None, None)
     try:
-        parsed = tomllib.loads(read.raw.decode("utf-8"))
+        parsed = load_toml_text(read.raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError):
         return _unknown(surface, expected, "file_invalid")
     digest = read.digest
@@ -789,7 +790,7 @@ def _codex_after(read: _Read, *, add: bool, owner: McpOwnerForm | None) -> bytes
             return None
         merged = append_table_block(raw, table)
         try:
-            tomllib.loads(merged.decode("utf-8"))
+            load_toml_text(merged.decode("utf-8"))
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             # Legal owner TOML (an inline ``mcp_servers = {}``) can make the appended header a
             # re-declaration; refuse at plan time rather than write a file Codex cannot parse.

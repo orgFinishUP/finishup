@@ -1084,3 +1084,21 @@ def test_the_observed_legacy_use_is_bound_into_the_preview_digest(tmp_path: Path
             legacy_name="maybe",  # type: ignore[arg-type]
         )
     assert caught.value.reason is HostAdmissionReason.HOST_INVALID
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"x = " + b"1" * 4301 + b"\n", b"x = " + b"[" * 5000 + b"]" * 5000 + b"\n"],
+    ids=["huge_int", "deep"],
+)
+def test_codex_toml_tomllib_cannot_load_is_unknown(tmp_path: Path, body: bytes) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_bytes(body)
+    observation = observe_host_admission("codex", tmp_path)
+    assert observation.state is HostAdmissionState.UNKNOWN
+    assert observation.entries[0].detail == "file_invalid"
+    assert sweep_host_admission(tmp_path, ("codex",))[0].outcome == "unknown"
+    assert config.read_bytes() == body

@@ -205,3 +205,16 @@ def test_a_policy_fifo_never_blocks_the_reader(
     expected = ObservationCheckPolicyAmbiguous if other_present else ProtocolValueError
     with pytest.raises(expected):
         load_observation_check_policy(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"x = " + b"1" * 4301 + b"\n", b"x = " + b"[" * 5000 + b"]" * 5000 + b"\n"],
+    ids=["huge_int", "deep"],
+)
+def test_policy_tomllib_cannot_load_is_invalid(body: bytes) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    with pytest.raises(ProtocolValueError) as caught:
+        parse_observation_check_policy(body)
+    assert caught.value.reason_code == "invalid_approved_check_policy"

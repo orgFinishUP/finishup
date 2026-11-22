@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from finishup.config.models import ConfigError
+from finishup.config.toml_text import load_toml_text
 from finishup.domain.privacy import PrivacyPolicy, policy_field_omitted
 from finishup.domain.values import format_rfc3339_millis
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
@@ -91,7 +92,7 @@ def load_privacy_desired_canonical(path: Path) -> bytes:
     """Load desired-state TOML and return the embedded canonical policy JSON bytes."""
 
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw = load_toml_text(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("config_value_invalid") from exc
     if raw.get("schema") != PRIVACY_DESIRED_SCHEMA:

@@ -716,3 +716,18 @@ def test_disagreeing_codex_readings_cannot_grant_without_a_selector(
     assert "--codex-path <exact-codex-executable>" in err
     assert str(tmp_path) not in out + err
     assert not (tmp_path / ".codex").exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["x = " + "1" * 4301 + "\n", "x = " + "[" * 5000 + "]" * 5000 + "\n"],
+    ids=["huge_int", "deep"],
+)
+def test_an_unloadable_codex_config_leaves_the_legacy_plugin_activation_unread(
+    tmp_path: Path, body: str
+) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    config = tmp_path / "config.toml"
+    config.write_text(body, encoding="utf-8")
+    assert module._codex_config_enables_legacy_plugin(config) is None  # pyright: ignore[reportPrivateUsage]

@@ -6,7 +6,6 @@ import fcntl
 import os
 import stat
 import tempfile
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +30,7 @@ from finishup.config.models import (
 )
 from finishup.config.paths import PathSafetyError, config_file_path, ensure_owner_only_dir
 from finishup.config.privacy import safe_privacy_bootstrap
+from finishup.config.toml_text import load_toml_text
 
 __all__ = [
     "PROVIDER_PRESETS",
@@ -671,7 +671,7 @@ def render_config_toml(config: FinishUpConfig) -> str:
     # Round-trip through the canonical loader rule, not raw strict validation: a rendered
     # ``storage.data_dir`` is file-shape (a string) and only the loader's normalization makes
     # the written file provably loadable (#520).
-    validate_config_mapping(tomllib.loads(text))
+    validate_config_mapping(load_toml_text(text))
     return text
 
 
