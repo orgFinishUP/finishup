@@ -47,7 +47,12 @@ from finishup.application.reviewer_loop import (
     Turn,
 )
 from finishup.application.reviewer_telemetry import read_usage_from_wire
-from finishup.domain.privacy import AuthorizationScope, AuthorizationScopeKind, PrivacyPolicy
+from finishup.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
+    CredentialHeuristic,
+    PrivacyPolicy,
+)
 from finishup.ports.change_capture import SnapshotFile, TaskInputSnapshotSet
 from finishup.ports.privacy import (
     OutboundGatewayPort,
@@ -1615,3 +1620,61 @@ def test_every_read_reason_the_service_issues_keeps_its_usage_row() -> None:
             "reason": reason,
         }
         assert read_usage_from_wire([row]) is not None, reason
+
+
+@pytest.mark.anyio
+async def test_a_packet_continuation_past_the_raw_length_reads_the_redacted_tail() -> None:
+    # A record's spans are offsets into its redacted text. With the heuristic disabled, short
+    # flagged values become the longer placeholder, so a continuation can lie past the raw
+    # record's length while the redacted text still holds the rest. It is served, never refused
+    # as not retained, and admission scans the raw lines the served text was cut from.
+    from finishup.observability.privacy import redact_fully
+
+    item_ref = "change-check-time-001"
+    diff = (
+        b"diff --git a/cfg.py b/cfg.py\n"
+        + b"".join(b"+passwd: q%03d\n" % i for i in range(100))
+        + b"".join(b"+retries_%03d = 3  # ordinary configuration line\n" % i for i in range(90))
+    )
+    case = _semantic_case(diff, with_aws_key=False)
+    item = next(i for i in case.items if i.item_id == item_ref)
+    redacted = redact_fully(item.content)
+    assert redacted is not None and len(redacted) > len(item.content)
+    offsets: list[int] = []
+
+    def follow(history: tuple[Turn, ...]) -> JsonValue:
+        first = _observations(history)[-1]
+        assert first["status"] == "partial", (first["reason"], first.get("continuation"))
+        span = cast(dict[str, dict[str, int]], _data(first)["provenance"])["span"]
+        offsets.append(span["end_exclusive"])
+        assert len(item.content) <= offsets[0] < len(redacted)
+        return _read(
+            "read_packet_section", section="excerpts", item_ref=item_ref, offset=offsets[0]
+        )
+
+    loop, broker, _model, _ = _setup(
+        _read("read_packet_section", section="excerpts", item_ref=item_ref, offset=0),
+        follow,
+        _FINAL,
+        case=case,
+        policy=replace(
+            with_llm(minimal_external_policy()), credential_heuristic=CredentialHeuristic.DISABLED
+        ),
+    )
+    admit = broker._admit  # pyright: ignore[reportPrivateUsage]
+    admitted: list[tuple[ReadElement, ...]] = []
+
+    async def record(elements: tuple[ReadElement, ...], envelope: bytes) -> str | None:
+        admitted.append(elements)
+        return await admit(elements, envelope)
+
+    broker._admit = record  # pyright: ignore[reportPrivateUsage]
+    _first, second = _observations((await loop.run()).history)
+    assert second["status"] in {"ok", "partial"}, (second["status"], second["reason"])
+    sent = cast(str, _data(second)["text"]).encode()
+    assert redacted[offsets[0] :].startswith(sent)
+    # The raw selection admission scans starts on the raw line the served text starts on.
+    line = redacted[: offsets[0]].count(b"\n")
+    raw_start = sum(len(r) + 1 for r in item.content.split(b"\n")[:line])
+    (raw,) = (data for _category, data, _root in admitted[-1] if data != sent)
+    assert item.content[raw_start:].startswith(raw)
