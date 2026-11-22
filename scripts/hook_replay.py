@@ -20,8 +20,9 @@ Corpus sources:
   replayed: every callback carries that turn's ``turn_id``, and calls from later turns are left out
   (they never count against ``--max-calls``). ``transcript_path`` names a copy of the rollout that
   grows to the point the callback fired at; unless ``--max-calls`` cuts the turn short, Stop fires
-  after the turn's final reply and carries it as ``last_assistant_message``, as Codex sends it. Calls with no recorded hook shape in this repository (``write_stdin``, ``view_image``,
-  MCP resource listing) are left out.
+  after the turn's final reply and carries it as ``last_assistant_message``, as Codex sends it.
+  Calls with no recorded hook shape in this repository (``write_stdin``, ``view_image``, MCP
+  resource listing) are left out.
 * Claude Code and Cursor: the ordinary-profile session assembled from the repository's recorded
   shapes (``fixtures/observations/*-outcomes.case.json`` and the host test payloads).
 * Malformed hook stdin for every host, invalid workflow requests through the CLI, and schema
