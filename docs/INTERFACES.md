@@ -3769,7 +3769,9 @@ Consented hook auto-attachment uses the same fixed on-demand launcher with
 `supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
 already-stamped compatible starting holder only while an owner-only nonblocking flock probe
 confirms that the singleton is still held; an unheld stale stamp is ignored and the fixed
-launcher makes a normal flock-protected start attempt. A live incompatible or unknown stamped
+launcher makes a normal flock-protected start attempt. `finishup service restart` likewise treats
+the previous holder as released once the flock is free, even while a stale stamp names a pid an
+unrelated live process has since reused; a lock it cannot inspect is not a release. A live incompatible or unknown stamped
 holder is refused without signalling it. The authenticated handshake remains authoritative; the
 stamp is only a pre-spawn hint. Startup and the auto-attach `start` share the existing five-second
 RPC budget; turn-boundary retries retain their one-second outer budget and reserve part of it for
