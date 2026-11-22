@@ -7275,9 +7275,11 @@ Shared closed types:
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
   healed mapping, cursor, quarantine, or outbox condition remain current forever.
 - `HookSpool` — private legacy-host ingress only: `append(workspace, event, structural payload)`
-  makes one fsync'd bounded record keyed by a workspace HMAC; `claim(workspace commitment)` uses
-  rename fencing and exposes records to the READY service. A claim given a stop event stops waiting
-  for the workspace lock once that event is set and claims nothing. A stable spool UUID enters
+  makes one fsync'd bounded record keyed by a workspace HMAC, first ending any partial line that a
+  failed or interrupted earlier write left, so a claim discards only that fragment;
+  `claim(workspace commitment)` uses rename fencing and exposes records to the READY service. A
+  claim given a stop event stops waiting for the workspace lock once that event is set and claims
+  nothing. A stable spool UUID enters
   source identity, so crash replay is at-least-once and normal local ingest deduplicates it.
   Pending spool work projects `source_lag`; it is not an acknowledged observation.
 - `AdviceSnapshot` — ranked `AdviceItem` values (finding id, local rule code, priority,
