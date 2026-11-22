@@ -142,6 +142,19 @@ def test_an_output_named_in_another_spelling_is_attempted() -> None:
     assert _never_attempted(other)
 
 
+@pytest.mark.parametrize(
+    "spelling", ["/app/out/build.log", "//app/out/build.log", "///app/out/build.log"]
+)
+def test_an_output_named_with_extra_leading_slashes_is_attempted(spelling: str) -> None:
+    item = RequestedItem(
+        RequestedItemKind.FILE, "/app/out/build.log", role=RequestedItemRole.OUTPUT
+    )
+    ledger = _ledger(item)
+    _publish(ledger, 1, kind=ActionKind.EDIT, refs=(_OBL,), attempted=(spelling,))
+    ledger.claim()
+    assert not _never_attempted(ledger)
+
+
 def test_an_untargeted_action_no_longer_marks_every_obligation_acted_on() -> None:
     """lake S: one untargeted command while training ran made the absent output reportable."""
 
@@ -170,6 +183,11 @@ def test_an_untargeted_action_no_longer_marks_every_obligation_acted_on() -> Non
         ("/app/solve.sage", "solve.sage", True),
         ("solve.sage", "/app/solve.sage", True),
         ("/app/out/x.log", "/app/out/x.log", True),
+        ("/app/out/x.log", "//app/out/x.log", True),
+        ("//app/out/x.log", "/app/out/x.log", True),
+        ("/app/out/x.log", "///app/out/x.log", True),
+        ("//app/out/x.log", "out/x.log", True),
+        ("//app/out/x.log", "//srv/out/x.log", False),
         ("/app/out/x.log", "/srv/out/x.log", False),
         ("/app/out/x.log", "out/y.log", False),
         ("/app/out/x.log", "../x.log", False),

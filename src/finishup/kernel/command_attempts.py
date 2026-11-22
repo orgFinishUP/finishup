@@ -21,7 +21,9 @@ def same_requested_path(requested: str, other: str) -> bool:
     ``attempted_items`` and a requested value used to match only byte for byte, so
     ``out/build.log`` never matched ``/app/out/build.log`` and ``./solve.sage`` never matched
     ``solve.sage`` (retro S: ``requested_item_never_attempted`` on files it had written). Both
-    are normalised lexically (``.`` and ``..`` folded, no filesystem access). Two absolute paths
+    are normalised lexically (``.`` and ``..`` folded, repeated leading slashes collapsed to one,
+    no filesystem access): ``normpath`` keeps exactly two leading slashes, which POSIX leaves
+    implementation-defined but Linux and macOS read as one. Two absolute paths
     match only when equal; otherwise the relative one matches when its components are the tail of
     the other's. The tail rule trades a rare false match (two files of one name in different
     directories) for the common true one (the agent's relative spelling of an absolute value).
@@ -31,6 +33,10 @@ def same_requested_path(requested: str, other: str) -> bool:
         return False
     first = posixpath.normpath(requested.strip())
     second = posixpath.normpath(other.strip())
+    if first.startswith("//"):
+        first = "/" + first.lstrip("/")
+    if second.startswith("//"):
+        second = "/" + second.lstrip("/")
     if first == second:
         return True
     first_absolute, second_absolute = first.startswith("/"), second.startswith("/")

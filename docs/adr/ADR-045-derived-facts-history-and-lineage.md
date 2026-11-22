@@ -273,10 +273,10 @@ matter and a false write is worse, so `domain/shell_writes` names no write when 
 
 `requested_item_never_attempted` counts a requested command as attempted when a hook-observed run
 matches it by `planned_match` (any outcome), and a file or directory when the agent named the same
-path in another spelling (`value_in_attempted`: normalized, relative tail). A global action (no
-`obligation_refs`) works on the obligations whose items its `attempted_items` name, not on every
-obligation. Status `command_attempts` compares a keyed observed action with the planned command by
-the same matcher.
+path in another spelling (`value_in_attempted`: normalized, repeated leading slashes collapsed,
+relative tail). A global action (no `obligation_refs`) works on the obligations whose items its
+`attempted_items` name, not on every obligation. Status `command_attempts` compares a keyed observed
+action with the planned command by the same matcher.
 
 ### 5. Binary
 
