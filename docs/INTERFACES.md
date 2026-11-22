@@ -3932,7 +3932,11 @@ fails (a `RepositoryIdentityError` such as `git_version_unsupported` or
 `repository_identity_unavailable`, or any unexpected exception) `server_handshake` closes the
 connection without answering, admits no session, and raises `HandshakeServiceFault` (control
 reason `handshake_service_fault`, server-only) carrying the closed refusal token or, for an
-unexpected exception, that exception as its cause. The daemon records it once: a typed refusal as
+unexpected exception, that exception as its cause. A locator the peer got wrong is not such a
+fault: the hello schema bounds `workspace_locator.path` at 8192 characters while the locator
+itself is bounded at 8192 UTF-8 bytes, so a schema-valid path over the byte bound (or one that
+does not encode) is refused as `protocol_mismatch` before any resolver runs, whether or not the
+service resolves locators, exactly as a malformed `workspace_claim` or `workspace_agent` is. The daemon records it once: a typed refusal as
 public error `handshake_service_fault` with `reason_code` the token (component `service.daemon`,
 operation `control_handshake`); an unexpected exception through the unexpected-exception record
 with its class token, origin and `phase: handshake`. Neither record carries the locator, a path,
