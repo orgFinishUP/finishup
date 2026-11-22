@@ -899,6 +899,33 @@ def installed_cursor_startup_mode(
     return "required" if b" hooks startup-gate --host cursor " in hooks else "optional"
 
 
+def installed_cursor_observation_profile(
+    target: CursorPluginTarget,
+) -> Literal["structural", "ordinary"] | None:
+    """The observation profile of marker-verified installed bytes, if it can be verified.
+
+    Like the startup mode, a re-render that names no profile keeps the installed one, so a plain
+    connection never trades an owner's ordinary hooks for structural ones. ``None`` when the tree
+    is unverifiable; an absent tree is ``"structural"``, the default for a new installation.
+    """
+    base, _identity = _target_path(target)
+    root = base / CURSOR_PLUGIN_RELATIVE_ROOT
+    if not root.exists() and not root.is_symlink():
+        legacy = base / CURSOR_LEGACY_PLUGIN_RELATIVE_ROOT
+        if _inspect_legacy(base)[0] == "owned":
+            root = legacy
+    if root.is_symlink():
+        return None
+    if not root.exists():
+        return "structural"
+    files = _safe_tree(root)
+    if not _valid_marker(files)[0]:
+        return None
+    hooks = files.get("hooks/hooks.json", b"")
+    flag = f" --observation-profile {shlex.quote(CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)} "
+    return "ordinary" if flag.encode() in hooks else "structural"
+
+
 def render_cursor_plugin(
     format_profile: PluginFormatProfile,
     *,

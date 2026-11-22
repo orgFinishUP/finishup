@@ -565,6 +565,9 @@ def prepare_connection(
             route_profile=route,
             finishup_launcher=launcher,
             startup_mode=claude.installed_claude_startup_mode(target) or "optional",
+            observation_profile=(
+                claude.installed_claude_observation_profile(target) or "structural"
+            ),
         )
         before = claude.status_claude_code_plugin(target, artifact)
         # Claude Code lists every project's install, so the host itself names who shares the
@@ -722,6 +725,9 @@ def prepare_connection(
                 mcp_ownership=McpOwnership.EXTERNAL_REGISTRATION,
                 finishup_launcher=plugin_launcher,
                 startup_mode=cursor.installed_cursor_startup_mode(cursor_target) or "optional",
+                observation_profile=(
+                    cursor.installed_cursor_observation_profile(cursor_target) or "structural"
+                ),
             )
         project_target = mcp.CursorProjectMcpTarget(
             project,

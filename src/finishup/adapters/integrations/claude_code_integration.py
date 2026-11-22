@@ -924,6 +924,33 @@ def installed_claude_startup_mode(
     return "required" if b" hooks startup-gate --host claude " in hooks else "optional"
 
 
+def installed_claude_observation_profile(
+    target: ClaudeCodePluginTarget,
+) -> Literal["structural", "ordinary"] | None:
+    """The observation profile of the marker-verified shared source, if it can be verified.
+
+    The source under the config root serves every project's install (#1058), so a connection
+    that names no profile keeps the installed one rather than reverting the owner's ordinary
+    hooks for every project. ``None`` when the source is unverifiable; an absent source is
+    ``"structural"``, the default for a new installation.
+    """
+    _validate_target(target)
+    root = Path(target.marketplace_root)
+    if not root.exists():
+        legacy_root = _legacy_location(target)
+        if _legacy_tree(legacy_root)[0] != "legacy":
+            return "structural"
+        root = legacy_root
+    files = _safe_tree(root)
+    if not _valid_source_marker(files)[0]:
+        return None
+    hooks = files.get("plugins/finishup/hooks/hooks.json") or files.get(
+        f"plugins/{_LEGACY_PLUGIN_NAME}/hooks/hooks.json", b""
+    )
+    flag = f" --observation-profile {shlex.quote(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)} "
+    return "ordinary" if flag.encode() in hooks else "structural"
+
+
 def installed_claude_route_profile(
     target: ClaudeCodePluginTarget,
 ) -> Literal["strict", "policy"] | None:

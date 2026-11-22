@@ -1064,8 +1064,11 @@ acceptance on macOS, Linux and Windows through WSL 2 is not established by sourc
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
 return to structural hooks, preview a replacement with `--observation-profile structural` and
-apply that exact preview. Portable artifacts reject ordinary observation; selecting a native
-artifact does not grant content capture.
+apply that exact preview. `finishup connect` keeps the profile of a marker-verified installed
+user plugin: re-running it after an upgrade, or connecting another project under the same config
+root, never reverts ordinary hooks to structural ones. A new installation starts structural.
+Portable artifacts reject ordinary observation; selecting a native artifact does not grant
+content capture.
 Preview names the selected profile. Status reports the requested profile and confirms an installed
 profile only when its verified marker and artifact digest match; otherwise that installed value is
 unknown rather than inferred from the request.

@@ -22,6 +22,7 @@ from finishup.adapters.integrations.claude_code_integration import (
     ClaudeCodePluginArtifact,
     ClaudeCodePluginTarget,
     apply_claude_code_plugin,
+    installed_claude_observation_profile,
     installed_claude_startup_mode,
     observe_claude_code_mcp,
     observe_claude_code_session_init,
@@ -72,6 +73,30 @@ def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
         )
         assert installed_claude_startup_mode(target) == ("required" if index == 0 else "optional")
         assert status_claude_code_plugin(target, artifact, commands=commands).marker_valid
+
+
+def test_ordinary_observation_install_inspect_and_reverse(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    assert installed_claude_observation_profile(target) == "structural"
+    ordinary = render_claude_code_plugin(observation_profile="ordinary")
+    commands = _ClaudeFixture(ordinary)
+    for index, artifact in enumerate((ordinary, render_claude_code_plugin())):
+        commands.artifact = artifact
+        action = ClaudeCodePluginAction.INSTALL if index == 0 else ClaudeCodePluginAction.UPDATE
+        preview = preview_claude_code_plugin(_REQUEST, target, action, artifact, commands=commands)
+        apply_claude_code_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_Review(),
+            commands=commands,
+        )
+        assert installed_claude_observation_profile(target) == (
+            "ordinary" if index == 0 else "structural"
+        )
 
 
 class _Review:

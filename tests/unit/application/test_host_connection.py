@@ -659,6 +659,7 @@ def test_claude_disconnect_of_a_yoetz_era_only_project_lists_only_what_it_remove
     monkeypatch.setattr(claude, "ClaudeCodePluginTarget", target)
     monkeypatch.setattr(claude, "discover_claude_code", anything)
     monkeypatch.setattr(claude, "installed_claude_startup_mode", nothing)
+    monkeypatch.setattr(claude, "installed_claude_observation_profile", nothing)
     monkeypatch.setattr(claude, "render_claude_code_plugin", anything)
     monkeypatch.setattr(claude, "status_claude_code_plugin", observed)
     monkeypatch.setattr(claude, "claude_code_other_projects", others)
@@ -885,6 +886,7 @@ def test_claude_connect_offers_observation_consent_to_an_installed_project(
     monkeypatch.setattr(claude, "ClaudeCodePluginTarget", target)
     monkeypatch.setattr(claude, "discover_claude_code", anything)
     monkeypatch.setattr(claude, "installed_claude_startup_mode", nothing)
+    monkeypatch.setattr(claude, "installed_claude_observation_profile", nothing)
     monkeypatch.setattr(claude, "render_claude_code_plugin", rendered)
     monkeypatch.setattr(claude, "status_claude_code_plugin", observed)
     monkeypatch.setattr(claude, "claude_code_other_projects", no_others)
@@ -914,3 +916,139 @@ def test_claude_connect_offers_observation_consent_to_an_installed_project(
     )
     assert result["observation_consent"] == "active"
     assert prepare().unchanged
+
+
+def test_cursor_reconnect_keeps_the_installed_ordinary_observation_profile(
+    tmp_path: Path,
+) -> None:
+    """A plain connect keeps ordinary hooks; leaving them takes an explicit structural update."""
+
+    import json
+
+    from finishup.adapters.integrations import cursor_integration as cursor
+    from finishup.ports.plugin_artifacts import (
+        McpOwnership,
+        PluginArtifactAction,
+        PluginFormatProfile,
+    )
+
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    installation, launcher = _cursor_install(tmp_path, "cursor-ide")
+    review = Review()
+    _cursor_step(installation, project, "connect", launcher, review)
+    target = cursor.CursorPluginTarget(str(installation.config_root))
+    hooks_file = (
+        installation.config_root / cursor.CURSOR_PLUGIN_RELATIVE_ROOT / "hooks" / "hooks.json"
+    )
+
+    def hook_commands() -> list[str]:
+        hooks = json.loads(hooks_file.read_bytes())
+        commands = [entry["command"] for entries in hooks["hooks"].values() for entry in entries]
+        return [command for command in commands if " hooks cursor-observe " in command]
+
+    flag = f"--observation-profile {cursor.CURSOR_ORDINARY_OBSERVATION_PROFILE_ID}"
+    assert not any(flag in command for command in hook_commands())
+
+    ordinary = cursor.render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        mcp_ownership=McpOwnership.EXTERNAL_REGISTRATION,
+        finishup_launcher=(str(launcher),),
+        observation_profile="ordinary",
+    )
+    preview = cursor.preview_cursor_plugin(REQUEST, target, PluginArtifactAction.REPLACE, ordinary)
+    cursor.apply_cursor_plugin(
+        REQUEST,
+        target,
+        PluginArtifactAction.REPLACE,
+        ordinary,
+        accepted_preview_digest=preview.preview_digest,
+        authority=ArtifactAuthority("review_only", preview.preview_digest, "test"),
+        review=review,
+    )
+    assert hook_commands() and all(flag in command for command in hook_commands())
+
+    # A plain re-run of connect (after an upgrade, say) keeps the owner's choice.
+    _cursor_step(installation, project, "connect", launcher, review)
+    assert hook_commands() and all(flag in command for command in hook_commands()), (
+        "connect replaced ordinary observation hooks with structural ones"
+    )
+    assert cursor.installed_cursor_observation_profile(target) == "ordinary"
+
+
+def test_claude_connect_renders_the_installed_observation_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Connecting another project keeps the shared source's ordinary hooks (#1058 sharing)."""
+
+    from types import SimpleNamespace
+
+    from finishup.adapters.integrations import claude_code_integration as claude
+    from finishup.application import host_connection as module
+    from finishup.ports.plugin_artifacts import PluginArtifactState
+
+    project, config = tmp_path / "b", tmp_path / "claude"
+    for item in (project, config):
+        item.mkdir(mode=0o700)
+    rendered: list[dict[str, object]] = []
+    status = SimpleNamespace(
+        state=PluginArtifactState.NATIVE_MANAGED,
+        discovered=True,
+        enabled=True,
+        legacy_installation="none",
+        installed_digest="sha256:" + "b" * 64,
+        marketplace_registered=True,
+    )
+
+    def target(*args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            project_root=args[0],
+            claude_config_root=args[1],
+            cache_root=args[2],
+            marketplace_root=args[3],
+        )
+
+    def render(*_args: object, **kwargs: object) -> SimpleNamespace:
+        rendered.append(kwargs)
+        return SimpleNamespace(artifact_digest="sha256:" + "b" * 64)
+
+    def preview(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            action=claude.ClaudeCodePluginAction.NOOP, preview_digest="sha256:" + "a" * 64
+        )
+
+    def anything(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    def nothing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def ordinary(*_args: object, **_kwargs: object) -> str:
+        return "ordinary"
+
+    def observed(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return status
+
+    def others(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return (str(tmp_path / "a"),)
+
+    monkeypatch.setattr(claude, "ClaudeCodePluginTarget", target)
+    monkeypatch.setattr(claude, "discover_claude_code", anything)
+    monkeypatch.setattr(claude, "installed_claude_startup_mode", nothing)
+    monkeypatch.setattr(claude, "installed_claude_observation_profile", ordinary)
+    monkeypatch.setattr(claude, "render_claude_code_plugin", render)
+    monkeypatch.setattr(claude, "status_claude_code_plugin", observed)
+    monkeypatch.setattr(claude, "claude_code_other_projects", others)
+    monkeypatch.setattr(claude, "installed_claude_route_profile", nothing)
+    monkeypatch.setattr(claude, "preview_claude_code_plugin", preview)
+    installation = HostInstallation("claude", tmp_path / "claude-bin", "2.1.299", config, "Claude")
+
+    module.prepare_connection(
+        request_id("req_50000000-0000-4000-8000-00000000000b"),
+        installation,
+        project,
+        action="connect",
+        route="strict",
+        launcher=("/x/finishup",),
+    )
+    assert rendered and all(call["observation_profile"] == "ordinary" for call in rendered)

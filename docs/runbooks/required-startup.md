@@ -14,7 +14,9 @@ The mode changes the artifact digest. An approval for optional bytes cannot inst
 `integrate <host> plugin status --json` reports the selected `startup_mode` and
 `installed_startup_mode`. Omitting the option preserves a marker-verified installed mode, including
 the common setup connection flow. New installations default to optional. Foreign or modified
-trees remain protected; an unverified installed mode is null.
+trees remain protected; an unverified installed mode is null. The setup connection flow keeps the
+marker-verified installed observation profile the same way, so it never reverts ordinary hooks to
+structural ones.
 
 To disable, preview and apply an update/replace with `--startup-mode optional`, then reload the
 host plugin or start a fresh session. Existing disable/remove/disconnect controls also remove its

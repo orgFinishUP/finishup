@@ -27,6 +27,7 @@ from finishup.adapters.integrations.cursor_integration import (
     discover_cursor_cli,
     discover_cursor_ide,
     discover_cursor_sdk,
+    installed_cursor_observation_profile,
     installed_cursor_startup_mode,
     observe_cursor_mcp,
     preview_cursor_plugin,
@@ -80,6 +81,30 @@ def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
         )
         assert installed_cursor_startup_mode(target) == mode
         assert status_cursor_plugin(target, artifact).marker_valid
+
+
+def test_ordinary_observation_install_inspect_and_reverse(tmp_path: Path) -> None:
+    launcher = _fake_finishup(tmp_path / "bin" / "finishup")
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    assert installed_cursor_observation_profile(target) == "structural"
+    for index, profile in enumerate(("ordinary", "structural")):
+        artifact = render_cursor_plugin(
+            PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+            finishup_launcher=launcher,
+            observation_profile="ordinary" if profile == "ordinary" else "structural",
+        )
+        action = PluginArtifactAction.INSTALL if index == 0 else PluginArtifactAction.REPLACE
+        preview = preview_cursor_plugin(_REQUEST, target, action, artifact)
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_AcceptingReview(),
+        )
+        assert installed_cursor_observation_profile(target) == profile
 
 
 class _AcceptingReview:

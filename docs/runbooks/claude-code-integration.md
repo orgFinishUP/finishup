@@ -893,6 +893,9 @@ Select these hooks with `--observation-profile ordinary` on the existing Claude 
 preview/install/update/status commands, or on `finishup integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to
 scoped structural hooks, preview and apply an update with `--observation-profile structural`.
+`finishup connect` keeps the profile of a marker-verified installed source: re-running it after
+an upgrade, or connecting another project that shares the config root's source, never reverts
+ordinary hooks to structural ones. A new installation starts structural.
 Artifact selection does not grant content capture.
 Preview names the selected profile. Status reports the requested profile and confirms an installed
 profile only when its verified marker and artifact digest match; otherwise that installed value is
