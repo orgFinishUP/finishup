@@ -947,8 +947,9 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   bytes are dropped, every host ingress records at most `MAX_OBSERVED_IMAGES = 8` images per
   event as the reserved structural member `observed_images` of a `PostToolUse` envelope (any host
   value under that name is discarded). The limit counts decoded images in document order; a
-  candidate string that does not decode (a URL-sourced image block) is skipped and does not count. Each item is exactly `content_digest` (`sha256:` of the
-  decoded bytes), `byte_count`, `media_type` (sniffed from the bytes: `image/png`, `image/jpeg`,
+  candidate string that does not decode (a URL-sourced image block) is skipped and does not count.
+  Each item is exactly `content_digest` (`sha256:` of the decoded bytes), `byte_count`, `media_type`
+  (sniffed from the bytes: `image/png`, `image/jpeg`,
   `image/gif`, `image/webp`, or `image/unknown`), and optionally both `width` and `height` from
   the header alone (never for `image/unknown`). Control-request 2.9.0 (unreleased, additive in
   place) and `domain/observation.validate_observed_images` admit exactly that shape. The service
