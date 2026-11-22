@@ -290,7 +290,7 @@ def encode_tree(entries: Iterable[TreeEntry]) -> bytes:
     ordered = sorted(entries, key=TreeEntry.sort_key)
     parts: list[bytes] = []
     for entry in ordered:
-        if entry.mode not in _MODES or not _HEX40_TEXT.match(entry.oid):
+        if entry.mode not in _MODES or not _HEX40_TEXT.fullmatch(entry.oid):
             raise CopyError("tree_entry_invalid")
         parts.append(entry.mode + b" " + entry.name + b"\x00" + bytes.fromhex(entry.oid))
     data = b"".join(parts)
@@ -339,7 +339,9 @@ def encode_commit(tree: str, parent: str | None) -> bytes:
     """The one synthetic commit shape: ``tree``, at most one ``parent``, fixed identities and
     message. The base commit has no parent; a snapshot commit's parent is its base commit."""
 
-    if not _HEX40_TEXT.match(tree) or (parent is not None and not _HEX40_TEXT.match(parent)):
+    if not _HEX40_TEXT.fullmatch(tree) or (
+        parent is not None and not _HEX40_TEXT.fullmatch(parent)
+    ):
         raise CopyError("commit_invalid")
     lines = [b"tree " + tree.encode("ascii")]
     if parent is not None:
@@ -358,7 +360,7 @@ def decode_commit(data: bytes) -> tuple[str, str | None]:
     parent: bytes | None = None
     if data[45:53] == b"\nparent ":
         parent = data[53:93]
-    if not _HEX40.match(tree) or (parent is not None and not _HEX40.match(parent)):
+    if not _HEX40.fullmatch(tree) or (parent is not None and not _HEX40.fullmatch(parent)):
         raise CopyError("commit_not_synthetic")
     decoded = (tree.decode("ascii"), None if parent is None else parent.decode("ascii"))
     if encode_commit(*decoded) != data:
@@ -518,10 +520,10 @@ def write_bundle(prerequisites: Sequence[str], tip: str, ref_number: int, pack: 
         raise CopyError("bundle_invalid")
     lines = [BUNDLE_HEADER]
     for prerequisite in sorted(set(prerequisites)):
-        if not _HEX40_TEXT.match(prerequisite):
+        if not _HEX40_TEXT.fullmatch(prerequisite):
             raise CopyError("bundle_invalid")
         lines.append(b"-" + prerequisite.encode("ascii") + b"\n")
-    if not _HEX40_TEXT.match(tip):
+    if not _HEX40_TEXT.fullmatch(tip):
         raise CopyError("bundle_invalid")
     lines.append(
         tip.encode("ascii") + b" " + SNAPSHOT_REF_PREFIX + str(ref_number).encode() + b"\n"
@@ -558,17 +560,17 @@ def read_bundle(data: bytes, limits: BundleLimits) -> _Bundle:
         if not line:
             break
         if line.startswith(b"-"):
-            if tip is not None or not _HEX40.match(line[1:]):
+            if tip is not None or not _HEX40.fullmatch(line[1:]):
                 raise CopyError("bundle_invalid")
             prerequisites.append(line[1:].decode("ascii"))
             if len(prerequisites) > _MAX_PREREQUISITES:
                 raise CopyError("bundle_invalid")
             continue
         oid, space, ref = line.partition(b" ")
-        if tip is not None or not space or not _HEX40.match(oid):
+        if tip is not None or not space or not _HEX40.fullmatch(oid):
             raise CopyError("bundle_ref_refused")
         number = ref.removeprefix(SNAPSHOT_REF_PREFIX)
-        if number == ref or not _REF_NUMBER.match(number):
+        if number == ref or not _REF_NUMBER.fullmatch(number):
             raise CopyError("bundle_ref_refused")
         tip = oid.decode("ascii")
         ref_number = int(number)
@@ -945,7 +947,7 @@ def policy_digest(
     """The digest of the exclusion policy a snapshot was made under (design v2 §8.6)."""
 
     allows = sorted(set(allowed))
-    if any(not _DIGEST.match(content) for _path, content in allows):
+    if any(not _DIGEST.fullmatch(content) for _path, content in allows):
         raise CopyError("policy_invalid")
     document: dict[str, JsonValue] = {
         "always": _patterns(always),
@@ -998,19 +1000,19 @@ class SnapshotManifest:
 
     def __post_init__(self) -> None:
         for oid in (self.snapshot, self.base, self.tree, self.base_tree):
-            if not _HEX40_TEXT.match(oid):
+            if not _HEX40_TEXT.fullmatch(oid):
                 raise CopyError("manifest_invalid")
         pattern = _HEX40_TEXT if self.original_base_format == "sha1" else _HEX64_TEXT
-        if self.original_base_format not in {"sha1", "sha256"} or not pattern.match(
+        if self.original_base_format not in {"sha1", "sha256"} or not pattern.fullmatch(
             self.original_base
         ):
             raise CopyError("manifest_invalid")
-        if not _EXPORT_ID.match(self.export_id) or not _ISSUER.match(self.issuer):
+        if not _EXPORT_ID.fullmatch(self.export_id) or not _ISSUER.fullmatch(self.issuer):
             raise CopyError("manifest_invalid")
         for digest in (self.worktree, self.policy, self.profile_digest):
-            if not _DIGEST.match(digest):
+            if not _DIGEST.fullmatch(digest):
                 raise CopyError("manifest_invalid")
-        if self.subject_state is not None and not _DIGEST.match(self.subject_state):
+        if self.subject_state is not None and not _DIGEST.fullmatch(self.subject_state):
             raise CopyError("manifest_invalid")
         if set(self.lists) != set(COMPLETENESS_LISTS) or set(self.more) != set(COMPLETENESS_LISTS):
             raise CopyError("manifest_invalid")
@@ -1030,7 +1032,7 @@ class SnapshotManifest:
                 raise CopyError("manifest_invalid")
         if type(self.revision) is not int or self.revision < 1:
             raise CopyError("manifest_invalid")
-        if self.purpose not in {"base", "check"} or not _STAMP.match(self.synced_at):
+        if self.purpose not in {"base", "check"} or not _STAMP.fullmatch(self.synced_at):
             raise CopyError("manifest_invalid")
 
     @property

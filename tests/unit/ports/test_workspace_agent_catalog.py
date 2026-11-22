@@ -532,6 +532,21 @@ def test_every_operation_round_trips_its_results_exactly(operation: WorkspaceOpe
         assert canonical_encode(spec.encode_result(decoded)) == canonical_encode(wire)
 
 
+@pytest.mark.parametrize("field", ["synced_at", "export_id", "policy", "original_base"])
+def test_a_prepared_sync_refuses_a_manifest_field_with_a_trailing_line_feed(field: str) -> None:
+    spec = WORKSPACE_OPERATION_CATALOG[WorkspaceOperation.CODE_SYNC_PREPARE]
+    prepared = cast(CodeSyncPrepared, _RESULTS[WorkspaceOperation.CODE_SYNC_PREPARE][0])
+    wire = cast(dict[str, Any], _through_wire(spec.encode_result(prepared)))
+    manifest = dict(wire["manifest"])
+    if field == "original_base":
+        manifest[field] = {**manifest[field], "commit": manifest[field]["commit"] + "\n"}
+    else:
+        manifest[field] += "\n"
+    with pytest.raises(WorkspaceCodecError) as refused:
+        spec.decode_result({**wire, "manifest": manifest})
+    assert refused.value.reason == "result_invalid"
+
+
 def test_change_captures_keep_the_stored_object_bytes() -> None:
     """A capture the agent carries is byte-identical to the object the service stores."""
 

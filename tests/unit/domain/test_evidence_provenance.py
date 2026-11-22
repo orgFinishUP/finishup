@@ -75,6 +75,9 @@ def test_plus_adds_counts_and_keeps_the_later_snapshot_and_marker() -> None:
         lambda: EvidenceProvenance(fenced_reads=-1),
         lambda: CopySnapshotRef("2026-11-10T11:00:00Z", _TREE),
         lambda: CopySnapshotRef(_AT, "A" * 40),
+        lambda: CopySnapshotRef(_AT + "\n", _TREE),
+        lambda: CopySnapshotRef(_AT, _TREE + "\n"),
+        lambda: CopySnapshotRef("\u0662026-11-10T11:00:00.000Z", _TREE),
         lambda: ContentForgotten(_AT, "later"),  # pyright: ignore[reportArgumentType]
     ],
 )

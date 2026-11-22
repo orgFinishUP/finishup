@@ -398,7 +398,7 @@ class CodeStore:
         if not folder.is_dir():
             return report
         for copy in sorted(folder.iterdir()):
-            if not copy.is_dir() or copy.is_symlink() or not _HEX64.match(copy.name * 2):
+            if not copy.is_dir() or copy.is_symlink() or not _HEX64.fullmatch(copy.name * 2):
                 continue
             if not (copy / "copy.json").is_file():
                 if _delete_folder(copy, folder):
@@ -415,7 +415,7 @@ class CodeStore:
                 continue
             record = cast(dict[str, JsonValue], value)
             copy_key = record.get("copy_key")
-            if type(copy_key) is not str or not _HEX64.match(copy_key):
+            if type(copy_key) is not str or not _HEX64.fullmatch(copy_key):
                 continue
             if copy_key[:32] != copy.name:
                 continue
@@ -439,7 +439,7 @@ class CodeStore:
         """Whether the copy folder ``name`` (a copy key's first 32 hex) holds a copy: how a
         checkout found on disk is known to belong to a copy that is still kept."""
 
-        if len(name) != 32 or not _HEX64.match(name * 2):
+        if len(name) != 32 or not _HEX64.fullmatch(name * 2):
             return False
         return (self._root / "copies" / name / "copy.json").is_file()
 
@@ -638,10 +638,10 @@ class CodeStore:
                 return False  # which additions were uncommitted is not known: nothing is trusted
             if target > committed:
                 for oid in cast(list[JsonValue], created):
-                    if type(oid) is str and _HEX40.match(oid):
+                    if type(oid) is str and _HEX40.fullmatch(oid):
                         _remove_file(folder / "objects" / oid)
                 if snapshot is not None and snapshot not in cast(list[str], record["snapshots"]):
-                    if _HEX40.match(snapshot):
+                    if _HEX40.fullmatch(snapshot):
                         _remove_file(folder / "snapshots" / f"{snapshot}.enc")
         keep = _index_name(committed)
         stale = [
@@ -708,7 +708,7 @@ class CodeStore:
 
         if type(size) is not int or not 0 < size <= self._limits.max_bundle_bytes:
             raise CodeStoreError("code_copy_too_large")
-        if type(sha256) is not str or not _DIGEST.match(sha256):
+        if type(sha256) is not str or not _DIGEST.fullmatch(sha256):
             raise CodeStoreError("code_upload_invalid")
         kind, days = retention
         if kind not in {"task_close", "days", "until_forgotten"} or (
@@ -753,7 +753,7 @@ class CodeStore:
         _remove_file(self._root / "uploads" / f"{upload_id}.part")
 
     def _upload(self, upload_id: str, principal: str, repository: str) -> _Upload:
-        upload = self._uploads.get(upload_id) if _UPLOAD_ID.match(upload_id or "") else None
+        upload = self._uploads.get(upload_id) if _UPLOAD_ID.fullmatch(upload_id or "") else None
         if upload is None or upload.copy_key != self.copy_key(principal, repository):
             raise CodeStoreError("code_upload_unknown")
         return upload
@@ -1104,7 +1104,7 @@ class CodeStore:
             except ValueError:
                 continue
             copy_key = record.get("copy_key")
-            if type(copy_key) is str and _HEX64.match(copy_key) and copy.name == copy_key[:32]:
+            if type(copy_key) is str and _HEX64.fullmatch(copy_key) and copy.name == copy_key[:32]:
                 if forgotten or not self._forgotten(copy_key, record):
                     found.append((copy_key, record))
         return found
@@ -1179,7 +1179,7 @@ class CodeStore:
     def read_object(self, principal: str, repository: str, oid: str) -> GitObject:
         """One object of this copy, decrypted and verified by its id."""
 
-        if not _HEX40.match(oid):
+        if not _HEX40.fullmatch(oid):
             raise CodeStoreError("code_object_unknown")
         with self._lock:
             copy_key = self.copy_key(principal, repository)
@@ -1212,7 +1212,7 @@ class CodeStore:
     ) -> None:
         """Pin ``task_id``'s later reads to ``snapshot`` (design v2 §8.6); its counts stay."""
 
-        if not _TASK_ID.match(task_id):
+        if not _TASK_ID.fullmatch(task_id):
             raise CodeStoreError("code_pin_invalid")
         with self._lock:
             copy_key = self.copy_key(principal, repository)
@@ -1321,7 +1321,7 @@ class CodeStore:
         """The newest snapshot whose synthetic base commit is ``base``, or None: how a task whose
         base was read from the copy names its original base commit to the client."""
 
-        if not _HEX40.match(base):
+        if not _HEX40.fullmatch(base):
             return None
         with self._lock:
             record = self._read_record(self.copy_key(principal, repository))
@@ -1414,7 +1414,7 @@ class CodeStore:
         if record is not None:
             for task_id, value in sorted(cast(dict[str, JsonValue], record["pins"]).items()):
                 entry = _pin_entry(value)
-                if entry is not None and _TASK_ID.match(task_id):
+                if entry is not None and _TASK_ID.fullmatch(task_id):
                     tasks.append(ForgottenTask(task_id, entry.account()))
         if tasks:
             # Before anything is deleted: the tasks whose records still hold excerpts derived
@@ -1498,7 +1498,7 @@ class CodeStore:
         for row in rows:
             try:
                 task_id = cast(str, row["task_id"])
-                if not _TASK_ID.match(task_id):
+                if not _TASK_ID.fullmatch(task_id):
                     continue
                 found.append(
                     PendingErasure(
@@ -1680,7 +1680,7 @@ def _pin_entry(value: object) -> PinEntry | None:
     """A pin as recorded: a snapshot id alone (as first written) or the full entry."""
 
     if type(value) is str:
-        return PinEntry(value) if _HEX40.match(value) else None
+        return PinEntry(value) if _HEX40.fullmatch(value) else None
     if type(value) is not dict:
         return None
     fields = cast(dict[str, JsonValue], value)
@@ -1695,7 +1695,7 @@ def _pin_entry(value: object) -> PinEntry | None:
         type(copy_used) is not bool
         or type(stale) is not bool
         or type(snapshot) is not str
-        or not _HEX40.match(snapshot)
+        or not _HEX40.fullmatch(snapshot)
         or (synced_at is not None and type(synced_at) is not str)
         or type(served) is not bool
         or type(reads) is not dict

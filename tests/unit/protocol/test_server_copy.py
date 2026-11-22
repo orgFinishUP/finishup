@@ -820,6 +820,46 @@ def test_a_manifest_with_anything_unknown_or_malformed_is_refused() -> None:
             replace(_manifest(), **change)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "snapshot",
+        "base",
+        "tree",
+        "base_tree",
+        "original_base",
+        "export_id",
+        "worktree",
+        "policy",
+        "subject_state",
+        "issuer",
+        "profile_digest",
+        "synced_at",
+    ],
+)
+def test_a_fixed_shape_manifest_field_with_a_trailing_line_feed_is_refused(field: str) -> None:
+    document = manifest_to_json(_manifest())
+    with pytest.raises(CopyError, match="manifest_invalid"):
+        replace(_manifest(), **{field: getattr(_manifest(), field) + "\n"})
+    wire = canonical_encode(document).replace(
+        canonical_encode(getattr(_manifest(), field)),
+        canonical_encode(getattr(_manifest(), field) + "\n"),
+        1,
+    )
+    assert wire != canonical_encode(document)
+    with pytest.raises(CopyError, match="manifest_invalid"):
+        manifest_from_json(wire)
+
+
+def test_policy_and_tree_helpers_refuse_a_trailing_line_feed() -> None:
+    with pytest.raises(CopyError, match="policy_invalid"):
+        _policy(allowed=[("p", "sha256:" + "1" * 64 + "\n")])
+    with pytest.raises(CopyError):
+        encode_commit("a" * 40 + "\n", None)
+    with pytest.raises(CopyError):
+        encode_commit("a" * 40, "b" * 40 + "\n")
+
+
 def test_tree_entries_from_the_builder_encode_exactly_as_git_writes_them(tmp_path: Path) -> None:
     git(tmp_path, "init", "-q")
     (tmp_path / "a").mkdir()
