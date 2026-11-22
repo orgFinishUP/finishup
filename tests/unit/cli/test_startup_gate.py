@@ -88,16 +88,30 @@ class Host:
             tool_input=request,
         )
 
-    def post(self, tool: str, request: dict[str, JsonValue], result: dict[str, JsonValue]) -> None:
+    def post(
+        self,
+        tool: str,
+        request: dict[str, JsonValue],
+        result: dict[str, JsonValue],
+        *,
+        shape: str = "structured",
+    ) -> None:
+        text_block: JsonValue = [{"type": "text", "text": json.dumps(result)}]
+        response: JsonValue = {
+            "structured": {"structuredContent": result},
+            "content": {"content": text_block},
+            "blocks": text_block,
+            "bare": result,
+        }[shape]
         self.call(
             "PostToolUse" if self.host == "claude" else "afterMCPExecution",
             tool_name=f"{self.tool_prefix}{tool}" if self.host == "claude" else tool,
             mcp_server_name=self.server_key,
             tool_input=request,
             **(
-                {"tool_response": {"structuredContent": result}}
+                {"tool_response": response}
                 if self.host == "claude"
-                else {"result_json": json.dumps({"structuredContent": result})}
+                else {"result_json": json.dumps(response)}
             ),
         )
 
@@ -939,3 +953,68 @@ def test_a_host_bound_write_with_an_unknown_outcome_keeps_a_ticket(host: Host) -
     host.post("publish_work", request, {**result, "outcome": "replayed"})
     scope = host.store.read()
     assert scope is not None and minted not in scope.pending
+
+
+# The host shapes the scoped ``start`` binder admits: structuredContent, a single-text-block
+# ``content`` object, a bare single-text-block content list, and a bare result object.
+_ADMITTED_SHAPES = ("structured", "content", "blocks", "bare")
+
+
+@pytest.mark.parametrize("shape", _ADMITTED_SHAPES)
+def test_start_in_every_admitted_result_shape_binds_the_route(host: Host, shape: str) -> None:
+    request: dict[str, JsonValue] = {"request_id": new_id(IdKind.REQUEST)}
+    host.pre("start", request)
+    result: dict[str, JsonValue] = {
+        "request_id": request["request_id"],
+        "ok": True,
+        "task_id": host.route[0],
+        "session_id": host.route[1],
+        "writer_id": host.route[2],
+    }
+    host.post("start", request, result, shape=shape)
+    scope = host.store.read()
+    assert scope is not None
+    assert scope.pending == {}
+    assert scope.route == host.route
+    assert scope.needs_start is False
+    publication, accepted = host.publication()
+    host.pre("publish_work", publication)
+    host.post("publish_work", publication, accepted, shape=shape)
+    assert not host.denied()
+
+
+@pytest.mark.parametrize("shape", _ADMITTED_SHAPES)
+def test_status_in_every_admitted_result_shape_recovers_a_lost_publication(
+    host: Host, shape: str
+) -> None:
+    host.start()
+    request, _result = host.publication()
+    host.pre("publish_work", request)
+    status: dict[str, JsonValue] = {
+        "ok": True,
+        "view": "operation",
+        "task_id": host.route[0],
+        "session_id": host.route[1],
+        "writer_id": host.route[2],
+        "page": {"operation_request_id": request["request_id"], "state": "complete"},
+    }
+    host.post("status", {}, status, shape=shape)
+    scope = host.store.read()
+    assert scope is not None and not scope.pending
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [{"text": "{}"}],
+        [{"type": "image", "text": "{}"}],
+        [{"type": "text", "text": "{}"}, {"type": "text", "text": "{}"}],
+        [{"type": "text", "text": "[]"}],
+        [],
+    ],
+)
+def test_unadmitted_content_lists_are_not_a_result(blocks: list[JsonValue]) -> None:
+    parse = startup_gate_module._result  # pyright: ignore[reportPrivateUsage]
+    assert parse(blocks) is None
+    assert parse(json.dumps(blocks)) is None
+    assert parse({"content": blocks}) is None

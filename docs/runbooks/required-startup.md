@@ -63,7 +63,11 @@ plan/obligation ids and bounded pending request identities. It stores no prompt,
 transcript, credential, or model-authored readiness flag. Before a `start` or `publish_work` that
 carries a `request_id`, the gate records that identity; an id-less `publish_work` is tracked only
 from its result (see the limits below). Only matching accepted output can nominate a route and
-plan. Newly accepted obligations must be in that plan. Failed/dry-run writes, old accepted
+plan. The gate reads a `start`, `publish_work` or `status` result in the same host shapes the
+scoped `start` binder admits: an object carrying `structuredContent`, an object whose `content` is
+a single-text-block list, a bare result object, a bare single-text-block content list, or a JSON
+string of one of those; any other shape settles nothing. Newly accepted obligations must be in
+that plan. Failed/dry-run writes, old accepted
 timestamps, wrong routes and earlier-scope responses cannot create current readiness. Hook
 auto-mapping alone is insufficient.
 
