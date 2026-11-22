@@ -588,7 +588,10 @@ token: a hook token is resolved from the hook's own exact reason (`render_hook_r
 and today only SessionStart's vault-locked advisory has one (`vault_unlock_required`). Hook contexts
 shared by several reasons (the status-read retry class), the service's retryable `storage_unsafe`
 fault, and a timed-out attachment keep their own instruction without a token. The TUI blocked report
-and receipt human text project the full directive lines from the registry. Compact receipt sentences
+and receipt human text project the full directive lines from the registry; for a public service
+error the TUI blocked report names the wire code (never the enum's Python spelling), the retryable
+marker, and the correlation ID, and resolves its directive from the error's `safe_details` through
+the same resolver as the CLI's human error rendering. Compact receipt sentences
 stay frozen. Advice and status `semantic_state` is the recorded attempt status (`ready` / `disabled`
 / `unavailable` / `failed`), not finding presence: a successful review with zero findings is
 `ready`, and `disabled` means no attempt was requested or configured. The state does not widen

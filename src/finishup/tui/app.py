@@ -599,12 +599,18 @@ class FinishUpTui(App[int]):
     def _report(self, error: RuntimeError_) -> None:
         from finishup.cli.render import render_local_recovery_lines
 
-        extra = (f"Reason: {error.reason}", *render_local_recovery_lines(error.reason))
+        suffix = " (retryable)" if error.retryable else ""
+        # A public service error brings the directive its safe details resolved (ADR-030); only a
+        # local reason is looked up here, since a protocol code resolves to nothing through it.
+        recovery = error.recovery or tuple(render_local_recovery_lines(error.reason))
+        details = error.details
+        if f"reason={error.reason}" not in details:
+            details = (f"reason={error.reason}", *details)
         self.say(
             Level.BLOCKED,
             error.message,
-            extra,
-            details=error.details or (f"reason={error.reason}",),
+            (f"Reason: {error.reason}{suffix}", *recovery),
+            details=details,
         )
 
     # ------------------------------------------------------------------
