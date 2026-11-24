@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
 from finishup.domain.observation_selection import (
     OBSERVATION_CLASSIFICATION_VERSION,
     ObservationContentRole,
     classify_observation,
+    command_is_verification,
     command_runner_class,
     compound_verification_gap_required,
     is_routine_read_candidate,
@@ -227,6 +230,77 @@ def test_a_noexec_shell_wrapper_is_not_classed_as_the_command_it_only_reads(comm
     argv: list[JsonValue] = list(command.replace("'", "").split(" ", 2))
     assert native_command_runner_class(argv) == "other"
     assert command_runner_class({"command": "bash -lc 'pytest -q'"}) == "test"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The script-file form and a ``-c`` text that names a test script.
+        "bash -n run_tests.sh",
+        "bash -nc ./run_tests.sh",
+        "sh -cn verify.sh",
+        "zsh -n tests/check.zsh",
+        "/bin/bash -n run_tests.sh",
+        # ``n`` anywhere among the shell's own options, which bash keeps reading after ``-c``.
+        "bash -xn tests/run.sh",
+        "bash --norc -n run_tests.sh",
+        "bash -c -n ./run_tests.sh",
+        # The option by name.
+        "bash -o noexec tests/run.sh",
+        "bash -eo noexec ./run_tests.sh",
+        "bash -O extglob -o noexec run_tests.sh",
+        "zsh -o NO_EXEC run_tests.sh",
+        "zsh --no-exec run_tests.sh",
+        # Text or a file name that reads as another verifier.
+        "bash -nc 'mypy src'",
+        "bash -nc 'npm run build'",
+        "bash -n build.sh",
+        "sh -n lint.sh",
+        "bash -o noexec build.sh",
+        # Behind a wrapper, a launcher or another shell.
+        "timeout 60 bash -n run_tests.sh",
+        "env CI=1 sh -n verify.sh",
+        "uv run bash -n run_tests.sh",
+        "sh -c 'bash -n run_tests.sh'",
+    ],
+)
+def test_a_noexec_shell_is_no_verification_run_in_any_form(command: str) -> None:
+    """A shell given noexec reads its script and runs nothing, whatever the script is (#1444)."""
+
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    hook_payload: dict[str, JsonValue] = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert command_runner_class(hook_payload) == "other"
+    assert command_is_verification(command) is False
+    argv: list[JsonValue] = list(shlex.split(command))
+    assert native_command_runner_class(argv) == "other"
+    # The host's own shell around the call, as a Codex native argv carries it.
+    assert native_command_runner_class(["/bin/bash", "-lc", command]) == "other"
+    # In a composition it adds no verification, and a real one beside it still counts.
+    assert command_runner_class({"command": f"cd /app && {command}"}) == "compound"
+    assert command_runner_class({"command": f"{command} && pytest -q"}) == "test"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash run_tests.sh",
+        "bash -x run_tests.sh",
+        "bash -eu run_tests.sh",
+        "bash --norc run_tests.sh",
+        "zsh tests/check.zsh",
+        # After the script or the ``-c`` text a word is the script's own argument.
+        "bash run_tests.sh -n",
+        "bash -c 'pytest -q' -n",
+        "sh -c 'pytest -q -n 4'",
+    ],
+)
+def test_a_shell_that_runs_its_script_keeps_the_class_of_what_it_runs(command: str) -> None:
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    assert command_runner_class({"command": command}) == "test"
+    argv: list[JsonValue] = list(shlex.split(command))
+    assert native_command_runner_class(argv) == "test"
 
 
 def test_a_codex_post_event_is_not_a_success_fact() -> None:

@@ -13615,7 +13615,10 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `typecheck`, ruff/flake8/pylint/pyflakes/pycodestyle `lint`, build/compileall `build`) and never
   counts an interpreter-run script as `build` by its name (ADR-042).
   `native_command_runner_class(argv)` unwraps at most one ordinary native host-shell layer for
-  runner classification; nested executable spelling remains visible. Generic `finalize` and
+  runner classification; nested executable spelling remains visible. A shell given noexec among
+  its own options (`bash -n FILE`, `bash -nc X`, `-o noexec`, zsh's `--no-exec`) runs nothing, so
+  the call classes `other` whatever its script or text names (`_shell_noexec`, #1444).
+  Generic `finalize` and
   `*_regression` names grant no verification credit. Exploration additionally requires established
   executable resolution and closed non-writing arguments, independent of canonical verification
   matching. Since PR #1080 round 5 the exploration class of a shell command keeps failed exploratory

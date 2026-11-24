@@ -1369,7 +1369,7 @@ def test_completed_masking_compound_command_preserves_outer_zero_with_nested_gap
     assert ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value in envelope.gap_codes
 
 
-def _rollout_command_envelope(command: str) -> ObservationEnvelope:
+def _rollout_command_envelope(command: str | list[str]) -> ObservationEnvelope:
     record = CodexParsedRecord(
         1,
         0,
@@ -1423,6 +1423,23 @@ def test_a_rollout_command_that_writes_carries_the_hooks_closed_write_scope(
     command: str, scope: str | None
 ) -> None:
     assert _rollout_command_envelope(command).structural_payload.get("write_scope") == scope
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -n run_tests.sh",
+        ["bash", "-n", "run_tests.sh"],
+        ["bash", "-nc", "./run_tests.sh"],
+        ["/bin/bash", "-lc", "bash -n run_tests.sh"],
+    ],
+)
+def test_a_rollout_noexec_shell_call_is_not_recorded_as_a_test_run(
+    command: str | list[str],
+) -> None:
+    """A shell given noexec ran nothing, as a string and as the argv Codex records (#1444)."""
+
+    assert _rollout_command_envelope(command).structural_payload["runner_class"] == "other"
 
 
 @pytest.mark.parametrize("vector", VECTORS, ids=[f"{n:03d}" for n, _ in enumerate(VECTORS)])

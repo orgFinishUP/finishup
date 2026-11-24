@@ -736,6 +736,11 @@ def _classify_resolved_argv(argv: list[str]) -> RunnerClass | None:
         and all(not argument.startswith("-") for argument in argv[3:])
     ):
         return "exploration"
+    if command in _SHELL_WRAPPERS and _shell_noexec(argv):
+        # The shell reads its script file or ``-c`` text and runs none of it (``bash -n
+        # run_tests.sh``, ``sh -cn verify.sh``), so the call is no run of that script, and no word
+        # of it names a verifier either (``bash -n build.sh``, ``bash -nc 'mypy src'``) (#1444).
+        return "other"
     if command in _SHELL_WRAPPERS and len(argv) >= 3 and _SHELL_COMMAND_FLAG_RE.fullmatch(argv[1]):
         return command_runner_class({"command": argv[2]})
     wrapped = _run_wrapper_target(command, argv)
@@ -889,6 +894,47 @@ _TEST_SCRIPT_NAME_RE: Final = re.compile(
     r"|^(?:test[-_][a-z0-9_.-]+|[a-z0-9_.-]+[-_]tests?)\.[a-z0-9]+$",
     re.IGNORECASE | re.ASCII,
 )
+
+
+# One word of a shell's own short options (``-x``, ``-lc``, ``+e``).
+_SHELL_OPTION_CLUSTER_RE: Final = re.compile(r"^[-+][A-Za-z]+$", re.ASCII)
+
+
+def _shell_noexec(argv: list[str]) -> bool:
+    """Whether a shell's own options tell it to read its script without running it.
+
+    The options are the words before the script file or the ``-c`` text; a shell keeps reading
+    them after ``-c`` (``bash -c -n X`` runs nothing), and any later word is the script's own
+    argument (``bash run.sh -n``, ``bash -c X -n``). Noexec is ``n`` in a short cluster (``-n``,
+    ``-nc``, ``-xn``), ``-o noexec`` (``-eo noexec``) and zsh's spellings of the name (``-o
+    NO_EXEC``, ``--no-exec``), which bash and dash refuse without running anything. Such a shell
+    exits zero for any well-formed text, so its exit status says nothing about the script.
+    """
+
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        index += 1
+        if len(word) > 2 and word.startswith("--"):
+            if _shell_option_name(word) == "noexec":
+                return True
+            continue
+        if _SHELL_OPTION_CLUSTER_RE.fullmatch(word) is None:
+            return False
+        if word[0] == "-" and "n" in word:
+            return True
+        for letter in word[1:]:
+            if letter in "oO":
+                # ``-o NAME`` and bash's ``-O NAME`` take the next word, from any cluster.
+                named = argv[index] if index < len(argv) else ""
+                if word[0] == "-" and letter == "o" and _shell_option_name(named) == "noexec":
+                    return True
+                index += 1
+    return False
+
+
+def _shell_option_name(word: str) -> str:
+    return word.replace("-", "").replace("_", "").casefold()
 
 
 def _script_operand(command: str, argv: list[str]) -> str | None:

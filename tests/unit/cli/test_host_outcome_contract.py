@@ -442,6 +442,35 @@ def test_runner_class_is_derived_instead_of_copied_from_host_payload() -> None:
     assert envelope.structural_payload["runner_class"] == "test"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "key"), [("Bash", "command"), ("exec_command", "cmd"), ("Shell", "command")]
+)
+@pytest.mark.parametrize(
+    "command",
+    ["bash -n run_tests.sh", "bash -nc ./run_tests.sh", "sh -cn verify.sh", "bash -n build.sh"],
+)
+def test_a_noexec_shell_call_is_not_recorded_as_a_verification_run(
+    tool_name: str, key: str, command: str
+) -> None:
+    """A shell given noexec ran nothing, so its zero exit is no test or build run (#1444)."""
+
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_use_id": "call-noexec",
+            "tool_input": {key: command},
+            "tool_response": {"exit_code": 0, "output": ""},
+        },
+        session_commitment="hmac-sha256:" + ("1d" * 32),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert envelope.structural_payload["exit_status"] == 0
+    assert envelope.structural_payload["runner_class"] == "other"
+
+
 def _rollout_envelopes(
     tmp_path: Path, session: str, fixture: str = _CODEX
 ) -> tuple[ObservationEnvelope, ...]:
