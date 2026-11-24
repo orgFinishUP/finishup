@@ -9864,7 +9864,13 @@ observation boolean. `CursorPluginStatus` also carries one `CursorMcpRuntimeObse
 live process scan ran, exact bounded counts of classified policy/strict/foreign `finishup mcp serve` processes,
 the live helper route or null, and `activation` exactly
 `unobserved|matched|full_restart_required`. Classification requires an exact `finishup` launcher token
-and known serve suffix; an unavailable or truncated scan is `unobserved`. Counts and closed tokens only — never raw argv, paths,
+and known serve suffix; an unavailable or truncated scan is `unobserved`. A project registration's
+known suffix is its absolute `--project-root`, then at most the Agent CLI's
+`--project-binding registered-project`, then at most `--semantic off`, as rendered. From Linux and
+WSL 2 argv any other tail is foreign. macOS `ps` text has no argument boundaries, so that scan is
+bounded: other text after the root that starts a long option (a space, two dashes, then a letter
+or digit) is foreign, including when it is part of the workspace path, and any other trailing
+text is read as part of a root that contains spaces. Counts and closed tokens only — never raw argv, paths,
 or parent command lines. File registration is not live runtime: a plugin-managed `policy` tree with
 a surviving Cursor-helper child on the strict argv is `full_restart_required`, and `HOST_ACTIVATION`
 stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate

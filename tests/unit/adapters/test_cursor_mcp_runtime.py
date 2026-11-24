@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -595,6 +596,7 @@ def test_darwin_scanner_keeps_a_root_whose_words_start_no_long_option(
         "My Project --\u00e9t\u00e9",
         "x --semantic off/y",
         "x --semantic offline/y",
+        "x --project-binding registered-project/y",
     ],
 )
 @pytest.mark.parametrize("tail", [(), ("--semantic", "off")])
@@ -641,6 +643,84 @@ def test_darwin_scanner_reads_a_root_that_ends_in_the_strict_tail_as_the_route(
     assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "strict", "matched"),)
 
 
+@pytest.mark.parametrize("route", ["policy", "strict"])
+@pytest.mark.parametrize("binding", ["mcp-roots", "registered-project"])
+@pytest.mark.parametrize("root", [f"{MACOS_HOME}/a/proj", f"{MACOS_HOME}/a/My Project"])
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        ("/opt/finishup/bin/finishup",),
+        ("/opt/FinishUP Tools/bin/finishup",),
+        ("/opt/current/bin/python3.14", "-m", "finishup"),
+    ],
+)
+def test_every_rendered_project_registration_is_classified_in_both_forms(
+    monkeypatch: pytest.MonkeyPatch,
+    route: Literal["policy", "strict"],
+    binding: Literal["mcp-roots", "registered-project"],
+    root: str,
+    launcher: tuple[str, ...],
+) -> None:
+    # The command comes from the renderer behind ``project-mcp install`` and ``setup run``:
+    # ``--host cursor-cli`` selects the ``registered-project`` binding (issue #786), which is
+    # rendered between the root and ``--semantic off``. A live child of FinishUP's own
+    # registration is never foreign, from the NUL-split argv or from macOS ``ps`` text.
+    from finishup.adapters.integrations import cursor_project_mcp
+
+    entry = cursor_project_mcp._expected(  # pyright: ignore[reportPrivateUsage]
+        launcher, None, route, project_root=Path(root), project_binding=binding
+    )
+    args = entry["args"]
+    assert isinstance(args, list)
+    argv = (str(entry["command"]), *(str(item) for item in args))
+    assert ("--project-binding" in argv) is (binding == "registered-project")
+    assert classify_serve_argv(argv, launcher) == (route, "matched")
+
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, launcher, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", route, "matched"),)
+    assert snapshot is not None
+    observation = observe_cursor_mcp_runtime(
+        installed_route=route, processes=FixedCursorMcpProcesses(snapshot)
+    )
+    assert observation.activation == "matched"
+    assert observation.live_route_profile == route
+    assert observation.foreign_process_count == 0
+
+
+def test_agent_cli_binding_is_accepted_only_where_the_renderer_puts_it() -> None:
+    from finishup.adapters.integrations.cursor_mcp_runtime import classify_project_serve_text
+
+    serve = _PROJECT_SERVE[:-1]
+    root = f"{MACOS_HOME}/a/My Project"
+    binding = ("--project-binding", "registered-project")
+    strict = ("--semantic", "off")
+
+    rendered = (*serve, "--project-root", root, *binding)
+    assert classify_serve_argv(rendered, _BOUND) == ("policy", "matched")
+    assert classify_serve_argv((*rendered, *strict), _BOUND) == ("strict", "matched")
+    assert classify_project_serve_text(" ".join(rendered), _BOUND) == ("policy", "matched")
+    assert classify_project_serve_text(" ".join((*rendered, *strict)), _BOUND) == (
+        "strict",
+        "matched",
+    )
+
+    # The renderer never emits the binding without an absolute root, after the route, twice,
+    # without a value, or with another value (the default ``mcp-roots`` spelled out, a longer
+    # word that starts the same): none of these is that registration.
+    for argv in (
+        (*serve, *binding),
+        (*serve, *binding, *strict),
+        (*serve, "--project-root", "relative", *binding),
+        (*serve, "--project-root", root, *strict, *binding),
+        (*serve, "--project-root", root, *binding, *binding),
+        (*serve, "--project-root", root, "--project-binding", "mcp-roots"),
+        (*serve, "--project-root", root, "--project-binding"),
+        (*serve, "--project-root", root, "--project-binding", "registered-projects"),
+    ):
+        assert classify_serve_argv(argv, _BOUND) == ("foreign", "matched"), argv
+        assert classify_project_serve_text(" ".join(argv), _BOUND) is None, argv
+
+
 _FOREIGN_TAILS: tuple[tuple[str, ...], ...] = (
     ("--evil", "x"),
     ("--evil",),
@@ -651,10 +731,14 @@ _FOREIGN_TAILS: tuple[tuple[str, ...], ...] = (
     ("--semantic", "off/y"),
     ("--semantic", "off/y", "--semantic", "off"),
     ("--project-binding", "mcp-roots"),
+    ("--project-binding", "mcp-roots", "--semantic", "off"),
     ("--project-binding", "registered-projects"),
     ("--project-binding", "registered-project/y"),
-    ("--project-binding", "registered-project"),
-    ("--project-binding", "registered-project", "--semantic", "off"),
+    ("--project-binding", "registered-project/y", "--semantic", "off"),
+    ("--project-binding", "registered-project", "--semantic", "on"),
+    ("--project-binding", "registered-project", "--semantic", "offline"),
+    ("--project-binding", "registered-project", "--evil", "x"),
+    ("--project-binding", "registered-project", "--project-binding", "registered-project"),
     ("--semantic", "off", "--project-binding", "registered-project"),
     ("--semantic", "off", "--semantic", "off"),
     ("--semantic", "off", "--evil", "x"),

@@ -41,7 +41,12 @@ _MAX_PROJECT_SELECTOR: Final = 8_192
 # past it is skipped rather than classified from a cut-off prefix.
 _MAX_PS_TEXT: Final = 4_096
 _PROJECT_SERVE_MARKER: Final = " mcp serve --host cursor --project-root "
-_STRICT_TEXT_TAIL: Final = " --semantic off"
+# What FinishUP renders after the project root, in rendered order: the Agent CLI's explicit
+# binding (issue #786), then the strict route. The argv and ``ps`` text forms accept exactly these.
+_REGISTERED_BINDING_ARGS: Final = ("--project-binding", "registered-project")
+_STRICT_ARGS: Final = ("--semantic", "off")
+_REGISTERED_BINDING_TEXT_TAIL: Final = " " + " ".join(_REGISTERED_BINDING_ARGS)
+_STRICT_TEXT_TAIL: Final = " " + " ".join(_STRICT_ARGS)
 # ``ps`` text has no argument boundaries. A space, two dashes and a letter or digit may start
 # another argument, and the argv classifier calls foreign every argument after the root that
 # FinishUP does not render, so root text holding one is refused. That includes option text that
@@ -218,7 +223,11 @@ def _valid_project_selector(value: str) -> bool:
 def _classify_cursor_project_suffix(
     suffix: tuple[str, ...],
 ) -> Literal["strict", "policy"] | None:
-    """Classify the exact project registration suffix with its expanded root argument."""
+    """Classify the exact project registration suffix with its expanded root argument.
+
+    After the root the renderer emits at most the Agent CLI binding and then ``--semantic off``;
+    any other tail, or those two in another order, is not this registration.
+    """
 
     prefix = ("mcp", "serve", "--host", "cursor", "--project-root")
     if len(suffix) < len(prefix) + 1 or suffix[: len(prefix)] != prefix:
@@ -226,9 +235,11 @@ def _classify_cursor_project_suffix(
     if not _valid_project_selector(suffix[len(prefix)]):
         return None
     tail = suffix[len(prefix) + 1 :]
+    if tail[: len(_REGISTERED_BINDING_ARGS)] == _REGISTERED_BINDING_ARGS:
+        tail = tail[len(_REGISTERED_BINDING_ARGS) :]
     if not tail:
         return "policy"
-    if tail == ("--semantic", "off"):
+    if tail == _STRICT_ARGS:
         return "strict"
     return None
 
@@ -284,13 +295,14 @@ def classify_project_serve_text(
     ``ps`` renders argv as one whitespace-joined string, so a ``--project-root`` that Cursor
     expanded to a workspace path containing whitespace (``~/Documents/My Project``) cannot be
     recovered by splitting. The text after ``mcp serve --host cursor --project-root `` is read as
-    the argv form is: the root, then nothing or one trailing `` --semantic off`` (strict). What is
-    left must pass the same lexical selector check as the argv form and hold no long option, so a
-    trailing ``--flag`` the argv classifier calls foreign is not absorbed into the root. Trailing
-    words that start no long option cannot be told from a root with spaces and are read as part
-    of it: that is the limit of the text form. A FinishUP launcher token must precede
-    ``mcp serve``. Returns ``None`` when the text is not that registration. The launcher match
-    compares the tokens before ``mcp serve`` exactly as :func:`classify_serve_argv` does.
+    the argv form is: the root, then at most `` --project-binding registered-project``, then at
+    most `` --semantic off`` (strict), both taken from the end of the text. What is left must pass
+    the same lexical selector check as the argv form and hold no long option, so a trailing
+    ``--flag`` the argv classifier calls foreign is not absorbed into the root. Trailing words
+    that start no long option cannot be told from a root with spaces and are read as part of it:
+    that is the limit of the text form. A FinishUP launcher token must precede ``mcp serve``.
+    Returns ``None`` when the text is not that registration. The launcher match compares the
+    tokens before ``mcp serve`` exactly as :func:`classify_serve_argv` does.
     """
 
     if type(text) is not str or not text or len(text) > _MAX_PS_TEXT:
@@ -309,6 +321,8 @@ def classify_project_serve_text(
     if root.endswith(_STRICT_TEXT_TAIL):
         root = root[: -len(_STRICT_TEXT_TAIL)]
         kind = "strict"
+    if root.endswith(_REGISTERED_BINDING_TEXT_TAIL):
+        root = root[: -len(_REGISTERED_BINDING_TEXT_TAIL)]
     if _TEXT_LONG_OPTION.search(root) or not _valid_project_selector(root):
         return None
     launcher: CursorLauncherMatch | None = None
