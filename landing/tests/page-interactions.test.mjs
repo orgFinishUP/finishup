@@ -185,8 +185,7 @@ test("pause destroys the artwork, renders static stills, and play restores anima
   assert.equal(env.ids.story.classList.contains("animated"), false);
   assert.equal(env.ids.story.classList.contains("stills"), true);
   assert.equal(env.stillRenders, 7, "every scene receives a crisp static still");
-  assert.equal(toggle.attributes.get("aria-label"), "Play animation");
-  assert.equal(toggle.attributes.get("aria-checked"), "true");
+  assert.equal(toggle.attributes.get("aria-checked"), "true", "Pause motion is on");
   assert.ok(env.copies.every((el) => !el.inert && !el.attributes.has("aria-hidden")));
   await env.win.dispatch("resize");
   await env.win.dispatch("pagehide");
@@ -196,8 +195,8 @@ test("pause destroys the artwork, renders static stills, and play restores anima
   assert.equal(env.activeArt, 1);
   assert.equal(env.ids.story.classList.contains("animated"), true);
   assert.equal(env.ids.story.classList.contains("stills"), false);
-  assert.equal(toggle.attributes.get("aria-label"), "Pause animation");
-  assert.equal(toggle.attributes.get("aria-checked"), "false");
+  assert.equal(toggle.attributes.get("aria-checked"), "false", "Pause motion is off");
+  assert.equal(toggle.attributes.has("aria-label"), false, "the switch is never renamed; aria-checked carries its state");
 });
 
 test("text-only toggle hides decorative stills and restores presentation cleanly", async () => {
@@ -213,12 +212,17 @@ test("text-only toggle hides decorative stills and restores presentation cleanly
   assert.equal(env.activeArt, 0);
   assert.equal(env.ids.story.classList.contains("animated"), false);
   assert.equal(env.ids.story.classList.contains("stills"), false);
-  assert.equal(graphics.attributes.get("aria-checked"), "true");
+  assert.equal(graphics.attributes.get("aria-checked"), "true", "Text only is on");
+  assert.equal(env.ids["motion-toggle"].attributes.get("aria-checked"), "true", "text only also pauses motion");
   await env.doc.dispatch("keydown", { key: "Escape" });
   assert.equal(panel.hidden, true);
   await graphics.dispatch("click");
   assert.equal(env.activeArt, 1);
   assert.equal(env.ids.story.classList.contains("animated"), true);
+  assert.equal(graphics.attributes.get("aria-checked"), "false", "Text only is off");
+  assert.equal(env.ids["motion-toggle"].attributes.get("aria-checked"), "false");
+  assert.equal(graphics.attributes.has("aria-label"), false, "the switch is never renamed; aria-checked carries its state");
+  assert.equal(env.ids["motion-toggle"].attributes.has("aria-label"), false);
 });
 
 test("copy that cannot fit uses stills flow and animation returns when room is available", async () => {

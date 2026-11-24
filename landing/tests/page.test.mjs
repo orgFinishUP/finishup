@@ -62,3 +62,20 @@ test("the accessibility panel follows its trigger, so Tab goes from the trigger 
   assert.match(rule, /position: fixed;/);
   assert.match(rule, /flex-direction: column-reverse;/);
 });
+
+test("each switch keeps one name, its visible label, and says its state with aria-checked alone", () => {
+  // A switch is announced as its name plus on or off. A name that changes with the state
+  // ("Pause animation" off, "Play animation" on) reads as the opposite of what the switch shows.
+  for (const [id, label] of [["motion-toggle", "Pause motion"], ["graphics-toggle", "Text only"]]) {
+    const toggle = element(id);
+    assert.equal(toggle.attr("role"), "switch");
+    assert.equal(toggle.attr("aria-checked"), "false");
+    assert.equal(toggle.attr("aria-label"), undefined, `#${id} is named by its visible label, not by a second wording`);
+    const name = element(toggle.attr("aria-labelledby"));
+    assert.equal(name.attr("class"), "a11y-name", "the name is the label drawn beside the switch");
+    assert.equal(body.slice(name.at).match(/>([^<]*)</)[1], label);
+    assert.equal(element(toggle.attr("aria-describedby")).attr("class"), "a11y-desc");
+  }
+  const script = page.slice(page.indexOf("<script>"));
+  assert.doesNotMatch(script, /setAttribute\("aria-label(?:ledby)?"/, "the page script never renames a control");
+});

@@ -106,22 +106,25 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
           </button>
         </div>
+        {/* Each switch is named by the label drawn beside it and keeps that name. Whether it is on
+            is said by aria-checked alone: a name that changed with the state would be announced
+            as the opposite of what the switch shows. */}
         <div class="a11y-row" id="motion-row">
           <div class="a11y-label">
-            <span class="a11y-name">Pause motion</span>
-            <span class="a11y-desc">Show crisp still artwork</span>
+            <span class="a11y-name" id="motion-name">Pause motion</span>
+            <span class="a11y-desc" id="motion-desc">Show crisp still artwork</span>
           </div>
-          <button class="a11y-switch" id="motion-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Pause animation" hidden>
+          <button class="a11y-switch" id="motion-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-labelledby="motion-name" aria-describedby="motion-desc" hidden>
             <span class="a11y-knob" aria-hidden="true"></span>
           </button>
         </div>
         <p class="a11y-note" id="a11y-reduced-note" hidden>System reduced motion is active — showing still artwork.</p>
         <div class="a11y-row" id="graphics-row">
           <div class="a11y-label">
-            <span class="a11y-name">Text only</span>
-            <span class="a11y-desc">Hide decorative dot artwork</span>
+            <span class="a11y-name" id="graphics-name">Text only</span>
+            <span class="a11y-desc" id="graphics-desc">Hide decorative dot artwork</span>
           </div>
-          <button class="a11y-switch" id="graphics-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Hide decorative artwork">
+          <button class="a11y-switch" id="graphics-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-labelledby="graphics-name" aria-describedby="graphics-desc">
             <span class="a11y-knob" aria-hidden="true"></span>
           </button>
         </div>
@@ -368,15 +371,12 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         if (a11yMenu) a11yMenu.hidden = !canDraw;
         if (motionToggle) {
           motionToggle.hidden = !canAnimate;
+          // Text only also stops the motion, so "Pause motion" reads as on while it is set.
           motionToggle.setAttribute("aria-checked", String(userPaused || userTextOnly));
-          motionToggle.setAttribute("aria-label", userPaused || userTextOnly ? "Play animation" : "Pause animation");
         }
         if (motionRow) motionRow.hidden = !canAnimate;
         if (a11yReducedNote) a11yReducedNote.hidden = !(canDraw && reduced.matches && !userTextOnly);
-        if (graphicsToggle) {
-          graphicsToggle.setAttribute("aria-checked", String(userTextOnly));
-          graphicsToggle.setAttribute("aria-label", userTextOnly ? "Show decorative artwork" : "Hide decorative artwork");
-        }
+        if (graphicsToggle) graphicsToggle.setAttribute("aria-checked", String(userTextOnly));
         if (graphicsRow) graphicsRow.hidden = !canDraw;
         if (sceneRail) sceneRail.hidden = !animated;
         story?.classList.toggle("animated", animated);
