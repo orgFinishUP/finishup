@@ -30,6 +30,7 @@ from finishup.ports.plugin_artifacts import (
 )
 from finishup.protocol.canonical import canonical_encode
 from finishup.version import read_verified_resource
+from synthetic_paths import MACOS_HOME
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000021")
 _REVIEW_ID = "a" * 64
@@ -456,12 +457,12 @@ def test_darwin_scanner_reads_the_whole_process_table(
 @pytest.mark.parametrize(
     ("root", "tail", "route"),
     [
-        ("/Users/dev/Documents/My Project", (), "policy"),
-        ("/Users/dev/Documents/My Project", ("--semantic", "off"), "strict"),
-        ("/Users/dev/Library/Mobile Documents/com~apple~CloudDocs/a b  c", (), "policy"),
-        ("/Users/dev/x --semantic off/y", (), "policy"),
-        ("/Users/dev/x --semantic off/y", ("--semantic", "off"), "strict"),
-        ("/Users/dev/" + "deep dir/" * 40 + "app", ("--semantic", "off"), "strict"),
+        (f"{MACOS_HOME}/dev/Documents/My Project", (), "policy"),
+        (f"{MACOS_HOME}/dev/Documents/My Project", ("--semantic", "off"), "strict"),
+        (f"{MACOS_HOME}/dev/Library/Mobile Documents/com~apple~CloudDocs/a b  c", (), "policy"),
+        (f"{MACOS_HOME}/dev/x --semantic off/y", (), "policy"),
+        (f"{MACOS_HOME}/dev/x --semantic off/y", ("--semantic", "off"), "strict"),
+        (f"{MACOS_HOME}/dev/" + "deep dir/" * 40 + "app", ("--semantic", "off"), "strict"),
     ],
 )
 @pytest.mark.parametrize(
@@ -515,7 +516,8 @@ def test_macos_ps_text_classifies_only_the_exact_project_registration() -> None:
     from finishup.adapters.integrations.cursor_mcp_runtime import classify_project_serve_text
 
     bound = ("/opt/finishup/bin/finishup",)
-    text = "/opt/finishup/bin/finishup mcp serve --host cursor --project-root /Users/a/My Project"
+    root = f"{MACOS_HOME}/a/My Project"
+    text = f"/opt/finishup/bin/finishup mcp serve --host cursor --project-root {root}"
     assert classify_project_serve_text(text, bound) == ("policy", "matched")
     assert classify_project_serve_text(text + " --semantic off", bound) == ("strict", "matched")
     assert classify_project_serve_text(text, None) == ("policy", None)
@@ -524,11 +526,9 @@ def test_macos_ps_text_classifies_only_the_exact_project_registration() -> None:
     # Not a FinishUP launcher before ``mcp serve``, a relative or traversing root, an unknown
     # trailing flag, or no project root at all: not this registration.
     assert classify_project_serve_text(text.replace("bin/finishup", "bin/other"), bound) is None
-    assert (
-        classify_project_serve_text(text.replace("/Users/a/My Project", "My Project"), bound)
-        is None
-    )
-    assert classify_project_serve_text(text.replace("/Users/a/My", "/Users/../My"), bound) is None
+    assert classify_project_serve_text(text.replace(root, "My Project"), bound) is None
+    traversing = text.replace(root, f"{MACOS_HOME}/../My Project")
+    assert classify_project_serve_text(traversing, bound) is None
     assert classify_project_serve_text("/opt/finishup/bin/finishup mcp serve", bound) is None
     assert classify_project_serve_text("", bound) is None
 
@@ -543,7 +543,7 @@ def test_darwin_scanner_skips_a_process_row_too_long_to_classify(
     import finishup.adapters.integrations.cursor_mcp_runtime as module
 
     launcher = "/opt/finishup/bin/finishup"
-    root = "/Users/dev/" + "d/" * 3_000 + "app"
+    root = f"{MACOS_HOME}/dev/" + "d/" * 3_000 + "app"
     comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 finishup\n"
     arg_table = (
         b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
