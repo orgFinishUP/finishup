@@ -8974,6 +8974,16 @@ and a cache that changes between preview and apply still refuses as `preview_sta
 source tree that byte-matches its own valid marker (for example a prior host-rendered or
 older-guidance render) is likewise a replaceable managed render, not a `modified_copy`; apply
 still requires a byte-exact current renderer variant at its source fences before any mutation.
+A project source tree that holds a file outside the managed inventory and is not such a render is
+never replaced: source install and activation preview both refuse it as `destination_conflict`
+with safe detail `unmanaged_files: true`, and inspection reports it as
+`installed_untrusted_unknown` (`installed_not_activated`), so removal stays available. Its one
+continuation is `plugin_unmanaged_files_continuation(project)`, a fixed sentence that names
+`.agents/plugins/finishup` and no file in it. `setup run|status --host codex` carry it as
+`next_step` in place of the Codex-home conflict text the same reason otherwise gets (the refused
+Codex plan brings it in `RuntimeError_.recovery`, which the terminal interface shows); the
+historical wizard carries it with `plugin_install_failed`, and an approved apply whose second
+preview meets the files carries it with `activation_preview_failed`.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 `apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a

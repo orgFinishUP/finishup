@@ -414,7 +414,9 @@ class RuntimeError_(Exception):
 
     ``recovery`` holds the directive lines a public service error resolved from its gated safe
     details (ADR-030), and ``retryable`` its retryable flag; both stay empty for a local reason,
-    whose directive the interface looks up from the reason itself.
+    whose directive the interface looks up from the reason itself. The exception is a local
+    refusal whose reason does not name its cause: a Codex plan refused for files FinishUP did
+    not write in the plugin directory brings that one continuation in ``recovery``.
     """
 
     def __init__(
@@ -1063,7 +1065,10 @@ class FinishUpRuntime:
         """
 
         from finishup.adapters.integrations.codex_mcp import CodexMcpAdapter
-        from finishup.adapters.integrations.codex_plugin import activation_cache_mcp_binding
+        from finishup.adapters.integrations.codex_plugin import (
+            activation_cache_mcp_binding,
+            plugin_unmanaged_files_continuation,
+        )
         from finishup.application.codex_plugin import CodexPluginService
         from finishup.application.harness_mcp import HarnessMcpService
         from finishup.cli.runtime_refusal import connect_refusal
@@ -1098,7 +1103,15 @@ class FinishUpRuntime:
         try:
             activation_preview = codex_activation_preview(binary, codex_home, root)
         except IntegrationError as error:
-            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
+            # ``destination_conflict`` alone reads as a conflict in the Codex home. When the
+            # plugin directory holds files FinishUP did not write, say that and what to do,
+            # for the terminal interface and for `setup run|status`, which see only this error.
+            unmanaged = error.safe_details.get("unmanaged_files") is True
+            raise RuntimeError_(
+                error.reason.value,
+                "the Codex activation could not be previewed",
+                recovery=(plugin_unmanaged_files_continuation(root),) if unmanaged else (),
+            )
         service = HarnessMcpService(
             CodexMcpAdapter(route_profile=route, codex_home=activation_preview.codex_home)
         )

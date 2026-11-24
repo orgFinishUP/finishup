@@ -546,6 +546,39 @@ async def test_the_codex_integration_preview_refuses_a_runtime_that_cannot_serve
     )
 
 
+async def test_the_codex_integration_preview_names_owner_files_in_the_plugin_directory(
+    tmp_path: Path,
+) -> None:
+    """#1382: the real activation preview refuses; the refusal brings the step that works.
+
+    The reason token alone is the one a conflict in the Codex home has, so every surface that
+    explains it would send the owner to the wrong place.
+    """
+
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    (project / ".git").mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nprintf 'codex-cli 0.149.1\\n'\n")
+    executable.chmod(0o700)
+    owner_file = project / ".agents/plugins/finishup/notes.md"
+    owner_file.parent.mkdir(parents=True)
+    owner_file.write_bytes(b"owner notes\n")
+    option = HarnessOption(str(executable), "0.149.1", "Codex", "")
+
+    with pytest.raises(RuntimeError_) as refused:
+        await FinishUpRuntime(cwd=project).integration_plan(option, home, "policy")
+
+    assert refused.value.reason == "destination_conflict"
+    assert refused.value.recovery == (plugin_unmanaged_files_continuation(project),)
+    assert owner_file.read_bytes() == b"owner notes\n"
+    assert list(home.iterdir()) == []
+
+
 def _isolated_observation_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> tuple[FinishUpRuntime, Path]:

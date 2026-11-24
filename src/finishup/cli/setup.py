@@ -1817,9 +1817,21 @@ async def _codex_integration_step(
             # Without a usable explicit home, fail closed instead of silently applying only the
             # other integration surfaces.
             if selected_codex_home is None or approved_activation_digest is not None:
+                # An approved apply stops here, before the plugin installer whose refusal names
+                # the same cause, when the owner's files appeared after the plan was shown.
+                unmanaged = error.safe_details.get("unmanaged_files") is True
                 return {
                     "outcome": "failed",
                     "reason": "activation_preview_failed",
+                    **(
+                        {
+                            "next_step": plugin_unmanaged_files_continuation(
+                                Path(project.project_root)
+                            )
+                        }
+                        if unmanaged
+                        else {}
+                    ),
                     "state": None,
                     "plugin": {"outcome": "skipped", "presence": None},
                     "plugin_activation": {

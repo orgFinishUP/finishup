@@ -1376,6 +1376,23 @@ def run_host_connection(
                 "connect through a separate Codex home instead: create a directory owned only "
                 "by you (mode 0700) and rerun with --host-config-root pointing to it."
             )
+        if host == "codex" and reason == "destination_conflict":
+            # The same reason is given when this project's plugin directory holds files FinishUP
+            # did not write (#1382). The Codex home is then not the cause and another home meets
+            # the same directory. `setup run` and `setup status` see the refused Codex plan,
+            # which brings the step for the directory it inspected; an adapter refusal met
+            # directly carries only the detail.
+            if isinstance(error, RuntimeError_) and error.recovery:
+                report["next_step"] = "\n".join(error.recovery)
+            elif (
+                isinstance(error, IntegrationError)
+                and error.safe_details.get("unmanaged_files") is True
+            ):
+                from finishup.adapters.integrations.codex_plugin import (
+                    plugin_unmanaged_files_continuation,
+                )
+
+                report["next_step"] = plugin_unmanaged_files_continuation(project)
         if (
             host == "codex"
             and isinstance(error, IntegrationError)

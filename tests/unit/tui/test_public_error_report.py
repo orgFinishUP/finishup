@@ -126,3 +126,23 @@ async def test_a_local_reason_still_resolves_its_own_directive(
     )
     assert body[0] == "Reason: task_not_open"
     assert details == ("reason=task_not_open",)
+
+
+async def test_a_local_refusal_shows_the_continuation_it_brought(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused Codex plan names the plugin directory; the reason alone would not (#1382)."""
+
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+
+    step = plugin_unmanaged_files_continuation(Path("/workspace/example/project"))
+    level, title, body, details = _report(
+        RuntimeError_(
+            "destination_conflict", "the Codex activation could not be previewed", recovery=(step,)
+        ),
+        monkeypatch,
+    )
+    assert level is Level.BLOCKED
+    assert title == "the Codex activation could not be previewed"
+    assert body == ("Reason: destination_conflict", step)
+    assert details == ("reason=destination_conflict",)

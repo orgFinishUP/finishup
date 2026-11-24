@@ -298,7 +298,7 @@ class _CommandOutputLimit(Exception):
 
 def _error(
     reason: IntegrationReason,
-    details: Mapping[str, str] | None = None,
+    details: Mapping[str, str | bool] | None = None,
 ) -> IntegrationError:
     return IntegrationError(reason, {} if details is None else dict(details))
 
@@ -1454,9 +1454,11 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         if plugin_tree_matches_marker(installed):
             return expected
         # Files outside the managed inventory are owner content the source install refuses
-        # to remove (ADR-023 §9), not a partial FinishUP install.
+        # to remove (ADR-023 §9), not a partial FinishUP install. The detail is the one the
+        # source install gives: the reason alone also means a conflict in the Codex home, and
+        # whoever explains this refusal has to name the plugin directory instead.
         if not installed.keys() <= expected.keys():
-            raise _error(IntegrationReason.DESTINATION_CONFLICT)
+            raise _error(IntegrationReason.DESTINATION_CONFLICT, {"unmanaged_files": True})
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
     for candidate in source.rglob("*"):
@@ -1471,7 +1473,12 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         else:
             raise _error(IntegrationReason.TARGET_UNSAFE)
     if actual_paths != set(expected):
-        raise _error(IntegrationReason.DESTINATION_CONFLICT)
+        # The tree changed after it was inspected as exact. A path outside the inventory is a
+        # file FinishUP did not write, as above; a managed file that went missing is not.
+        raise _error(
+            IntegrationReason.DESTINATION_CONFLICT,
+            {"unmanaged_files": True} if actual_paths - set(expected) else None,
+        )
     members: dict[str, bytes] = {}
     for relative_path in expected:
         path = source / relative_path

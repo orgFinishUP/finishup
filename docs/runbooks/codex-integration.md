@@ -746,10 +746,34 @@ prior render that byte-matches its own valid marker (ADR-023 §6, §9). A direct
 other file, whether an owner note added to an installed tree or a hand-made directory with no
 marker, is refused as `destination_conflict` (`unmanaged_files: true`) and left untouched;
 `replace_modified` covers edited managed files only and never authorizes removing unmanaged
-files. Setup reports `plugin_install_failed` with a continuation: move those files, or the whole
-directory, outside `.agents/plugins`, then rerun setup. Plugin inspection reports such a tree as
-not exact (`installed_untrusted_unknown`), its digest binds the unmanaged files, and activation
-preview refuses it as `destination_conflict` before any Codex command.
+files. Plugin inspection reports such a tree as not exact (`installed_untrusted_unknown`), its
+digest binds the unmanaged files, and activation preview refuses it with the same
+`destination_conflict` (`unmanaged_files: true`) before any Codex command.
+
+Every setup route gives one continuation for it, naming the directory: move those files, or the
+whole directory, outside `.agents/plugins`, then rerun setup. Which reason carries it depends on
+where the route stops:
+
+- `setup run --host codex` (preview and `--accept`) and `setup status --host codex` stop at the
+  activation preview: outcome `incomplete`, reason `destination_conflict`, the continuation as
+  `next_step`. This is not the Codex-home conflict text the same reason has otherwise: nothing in
+  the Codex home is the cause, and a separate home meets the same directory.
+- The terminal interface shows the continuation under the refused plan. If the files appear
+  after the plan was shown, the approved apply previews again and reports
+  `activation_preview_failed` with the same continuation.
+- The historical wizard (`setup run` with Codex as the only host found, or `--codex-path`)
+  installs sources even when activation cannot be previewed, so an accepted run reports
+  `plugin_install_failed` with the continuation.
+- A setup run or status for several agents at once reports `destination_conflict` with its
+  general next step (inspect setup status for the selected agents), and `setup status --next`
+  reports `connection_unavailable` with the `setup status --host codex` command; that status
+  then names the directory.
+
+`integrate codex plugin status` is an inspection, not a setup: it reports such a tree as
+`installed_not_activated`, like any other byte-present tree that is not an exact render (issue
+#347), also when Codex still lists the plugin as installed and enabled. `integrate codex plugin
+preview|remove` and `setup disconnect --host codex` still work for it and leave the plugin source
+directory, with the owner's files, in place.
 
 Activation is a standing-trust mutation for future sessions in one owner-selected Codex home. The
 owner must explicitly supply an existing absolute, non-symlink home; setup never derives it from a
@@ -807,9 +831,10 @@ version stays constant while plugin content drifts, a previously activated home'
 legitimately differ from the fresh render: a cache tree that carries a valid
 `.yoetz-plugin-install.json` marker and byte-matches that marker's own inventory is a prior
 finishup-managed render, previewed as a same-version refresh and replaced atomically on apply.
-`destination_conflict` is reserved for foreign, marker-inconsistent, or modified cache trees and
-for FinishUP-named configuration FinishUP did not write — those still require the owner to resolve the
-conflict by hand. A binding to another connected project is the shared marketplace, not a conflict
+`destination_conflict` is reserved for foreign, marker-inconsistent, or modified cache trees, for
+FinishUP-named configuration FinishUP did not write, and for a project plugin directory holding
+files FinishUP did not write (above) — those still require the owner to resolve the conflict by
+hand. A binding to another connected project is the shared marketplace, not a conflict
 (see [Several projects in one Codex home](#several-projects-in-one-codex-home-issue-1058)). An exact
 Yoetz-era activation of the same project is migrated, not a conflict (see
 [Legacy Yoetz registrations](#legacy-yoetz-registrations)).
@@ -2458,7 +2483,7 @@ egress.
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$finishup` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | Setup reports `installed_not_activated` | Run `finishup recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance cannot suppress an observed inactive target; a decline suppresses only its unchanged exact target. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
-| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. |
+| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. When the next step names `.agents/plugins/finishup` instead, that directory holds files FinishUP did not write: move them, or the whole directory, outside `.agents/plugins` and rerun setup. A different Codex home does not help. |
 | Setup reports `project_connected_via_other_path` | This directory is already connected under another path (symlink, letter case, or a move). Run the `setup disconnect` the message names for this project (it clears the other entry), then connect again. |
 | Disconnect reports `membership_unverified` | No verified project is left to carry the shared pieces, but projects FinishUP connected earlier or trusted checkouts with FinishUP's plugin files (`possible_users`) might still use them. Reconnect the project that uses FinishUP (that records it) and rerun the disconnect, or preview `setup disconnect --remove-shared` if none does. |
 | Setup reports `connection_lock_unavailable` | Nothing changed. FinishUP could not take its setup lock under its own state directory (the folder is named in the message). It must be a local, owner-only (0700) folder without symlinked parts on a filesystem that supports `flock`. |

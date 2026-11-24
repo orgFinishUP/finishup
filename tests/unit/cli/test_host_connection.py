@@ -908,6 +908,145 @@ def test_codex_home_that_does_not_exist_names_the_mkdir(
     assert f"mkdir -p -m 700 {home}" in report["next_step"]
 
 
+@pytest.mark.parametrize("command", ["preview", "accept", "status"])
+def test_codex_owner_files_in_the_plugin_directory_are_named_as_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """#1382: `setup run` and `setup status` name the plugin directory, not the Codex home.
+
+    Nothing here stands in for the Codex plan or the activation preview: the real preview meets
+    the owner's file and refuses. The Codex home is empty, so advice about its configuration, or
+    about using another home, could never succeed.
+    """
+
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    (project / ".git").mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nprintf 'codex-cli 0.149.1\\n'\n")
+    executable.chmod(0o700)
+    owner_file = project / ".agents/plugins/finishup/notes.md"
+    owner_file.parent.mkdir(parents=True)
+    owner_file.write_bytes(b"owner notes\n")
+    installation = HostInstallation("codex", executable, "0.149.1", home, "Codex")
+
+    def selected(*_args: object) -> HostInstallation:
+        return installation
+
+    monkeypatch.setattr(cli, "select_installation", selected)
+
+    code = cli.run_host_connection(
+        host="codex",
+        executable=executable,
+        config_root=home,
+        project=project,
+        route="policy",
+        accept=command == "accept",
+        request_value=REQUEST if command == "accept" else None,
+        preview_digest=DIGEST if command == "accept" else None,
+        status_only=command == "status",
+        json_output=True,
+    )
+
+    assert code == 1
+    printed = capsys.readouterr().out
+    report = json.loads(printed)
+    HostConnectionReport.model_validate(report)
+    assert (report["outcome"], report["reason"]) == ("incomplete", "destination_conflict")
+    assert report["next_step"] == plugin_unmanaged_files_continuation(project)
+    assert "--host-config-root" not in report["next_step"]
+    # The directory is named; a file name in it is the owner's and is never printed.
+    assert "notes.md" not in printed
+    assert owner_file.read_bytes() == b"owner notes\n"
+    assert sorted(path.name for path in owner_file.parent.iterdir()) == ["notes.md"]
+    assert list(home.iterdir()) == []
+
+
+def test_codex_plugin_directory_cause_survives_either_error_shape(
+    prepared: ConnectionPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The step the Codex plan resolved is used as given; a bare adapter refusal names it too."""
+
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+    from finishup.ports.integrations import IntegrationError, IntegrationReason
+    from finishup.tui.runtime import RuntimeError_
+
+    home = tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    _select(monkeypatch, "codex", home)
+    project = tmp_path / "project"
+    # The plan works on the repository root, which may sit above the folder that was named.
+    planned = plugin_unmanaged_files_continuation(tmp_path / "repository")
+    errors: list[tuple[Exception, str]] = [
+        (
+            RuntimeError_(
+                "destination_conflict",
+                "the Codex activation could not be previewed",
+                recovery=(planned,),
+            ),
+            planned,
+        ),
+        (
+            IntegrationError(IntegrationReason.DESTINATION_CONFLICT, {"unmanaged_files": True}),
+            plugin_unmanaged_files_continuation(project),
+        ),
+    ]
+    for error, expected in errors:
+
+        def refused(*_args: object, _error: Exception = error, **_kwargs: object):
+            raise _error
+
+        monkeypatch.setattr(cli, "prepare_selected", refused)
+        assert (
+            cli.run_host_connection(
+                host="codex", executable=None, config_root=home, project=project, json_output=True
+            )
+            == 1
+        )
+        report = json.loads(capsys.readouterr().out)
+        HostConnectionReport.model_validate(report)
+        assert report["reason"] == "destination_conflict"
+        assert report["next_step"] == expected
+
+
+def test_codex_home_conflict_keeps_its_own_continuation(
+    prepared: ConnectionPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A conflict without the plugin-directory cause is still the Codex home's (#1058)."""
+
+    from finishup.tui.runtime import RuntimeError_
+
+    home = tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    _select(monkeypatch, "codex", home)
+
+    def conflict(*_args: object, **_kwargs: object):
+        raise RuntimeError_("destination_conflict", "the Codex activation could not be previewed")
+
+    monkeypatch.setattr(cli, "prepare_selected", conflict)
+    cli.run_host_connection(
+        host="codex", executable=None, config_root=home, project=tmp_path, json_output=True
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason"] == "destination_conflict"
+    assert report["next_step"].startswith("The selected Codex home holds FinishUP-named")
+    assert "--host-config-root" in report["next_step"]
+    assert ".agents/plugins/finishup" not in report["next_step"]
+
+
 def test_unverified_step_names_the_selected_codex_and_keeps_the_review_mode(
     tmp_path: Path,
 ) -> None:

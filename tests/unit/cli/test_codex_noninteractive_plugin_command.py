@@ -424,6 +424,50 @@ async def test_tui_plugin_owner_files_are_kept_with_an_actionable_continuation(
     assert sorted(path.name for path in owner_file.parent.iterdir()) == ["notes.md"]
 
 
+async def test_tui_owner_file_added_while_the_plan_was_shown_gets_the_same_continuation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The approved apply previews activation again before it writes; that refusal comes first.
+
+    Nothing stands in for that second preview: the real one meets the owner's file, so the apply
+    never reaches the plugin installer whose refusal carries the continuation above.
+    """
+
+    from finishup.adapters.integrations.codex_marketplace import preview_activation
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+    from finishup.cli import setup
+    from finishup.tui.models import HarnessOption
+    from finishup.tui.runtime import FinishUpRuntime
+
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir(mode=0o700)
+    (project / ".git").mkdir()
+    home.mkdir(mode=0o700)
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nprintf 'codex-cli 0.150.1\\n'\n", encoding="utf-8")
+    executable.chmod(0o700)
+    _bind(monkeypatch, tmp_path)
+    calls = _install_fakes(
+        monkeypatch, home=home, outputs=[*_absent(), *_absent()], state_dir=tmp_path / "state"
+    )
+    option = HarnessOption(str(executable), "0.150.1", "Codex", "")
+    runtime = FinishUpRuntime(cwd=project)
+    plan = await runtime.integration_plan(option, home, "policy")
+    owner_file = project / ".agents/plugins/finishup/notes.md"
+    owner_file.parent.mkdir(parents=True)
+    owner_file.write_bytes(b"owner notes\n")
+    monkeypatch.setattr(setup, "preview_activation", preview_activation)
+
+    result = await runtime.apply_integration(option, plan)
+
+    assert result.outcome == "failed"
+    assert result.reason == "activation_preview_failed"
+    assert result.next_step == plugin_unmanaged_files_continuation(project)
+    assert owner_file.read_bytes() == b"owner notes\n"
+    assert sorted(path.name for path in owner_file.parent.iterdir()) == ["notes.md"]
+    assert not any(call[1:3] == ("mcp", "add") for call in _flat(calls))
+
+
 def test_current_plugin_does_not_hide_an_outdated_project_skill(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
