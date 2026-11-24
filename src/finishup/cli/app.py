@@ -3337,16 +3337,38 @@ def service_diagnostics(
     ] = None,
     request_id: Annotated[
         str | None,
-        typer.Option("--request-id", help="Exact check request ID for joined failure stages."),
+        typer.Option(
+            "--request-id",
+            help=(
+                "Exact request ID: a check's, for its joined failure stages, or a review's first "
+                "provider request ID, for its exchange_cache records."
+            ),
+        ),
     ] = None,
+    reviewer_cache: Annotated[
+        bool,
+        typer.Option(
+            "--reviewer-cache",
+            help=(
+                "Report reviewer prompt-cache use from the exchange_cache records still in the "
+                "log: every review's, or one review's with --request-id."
+            ),
+        ),
+    ] = False,
     json_output: _JSON = False,
 ) -> None:
-    """Resolve one durable owner-only diagnostic record by correlation id."""
+    """Resolve durable owner-only diagnostic records, or report reviewer prompt-cache use."""
 
     try:
         from finishup.observability.diagnostics import lookup_diagnostic_records
         from finishup.protocol.ids import IdKind, validate_id
 
+        if reviewer_cache:
+            # #1172: no selector reports every review in the ring; --request-id narrows it to one.
+            if correlation_id is not None:
+                raise ValueError("diagnostic_selector_invalid")
+            _service_diagnostics_reviewer_cache(request_id, json_output=json_output)
+            return
         if correlation_id is not None:
             validate_id(IdKind.CORRELATION, correlation_id)
         records = lookup_diagnostic_records(correlation_id, request_id=request_id)
@@ -3363,6 +3385,22 @@ def service_diagnostics(
         _finish(0 if records else 1)
     except (OSError, TypeError, ValueError):
         _finish(_usage_failure())
+
+
+def _service_diagnostics_reviewer_cache(request_id: str | None, *, json_output: bool) -> None:
+    """Print the reviewer cache report; exit 1 when the log holds no matching record."""
+
+    from finishup.cli.reviewer_cache import reviewer_cache_text
+    from finishup.domain.reviewer_cache_report import reviewer_cache_report
+    from finishup.observability.diagnostics import lookup_exchange_cache_records
+
+    records = lookup_exchange_cache_records(request_id=request_id)
+    report = reviewer_cache_report(records, request_id=request_id)
+    if json_output:
+        _stdout_json(cast(JsonValue, report))
+    else:
+        typer.echo(reviewer_cache_text(report))
+    _finish(0 if records else 1)
 
 
 @mcp_app.command("serve")

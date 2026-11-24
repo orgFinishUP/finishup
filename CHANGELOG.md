@@ -340,6 +340,13 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Added
 
+- **A report of how much reviewer input the prompt cache served** (#1172). `finishup service
+  diagnostics --reviewer-cache` sums the per-exchange cache records still in the local diagnostics
+  log, for every review or one (`--request-id`), with exact integer totals, the cached share in
+  basis points, and the uncached input split by cause; `--json` prints `reviewer-cache-report`
+  1.0.0. A count the provider did not report stays unreported, never zero. It is owner-only and
+  command-line only, sends nothing, and covers only what the bounded log still holds.
+
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy
   input-roots add <folder>` lets AI-powered review read files the task names in that folder (for
   example a shared specification or the code being ported), after your approval in the trusted

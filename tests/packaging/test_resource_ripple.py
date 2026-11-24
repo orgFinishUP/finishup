@@ -29,6 +29,7 @@ _CHECKOUT_TREES: Final = (
     "fixtures/privacy",
     "fixtures/replay",
     "fixtures/receipts",
+    "fixtures/service",
     "guidance",
     "migrations",
     "schemas",
@@ -113,6 +114,7 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
     _write(root, "scripts/generate_review_mode_fixture.py", "")
     _write(root, "scripts/generate_deferred_review_fixture.py", "")
     _write(root, "scripts/generate_reviewer_record_fixture.py", "")
+    _write(root, "scripts/generate_reviewer_cache_report_fixture.py", "")
     _write(root, "scripts/generate_review_result_delivery_fixture.py", "")
     _write(root, "scripts/generate_verification_freshness_fixture.py", "")
     _write(root, "scripts/generate_result_verification_fixture.py", "")

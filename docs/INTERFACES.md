@@ -10942,10 +10942,22 @@ exception evidence is emitted before cleanup; cleanup records carry the same req
 missing diagnostics nor null provenance proves that no provider executed. Diagnostics are
 best-effort; absence can mean that the sink was unavailable, and never licenses a retry.
 
-`finishup service diagnostics --request-id req_…` reads matching owner-only records for the request
-returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
-is required. Both use the same bounded, payload-free record projection and require no ledger
-inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+`finishup service diagnostics --request-id req_…` reads the owner-only records that carry that
+request id. An AI-powered review attempt's failure stages above carry the check request id that
+check/operation status returns. A review's `exchange_cache` records ("Per-exchange prompt-cache
+telemetry", below) carry another id: the review's first provider request id, the attempt row's
+`provider_request_id`, minted for each attempt and never the check request id. That id is the
+`request_id` of the privacy receipt of the review's first exchange, but each later exchange's
+receipt has its own request id and no owner-visible surface marks which receipt opened a review, so
+the documented way to find it is `--reviewer-cache` without `--request-id`, which lists every
+review still in the ring by that id. `--correlation-id err_…` remains supported; without
+`--reviewer-cache`, exactly one selector is required. `--reviewer-cache` (issue #1172) takes no
+selector, for every review in the ring, or `--request-id` for one review, and refuses
+`--correlation-id`; it prints the reviewer cache report below (`--json`: `reviewer-cache-report`
+1.0.0), exits 0 when the ring holds at least one matching `exchange_cache` record and 1 when it
+holds none, and 2 on a malformed or refused selector. Every mode uses the same bounded,
+payload-free record projection and requires no ledger inspection. No new retry, lease, cancellation,
+network or credential authority is introduced.
 
 ### Status fault classification and project member containment (issue #840)
 
@@ -14077,52 +14089,171 @@ Discarded telemetry and streamed deltas no longer exhaust a 4,096-event allowanc
 the turn acknowledgement), and attempt `duration_ms` including cleanup. Per-message,
 request-queue and pre-disclosure bounds and all event/tool allowlists still apply.
 
-**Per-exchange prompt-cache telemetry (issue #1172).** Every provider exchange that reports usage
-writes one `exchange_cache` owner diagnostic (component `codex_app_server`, `openai_responses` or
-`openai_chat_completions`; reason `completed`, or `incomplete` when the Codex turn did not complete,
-the Responses status is not `completed` or the Chat Completions `finish_reason` is not `stop`). Its
-`request_id` is the review's first provider request id, the attempt row's `provider_request_id`, so
-every exchange of one review shares it and `finishup service diagnostics --request-id <id>`
-returns them all; a one-shot case names its own. Fields, all integers but the last:
+**Per-exchange prompt-cache telemetry (issue #1172).** Every provider exchange, except those listed
+below, writes one `exchange_cache` owner diagnostic with its token counts or the closed reason it
+has none (component `codex_app_server`, `openai_responses` or `openai_chat_completions`; reason
+`completed` when the generation finished, or `incomplete` when the Codex turn did not complete, the
+Responses status is not `completed`, or the Chat Completions response carries no choice or its first
+choice's `finish_reason` is `length` (truncated) or `content_filter` (filtered); a refusal that
+finished is `completed` on both API routes, as is a Chat Completions answer with any other finish
+reason, whether or not the route accepts it). Its `request_id` is the review's
+first provider request id, the attempt row's `provider_request_id`, so every exchange of one review
+shares it and `finishup service diagnostics --request-id <id>` returns them all; a one-shot case
+names its own. It is not the check request id, and no owner surface marks it as a review's, so
+`finishup service diagnostics --reviewer-cache` (below) is the way to list it. Fields, all integers
+but the last two:
 
 | Field | Meaning |
 |---|---|
 | `reviewer_exchange_index` | 1-based exchange of the review (a one-shot case is 1) |
 | `reviewer_model_requests` | model requests the exchange made |
-| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report one |
+| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report a consistent one |
 | `reviewer_cache_write_input_tokens` | provider-reported cache writes, absent where the provider did not report them |
 | `reviewer_prefix_tokens` | input of the previous exchange's last request: what this exchange could reuse (0 when it opened the conversation; absent when the previous exchange's requests are unknown) |
 | `reviewer_prefix_cached_tokens` | cached input of this exchange's first request (absent with the cached count) |
 | `reviewer_cache_miss` | closed label, below; `first_turn` and `compaction` are always recorded, and a later exchange has none when its prefix or cached input is unknown |
+| `reviewer_usage_state` | only on an exchange recorded without counts: `unreported` (the provider reported no usage for it) or `refused` (it reported counts FinishUP could not accept as consistent) |
 
 Codex counts are the thread's cumulative `total` across the turn; a snapshot whose input grew is one
 more request, and that snapshot's `last` names the request (a repeated snapshot is not another one).
 A turn starts at the total its previous turn left. When that turn reported no usage or had a usage
 snapshot refused, the turn starts instead at the total before its own first reported request (that
-snapshot's `total` less its `last`), so it records its own requests, not the thread's earlier
-ones, unless a repeated snapshot of the thread's total arrives first, which it would count as its
-own (#1192). A turn that had a usage snapshot refused records no counts (it may be missing a
-request) and leaves the next prefix unknown. Responses reads `usage.input_tokens`,
+snapshot's `total` less its `last`), so it records its own requests, not the thread's earlier ones,
+unless a repeated snapshot of the thread's total arrives first, which it would count as its own
+(#1192). A turn that had a usage snapshot refused records no counts (it may be missing a request)
+and leaves the next prefix unknown; it is `refused`. So is a turn whose counters do not fit
+together, for example a first request's `last` above its snapshot's `total` when the turn starts at
+their difference, or a cached total that grew by less than the first request's `last` says it read
+from the cache. A turn in which no snapshot reported a request (none arrived, or only repeats of the
+total the turn started at) is `unreported`. Responses reads `usage.input_tokens`,
 `usage.output_tokens` and, in `usage.input_tokens_details`, `cached_tokens` and
 `cache_write_tokens`; Chat Completions `prompt_tokens`, `completion_tokens` and the same two in
-`prompt_tokens_details`, which may be absent. A count the answer omits is left out, never recorded
-as zero. An answer without input and output counts records nothing. A compaction is still
-recorded then, by its index and label alone. The local model route records nothing (FinishUP
-observes no provider prompt cache there), nor does the credential probe.
+`prompt_tokens_details`, which may be absent. The input and output counts must each be an integer
+from 0 to 2^53-1 (not a boolean or a float); an answer whose usage object does not carry both is
+`refused`, and an answer without a usage object `unreported`. The cached count is kept only when it
+is such an integer and at most the input, the cache-write count only when it is such an integer. A
+count the answer omits or reports otherwise is left out, never recorded as zero, and the exchange's
+input and output are still recorded, its input still the next exchange's prefix (#1172).
+
+An exchange recorded without counts holds `reviewer_exchange_index`, `reviewer_usage_state` and,
+when the turn saw a compaction, `reviewer_cache_miss` `compaction`; no token count and no other
+label. Its prefix stays unknown, so the next exchange records no `reviewer_prefix_tokens` and no
+guessed label. An exchange with counts never carries `reviewer_usage_state`. What is still not
+recorded, and does not advance the review's exchange index: the local model route (FinishUP observes
+no provider prompt cache there), the credential probe, an API request that fails before an answer
+arrives (a transport failure, timeout or error status), and a Codex exchange that fails before its
+turn's settings are fixed (for example at launch, account, model or thread start). Within a review's
+records, a missing index therefore means a line was lost: the ring evicted it or its best-effort
+write failed.
 
 `reviewer_cache_miss` is the first that applies: `compaction` (a `thread/compacted` notification or
 `contextCompaction` item in the turn, recorded even where the reviewer then refuses it);
-`first_turn` (the exchange opened the review's conversation; every one-shot case); `none` (the
-first request's cached input falls short of the prefix by at most 1,024 tokens, the providers'
-minimum cacheable prefix; they cache whole 128-token blocks from there, so a prefix that short is
-`none` even when nothing of it was cached);
-`schema_or_settings_change` (the digest of what the route sends beside the messages differs from
-the previous exchange's: the Codex `turn/start` parameters except `input` and `threadId`, or the API
-body except `input`/`messages`); `retry` (the history does not carry the previous answer, so this
-is the loop's one format repair); `unexplained`. The state between a review's exchanges is
-`ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts, the last history's
-message count and that settings digest, never content. Recording never changes an outcome: any
-failure in it is dropped. A record is at most 656 bytes, inside the ring's 1,024-byte line cap.
+`first_turn` (the exchange opened the review's conversation; every one-shot case); `none` (the first
+request's cached input falls short of the prefix by at most 1,024 tokens, the providers' minimum
+cacheable prefix; they cache whole 128-token blocks from there, so a prefix that short is `none`
+even when nothing of it was cached); `schema_or_settings_change` (the digest of what the route sends
+beside the messages differs from the previous exchange's: the Codex `turn/start` parameters except
+`input` and `threadId`, or the API body except `input`/`messages`); `retry` (an otherwise
+unexplained shortfall on the review's one format-repair exchange, which the history shows by not
+carrying the previous answer; the repair appends its note after the unchanged previous input on
+every route, so the repair itself is not what breaks the prefix); `unexplained`. What the reviewer's
+switch to the read-free schema cost as `schema_or_settings_change` in a measurement, and why it
+stays, is recorded in the ADR-006 amendment "measured cost of the reply-schema change, and why
+review behaviour stays as it is". The state between a review's exchanges is
+`ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts,
+the last history's message count and that settings digest, never content. Recording never changes an
+outcome: any failure in it is dropped. A record is at most 656 bytes (one without counts at most
+359), inside the ring's 1,024-byte line cap.
+
+**Reviewer cache report (issue #1172).** `finishup service diagnostics --reviewer-cache
+[--request-id <id>] [--json]` reads the `exchange_cache` records still in the owner-only diagnostics
+ring (every review's, or the one review's) and prints
+`domain.reviewer_cache_report.reviewer_cache_report(records, request_id=)`. The `--json` form is
+`reviewer-cache-report` 1.0.0 (`schemas/service/reviewer-cache-report-1.0.0.schema.json`, golden
+vectors `fixtures/service/reviewer-cache-report-1.0.0.case.json`). The function is pure,
+integer-only and total: no clock, no I/O, no float, and no record makes it raise. Its coverage is
+the ring's: the ring keeps the newest 256 KiB of lines, so an older review may be absent entirely
+and an old review may have lost its first exchanges. The report is:
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `source` | `"1.0.0"`; `"diagnostics_ring"` |
+| `request_id` | the `--request-id` selector, or `null` for every review |
+| `coverage.records_read` | `exchange_cache` records read (with a selector, those carrying it) |
+| `coverage.unreadable_records` | of those, records that are not well-formed, or whose sums the report could not hold (below); they add nothing else |
+| `coverage.reviews`, `coverage.exchange_records` | distinct request ids; readable records |
+| `coverage.duplicate_exchange_records`, `coverage.missing_exchanges` | sums of the per-review counts below |
+| `coverage.earliest_record_at`, `coverage.latest_record_at` | the readable records' oldest and newest timestamps, or `null` |
+| `reviews[]` | one entry per request id, in ascending byte order of the id: `request_id`, `exchange_indices`, `usage` |
+| `exchange_indices.highest`, `.distinct` | highest exchange index seen; distinct indices seen |
+| `exchange_indices.duplicate_records` | records whose index another record of the review already has |
+| `exchange_indices.missing`, `.missing_ranges` | indices from 1 to `highest` no record has, and the same as ascending inclusive `{first, last}` ranges |
+| `total` | the `usage` shape below, over every readable record |
+
+`usage` (each review's and `total`):
+
+| Field | Meaning |
+|---|---|
+| `exchange_records` | readable records |
+| `exchanges_with_counts`, `exchanges_unreported`, `exchanges_refused` | records with token counts; records whose `reviewer_usage_state` is `unreported` or `refused` |
+| `model_requests`, `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens` | each `{sum, exchanges}`: the sum over the records that carry that count and how many did; `sum` is `null` when none did, never 0 |
+| `cached_share` | `cached_input_tokens` over `input_tokens_of_exchanges_reporting_cached` (the input of the records that carry a cached count, not all input), and `basis_points_floor` = ⌊cached × 10,000 / that input⌋, `null` when that input is 0 |
+| `miss_labels` | records per `reviewer_cache_miss` value, and `no_label` for records without one (every record, counted or not) |
+| `first_turn.cold`, `.warm`, `.cached_unreported` | `first_turn` records with counts whose first request read nothing from the cache (`reviewer_prefix_cached_tokens` 0), read something an earlier review or attempt left (above 0; `prefix_cached_tokens` sums it), or reported no cached count: `exchanges` and `input_tokens` |
+| `beyond_prefix` | records split exactly (below) that are not `first_turn`: `exchanges`, `input_tokens` (input minus prefix: new tokens no earlier exchange of the review held) and `surplus_cached_tokens` (cached input above the prefix, which the provider served from elsewhere) |
+| `uncached_input` | `exchanges` and `tokens` (input minus cached input) of the records that carry a cached count, and the partition of `tokens` below |
+
+A well-formed record has operation `exchange_cache`, a request id, a millisecond timestamp, an
+exchange index of at least 1, and is one of the two shapes `domain.reviewer_cache` writes: with
+`reviewer_usage_state` (`unreported` or `refused`), no token count and no label but `compaction`; or
+with integer request, input and output counts, at least one request, the cached and prefix-cached
+counts present together, cached at most input and prefix-cached at most cached; at index 1 (the
+exchange that opened the conversation, which is also every one-shot case and the first exchange a
+restarted attempt records again) prefix 0 and the label `first_turn` or `compaction`; `first_turn`
+at no other index; `none`, `schema_or_settings_change`, `retry` and `unexplained` only with a known
+prefix and cached count, and no label only when one of those is unknown. Anything else, including a
+value the diagnostics fence read back as `unavailable`, is unreadable. Every readable record is
+summed, duplicates included: a restarted attempt that kept its request id records its exchanges
+again, and their tokens were spent again. No record replaces another. Records are accounted in one
+canonical order: reviews in ascending byte order of request id, a review's records by exchange
+index and then by their other fields. A well-formed record whose accounting would carry any sum of
+the report (a review's, `total`'s, or the coverage duplicate and missing totals) past 2^53-1, the
+bound of every report integer, is counted in `unreadable_records` as well and adds nothing else.
+Every sum only grows along that order, so which record that is, and so the whole report, is the
+same for the same records in any input order. An exchange that is not recorded does not advance
+the index, so a missing index is a lost line (the ring evicted it or its best-effort write
+failed); a duplicate can hide a lost line of the same index, so `missing` is a lower bound.
+
+`uncached_input.tokens` is split, exactly, into `first_turn_cold`, `first_turn_warm`, `shortfall`
+(`none`, `schema_or_settings_change`, `compaction`, `retry`, `unexplained`), `beyond_prefix` and
+`unattributed` (`prefix_unknown`, `shortfall_exceeds_uncached`, `not_split_by_request`). A record's
+`reviewer_prefix_cached_tokens` is its first model request's cached input, while its input and
+cached counts sum every request, so only a record of one request whose cached count equals its
+prefix-cached count is split exactly. For such a `first_turn` record, all its uncached input is
+`first_turn_cold` or `first_turn_warm`. For any other such record with a prefix, the shortfall
+max(0, prefix − prefix-cached) goes under its label (`none` keeps its within-tolerance shortfall)
+and the rest under `beyond_prefix`. A record of more requests (or whose two cached counts differ)
+still has its first request's shortfall attributed to its label, and the rest is
+`not_split_by_request`: later requests re-read earlier ones and the record does not say which of
+them missed; a `first_turn` record of more requests is all `not_split_by_request`. A record without
+a prefix (the previous exchange had no counts) is all `prefix_unknown`. A record whose shortfall is
+larger than its whole uncached input read something other than the prefix (a history a compaction
+rewrote, or counts that do not fit), so it is all `shortfall_exceeds_uncached` and none of it is
+attributed. Whether `first_turn` input is the largest uncached share (ADR-006's revisit condition
+for cross-review reuse) is `first_turn_cold` plus `first_turn_warm` against the other parts.
+
+Without `--json` the command prints a fixed layout: the scope, a line saying the records are what
+the diagnostics log still holds, the coverage counts, then `total` line by line (each sum with its
+number of contributing exchanges, or "not reported by any exchange"; the cached share as the floor
+basis points written as a two-place percentage, "of the N exchanges still in the diagnostics log
+that reported a cached count"; each part of the partition) and one line per review (its known
+missing indices, a lower bound, and its cached share). When no exchange covered reported a cached
+count, one line says so in place of the cached share, the uncached input and its partition, and a
+review's line says so in place of its share: they have no basis, and zeros would read as everything
+cached. The report is
+owner-only and local: the CLI reads the ring file under the instance's log directory, as the other
+modes do, and nothing else. It is not offered over MCP tools, hook events or the terminal interface
+(ADR-006, 2026-11-21 amendment).
 
 `complete(history, schema, deadline=)` returns the reply object. It raises the decoder's
 `ReviewerReplyInvalid("output_not_json")` only for a completed answer that is not one JSON object

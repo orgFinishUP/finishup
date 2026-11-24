@@ -2,13 +2,15 @@
 
 The Codex runtime and the API transports are scripted; the evaluators, the reviewer session and
 the diagnostics fence are the real ones. Records carry provider token counts, one closed label
-and the review's first request id, never content.
+and the review's first request id, never content. An exchange without counts still records its
+index and whether its usage was unreported or refused.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -17,19 +19,24 @@ import pytest
 from builders.codex_capability import profile_for, record_for
 from finishup.adapters.providers import codex_app_server as codex
 from finishup.adapters.providers import reviewer_cache_telemetry as telemetry
+from finishup.application.reviewer_exchange import REVIEWER_REPLY_SCHEMAS, ReviewerExchangeModel
+from finishup.application.reviewer_loop import Turn
 from finishup.domain.privacy import ProviderBinding
 from finishup.domain.reviewer_cache import ExchangeCacheUsage
 from finishup.observability.diagnostics import lookup_diagnostic_records
 from finishup.ports.secret_memory import ProviderAttemptAuthBinding
 from finishup.ports.semantic import (
     CURRENT_REVIEWER_SESSION,
+    Deadline,
     ExternalRuntimeAuthority,
     ReviewerMessage,
     ReviewerReplySchemas,
     ReviewerSession,
     SemanticResult,
     SemanticResultInvalid,
+    SemanticResultRefused,
     SemanticResultReply,
+    decode_reviewer_exchange,
     reviewer_exchange,
 )
 from finishup.protocol.canonical import canonical_digest
@@ -41,7 +48,9 @@ from unit.adapters.providers.test_reviewer_completions import (
     _FIRST,  # pyright: ignore[reportPrivateUsage]
     _SCHEMAS,  # pyright: ignore[reportPrivateUsage]
     _SECOND,  # pyright: ignore[reportPrivateUsage]
+    _api_binding,  # pyright: ignore[reportPrivateUsage]
     _api_evaluate,  # pyright: ignore[reportPrivateUsage]
+    _api_profile,  # pyright: ignore[reportPrivateUsage]
     _Capture,  # pyright: ignore[reportPrivateUsage]
     _case,  # pyright: ignore[reportPrivateUsage]
     _Clock,  # pyright: ignore[reportPrivateUsage]
@@ -290,7 +299,9 @@ async def test_a_turn_after_a_silent_one_records_its_own_request_and_names_the_n
     result = await _exchange(monkeypatch, runtime, session, _THIRD, _REQUESTS[2], "final")
     assert type(result) is SemanticResultReply
     await session.aclose()
-    second, third = (cast(dict[str, object], r["counts"]) for r in records)
+    first, second, third = (cast(dict[str, object], r["counts"]) for r in records)
+    # The silent turn still leaves its index, so a missing one can only be a lost record.
+    assert first == {"reviewer_exchange_index": 1, "reviewer_usage_state": "unreported"}
     # Turn 2 starts at its first snapshot's total less that request's own ``last``: it records
     # its own request, never the thread's 182,000, and has no known prefix to label against.
     assert second == {
@@ -323,13 +334,18 @@ async def test_a_turn_after_a_middle_turn_without_usage_never_claims_the_threads
     result = await _exchange(monkeypatch, runtime, session, _THIRD, _REQUESTS[2])
     assert type(result) is SemanticResultReply
     await session.aclose()
-    # Turn 3 records its own 95,000 tokens, not the 187,000 the thread grew by since turn 1, and
-    # no label: turn 2 left no known prefix.
+    # Turn 2 is recorded as unreported. Turn 3 records its own 95,000 tokens, not the 187,000
+    # the thread grew by since turn 1, and no label: turn 2 left no known prefix.
     assert [
-        (counts["reviewer_exchange_index"], counts["reviewer_input_tokens"], _miss(record))
+        (
+            counts["reviewer_exchange_index"],
+            counts.get("reviewer_input_tokens"),
+            counts.get("reviewer_usage_state"),
+            _miss(record),
+        )
         for record in records
         for counts in (cast(dict[str, object], record["counts"]),)
-    ] == [(1, 90_000, "first_turn"), (3, 95_000, None)]
+    ] == [(1, 90_000, None, "first_turn"), (2, None, "unreported", None), (3, 95_000, None, None)]
 
 
 async def test_a_turn_that_had_a_snapshot_refused_records_no_counts(
@@ -341,8 +357,59 @@ async def test_a_turn_that_had_a_snapshot_refused_records_no_counts(
     result = await _exchange(monkeypatch, runtime, session, _SECOND, _REQUESTS[1])
     assert type(result) is SemanticResultReply  # usage is telemetry: the answer still counts
     await session.aclose()
-    # The refused snapshot may have reported another request, so turn 2's counts are unknown.
-    assert [cast(dict[str, object], r["counts"])["reviewer_exchange_index"] for r in records] == [1]
+    # The refused snapshot may have reported another request, so turn 2's counts are unknown:
+    # its record says they were refused, not that the runtime reported none.
+    assert [(r["outcome"], r["counts"]) for r in records][1:] == [
+        ("completed", {"reviewer_exchange_index": 2, "reviewer_usage_state": "refused"})
+    ]
+
+
+async def test_a_turn_whose_deltas_are_inconsistent_is_refused_and_leaves_no_prefix(
+    monkeypatch: pytest.MonkeyPatch, records: list[dict[str, object]]
+) -> None:
+    runtime = _UsageRuntime(
+        [_ACTION, _ACTION, _FINAL],
+        [[(90_000, 0, 50)], [(2_000, 1_500, 50)], [(3_000, 2_900, 50)]],
+    )
+    session = ReviewerSession("review-a", _DEADLINE)
+    await _exchange(monkeypatch, runtime, session, _FIRST, _REQUESTS[0])
+    # Each snapshot is well formed and the totals never fall, but the thread's cached total grows
+    # by 500 while turn 2's one request says it read 1,500 from the cache.
+    runtime.total = (90_000, -1_000, 50)
+    await _exchange(monkeypatch, runtime, session, _SECOND, _REQUESTS[1])
+    result = await _exchange(monkeypatch, runtime, session, _THIRD, _REQUESTS[2])
+    assert type(result) is SemanticResultReply
+    await session.aclose()
+    _first, second, third = (cast(dict[str, object], r["counts"]) for r in records)
+    assert second == {"reviewer_exchange_index": 2, "reviewer_usage_state": "refused"}
+    # Turn 3 records its own counts with no prefix and no guessed label.
+    assert third == {
+        "reviewer_exchange_index": 3,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 3_000,
+        "reviewer_cached_input_tokens": 2_900,
+        "reviewer_output_tokens": 50,
+        "reviewer_prefix_cached_tokens": 2_900,
+        "reviewer_cache_write_input_tokens": 0,
+    }
+
+
+async def test_a_request_that_read_more_than_the_threads_total_is_refused(
+    monkeypatch: pytest.MonkeyPatch, records: list[dict[str, object]]
+) -> None:
+    # Turn 1 reports nothing, so turn 2 starts at its first snapshot's total less its ``last``;
+    # a ``last`` above that total leaves no start to count from.
+    runtime = _UsageRuntime([_ACTION, _FINAL], [[], [(92_000, 0, 50)]])
+    session = ReviewerSession("review-a", _DEADLINE)
+    await _exchange(monkeypatch, runtime, session, _FIRST, _REQUESTS[0])
+    runtime.total = (-1_000, 0, 0)
+    result = await _exchange(monkeypatch, runtime, session, _SECOND, _REQUESTS[1])
+    assert type(result) is SemanticResultReply
+    await session.aclose()
+    assert [r["counts"] for r in records] == [
+        {"reviewer_exchange_index": 1, "reviewer_usage_state": "unreported"},
+        {"reviewer_exchange_index": 2, "reviewer_usage_state": "refused"},
+    ]
 
 
 async def test_a_compaction_before_any_usage_is_still_labelled(
@@ -356,7 +423,14 @@ async def test_a_compaction_before_any_usage_is_still_labelled(
     assert type(result) is not SemanticResultReply  # the reviewer still refuses compaction
     await session.aclose()
     assert [(r["outcome"], r["counts"]) for r in records][1:] == [
-        ("incomplete", {"reviewer_exchange_index": 2, "reviewer_cache_miss": "compaction"})
+        (
+            "incomplete",
+            {
+                "reviewer_exchange_index": 2,
+                "reviewer_usage_state": "unreported",
+                "reviewer_cache_miss": "compaction",
+            },
+        )
     ]
 
 
@@ -378,11 +452,15 @@ class _UsageCapture(_Capture):
     """The in-memory API provider, answering with the usage each request reports.
 
     The input details report what was read from the cache and what was written to it (the rest of
-    the input); a Chat Completions answer whose cached count is ``None`` has no details at all.
+    the input); a Chat Completions answer whose cached count is ``None`` has no details at all,
+    and an answer whose usage is ``None`` carries no usage object.
     """
 
     def __init__(
-        self, route: str, usages: list[tuple[int, int | None, int]], finish_reason: str = "stop"
+        self,
+        route: str,
+        usages: list[tuple[int, int | None, int] | None],
+        finish_reason: str = "stop",
     ) -> None:
         super().__init__(route)
         self.usages, self.finish_reason = usages, finish_reason
@@ -390,7 +468,14 @@ class _UsageCapture(_Capture):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await super().handle_async_request(request)
         payload = cast(dict[str, object], __import__("json").loads(response.content))
-        used, cached, output = self.usages.pop(0)
+        if self.route != "responses":
+            cast(list[dict[str, object]], payload["choices"])[0]["finish_reason"] = (
+                self.finish_reason
+            )
+        reported = self.usages.pop(0)
+        if reported is None:
+            return httpx.Response(200, request=request, json=payload)
+        used, cached, output = reported
         details = (
             None
             if cached is None
@@ -412,10 +497,6 @@ class _UsageCapture(_Capture):
             }
             | ({} if details is None else {"prompt_tokens_details": details})
         )
-        if self.route != "responses":
-            cast(list[dict[str, object]], payload["choices"])[0]["finish_reason"] = (
-                self.finish_reason
-            )
         return httpx.Response(200, request=request, json=payload)
 
 
@@ -451,6 +532,42 @@ async def test_api_routes_record_each_exchange_from_the_reported_usage(
     ]
 
 
+@pytest.mark.parametrize(
+    ("route", "component"),
+    [("responses", "openai_responses"), ("chat", "openai_chat_completions")],
+)
+async def test_the_facade_carries_its_review_session_to_each_stateless_exchange(
+    records: list[dict[str, object]], route: str, component: str
+) -> None:
+    """The review's session reaches the route only through ``ReviewerExchangeModel.complete``:
+    without it each exchange would be its own first turn under its own request id (#1172)."""
+
+    requests, usages = iter(_REQUESTS), iter([(2_000, 0, 30), (2_200, 1_920, 30)])
+
+    async def dispatch(payload: bytes, media_type: str, deadline: Deadline) -> SemanticResult:
+        del media_type, deadline
+        capture = _UsageCapture(route, [next(usages)])
+        history = decode_reviewer_exchange(payload)
+        result, *_rest = await _api_evaluate(route, history, capture, _Clock(), next(requests))
+        return result
+
+    session = ReviewerSession("review-a", _DEADLINE)
+    async with ReviewerExchangeModel(_api_binding(_api_profile(route)), dispatch, session) as model:
+        for history in (_FIRST, _SECOND):
+            turns = [Turn(role, text) for role, text in history]
+            await model.complete(turns, REVIEWER_REPLY_SCHEMAS.turn, deadline=_DEADLINE)
+    assert CURRENT_REVIEWER_SESSION.get() is None  # bound only while each exchange runs
+    # Two provider requests, one review: both records carry the first request id.
+    assert [(r["component"], r["request_id"]) for r in records] == [(component, _REQUESTS[0])] * 2
+    first, second = (cast(dict[str, object], r["counts"]) for r in records)
+    assert (first["reviewer_exchange_index"], first["reviewer_cache_miss"]) == (1, "first_turn")
+    assert (
+        second["reviewer_exchange_index"],
+        second["reviewer_prefix_tokens"],
+        second["reviewer_cache_miss"],
+    ) == (2, 2_000, "none")
+
+
 async def test_a_chat_answer_without_a_cached_count_still_records_and_leaves_its_prefix(
     records: list[dict[str, object]],
 ) -> None:
@@ -478,24 +595,239 @@ async def test_a_chat_answer_without_a_cached_count_still_records_and_leaves_its
     assert (second["reviewer_prefix_tokens"], second["reviewer_cache_miss"]) == (2_000, "none")
 
 
-async def test_a_truncated_chat_answer_is_recorded_incomplete(
+class _ChoiceCapture(_UsageCapture):
+    """A Chat Completions answer whose first choice ends as given, refuses, or is missing."""
+
+    def __init__(self, finish_reason: str, *, refusal: str | None, choice: bool) -> None:
+        super().__init__("chat", [(2_000, 0, 30)], finish_reason=finish_reason)
+        self.refusal, self.choice = refusal, choice
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await super().handle_async_request(request)
+        payload = cast(dict[str, object], __import__("json").loads(response.content))
+        choices = cast(list[dict[str, object]], payload["choices"])
+        if not self.choice:
+            choices.clear()
+        elif self.refusal is not None:
+            cast(dict[str, object], choices[0]["message"]).update(
+                content=None, refusal=self.refusal
+            )
+        return httpx.Response(200, request=request, json=payload)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "refusal", "choice", "result_type", "outcome"),
+    [
+        # ``length`` is the Chat Completions spelling of Responses ``incomplete``.
+        ("length", None, True, SemanticResultInvalid, "incomplete"),
+        ("content_filter", None, True, SemanticResultRefused, "incomplete"),
+        # A refusal that finished is a finished generation, as a Responses refusal whose status is
+        # ``completed``; one cut short is not.
+        ("stop", "I can't review this.", True, SemanticResultRefused, "completed"),
+        ("length", "I can't review this.", True, SemanticResultRefused, "incomplete"),
+        # The route parses any other answer whatever its finish reason; it finished.
+        ("eos", None, True, SemanticResultReply, "completed"),
+        ("stop", None, False, SemanticResultInvalid, "incomplete"),
+    ],
+    ids=[
+        "truncated",
+        "filtered",
+        "finished-refusal",
+        "truncated-refusal",
+        "other-finish-reason",
+        "no-choice",
+    ],
+)
+async def test_a_chat_exchange_is_completed_exactly_when_its_generation_finished(
     records: list[dict[str, object]],
+    finish_reason: str,
+    refusal: str | None,
+    choice: bool,
+    result_type: type[object],
+    outcome: str,
 ) -> None:
-    # ``length`` is the Chat Completions spelling of Responses ``incomplete``: the answer is
-    # invalid, so its exchange is not recorded as a completed one.
-    capture = _UsageCapture("chat", [(2_000, 0, 30)], finish_reason="length")
+    capture = _ChoiceCapture(finish_reason, refusal=refusal, choice=choice)
     result, *_rest = await _api_evaluate("chat", _FIRST, capture, _Clock())
-    assert type(result) is SemanticResultInvalid
+    assert type(result) is result_type
     assert [(r["component"], r["outcome"]) for r in records] == [
-        ("openai_chat_completions", "incomplete")
+        ("openai_chat_completions", outcome)
     ]
 
 
-async def test_an_api_answer_without_usage_records_nothing(
+async def test_an_inconsistent_cached_count_keeps_the_exchange_and_the_next_prefix(
+    records: list[dict[str, object]],
+) -> None:
+    session = ReviewerSession("review-a", _DEADLINE)
+    token = CURRENT_REVIEWER_SESSION.set(session)
+    try:
+        # More cached than input (and so a negative cache write): both unknown, never zero.
+        for history, usage in (
+            (_FIRST, (2_000, 2_500, 30)),
+            (_SECOND, (2_200, 9_999, 30)),
+            (_THIRD, (2_400, 2_100, 30)),
+        ):
+            result, *_rest = await _api_evaluate(
+                "chat", history, _UsageCapture("chat", [usage]), _Clock()
+            )
+            assert type(result) is SemanticResultReply
+    finally:
+        CURRENT_REVIEWER_SESSION.reset(token)
+    first, second, third = (cast(dict[str, object], r["counts"]) for r in records)
+    assert first == {
+        "reviewer_exchange_index": 1,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 2_000,
+        "reviewer_output_tokens": 30,
+        "reviewer_prefix_tokens": 0,
+        "reviewer_cache_miss": "first_turn",
+    }
+    # Its prefix is known but its own reuse is not, so no label is guessed.
+    assert second == {
+        "reviewer_exchange_index": 2,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 2_200,
+        "reviewer_output_tokens": 30,
+        "reviewer_prefix_tokens": 2_000,
+    }
+    assert (third["reviewer_prefix_tokens"], third["reviewer_cache_miss"]) == (2_200, "none")
+
+
+def _api_usage(**fields: object) -> ExchangeCacheUsage | None:
+    details = SimpleNamespace(
+        cached_tokens=fields.pop("cached", None), cache_write_tokens=fields.pop("write", None)
+    )
+    return telemetry.api_exchange_usage(
+        SimpleNamespace(prompt_tokens_details=details, **fields),
+        input_name="prompt_tokens",
+        details_name="prompt_tokens_details",
+        output_name="completion_tokens",
+    )
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, -1, 2**53, "5"], ids=repr)
+def test_an_optional_count_that_is_not_a_counter_is_unknown_not_zero(bad: object) -> None:
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=bad, write=bad) == (
+        ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=None)
+    )
+
+
+def test_a_cached_count_above_the_input_is_unknown_and_the_write_count_still_kept() -> None:
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=2_001, write=7) == (
+        ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=7)
+    )
+    assert _api_usage(prompt_tokens=2_000, completion_tokens=30, cached=2_000, write=0) == (
+        ExchangeCacheUsage(2_000, 2_000, 30, 1, 2_000, 2_000, cache_write_input_tokens=0)
+    )
+
+
+class _UnreadableDetails:
+    """Input details whose every count raises when read, as a broken SDK shape might."""
+
+    @property
+    def cached_tokens(self) -> int:
+        raise RuntimeError("unreadable")
+
+    @property
+    def cache_write_tokens(self) -> int:
+        raise RuntimeError("unreadable")
+
+
+class _UnreadableUsage(SimpleNamespace):
+    """A usage whose input details object itself raises when read."""
+
+    @property
+    def prompt_tokens_details(self) -> object:
+        raise RuntimeError("unreadable")
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        SimpleNamespace(
+            prompt_tokens=2_000, completion_tokens=30, prompt_tokens_details=_UnreadableDetails()
+        ),
+        _UnreadableUsage(prompt_tokens=2_000, completion_tokens=30),
+    ],
+    ids=["counts-raise", "details-raise"],
+)
+def test_an_optional_count_whose_read_raises_is_unknown_and_keeps_the_exchange(
+    usage: object,
+) -> None:
+    # Input and output are read on their own; a failing optional read is that count unknown.
+    assert telemetry.api_exchange_usage(
+        usage,
+        input_name="prompt_tokens",
+        details_name="prompt_tokens_details",
+        output_name="completion_tokens",
+    ) == ExchangeCacheUsage(2_000, None, 30, 1, None, 2_000, cache_write_input_tokens=None)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"prompt_tokens": True, "completion_tokens": 30},
+        {"prompt_tokens": 2_000.0, "completion_tokens": 30},
+        {"prompt_tokens": 2_000, "completion_tokens": -1},
+        {"prompt_tokens": 2**53, "completion_tokens": 30},
+        {"prompt_tokens": 2_000},
+    ],
+    ids=["bool-input", "float-input", "negative-output", "input-too-large", "no-output"],
+)
+def test_an_input_or_output_count_that_is_not_a_counter_is_no_usage(
+    fields: dict[str, object],
+) -> None:
+    assert _api_usage(**fields, cached=0, write=0) is None
+
+
+@pytest.mark.parametrize(
+    ("route", "component"),
+    [("responses", "openai_responses"), ("chat", "openai_chat_completions")],
+)
+@pytest.mark.parametrize(
+    ("usage", "state"),
+    [(None, "unreported"), ((-1, 0, 30), "refused")],
+    ids=["no-usage-object", "negative-input"],
+)
+async def test_an_api_exchange_without_counts_says_why_and_leaves_no_prefix(
+    records: list[dict[str, object]],
+    route: str,
+    component: str,
+    usage: tuple[int, int, int] | None,
+    state: str,
+) -> None:
+    session = ReviewerSession("review-a", _DEADLINE)
+    token = CURRENT_REVIEWER_SESSION.set(session)
+    try:
+        for history, reported in ((_FIRST, usage), (_SECOND, (2_200, 0, 30))):
+            capture = _UsageCapture(route, [reported])
+            await _api_evaluate(route, history, capture, _Clock())
+    finally:
+        CURRENT_REVIEWER_SESSION.reset(token)
+    assert [r["component"] for r in records] == [component] * 2
+    assert len({r["request_id"] for r in records}) == 1
+    first, second = (cast(dict[str, object], r["counts"]) for r in records)
+    # An answer with no usage object is unreported; one whose input count FinishUP cannot accept
+    # is refused. Neither carries a count, and the next exchange gets no prefix and no label.
+    assert first == {"reviewer_exchange_index": 1, "reviewer_usage_state": state}
+    assert second == {
+        "reviewer_exchange_index": 2,
+        "reviewer_model_requests": 1,
+        "reviewer_input_tokens": 2_200,
+        "reviewer_cached_input_tokens": 0,
+        "reviewer_output_tokens": 30,
+        "reviewer_prefix_cached_tokens": 0,
+        "reviewer_cache_write_input_tokens": 2_200,
+    }
+
+
+async def test_an_api_answer_without_usage_is_recorded_unreported(
     records: list[dict[str, object]],
 ) -> None:
     result, *_rest = await _api_evaluate("responses", _FIRST, _Capture("responses"), _Clock())
-    assert type(result) is SemanticResultReply and records == []
+    assert type(result) is SemanticResultReply
+    assert [r["counts"] for r in records] == [
+        {"reviewer_exchange_index": 1, "reviewer_usage_state": "unreported"}
+    ]
 
 
 def test_a_record_reaches_the_owner_ring_through_the_field_fence(
@@ -552,3 +884,53 @@ def test_the_miss_label_passes_the_token_fence_and_nothing_else_does(
     assert found["reviewer_cache_miss"] == "unavailable"
     assert found["reviewer_input_tokens"] == "unavailable"
     assert "PRIVATE" not in diagnostics.diagnostic_log_path(root=tmp_path).read_text()
+
+
+def test_a_record_without_counts_reaches_the_owner_ring_with_its_usage_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import finishup.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    for request_id, refused in ((_REQUESTS[0], False), (_REQUESTS[1], True)):
+        telemetry.record_exchange_cache(
+            component="openai_responses",
+            request_id=request_id,
+            session=None,
+            exchange=None,
+            settings={"s": 1},
+            usage=None,
+            completed=True,
+            compacted=refused,
+            usage_refused=refused,
+        )
+    unreported, refused_record = (
+        {name: found[name] for name in found if name.startswith("reviewer_")}
+        for request_id in _REQUESTS[:2]
+        for found in lookup_diagnostic_records(request_id=request_id, root=tmp_path)
+    )
+    assert unreported == {"reviewer_exchange_index": 1, "reviewer_usage_state": "unreported"}
+    assert refused_record == {
+        "reviewer_exchange_index": 1,
+        "reviewer_usage_state": "refused",
+        "reviewer_cache_miss": "compaction",
+    }
+
+
+@pytest.mark.parametrize("value", ["private", "none", "Unreported", 1, None], ids=repr)
+def test_the_usage_state_fence_admits_its_two_tokens_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    import finishup.observability.diagnostics as diagnostics
+    from finishup.observability.logging import record_bounded_counts_without_raising
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    correlation = record_bounded_counts_without_raising(
+        component="openai_responses",
+        operation="exchange_cache",
+        outcome="completed",
+        counts={"reviewer_exchange_index": 1, "reviewer_usage_state": value},
+    )
+    (found,) = lookup_diagnostic_records(correlation, root=tmp_path)
+    # A token-shaped value outside the closed pair is not admitted either.
+    assert found.get("reviewer_usage_state", "unavailable") == "unavailable"

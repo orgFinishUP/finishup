@@ -13,10 +13,14 @@ shared behavior on macOS, Linux and WSL 2, without claiming new native acceptanc
 [the reviewer contract](../INTERFACES.md#reviewer-loop-issue-1118-unit-2).
 
 Per-exchange prompt-cache telemetry (#1172) applies to Cursor IDE and CLI through the same
-service: each reviewer exchange that reports usage writes one content-free `exchange_cache`
-owner diagnostic, read with `finishup service diagnostics --request-id`. It depends on the
+service: each reviewer exchange the provider answers writes one content-free `exchange_cache`
+owner diagnostic, with its token counts or whether its usage was unreported or refused, read with
+`finishup service diagnostics --request-id`. It depends on the
 review provider, not the agent host, adds no request or egress, and never changes a review
 outcome. See [the exchange contract](../INTERFACES.md#reviewer-completion-exchanges-issue-1118-unit-3-adr-006).
+`finishup service diagnostics --reviewer-cache` sums those records per review and in total; it is an
+owner-only CLI report, not offered over MCP tools, hook events or the terminal interface on any
+host (ADR-006, 2026-11-21 amendment).
 The reviewer also keeps its reply schema through a review's normal final turn and announces that
 turn with a short appended notice, so the provider can reuse the conversation from its cache. Only
 the final-phase repair turn, or a final turn after the review's one repair is spent, changes the

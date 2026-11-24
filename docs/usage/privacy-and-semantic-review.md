@@ -823,6 +823,16 @@ means **no provider attempt was made**; where it requires provenance, an attempt
 not the same as it being useful); and `failed`/`coordinator_failure` is unconstrained, so it is
 **indeterminate** — never read it as "not attempted".
 
+To see how much of the AI reviewer's input your provider served from its prompt cache, run
+`finishup service diagnostics --reviewer-cache` (`--json` for the machine-readable report). Add
+`--request-id <id>` for one review, with an id the full report lists; it is not the check's request
+ID. The report reads only FinishUP's local, owner-only diagnostics log and shows, for each review
+and in total, the token counts the provider reported, the share of input read from the cache, and
+the cause each uncached part comes from, as far as the counts show it. The log is bounded, so the
+report covers only the reviews it still holds, and a count the provider did not report is shown as
+not reported, never as zero. It sends nothing, and it is a command-line report for you: FinishUP
+does not offer it to your agent as a tool.
+
 If you believe FinishUP disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.
 

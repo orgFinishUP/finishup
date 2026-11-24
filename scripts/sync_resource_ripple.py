@@ -174,6 +174,7 @@ def _check(repo_root: Path) -> bool:
         and _run(repo_root, "generate_review_mode_fixture.py", "--check")
         and _run(repo_root, "generate_deferred_review_fixture.py", "--check")
         and _run(repo_root, "generate_reviewer_record_fixture.py", "--check")
+        and _run(repo_root, "generate_reviewer_cache_report_fixture.py", "--check")
         and _run(repo_root, "generate_review_dialogue_fixture.py", "--check")
         and _run(repo_root, "generate_task_statement_fixture.py", "--check")
         and _run(repo_root, "generate_publish_action_notices_fixture.py", "--check")
@@ -240,6 +241,7 @@ def _write_pass(repo_root: Path) -> bool:
         ("generate_review_mode_fixture.py", "--write"),
         ("generate_deferred_review_fixture.py", "--write"),
         ("generate_reviewer_record_fixture.py", "--write"),
+        ("generate_reviewer_cache_report_fixture.py", "--write"),
         ("generate_review_dialogue_fixture.py", "--write"),
         ("generate_task_statement_fixture.py", "--write"),
         ("generate_publish_action_notices_fixture.py", "--write"),
@@ -320,6 +322,8 @@ def _write_pass(repo_root: Path) -> bool:
             "service/rest-operation-1.0.0.schema.json",
             "--only",
             "service/rest-session-1.0.0.schema.json",
+            "--only",
+            "service/reviewer-cache-report-1.0.0.schema.json",
             "--only",
             "service/server-profile-1.0.0.schema.json",
             "--only",

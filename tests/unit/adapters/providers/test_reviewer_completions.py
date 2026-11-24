@@ -785,12 +785,18 @@ class _Credential:
 
 
 async def _api_evaluate(
-    route: str, history: tuple[ReviewerMessage, ...] | None, capture: _Capture, clock: _Clock
+    route: str,
+    history: tuple[ReviewerMessage, ...] | None,
+    capture: _Capture,
+    clock: _Clock,
+    request_id: str | None = None,
 ) -> tuple[SemanticResult, bytes, _Credential, OneAttemptCredentialTransport]:
     """One exchange (``None``: a one-shot case) through the real pinned SDK, offline."""
 
     profile = _api_profile(route)
     case = _case(_FIRST if history is None else history, _api_binding(profile))
+    if request_id is not None:
+        case = replace(case, request_id=request_id)
     if history is None:
         case = replace(case, payload=b'{"case":1}', media_type="application/json", byte_count=10)
     rendered = (

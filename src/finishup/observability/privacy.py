@@ -356,8 +356,8 @@ _LOG_FIELDS: Final = frozenset(
         "codex_event_delta_bytes",
         "codex_event_intermediate_count",
         "codex_event_intermediate_bytes",
-        # #1172: per-exchange prompt-cache telemetry (provider-reported token counts and one
-        # closed miss label, never content).
+        # #1172: per-exchange prompt-cache telemetry (provider-reported token counts, one
+        # closed miss label and one closed usage state, never content).
         "reviewer_exchange_index",
         "reviewer_model_requests",
         "reviewer_input_tokens",
@@ -367,6 +367,7 @@ _LOG_FIELDS: Final = frozenset(
         "reviewer_prefix_tokens",
         "reviewer_prefix_cached_tokens",
         "reviewer_cache_miss",
+        "reviewer_usage_state",
         "timestamp",
         "level",
         "component",
@@ -534,10 +535,13 @@ _TOKEN_FIELDS: Final = frozenset(
         "semantic_conclusion",
         "control_method",
         "client_kind",
-        # #1172: the closed per-exchange prompt-cache miss label.
+        # #1172: the closed per-exchange prompt-cache miss label and usage state.
         "reviewer_cache_miss",
+        "reviewer_usage_state",
     }
 )
+# #1172: why an ``exchange_cache`` record carries no counts; no other value is admitted.
+_REVIEWER_USAGE_STATES: Final = frozenset({"unreported", "refused"})
 _VERSION_FIELDS: Final = frozenset(
     {
         "schema_version",
@@ -2029,6 +2033,10 @@ def redact_diagnostic_value(name: str, value: object) -> JsonValue:
             return value if type(value) is str and _HASH.fullmatch(value) else "unavailable"
         if name == "origin":
             return value if type(value) is str and _ORIGIN.fullmatch(value) else "unavailable"
+        if name == "reviewer_usage_state":
+            return (
+                value if type(value) is str and value in _REVIEWER_USAGE_STATES else "unavailable"
+            )
         if name in _TOKEN_FIELDS:
             return _bounded_token(value, _TOKEN)
         if name in _VERSION_FIELDS:

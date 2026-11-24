@@ -102,7 +102,9 @@ def test_a_changed_schema_or_setting_names_the_miss() -> None:
 def test_a_format_repair_that_missed_is_a_retry() -> None:
     state = ReviewerCacheState()
     _opened(state)
-    # The loop left the rejected answer out and appended its repair notice.
+    # The loop left the rejected answer out and appended its repair notice after the unchanged
+    # previous input, so the repair does not break the prefix: ``retry`` only names where an
+    # otherwise unexplained shortfall fell.
     _request, counts = exchange_cache_counts(
         state, request_id=_LATER, settings="s", roles=_REPAIR_ROLES, usage=_usage(90_100, 0)
     )
@@ -124,32 +126,68 @@ def test_compaction_outranks_every_other_cause() -> None:
     assert counts["reviewer_model_requests"] == 2
 
 
-def test_unreported_usage_records_nothing_and_leaves_the_next_prefix_unknown() -> None:
+@pytest.mark.parametrize(("refused", "state_token"), [(False, "unreported"), (True, "refused")])
+def test_an_exchange_without_usage_says_why_and_leaves_the_next_prefix_unknown(
+    refused: bool, state_token: str
+) -> None:
     state = ReviewerCacheState()
     request, counts = exchange_cache_counts(
-        state, request_id=_REQUEST, settings="s", roles=_FIRST_ROLES, usage=None
+        state,
+        request_id=_REQUEST,
+        settings="s",
+        roles=_FIRST_ROLES,
+        usage=None,
+        usage_refused=refused,
     )
-    assert (request, counts) == (_REQUEST, None)
+    # The record keeps the exchange's index and why it has no counts; it holds no count.
+    assert (request, counts) == (
+        _REQUEST,
+        {"reviewer_exchange_index": 1, "reviewer_usage_state": state_token},
+    )
     assert state.prefix_tokens is None and state.exchanges == 1
     _request, counts = exchange_cache_counts(
         state, request_id=_LATER, settings="s", roles=_NEXT_ROLES, usage=_usage(91_000, 0)
     )
-    # No label is guessed against a prefix nobody reported.
-    assert counts is not None and "reviewer_cache_miss" not in counts
-    assert "reviewer_prefix_tokens" not in counts
+    # No label is guessed against a prefix nobody reported, and the state is not repeated.
+    assert "reviewer_cache_miss" not in counts and "reviewer_prefix_tokens" not in counts
+    assert "reviewer_usage_state" not in counts and counts["reviewer_exchange_index"] == 2
 
 
-def test_a_compaction_without_usage_is_still_labelled() -> None:
+@pytest.mark.parametrize(("refused", "state_token"), [(False, "unreported"), (True, "refused")])
+def test_a_compaction_without_usage_is_still_labelled(refused: bool, state_token: str) -> None:
     state = ReviewerCacheState()
     _opened(state)
     request, counts = exchange_cache_counts(
-        state, request_id=_LATER, settings="s", roles=_NEXT_ROLES, usage=None, compacted=True
+        state,
+        request_id=_LATER,
+        settings="s",
+        roles=_NEXT_ROLES,
+        usage=None,
+        compacted=True,
+        usage_refused=refused,
     )
     # It can come before any usage snapshot: the index and the label still reach the record.
     assert (request, counts) == (
         _REQUEST,
-        {"reviewer_exchange_index": 2, "reviewer_cache_miss": "compaction"},
+        {
+            "reviewer_exchange_index": 2,
+            "reviewer_usage_state": state_token,
+            "reviewer_cache_miss": "compaction",
+        },
     )
+    assert state.prefix_tokens is None
+
+
+def test_an_exchange_with_counts_carries_no_usage_state() -> None:
+    _request, counts = exchange_cache_counts(
+        ReviewerCacheState(),
+        request_id=_REQUEST,
+        settings="s",
+        roles=(),
+        usage=_usage(10, 0),
+        usage_refused=True,
+    )
+    assert "reviewer_usage_state" not in counts and counts["reviewer_input_tokens"] == 10
 
 
 def test_cache_writes_are_recorded_only_where_the_provider_reports_them() -> None:
