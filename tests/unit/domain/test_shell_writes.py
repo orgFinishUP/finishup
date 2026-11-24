@@ -670,6 +670,27 @@ def test_a_long_heredoc_patch_in_a_native_argv_is_still_a_write() -> None:
     assert shell_writes.shell_command_text([1, 2]) is None
 
 
+@pytest.mark.parametrize("flag", ["-nc", "-cn", "-lnc"])
+@pytest.mark.parametrize("shell", ["bash", "/bin/sh"])
+def test_a_noexec_argv_is_its_script_only_to_a_reader_of_what_it_could_do(
+    shell: str, flag: str
+) -> None:
+    """``bash -nc SCRIPT`` reads SCRIPT and runs none of it. The write readers still get SCRIPT;
+    a reader of what ran (``ran``) gets the joined argv, in which SCRIPT is one quoted word."""
+
+    script = "pip install x && echo y > out.txt"
+    assert shell_writes.shell_command_text([shell, flag, script]) == script
+    ran = shell_writes.shell_command_text([shell, flag, script], ran=True)
+    assert ran is not None and ran == shlex.join([shell, flag, script])
+    assert shell_writes.shell_command_segments(ran) == [[shell, flag, script]]
+    # A layer that runs its script is that script to both readers, and a string is itself.
+    runs = flag.replace("n", "")
+    assert shell_writes.shell_command_text([shell, runs, script], ran=True) == script
+    assert shell_writes.shell_command_text(f"bash {flag} 'pytest -q'", ran=True) == (
+        f"bash {flag} 'pytest -q'"
+    )
+
+
 # --- #1106 r3: a directory change inside a wrapped script, and heredoc bodies as data ----------
 
 

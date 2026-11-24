@@ -4185,6 +4185,8 @@ Host decisions for Codex; the shared classifier parts apply to Claude Code and C
   `CommandExecution` item records an argv (`["/bin/bash", "-lc", CMD]`); its writes and heredoc
   patch paths are read from that script, however long. A legacy `shell` hook states the same argv
   shape, and its install target is read from that script too, as its stream copy's is (#1435). A
+  noexec argv (`["bash", "-nc", CMD]`, a syntax check) runs none of `CMD`: neither copy reports an
+  install target for it, and both still read `CMD` for the writes it could make. A
   call whose row was written but which Codex never ran (an interrupted turn, a declined approval)
   still counts as a verification run
   with an unknown outcome, as a declined `PreToolUse` already did (gap kept; follow-up is the

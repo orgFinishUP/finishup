@@ -1974,7 +1974,7 @@ def _codex_hook_call_workdir(
 def _stream_command_facts(
     workspace_locator: str | None,
     session_directory: str | None,
-) -> Callable[[str, str | None], Mapping[str, object]] | None:
+) -> Callable[[str | list[str], str | None], Mapping[str, object]] | None:
     """The hook's own runtime facts for a command its session stream names (n7 RC2, #1106 r2).
 
     Codex writes every ``function_call`` row of a turn before it runs them, so with parallel calls
@@ -1994,9 +1994,11 @@ def _stream_command_facts(
         return None
     root = workspace_locator
 
-    def facts(script: str, workdir: str | None) -> Mapping[str, object]:
+    def facts(command: str | list[str], workdir: str | None) -> Mapping[str, object]:
+        # The command as the rollout row states it, the value the hook copy's ``tool_input``
+        # holds: one reader then unwraps a native argv the same way for both copies.
         return runtime_structural_facts(
-            {"tool_input": {"command": script}},
+            {"tool_input": {"command": cast(JsonValue, command)}},
             tool_name="Bash",
             workspace_locator=root,
             inside=lambda value: workspace_relative_edit_path(value, root) is not None,

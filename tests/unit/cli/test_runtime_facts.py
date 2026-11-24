@@ -462,7 +462,7 @@ def test_a_native_argv_install_is_read_from_its_script(
     env: dict[str, Path], shell: str, tool: str, workspace_known: bool
 ) -> None:
     """A Codex ``shell`` hook states ``["bash", "-lc", SCRIPT]``; its install target is the
-    script's, the one its session-stream copy (handed that script) carries (#1435)."""
+    script's, the one its session-stream copy carries (#1435)."""
 
     script = f"{env['private'] / 'bin' / 'pip'} install x"
     locator = str(env["workspace"]) if workspace_known else None
@@ -481,6 +481,46 @@ def test_a_native_argv_install_is_read_from_its_script(
     stream = facts("Bash", script)
     assert stream["install_target"] == "private_env"
     assert hook["install_target"] == stream["install_target"]
+
+
+@pytest.mark.parametrize("flag", ["-nc", "-cn", "-lnc", "-nlc"])
+@pytest.mark.parametrize("shell", ["bash", "/bin/sh"])
+@pytest.mark.parametrize("tool", ["shell", "local_shell"])
+@pytest.mark.parametrize("workspace_known", [True, False])
+def test_a_noexec_argv_installs_nothing(
+    env: dict[str, Path], flag: str, shell: str, tool: str, workspace_known: bool
+) -> None:
+    """``["bash", "-nc", SCRIPT]`` is a syntax check: the shell reads SCRIPT and runs none of it,
+    so no install happened and the hook reports no install target, as on main. The same argv
+    without ``n`` still reports its script's target (#1435)."""
+
+    script = f"{env['private'] / 'bin' / 'pip'} install x"
+    locator = str(env["workspace"]) if workspace_known else None
+
+    def facts(command: list[JsonValue]) -> dict[str, JsonValue]:
+        return dict(
+            runtime_structural_facts(
+                {"tool_input": {"command": command}},
+                tool_name=tool,
+                workspace_locator=locator,
+                inside=_inside(env["workspace"]),
+            )
+        )
+
+    assert "install_target" not in facts([shell, flag, script])
+    assert "install_target" not in facts([shell, flag, "pipx install x"])
+    assert facts([shell, flag.replace("n", ""), script])["install_target"] == "private_env"
+
+
+def test_a_noexec_argv_is_still_read_for_what_its_script_could_write(tmp_path: Path) -> None:
+    """The write readers ask what a script could do, so they keep reading a noexec argv's script
+    (a write token and a heredoc patch alike); only the install reader asks what ran."""
+
+    patch = "git apply <<'EOF'\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\nEOF\n"
+    for script in ("echo x > src/a.py", patch, f"pipx install x && {patch}"):
+        facts = _facts("shell", {"command": ["bash", "-nc", script]}, tmp_path)
+        assert facts.get("write_scope") == "workspace"
+        assert "install_target" not in facts
 
 
 def test_quoted_text_and_heredoc_bodies_are_not_write_targets(tmp_path: Path) -> None:

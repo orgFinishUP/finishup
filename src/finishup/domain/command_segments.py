@@ -586,18 +586,20 @@ def _returns_control(segment: str) -> bool:
     return True
 
 
-def wrapped_shell_argument(words: Sequence[str]) -> str | None:
+def wrapped_shell_argument(words: Sequence[str], *, ran: bool = False) -> str | None:
     """``X`` for the words of ``bash -lc X`` / ``sh -c X`` (any shell path), else ``None``.
 
     A noexec cluster (``bash -nc X``) is still read as a wrapper here: callers that ask what the
-    script *could* do (write files, background) stay conservative. Whether ``X`` ran is
-    ``_wrapped_argument``'s question, and there it did not.
+    script *could* do (write files, background) stay conservative. A caller that asks what the
+    words did (an install happened or it did not) passes ``ran``: the noexec shell only read
+    ``X``, so there it is no wrapper, as for ``_wrapped_argument``.
     """
 
     if len(words) != 3:
         return None
     shell = words[0].replace("\\", "/").rsplit("/", 1)[-1]
-    if shell not in _SHELLS or _SHELL_COMMAND_FLAG_RE.fullmatch(words[1]) is None:
+    flag = _SHELL_RUNS_COMMAND_FLAG_RE if ran else _SHELL_COMMAND_FLAG_RE
+    if shell not in _SHELLS or flag.fullmatch(words[1]) is None:
         return None
     return words[2]
 

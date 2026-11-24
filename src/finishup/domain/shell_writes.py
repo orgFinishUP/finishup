@@ -1311,7 +1311,7 @@ def _without_heredoc_bodies(command: str, start: int) -> str:
     return "\n".join(kept)
 
 
-def shell_command_text(value: object) -> str | None:
+def shell_command_text(value: object, *, ran: bool = False) -> str | None:
     """The shell text a command value runs, for the write readers (#1106 r2).
 
     A string is itself. A native argv is its script when it is one host-shell layer
@@ -1319,6 +1319,10 @@ def shell_command_text(value: object) -> str | None:
     ``shell`` call records), so a long heredoc patch is read from the script itself rather than
     from a joined copy the token parsers cut at ``MAX_SHELL_WRITE_CHARS``; any other argv is
     its ``shlex.join``. Anything else is ``None``.
+
+    A noexec layer (``["bash", "-nc", SCRIPT]``) reads SCRIPT and runs none of it. The write
+    readers still get SCRIPT: they ask what it could do. A reader that asks what happened (the
+    install reader) passes ``ran`` and gets the joined argv, in which no command of SCRIPT runs.
     """
 
     if type(value) is str:
@@ -1327,7 +1331,7 @@ def shell_command_text(value: object) -> str | None:
         words = cast(Sequence[object], value)
         if all(type(word) is str for word in words):
             argv = [cast(str, word) for word in words]
-            script = wrapped_shell_argument(argv)
+            script = wrapped_shell_argument(argv, ran=ran)
             return script if script is not None else shlex.join(argv)
     return None
 

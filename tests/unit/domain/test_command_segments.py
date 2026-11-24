@@ -348,6 +348,18 @@ def test_a_noexec_host_shell_wrapper_is_not_stripped_from_the_command_identity(
     assert normalize_observed_command(argv) != "pytest -q"
 
 
+@pytest.mark.parametrize("argv", [["bash", "-nc", "pytest -q"], ["/bin/sh", "-cn", "pytest -q"]])
+def test_a_noexec_wrapper_is_a_wrapper_only_to_a_reader_of_what_it_could_do(
+    argv: list[str],
+) -> None:
+    from finishup.domain.command_segments import wrapped_shell_argument
+
+    assert wrapped_shell_argument(argv) == "pytest -q"
+    assert wrapped_shell_argument(argv, ran=True) is None
+    runs = [argv[0], argv[1].replace("n", ""), argv[2]]
+    assert wrapped_shell_argument(runs, ran=True) == "pytest -q"
+
+
 @pytest.mark.parametrize(
     "command", ["bash -lc 'pytest -q'", "bash -ec 'pytest -q'", "bash <<'EOF'\npytest -q\nEOF"]
 )

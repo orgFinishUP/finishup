@@ -281,7 +281,11 @@ agent must not be able to stop silently with known work left.
    command of a shell call is classified, split by the same shell lexer `write_scope` reads: an
    unquoted newline separates commands like `;`, `|&` like `|`, while a quoted newline, a comment
    or a heredoc body installs nothing (#1434), and an unquoted command substitution
-   (`echo $(pip install x)`) is read as the command it runs. `write_scope`
+   (`echo $(pip install x)`) is read as the command it runs. A native argv that is one
+   host-shell layer (`["bash", "-lc", SCRIPT]`) is read as its script (#1435), unless the layer
+   carries the noexec flag (`["bash", "-nc", SCRIPT]`): that shell reads the script and runs none
+   of it, so it installs nothing, while `write_scope` still reads what the script could write.
+   `write_scope`
    ignores writes into temporary scratch space (tb4n1 E6, #1000: 28 of 33 firings were `/tmp`
    logs, none a misplaced deliverable): `/tmp`, `/private/tmp`, `/var/tmp`, `/private/var/tmp`,
    `/dev/shm`, anything under `/dev/`, the macOS per-user `/var/folders/*/*/T`, and the

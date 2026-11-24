@@ -484,6 +484,76 @@ def test_a_stream_copy_names_a_heredoc_patch_bash_does_not_close(closing: str) -
 
 
 @pytest.mark.parametrize(
+    ("flag", "target"),
+    [("-lc", "private_env"), ("-c", "private_env"), ("-nc", None), ("-cn", None), ("-lnc", None)],
+)
+def test_a_stream_copy_of_a_noexec_argv_reports_no_install(flag: str, target: str | None) -> None:
+    """``["bash", "-nc", SCRIPT]`` reads SCRIPT and runs none of it. The rollout copy a hook
+    reconciles is handed the argv as the row states it, so it reports what the hook copy of the
+    same call reports: the script's install target when the script ran, none when it did not,
+    and in both cases the write the script could make."""
+
+    from finishup.cli.observe_hooks import (
+        _stream_command_facts,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    argv: list[JsonValue] = ["/bin/bash", flag, "pipx install x && echo x > src/a.py"]
+    item = CodexParsedRecord(
+        1,
+        0,
+        200,
+        "event_msg",
+        "CommandExecution",
+        JsonObject(
+            {
+                "payload": {
+                    "item": {
+                        "id": "exec-noexec",
+                        "type": "CommandExecution",
+                        "command": argv,
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                    "type": "item_completed",
+                }
+            }
+        ),
+    )
+    row = CodexParsedRecord(
+        1,
+        0,
+        200,
+        "response_item",
+        "function_call",
+        JsonObject(
+            {
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "c-noexec",
+                    "arguments": json.dumps({"command": argv}),
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    hook_facts = runtime_structural_facts(
+        {"cwd": "/repo", "tool_input": {"command": argv}},
+        tool_name="shell",
+        workspace_locator="/repo",
+        inside=lambda value: value.startswith("/repo/"),
+    )
+    assert hook_facts.get("install_target") == target
+    assert hook_facts.get("write_scope") == "workspace"
+    for record in (item, row):
+        structural, _gaps = structural_from_stream_record(
+            record, key_material=_KEY, command_facts=_stream_command_facts("/repo", "/repo")
+        )
+        assert structural.get("install_target") == target, record.item_type
+        assert structural.get("write_scope") == "workspace", record.item_type
+
+
+@pytest.mark.parametrize(
     ("session_cwd", "scope"),
     [
         ("/repo", "docs"),

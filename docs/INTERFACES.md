@@ -8024,7 +8024,9 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
   `command_composition` and `runner_class`, computed from its arguments (`cmd`, `command`,
   `argv`) with the hook's normalization and key (OUT-005); reconciled by a hook, it and a
   `CommandExecution` item also carry that hook's own `write_scope`, `install_target` and
-  `effective_user` (`codex_session_stream.StreamCommandFacts`, placed under the call's `workdir`,
+  `effective_user` (`codex_session_stream.StreamCommandFacts`, handed the command as the row
+  states it, a string or a native argv, so both copies unwrap an argv by one rule and a noexec
+  `["bash", "-nc", SCRIPT]` reports no install on either; placed under the call's `workdir`,
   or with none under the reconciling hook's payload `cwd`, `observe_hooks._stream_command_facts(
   workspace_locator, session_directory)`), and read elsewhere only a relative `write_scope` placed
   under a stated absolute directory, unplaced otherwise (#1106 r2, r4). The Claude ordinary

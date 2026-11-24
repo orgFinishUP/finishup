@@ -125,6 +125,19 @@ def _raw_command(tool_input: Mapping[str, JsonValue]) -> str | None:
     return None
 
 
+def _command_text(tool_input: Mapping[str, JsonValue], *, ran: bool = False) -> str | None:
+    """The shell text of the first command key that states one (``shell_command_text``)."""
+
+    return next(
+        (
+            text
+            for key in _COMMAND_KEYS
+            if (text := shell_command_text(tool_input.get(key), ran=ran)) is not None and text
+        ),
+        None,
+    )
+
+
 # Prefix-command options that take a separate operand (``sudo -u user``, ``env -u NAME``,
 # ``time -o file``), keyed by prefix command: an option one command reads an operand for is
 # operand-less in another (``sudo -S`` reads the password from stdin, ``env -S`` takes a string;
@@ -457,18 +470,15 @@ def runtime_structural_facts(
     if command is None:
         return facts
     # A native argv is read as its script (``["bash", "-lc", SCRIPT]``), by the install reader
-    # and the write reader alike, exactly as its session-stream copy is handed that script: the
-    # joined argv shows only ``bash`` to the install reader (#1435), and a heredoc patch longer
-    # than the token parsers' bound is still named (#1106 r2).
-    script = next(
-        (
-            text
-            for key in _COMMAND_KEYS
-            if (text := shell_command_text(tool_input.get(key))) is not None and text
-        ),
-        command,
-    )
-    target = install_target_class(script, workspace_locator)
+    # and the write reader alike, as its session-stream copy is: the joined argv shows only
+    # ``bash`` to the install reader (#1435), and a heredoc patch longer than the token parsers'
+    # bound is still named (#1106 r2).
+    script = _command_text(tool_input) or command
+    # The two readers part over a noexec argv (``["bash", "-nc", SCRIPT]``), which reads SCRIPT
+    # and runs none of it. The write reader asks what the script could do and still reads it.
+    # The install reader asks what happened: nothing ran, so it reads the joined argv, which
+    # installs nothing.
+    target = install_target_class(_command_text(tool_input, ran=True) or command, workspace_locator)
     if target is not None:
         facts["install_target"] = target
     if workspace_locator is not None:
