@@ -16,10 +16,17 @@ from typing import Any
 
 import pytest
 
+from builders.scripted_service_client import result_frame, run_in_new_process
 from builders.server_targets import ambient_home
 from finishup.client import connection_timing, target_runtime, targets
 from finishup.client.target_runtime import TargetRuntimeError, time_new_connections
-from finishup.ports.control import ControlError
+from finishup.ports.control import (
+    ControlError,
+    ControlMethod,
+    ServiceState,
+    ServiceStatus,
+)
+from finishup.protocol.ids import IdKind, new_id
 
 
 class _Client:
@@ -53,6 +60,55 @@ def test_a_new_process_times_one_connection_and_one_status_naming_no_workspace(
     assert set(answer) == {"ms"}
     assert isinstance(answer["ms"], int) and answer["ms"] >= 0
     assert calls == ["connect:None", "service_status", "close"]
+
+
+# One timing in a new process over the scripted client, which answers ``service_status``.
+_TIMING_IN_A_NEW_PROCESS = r"""
+import json, sys
+
+from finishup.client import connection_timing
+
+reply = json.loads(sys.stdin.read())
+
+
+async def connect(kind, *, workspace_locator=None):
+    return scripted_client(kind, reply)
+
+
+service_client.connect_service = connect
+answer = connection_timing.measure("own")
+loaded = sorted(name for name in ("pydantic", "finishup.protocol.models") if name in sys.modules)
+print(json.dumps({"answer": answer, "loaded": loaded}))
+"""
+
+
+def test_a_new_process_times_its_status_without_building_a_protocol_model() -> None:
+    """The timed window holds no model build, as the startup gate's bound holds none.
+
+    The protocol models build on first use. The gate builds the models of its status before its
+    bound opens; this process's ``service_status`` uses none, so it never loads them. A first-use
+    build inside either window would make ``server test`` and the gate time different work.
+    """
+
+    instance = new_id(IdKind.SERVICE_INSTANCE)
+    status = ServiceStatus(
+        protocol_version="1.0",
+        service_version="0.1.0",
+        service_instance_id=instance,
+        service_generation="1",
+        state=ServiceState.LOCKED,
+        state_reason="human_authority_unavailable",
+        vault_mode="uninitialized",
+        capabilities=(),
+        session_monitor="unavailable",
+    )
+    report = run_in_new_process(
+        _TIMING_IN_A_NEW_PROCESS,
+        result_frame(ControlMethod.SERVICE_STATUS, status, service_instance_id=instance),
+    )
+    answer = report["answer"]
+    assert isinstance(answer, dict) and set(answer) == {"ms"}
+    assert report["loaded"] == []
 
 
 def test_a_refused_connection_names_only_its_closed_reason_and_phase(

@@ -7,7 +7,9 @@ times, after its imports, a new connection (``service.client.connect_service``: 
 the transport and the handshake) and one ``service_status`` call within one bound. The required
 startup gate (``cli.startup_gate_probe``) times its connection and a task's status the same way, in a
 process of its own, after its imports; a process that already made a connection would time
-neither its schema parsing nor (relayed) its first channel (design v2 section 8.9).
+neither its schema parsing nor (relayed) its first channel (design v2 section 8.9). Neither
+window covers a protocol model's first-use build: the gate builds the models its status uses
+before its bound opens, and ``service_status`` here uses none.
 
 It prints one JSON object, ``{"ms": <int>}`` or ``{"error": <closed token>, "phase": <closed token
 or null>}``; nothing else leaves it (no path, host or name). It names no workspace, as

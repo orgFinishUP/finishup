@@ -1053,9 +1053,12 @@ single process-wide lock and resolves names from the model's own module, as the 
 did; a JSON schema asked of a model and a `TypeAdapter` over one also wait for that build (every
 `TypeAdapter` over a model class adapts the model `ensure_built` returned, and an architecture
 test holds `src/` and `scripts/` to that). The service and the MCP bridge build every model before
-they serve, and the native REST edge builds them before its port listens. Validation results,
-errors, serialization, and JSON schemas are unchanged; only a class's introspected `__init__`
-signature stays generic until the model is first used.
+they serve, and the native REST edge builds them before its port listens. The required-startup
+probe (`startup_gate_probe`), a new process for every gate decision, builds the four models its
+compact status exchange would otherwise build on first use (`build_status_models`) before its
+650 ms bound opens, so the bound covers its connection and its status and no model build.
+Validation results, errors, serialization, and JSON schemas are unchanged; only a class's
+introspected `__init__` signature stays generic until the model is first used.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and

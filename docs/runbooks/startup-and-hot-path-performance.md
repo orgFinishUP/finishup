@@ -110,7 +110,9 @@ gain:
   `helper run`) are not frozen.
 - **Imports.** Protocol and configuration models are built on first use under one process-wide
   lock; the service and the MCP bridge still build every model before serving, so no request
-  pays a first-use build. Ordinary hook passes, the advice refresh after a tool call and
+  pays a first-use build. The required-startup probe builds the four models of its one status
+  exchange before its 650 ms bound opens, so the bound still covers only the connection and the
+  status. Ordinary hook passes, the advice refresh after a tool call and
   `service status` no longer import pydantic or the protocol models. The package version is read
   only when something asks for it.
 - **Protocol.** A value made only of plain JSON types is checked in one walk and encoded by the

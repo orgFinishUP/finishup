@@ -21,7 +21,8 @@ a claim-bound task was started:
 
 * ``warm_connect_status`` — a fresh process connects (its workspace claim) and asks one compact
   ``status``, as the required-mode startup gate does (``cli/startup_gate_probe.py``, bounded at
-  0.65 s), with the relay's helper (and the SSH master) already up; gated at **650 ms p95**;
+  0.65 s; like its probe, the sample builds its status models before it starts timing), with
+  the relay's helper (and the SSH master) already up; gated at **650 ms p95**;
 * ``warm_process`` — that whole process, interpreter start and imports included; gated at the
   hook pass budget, **3200 ms p95**;
 * ``hook_cold_connect`` — after ``server disconnect`` (helper and master stopped), a hook's own
@@ -112,11 +113,18 @@ HOOK_FAIL_OPEN_PHASES = frozenset({"remote_unreachable", "remote_service_not_run
 PROBE = r"""
 import asyncio, json, sys, time
 began = time.monotonic()
+from finishup.cli.startup_gate_probe import build_status_models
 from finishup.ports.control import ControlClientKind, WorkspaceLocator
 from finishup.protocol.models import StatusRequest
 from finishup.service.client import connect_service, connect_service_on_demand
-imported = time.monotonic()
 budget = float(sys.argv[3])
+if budget <= 0:
+    # The gate's sample. The gate's probe builds its status models before its bound opens, so
+    # they are built here before the timers start and count as import time, where the import
+    # itself built every model before they were deferred to first use. A hook's sample (one
+    # with a budget) leaves them to first use, as a hook does.
+    build_status_models()
+imported = time.monotonic()
 async def main():
     out = {"import_ms": round((imported - began) * 1000, 1)}
     client = None

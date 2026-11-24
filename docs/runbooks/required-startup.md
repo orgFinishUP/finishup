@@ -93,7 +93,9 @@ plan prose matches the user's intent.
 
 Gate locks are nonblocking and independent of observation locks, capture, spool, drain and advice.
 The service probe has a 650 ms asynchronous budget inside a 1.25 s subprocess deadline; gate hooks
-have a 3 s host timeout. Controlled failures at a block-capable boundary deny substantive tools.
+have a 3 s host timeout. The 650 ms covers the probe's new connection and one compact status; its
+imports and the build of the models that status uses come before it, inside the 1.25 s.
+Controlled failures at a block-capable boundary deny substantive tools.
 Bootstrap still reaches normal host admission even when gate state is unreadable. Errors expose only
 closed reasons, never payloads.
 

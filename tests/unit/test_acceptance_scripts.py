@@ -246,6 +246,46 @@ def test_the_new_connection_line_server_test_prints_is_read() -> None:
     assert found is not None and found.group(1, 2) == ("702", "5")
 
 
+# Placed before the probe's own text: every connection is refused, after saying whether the
+# status models were built by the time the probe's timers had started.
+_REFUSED_CONNECTION = r"""
+import json, sys
+import finishup.service.client as service_client
+from finishup.ports.control import ControlError
+
+async def refuse(*_arguments, **_options):
+    from finishup.protocol.models import StatusRequest, StatusResult
+    built = [StatusRequest.__pydantic_complete__, StatusResult.__pydantic_complete__]
+    print(json.dumps(built), file=sys.stderr)
+    raise ControlError("service_unavailable", retryable=True)
+
+service_client.connect_service = refuse
+service_client.connect_service_on_demand = refuse
+"""
+
+
+def test_the_gate_sample_builds_its_status_models_before_its_timers_start() -> None:
+    """The warm sample times what the startup gate's bound covers: a connection and a status.
+
+    The protocol models build on first use, and the gate's probe builds the models of its status
+    before its bound opens. A sample that left them to first use would count their build in
+    ``status_ms`` and compare more than the gate times with the gate's 650 ms.
+    """
+
+    done = subprocess.run(  # noqa: S603 - no shell and a fixed interpreter
+        [sys.executable, "-I", "-c", _REFUSED_CONNECTION + wan_gate.PROBE, "/project", "{}", "0.0"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stderr.strip().splitlines()[-1]) == [True, True]
+    timing = json.loads(done.stdout)
+    assert timing["error"].startswith("ControlError:service_unavailable")
+    assert timing["import_ms"] > 0
+
+
 def test_the_calibration_is_a_number_of_milliseconds() -> None:
     measured = wan_gate.calibration()
     assert isinstance(measured, float) and measured > 0
