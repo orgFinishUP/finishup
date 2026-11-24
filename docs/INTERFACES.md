@@ -7702,6 +7702,10 @@ A workspace state document (`observation/workspaces/<digest>.json`) starts fresh
 one that exists but cannot be read, is not a regular file, or is empty, oversize, or invalid raises
 `STORAGE_UNSAFE` or non-retryable `STORAGE_CORRUPT` on every read and write and is never replaced
 (ADR-029, issue #1391).
+`LocalObservationStore.ingest` without an explicit workspace reads every workspace document to
+find the session's owner. A retryable failure to read any of them is raised as that
+`STORAGE_UNSAFE`. It is never answered as a `consent_missing` rejection, which reports only a
+decision made from documents that were read.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. A safe project root is the running user's own directory that no other account can

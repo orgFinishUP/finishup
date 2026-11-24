@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from dataclasses import replace
@@ -54,6 +55,7 @@ from finishup.domain.observation import (
 )
 from finishup.domain.observation_budget import AdmissionLossCause, ObservationMode
 from finishup.domain.values import JsonObject, Timestamp
+from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 
 
 def test_source_file_identity_bounds_large_filesystem_integers() -> None:
@@ -533,6 +535,83 @@ def test_reconcile_does_not_advance_past_a_rejected_envelope(
     assert cursor.byte_position == 0
     assert cursor.event_position == 0
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_reconcile_fails_as_storage_when_another_workspace_cannot_be_read_then_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient read failure of another workspace's state is named, and the pass retries.
+
+    Each stream row is ingested by session, which scans every workspace document. When one
+    of the others cannot be read, the pass must fail with the retryable storage error. It
+    must not treat the row as rejected for missing consent: that kept the cursor in place,
+    recorded a completed pass, and never named the cause.
+    """
+
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-other-workspace-unreadable"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(failed_shell_rollout())
+    seed = LocalObservationStore(_state=tmp_path)
+    workspace = seed.workspace_commitment(str(tmp_path.resolve()))
+    seed.grant_consent(workspace)
+    session = seed.session_commitment(session_id)
+    seed.bind_session(workspace, session)
+    (tmp_path / "other").mkdir()
+    other = seed.workspace_commitment(str(tmp_path / "other"))
+    seed.grant_consent(other)
+    other_path = (
+        tmp_path / "observation" / "workspaces" / (other.removeprefix("hmac-sha256:") + ".json")
+    )
+    real_open = os.open
+
+    def failing_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fspath(path) == os.fspath(other_path):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    # A new store, as each hook process has: nothing is cached, so the scan reads the file.
+    store = LocalObservationStore(_state=tmp_path)
+    with monkeypatch.context() as failing:
+        failing.setattr(os, "open", failing_open)
+        with pytest.raises(PublicOperationError) as failure:
+            reconcile_session_stream(
+                store,
+                workspace_commitment=workspace,
+                session_commitment=session,
+                codex_session_id=session_id,
+                locator=CodexSessionStreamLocator(home),
+            )
+    assert failure.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert failure.value.retryable is True
+    # Nothing of the failed pass is durable: no cursor, no row, and no reconcile stamp that
+    # would let the next hook skip its pass as recently done.
+    after = LocalObservationStore(_state=tmp_path)
+    assert after.get_stream_cursor(workspace, session) is None
+    assert after.pending_outbox_count(workspace) == 0
+    assert after.last_stream_reconcile_mono(workspace) is None
+
+    result = reconcile_session_stream(
+        after,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 1
+    assert result["byte_position"] == target.stat().st_size
+    assert after.pending_outbox_count(workspace) == accepted
 
 
 @pytest.mark.parametrize("blocked_by", ["ingest", "outbox"])

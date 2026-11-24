@@ -98,6 +98,10 @@ that is not a regular file or is empty, oversize, or not a valid state document 
 left byte-identical for repair, never replaced by an empty state that would drop consent and
 accepted rows. A hook pass records it as `observe_exception_public_operation_error`;
 cross-workspace scans skip such a document and propagate a retryable failure (issue #1391).
+Ingest that finds its workspace from the session is such a scan. It raises the retryable failure
+and never answers `consent_missing` for a document it could not read. `observe reconcile` then
+exits with the typed error, and a stream pass run by a hook keeps nothing, so the next reconciling
+hook reads the same rows again.
 
 ### Capacity, pressure, and setting lifetime
 

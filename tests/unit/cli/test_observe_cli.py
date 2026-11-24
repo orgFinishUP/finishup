@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -1767,6 +1767,90 @@ def test_explicit_recovery_persists_profile_and_rotation_frontier(
             commitment, session, source_generation=cursor.source_generation
         )
         assert set(tools) == ({"first"} if version == "0.148.0" else {"second", "third"})
+
+
+def test_reconcile_names_a_storage_failure_that_starts_during_the_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transient read failure of another workspace's state fails the command as storage.
+
+    The command's first scan of the workspaces succeeds. Another workspace's document then
+    changes and cannot be read when the pass ingests its first row. The command must exit
+    with the typed, retryable storage error. It must not exit 0 with nothing accepted, which
+    is how a pass that was refused for missing consent ends.
+    """
+
+    from builders.codex_rollout import encode_lines, function_call, session_meta
+
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "other-home"))
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace))
+    other = store.workspace_commitment(str(other_workspace))
+    store.grant_consent(commitment)
+    store.grant_consent(other)
+    other_path = (
+        state / "observation" / "workspaces" / (other.removeprefix("hmac-sha256:") + ".json")
+    )
+    path = tmp_path / "manual-recovery.jsonl"
+    path.write_bytes(encode_lines(session_meta(), function_call(name="shell", call_id="first")))
+    real_pass = observe_cli.reconcile_session_stream_path
+    real_open = os.open
+    unreadable = False
+
+    def failing_open(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if unreadable and os.fspath(target) == os.fspath(other_path):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    def pass_after_the_document_changed(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal unreadable
+        # A new modification time makes the store read the document again, not its cached copy.
+        os.utime(other_path, ns=(1, 1))
+        unreadable = True
+        return real_pass(*args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    monkeypatch.setattr(
+        observe_cli, "reconcile_session_stream_path", pass_after_the_document_changed
+    )
+    code = observe_cli.reconcile_session_stream(
+        session_file=str(path), workspace=str(workspace), json_output=True, _state=state
+    )
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["operation"], error["reason"], error["code"], error["retryable"]) == (
+        "reconcile",
+        "storage_unsafe",
+        "STORAGE_UNSAFE",
+        True,
+    )
+    session = store.session_commitment("recovery")
+    assert LocalObservationStore(_state=state).get_stream_cursor(commitment, session) is None
+
+    # The same command succeeds once the document can be read again.
+    unreadable = False
+    monkeypatch.setattr(observe_cli, "reconcile_session_stream_path", real_pass)
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(path), workspace=str(workspace), json_output=True, _state=state
+        )
+        == 0
+    )
+    cursor = LocalObservationStore(_state=state).get_stream_cursor(commitment, session)
+    assert cursor is not None
+    assert cursor.byte_position == path.stat().st_size
 
 
 def test_explicit_recovery_uses_full_mapped_native_session_id(

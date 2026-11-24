@@ -11323,7 +11323,17 @@ class LocalObservationStore:
             if workspace_commitment is None:
                 try:
                     workspace = self._workspace_for_envelope(envelope)
-                except PublicOperationError:
+                except PublicOperationError as exc:
+                    # Only the resolver's own two refusals are a consent decision: a session
+                    # with several owners, or no single consented workspace. Any other error
+                    # comes from reading or writing local state and stays a storage failure,
+                    # so the caller retries a transient one instead of being told that
+                    # consent is missing (ADR-029).
+                    if exc.code not in {
+                        PublicErrorCode.SESSION_CONFLICT,
+                        PublicErrorCode.INVALID_REQUEST,
+                    }:
+                        raise
                     return ObservationIngestResult(
                         ObservationIngestDisposition.REJECTED,
                         ObservationGapCode.CONSENT_MISSING.value,
