@@ -10833,7 +10833,20 @@ facade and are never MCP tools.
   `SemanticPolicy` values are exactly
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
 - `config/write.py` / `config/privacy_desired.py`: atomic nonsecret TOML writers and privacy
-  desired-state export/apply classification (widen never silent).
+  desired-state export/apply classification (widen never silent). `privacy export-desired
+  --output` replaces a regular file by renaming a finished temporary file over the name a symlink
+  resolves to, keeping the old file's owner, group and permissions (a new file gets the default
+  mode). The temporary file is flushed to storage first, except on a file system that cannot be
+  told to flush. It writes in place where a rename cannot leave what a plain write leaves: a
+  device or pipe, a file with another hard link, a file whose owner a new file cannot be given, a
+  file whose extended attributes (its access-control list, security label and `user.*`
+  attributes) cannot be read or are not exactly those of the temporary file made beside it, and
+  a file whose folder does not allow the rename. Extended attributes are compared on Linux only.
+  Known gap: on macOS Python can read neither them nor an access-control list, so a file replaced
+  there loses both. A path that cannot be written, a read-only file included, fails as
+  `privacy_desired_output_unwritable` with nothing saved; an in-place write that stops after it
+  began fails as `privacy_desired_output_incomplete`. Both are CLI-only and exit 2, and neither
+  carries the path or the operating-system message.
 - `config/toml_text.py`: `load_toml_text()`, the one TOML parse every reader uses. Any document
   `tomllib` cannot load raises `tomllib.TOMLDecodeError` (`TomlNotLoadable` for an integer past
   the integer string conversion limit or deep inline nesting, which `tomllib` reports as

@@ -413,8 +413,23 @@ there until it expires.
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
 `export-desired --output` writes the file whole or not at all: an existing file at that path is
-replaced only once the new one is complete. A path that cannot be written (an existing folder, a
-read-only folder, or a file where a folder should be) stops with
+replaced only once the new one is complete. The new file keeps the old one's owner, group and
+permissions, and a file that did not exist yet gets your usual default permissions. A symbolic
+link at that path is followed: the file it points to is the one replaced, and the link stays a
+link.
+
+Where a replacement is not possible, or would change more than the content, the export is written
+straight into what is already at the path instead: a device or a pipe, a file that has another
+hard link, a file whose owner a new file cannot be given, a file whose access-control list or
+other extended attributes differ from what a new file in that folder gets, and a writable file in
+a folder that does not allow files to be created or replaced. Access-control lists and extended
+attributes are checked on Linux only. On macOS FinishUP cannot read them, so a file that has them
+is replaced and loses them; set them again after the export.
+
+Only a direct write can stop part-way. If it does, `privacy_desired_output_incomplete` and exit
+code 2 say the file may be incomplete; export again. A path that cannot be written at all (an
+existing folder, a file where a folder should be, a file you are not allowed to write, or a
+read-only folder with no writable file at that path) stops with
 `privacy_desired_output_unwritable` and exit code 2; nothing is saved, so choose a writable file
 path in an existing folder and export again.
 

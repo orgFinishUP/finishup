@@ -6095,7 +6095,6 @@ def privacy_export_desired(
     async def _run() -> int:
         from finishup.adapters.privacy.catalog import decode_privacy_policy_canonical
         from finishup.config.privacy_desired import (
-            PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY,
             PrivacyDesiredOutputUnwritable,
             write_privacy_desired_toml,
         )
@@ -6127,7 +6126,7 @@ def privacy_export_desired(
         except PrivacyDesiredOutputUnwritable as error:
             # A path the caller chose that cannot be written is a named refusal with its remedy,
             # never an internal error; neither the path nor the OS message is echoed.
-            _stderr(f"{error.reason_code}: {PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY}")
+            _stderr(f"{error.reason_code}: {error.remedy}")
             return 2
         _human_or_json(
             # Frozen legacy identifier (ADR-048): machine-readable report tag agents parse.
