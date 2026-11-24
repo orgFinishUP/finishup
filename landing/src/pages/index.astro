@@ -86,6 +86,47 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
   </head>
   <body id="top">
     <a class="skip-link" href="#main-content">Skip to the story</a>
+    {/* The menu holds the only control that pauses the artwork, so it comes straight after the
+        skip link, where a keyboard reaches it before the nav and the story. CSS fixes it to the
+        right edge of the window wherever it sits in the source. The panel follows its trigger, so
+        Tab goes from the trigger into the open panel. */}
+    <aside class="a11y-menu" id="a11y-menu" aria-label="Accessibility options" hidden>
+      <button class="a11y-trigger" id="a11y-trigger" type="button" aria-expanded="false" aria-controls="a11y-panel" aria-label="Accessibility options" title="Accessibility options">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="4.5" r="2" />
+          <path d="M4.5 9h15" />
+          <path d="M12 9v5.5" />
+          <path d="M8.5 21 12 14.5 15.5 21" />
+        </svg>
+      </button>
+      <div class="a11y-panel" id="a11y-panel" role="region" aria-label="Accessibility settings" hidden>
+        <div class="a11y-head">
+          <span class="a11y-title">Accessibility</span>
+          <button class="a11y-close" id="a11y-close" type="button" aria-label="Close accessibility menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div class="a11y-row" id="motion-row">
+          <div class="a11y-label">
+            <span class="a11y-name">Pause motion</span>
+            <span class="a11y-desc">Show crisp still artwork</span>
+          </div>
+          <button class="a11y-switch" id="motion-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Pause animation" hidden>
+            <span class="a11y-knob" aria-hidden="true"></span>
+          </button>
+        </div>
+        <p class="a11y-note" id="a11y-reduced-note" hidden>System reduced motion is active — showing still artwork.</p>
+        <div class="a11y-row" id="graphics-row">
+          <div class="a11y-label">
+            <span class="a11y-name">Text only</span>
+            <span class="a11y-desc">Hide decorative dot artwork</span>
+          </div>
+          <button class="a11y-switch" id="graphics-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Hide decorative artwork">
+            <span class="a11y-knob" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </aside>
     <header class="nav">
       <div class="nav-inner">
         <a class="lockup" href="#top" aria-label="FinishUP home"><img src="/assets/finishup-lockup.png" alt="FinishUP" height="32" /></a>
@@ -182,44 +223,6 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
       <button type="button" class="rail-dot" data-scene-target="robot1" aria-label="FinishUP checks"></button>
       <button type="button" class="rail-dot" data-scene-target="end" aria-label="FinishUP is free"></button>
     </nav>
-
-    <aside class="a11y-menu" id="a11y-menu" aria-label="Accessibility options" hidden>
-      <div class="a11y-panel" id="a11y-panel" role="region" aria-label="Accessibility settings" hidden>
-        <div class="a11y-head">
-          <span class="a11y-title">Accessibility</span>
-          <button class="a11y-close" id="a11y-close" type="button" aria-label="Close accessibility menu">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
-          </button>
-        </div>
-        <div class="a11y-row" id="motion-row">
-          <div class="a11y-label">
-            <span class="a11y-name">Pause motion</span>
-            <span class="a11y-desc">Show crisp still artwork</span>
-          </div>
-          <button class="a11y-switch" id="motion-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Pause animation" hidden>
-            <span class="a11y-knob" aria-hidden="true"></span>
-          </button>
-        </div>
-        <p class="a11y-note" id="a11y-reduced-note" hidden>System reduced motion is active — showing still artwork.</p>
-        <div class="a11y-row" id="graphics-row">
-          <div class="a11y-label">
-            <span class="a11y-name">Text only</span>
-            <span class="a11y-desc">Hide decorative dot artwork</span>
-          </div>
-          <button class="a11y-switch" id="graphics-toggle" type="button" role="switch" aria-checked="false" aria-controls="story" aria-label="Hide decorative artwork">
-            <span class="a11y-knob" aria-hidden="true"></span>
-          </button>
-        </div>
-      </div>
-      <button class="a11y-trigger" id="a11y-trigger" type="button" aria-expanded="false" aria-controls="a11y-panel" aria-label="Accessibility options" title="Accessibility options">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="4.5" r="2" />
-          <path d="M4.5 9h15" />
-          <path d="M12 9v5.5" />
-          <path d="M8.5 21 12 14.5 15.5 21" />
-        </svg>
-      </button>
-    </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden>
       <span class="ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>

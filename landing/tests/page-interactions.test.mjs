@@ -42,7 +42,7 @@ function environment({ fits = true } = {}) {
       contains: (name) => this.classes.has(name),
       toggle: (name, on) => on ? this.classes.add(name) : this.classes.delete(name),
     };
-    focus() {}
+    focus() { doc.activeElement = this; }
     setAttribute(name, value) { this.attributes.set(name, value); }
     removeAttribute(name) { this.attributes.delete(name); }
     contains(el) { return el === this || el?.parent === this; }
@@ -259,4 +259,49 @@ test("reduced motion shows stills while forced colours keep plain text only", as
   forcedMedia.matches = false;
   await forcedMedia.dispatch("change");
   assert.equal(forcedEnv.activeArt, 1);
+});
+
+test("the accessibility menu opens under its trigger and gives focus back when it closes", async () => {
+  const env = environment();
+  const trigger = env.ids["a11y-trigger"];
+  const panel = env.ids["a11y-panel"];
+  const close = env.ids["a11y-close"];
+  close.parent = panel;
+  // Opening leaves focus on the trigger. The panel is the next thing in the page source (see
+  // page.test.mjs), so the next Tab lands on its first control.
+  env.doc.activeElement = trigger;
+  await trigger.dispatch("click");
+  assert.equal(panel.hidden, false);
+  assert.equal(trigger.attributes.get("aria-expanded"), "true");
+  assert.equal(env.doc.activeElement, trigger, "opening does not move focus");
+  // The close button hides the panel it sits in, so focus goes back to the trigger.
+  env.doc.activeElement = close;
+  await close.dispatch("click");
+  assert.equal(panel.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  assert.equal(env.doc.activeElement, trigger, "the close button returns focus to the trigger");
+  // Escape does the same from a control inside the panel.
+  await trigger.dispatch("click");
+  env.doc.activeElement = env.ids["graphics-toggle"];
+  await env.doc.dispatch("keydown", { key: "Escape" });
+  assert.equal(panel.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  assert.equal(env.doc.activeElement, trigger, "Escape returns focus to the trigger");
+  // The trigger closes the panel it opened.
+  await trigger.dispatch("click");
+  await trigger.dispatch("click");
+  assert.equal(panel.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  // A click elsewhere closes the panel and leaves focus where the click put it.
+  await trigger.dispatch("click");
+  await env.doc.dispatch("click", { target: trigger });
+  assert.equal(panel.hidden, false, "a click inside the menu keeps it open");
+  env.doc.activeElement = env.setup;
+  await env.doc.dispatch("click", { target: env.setup });
+  assert.equal(panel.hidden, true);
+  assert.equal(trigger.attributes.get("aria-expanded"), "false");
+  assert.equal(env.doc.activeElement, env.setup);
+  // Escape with the panel closed is left alone.
+  await env.doc.dispatch("keydown", { key: "Escape" });
+  assert.equal(env.doc.activeElement, env.setup);
 });
