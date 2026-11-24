@@ -384,9 +384,19 @@ def rest_run(
         # The native edge runs the service in this process. Build the protocol and config models
         # before the port listens, as the import-time build did, so the service's own eager build
         # (which then finds them built) does not lengthen the time between the port accepting
-        # connections and the control channel answering.
+        # connections and the control channel answering. The build covers only models that exist
+        # when it runs, and the command graph does not import the config models: the service
+        # does, once the port is bound. So the modules that define the models are imported here.
+        from importlib import import_module
+
         from finishup.protocol.deferred_build import build_deferred_models
 
+        for module in (
+            "finishup.protocol.models",
+            "finishup.config.models",
+            "finishup.config.privacy",
+        ):
+            import_module(module)
         build_deferred_models()
     try:
         listener = RestListener.bind(

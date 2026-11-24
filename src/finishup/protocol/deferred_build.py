@@ -78,6 +78,8 @@ def build_deferred_models() -> None:
 
     A model that is already complete is skipped, so a second call (the native REST edge builds
     before it listens, then the service it runs builds again) only builds models created since.
+    Only models that exist are built: a caller that needs a module's models built by this call
+    imports that module first, as the native REST edge does for the config models.
     """
 
     with _BUILD_LOCK:

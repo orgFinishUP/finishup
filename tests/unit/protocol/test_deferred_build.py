@@ -15,6 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 import finishup.protocol.deferred_build as deferred_build
+from builders.server_targets import ambient_home
 from finishup.config.models import StrictConfigModel
 from finishup.protocol.models import PublicResultModel
 
@@ -197,6 +198,79 @@ def test_native_rest_edge_builds_every_model_before_it_listens() -> None:
     body = source[source.index("def rest_run(") : source.index("def _run_gateway(")]
     build = body.index("build_deferred_models()")
     assert body.rindex('if edge == "native":', 0, build) < build < body.index("RestListener.bind(")
+
+
+# ``finishup service rest run --edge native`` in a new process, stopped twice: where the port
+# would start to listen (``RestListener.bind``), and where the service would start to run
+# (``anyio.run``, by then holding every model its module imports create). Nothing listens and no
+# service starts. Only models whose build is deferred are counted: any other model is built by
+# the import that creates it, wherever that import runs.
+_NATIVE_EDGE_IN_A_NEW_PROCESS = """
+import json, sys
+
+import anyio
+import pydantic
+
+import finishup.rest.listener as listener
+
+
+def deferred_models():
+    found, pending = {}, [pydantic.BaseModel]
+    while pending:
+        model = pending.pop()
+        pending.extend(model.__subclasses__())
+        if model.__module__.startswith("finishup.") and model.model_config.get("defer_build"):
+            found[f"{model.__module__}.{model.__qualname__}"] = model.__pydantic_complete__
+    return found
+
+
+built_when_the_port_opens = set()
+
+
+class Bound:
+    scheme, port = "http", 0
+
+
+def bind(*_arguments, **_options):
+    built_when_the_port_opens.update(name for name, built in deferred_models().items() if built)
+    return Bound()
+
+
+def run(*_arguments, **_options):
+    held = deferred_models()
+    print(json.dumps({
+        "models": len(held),
+        "config_models": sum(name.startswith("finishup.config.") for name in held),
+        "not_built_when_the_port_opened": sorted(set(held) - built_when_the_port_opens),
+    }))
+
+
+listener.RestListener.bind = bind
+anyio.run = run
+sys.argv = ["finishup", "service", "rest", "run", "--edge", "native"]
+sys.argv += ["--listen", "127.0.0.1:0", "--behind-proxy"]
+from finishup.cli.entry import main
+main()
+"""
+
+
+def test_native_rest_edge_has_built_every_service_model_when_its_port_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every deferred model the native edge's service holds was built before the port opened.
+
+    The eager build only builds models that exist when it runs. The command graph does not
+    import the config models, and the service the edge runs imports them after the port is
+    bound, so a pre-listen build that ran without them left them to the service's own build,
+    while the port already accepted connections.
+    """
+
+    with ambient_home(monkeypatch):
+        out = _run(_NATIVE_EDGE_IN_A_NEW_PROCESS)
+    report = json.loads(out.strip().splitlines()[-1])
+    assert report["models"] > 200
+    assert report["config_models"] > 0
+    assert report["not_built_when_the_port_opened"] == []
 
 
 def test_a_second_eager_build_rebuilds_no_built_model(monkeypatch: pytest.MonkeyPatch) -> None:
