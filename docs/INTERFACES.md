@@ -3732,9 +3732,19 @@ from the inactive timer until the final in-flight call completes; long-running c
 cancelled solely for lack of a subsequent frame. Each control-result write is also wall-clock
 bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
 thus the inactive-session exemption) indefinitely via send backpressure. A connection accepted
-while the service is draining or failed is closed at once, before any handshake, on every local
-endpoint (control, secret ingress, human control): it releases its admission slot immediately and
-its peer sees end of stream, which clients treat as retryable.
+while the service is draining or failed is closed at once, before any handshake, on the two
+endpoints the daemon's accept loop serves (control and human control): the daemon reads and
+answers nothing, and the connection's admission slot is released immediately. Secret ingress is
+not accepted by that loop (it takes one connection inside a live ceremony), so this refusal never
+applies to it. The close names no reason, and nothing orders it against the peer's first write, so
+what the ordinary client reports depends on which came first. If its hello was already written, it
+reads end of stream or a transport error in place of the hello answer and classifies that like any
+other unanswered hello (`handshake_rejected`, below) by the singleton stamp: `service_incompatible`
+when the stamp shows another installation, otherwise the non-retryable `service_unavailable` with
+`phase` `handshake` or `handshake_git_version`. A hello write that itself fails, because the close
+landed first, is reported as retryable `service_unavailable` with no `phase`. The human-control
+client (`HumanControlClient`) reports the same close as `service_unavailable` (its write or read
+failed) or `ambiguous` (a bare end of stream); its errors carry no retry flag.
 
 The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
 closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that
@@ -3749,7 +3759,8 @@ then closes without admitting a session. The client names an answered digest mis
 closes without answering) `handshake_rejected`. An answered `manifest_mismatch` maps to the
 retryable `ControlError` reason `service_incompatible` (public code `SERVICE_UNAVAILABLE`). A
 silent close proves nothing by itself, because a service of this very installation also closes
-when its own side of the handshake fails (#1040 follow-up, below); the client reads the singleton
+when its own side of the handshake fails (#1040 follow-up, below) and when it refuses the
+connection while draining or failed (above); the client reads the singleton
 stamp (`_stamp_identity` in `finishup.service.client`) and reports `service_incompatible` only on
 evidence: a present, validated field that differs from this installation's (a well-formed
 `schema_manifest_digest`, or a `service_version` that parses as a package version). A stamp with
