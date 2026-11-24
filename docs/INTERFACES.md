@@ -7670,7 +7670,19 @@ to the service (`observation_revoke`, starting the service when absent), which f
 generations and clears the token; when no service can be reached it says so on stderr
 (`observation_revoke_fence_pending:service_unavailable`) and exits 0, because the revoke itself
 holds. `finishup observe grant` over a pending fence first asks the service to finish it, so a
-fence left by an unreachable service is never a one-way door (issue #1479). Only an explicit
+fence left by an unreachable service is not a one-way door on a root a service of this computer
+serves: the everyday installation, an isolated root that is not a target, and a named local server
+(issue #1479). On a root that is, or may be, a server elsewhere
+(`targets.active_root_may_be_remote`: a `target.json` of a remote kind, or one that cannot be read)
+the fence is still a one-way door. Its token is in this computer's observation store for that
+server (ADR-051 decision 12); the server holds its own stores and never that token, and no service
+of this computer runs in such a root, so no request can clear it. Neither command sends anything
+for the fence there: `observe revoke` reports `observation_revoke_fence_pending:no_local_service`
+with a continuation that names no retry, still exiting 0, and a grant for that workspace stays
+refused in that root. Clearing it needs the server to run its own revocation for the workspace's
+claim and confirm it to this computer, and no control method does that yet: `observation_revoke`
+is not claim-bound, and a row attested `revoked` runs that revocation only when a row is left to
+send, and confirms nothing. Only an explicit
 profile set, `content-disable`, or revoke removes an arm. The call returns a
 `LocalConsentGrant` (`transition`: `granted`, `resumed`, `updated`, or `unchanged`, plus the
 resulting consent). The setup report's `observation_consent` block adds that `transition` and the

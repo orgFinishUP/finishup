@@ -1645,7 +1645,11 @@ def observe_resume_cmd(
 def observe_revoke_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
 ) -> None:
-    """Withdraw observation consent; retained evidence is kept. Grant again to resume."""
+    """Withdraw observation consent; retained evidence is kept. Grant again to resume.
+
+    With a server elsewhere in use (reached over SSH or HTTPS), the withdrawal
+    cannot be finished yet, so a later grant for the same workspace is refused.
+    """
 
     _finish(_observe_operation("revoke_observation")(workspace=workspace))
 

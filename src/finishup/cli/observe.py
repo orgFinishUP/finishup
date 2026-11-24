@@ -194,6 +194,14 @@ _REVOCATION_FENCE_PENDING_CONTINUATION: Final = (
     "finish withdrawing consent. Run `finishup observe revoke` again once the service can "
     "start; until then a new grant for this workspace is refused."
 )
+# The same pending fence on a root that is, or may be, a server elsewhere: no retry from this
+# computer finishes it, so the text names none.
+_REVOCATION_FENCE_NO_LOCAL_SERVICE_CONTINUATION: Final = (
+    "Observation is revoked and stays stopped. The server in use is elsewhere (reached over SSH "
+    "or HTTPS), or its record cannot be read, and FinishUP cannot finish withdrawing consent for "
+    "such a server, so nothing was sent to it. While that is so, a new grant for this workspace "
+    "is refused, and running `finishup observe revoke` again does not finish it."
+)
 
 
 _WORKSPACE_LOCATOR_INVALID: Final = "workspace_locator_invalid"
@@ -1976,9 +1984,10 @@ def grant_observation(
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
     # A revoke whose project fence never finished (no service then) blocks every new grant;
-    # finish it first, so withdrawing consent is never a one-way door (#1479). A fence still
-    # pending after this is refused below as before.
-    _finish_revocation_fence(store, commitment, _revocation_fence_connector(_connect, _state))
+    # finish it first, so withdrawing consent is not a one-way door on a root a service of this
+    # computer serves (#1479). A fence still pending after this is refused below as before; on a
+    # root that is, or may be, a server elsewhere nothing can finish it and none is asked.
+    _finish_revocation_fence(store, commitment, _connect, _state)
     # A repeated grant keeps already-approved native content arms and the unchanged
     # content fence; only content-disable or revoke removes an arm (issue #835).
     grant = store.grant_consent(commitment)
@@ -2513,14 +2522,33 @@ def _revocation_fence_connector(
     """Return the service route that finishes a revoke, or None when none serves this store.
 
     The service owns the project catalog a revoke must fence, and it serves the default state
-    root only; a store under any other root has no service of its own to ask.
+    root only; a store under any other root has no service of its own to ask. A root that is, or
+    may be, a server elsewhere has none either (``_fence_root_may_be_remote``), so nothing is
+    dialled for it.
     """
 
     if connect is not None:
         return connect
-    if state is not None:
+    if state is not None or _fence_root_may_be_remote(connect, state):
         return None
     return cast(RevocationFenceConnector, connect_service_on_demand)
+
+
+def _fence_root_may_be_remote(connect: RevocationFenceConnector | None, state: Path | None) -> bool:
+    """Whether the store's root is, or may be, a server elsewhere: SSH, HTTPS or a port (ADR-051).
+
+    The fence token of such a root is in this computer's store for that server. The server keeps
+    its own stores and clears a token only there, and no service of this computer runs in such a
+    root, so no request can finish the fence: asking the server would spend a remote connection,
+    and up to the request's deadline, on an answer that changes nothing here. An injected
+    connector or an explicit state root is used as given.
+    """
+
+    if connect is not None or state is not None:
+        return False
+    from finishup.client.targets import active_root_may_be_remote
+
+    return active_root_may_be_remote()
 
 
 async def _finish_revocation_fence_async(
@@ -2551,23 +2579,27 @@ def _finish_revocation_fence(
     store: LocalObservationStore,
     commitment: str,
     connect: RevocationFenceConnector | None,
+    state: Path | None,
 ) -> bool:
     """Finish a pending consent-revocation fence through the service; True once none is pending.
 
     A local revoke stops capture at once and records a durable fence token. Only the service's
     observation coordinator can fence the project generations the revoked consent fed and then
     clear that token; until it does, a new grant is refused. The service's revoke is idempotent
-    for an already-revoked consent, so asking it again replays the pending fence (#1479).
+    for an already-revoked consent, so asking it again replays the pending fence (#1479). The
+    route is resolved only while a fence is pending, so a command that finds none reads nothing
+    more for it.
     """
 
     if store.pending_consent_revocation(commitment) is None:
         return True
-    if connect is None:
+    route = _revocation_fence_connector(connect, state)
+    if route is None:
         return False
     import anyio
 
     async def run() -> None:
-        await _finish_revocation_fence_async(commitment, connect)
+        await _finish_revocation_fence_async(commitment, route)
 
     # The pending token, re-read below, is the authority on whether the fence finished; a
     # service that could not be reached or refused the request leaves it in place.
@@ -2587,11 +2619,13 @@ def revoke_observation(
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
     status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
     typer.echo(f"observation_revoked:{status.lifecycle.value}:evidence_retained")
-    if not _finish_revocation_fence(
-        store, commitment, _revocation_fence_connector(_connect, _state)
-    ):
-        typer.echo("observation_revoke_fence_pending:service_unavailable", err=True)
-        typer.echo(_REVOCATION_FENCE_PENDING_CONTINUATION, err=True)
+    if not _finish_revocation_fence(store, commitment, _connect, _state):
+        if _fence_root_may_be_remote(_connect, _state):
+            typer.echo("observation_revoke_fence_pending:no_local_service", err=True)
+            typer.echo(_REVOCATION_FENCE_NO_LOCAL_SERVICE_CONTINUATION, err=True)
+        else:
+            typer.echo("observation_revoke_fence_pending:service_unavailable", err=True)
+            typer.echo(_REVOCATION_FENCE_PENDING_CONTINUATION, err=True)
     return 0
 
 

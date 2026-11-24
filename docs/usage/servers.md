@@ -678,6 +678,11 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 - An official FinishUP service: this release names none.
 - An SSH host certificate in place of a host key: FinishUP refuses such a server
   (`remote_identity_changed`).
+- Granting observation again after `finishup observe revoke` while an SSH or HTTPS server is in
+  use. The revoke stops observation at once, but FinishUP cannot yet finish withdrawing consent
+  for such a server, so a later `finishup observe grant` for the same project is refused while
+  that server is in use. `finishup observe revoke` says so when it happens, and running it again
+  does not change that.
 - SSH and HTTPS servers have been tried on Linux. macOS, and Windows through WSL 2, have not been
   tested yet as either end of an SSH or HTTPS server; on macOS a Python from python.org may need
   its certificates installed before FinishUP trusts a server through the system store.

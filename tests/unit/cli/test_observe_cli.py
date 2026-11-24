@@ -207,6 +207,162 @@ def test_revoke_without_a_service_names_the_pending_fence_and_a_later_grant_fini
     assert consent is not None and consent.active
 
 
+class _ServiceDial:
+    """Stands in for the on-demand service connector and counts every attempt to use it."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def __call__(self, kind: object, **kwargs: object) -> object:
+        del kind, kwargs
+        self.attempts += 1
+        raise ConnectionRefusedError("service_unavailable")
+
+
+def _select_server_elsewhere(kind: str) -> Path:
+    """Record and select one server elsewhere; return its root on this computer."""
+
+    from finishup.client import targets
+
+    with targets.registry_lock():
+        if kind == "https":
+            record, root = targets.new_remote_target(
+                "lab", "https", base_url="https://finishup.example"
+            )
+        else:
+            record, root = targets.new_remote_target(
+                "lab", "ssh", user="owner", host="lab.example", port=22
+            )
+    targets.write_selection(record)
+    return root
+
+
+@pytest.mark.parametrize("root_kind", ["ssh", "https", "unreadable_record"])
+def test_revoke_and_grant_on_a_root_that_may_be_remote_dial_nothing_and_promise_no_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    root_kind: str,
+) -> None:
+    """The fence token of such a root is in this computer's store, which no service serves.
+
+    A server elsewhere keeps its own stores and cannot clear it, so asking that server (as the
+    fence finisher of issue #1479 first did for every root) only spent a remote connection and
+    its deadline, and the "run revoke again once the service can start" text named a retry that
+    never succeeds.
+    """
+
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+    from finishup.config.paths import reset_selection_memo, state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch):
+        root = _select_server_elsewhere("https" if root_kind == "https" else "ssh")
+        if root_kind == "unreadable_record":
+            # A record other accounts could have written is not trusted: it may name any kind.
+            (root / "target.json").chmod(0o644)
+            reset_selection_memo()
+        assert targets.active_root_may_be_remote() is True
+        assert state_dir() == root / "state"
+        dial = _ServiceDial()
+        monkeypatch.setattr(observe_cli, "connect_service_on_demand", dial)
+
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        capsys.readouterr()
+        for _attempt in range(2):
+            assert observe_cli.revoke_observation(workspace=str(workspace)) == 0
+            revoked = capsys.readouterr()
+            assert "observation_revoked:" in revoked.out
+            assert dial.attempts == 0
+            assert "observation_revoke_fence_pending:no_local_service" in revoked.err
+            # Nothing here can be retried into success, so nothing says to retry.
+            assert "service_unavailable" not in revoked.err
+            assert "once the service can start" not in revoked.err
+            assert "does not finish it" in revoked.err
+            assert "a new grant for this workspace is refused" in revoked.err
+            assert str(workspace) not in revoked.out + revoked.err
+
+        store = LocalObservationStore()
+        commitment = store.workspace_commitment(str(workspace.resolve()))
+        assert store.pending_consent_revocation(commitment) is not None
+
+        # The grant is refused exactly as before the fence finisher existed.
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 10
+        assert "still being fenced" in capsys.readouterr().err
+        assert dial.attempts == 0
+
+
+def test_a_grant_with_no_pending_fence_does_not_read_the_server_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+
+    def unexpected() -> bool:
+        raise AssertionError("the route is resolved only while a fence is pending")
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch):
+        monkeypatch.setattr(targets, "active_root_may_be_remote", unexpected)
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+
+
+def test_revoke_help_does_not_promise_a_new_grant_with_a_server_elsewhere() -> None:
+    result = CliRunner().invoke(app, ["observe", "revoke", "--help"])
+
+    assert result.exit_code == 0
+    output = _terminal_compact(result.stdout)
+    assert "Grantagaintoresume." in output
+    assert "Withaserverelsewhereinuse(reachedoverSSHorHTTPS)" in output
+    assert "alatergrantforthesameworkspaceisrefused" in output
+
+
+@pytest.mark.parametrize("root_kind", ["everyday", "named_local", "isolated"])
+def test_revoke_on_a_local_root_still_finishes_its_fence_through_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    root_kind: str,
+) -> None:
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, reset_selection_memo, state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch) as home:
+        if root_kind == "named_local":
+            with targets.registry_lock():
+                record, _root = targets.new_local_target("work")
+            targets.write_selection(record)
+        elif root_kind == "isolated":
+            isolated = home / "isolated"
+            isolated.mkdir(mode=0o700)
+            monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(isolated))
+            reset_selection_memo()
+        assert targets.active_root_may_be_remote() is False
+        service = _CoordinatorBackedService(state_dir())
+        monkeypatch.setattr(observe_cli, "connect_service_on_demand", service.connect)
+
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        assert observe_cli.revoke_observation(workspace=str(workspace)) == 0
+        revoked = capsys.readouterr()
+        assert "observation_revoked:" in revoked.out
+        assert "fence_pending" not in revoked.err
+        assert (service.connections, len(service.fenced)) == (1, 1)
+
+        code = observe_cli.grant_observation(workspace=str(workspace))
+        captured = capsys.readouterr()
+        assert code == 0, captured.err
+        store = LocalObservationStore()
+        consent = store.consent_for(store.workspace_commitment(str(workspace.resolve())))
+        assert consent is not None and consent.active
+
+
 def test_git_subdirectory_consent_and_hook_share_one_canonical_workspace(
     tmp_path: Path,
     capsys: object,
