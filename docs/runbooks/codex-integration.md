@@ -736,6 +736,17 @@ skill at `.agents/skills/finishup`, installs managed structural plugin/hook sour
 entry. The plugin source directory, marketplace entry, or enabled config table alone is not
 evidence that Codex activated a plugin.
 
+Installing the plugin source replaces `.agents/plugins/finishup` as a whole directory, so it
+proceeds only when every file there is FinishUP's: this release's managed files and marker, or a
+prior render that byte-matches its own valid marker (ADR-023 §6, §9). A directory holding any
+other file, whether an owner note added to an installed tree or a hand-made directory with no
+marker, is refused as `destination_conflict` (`unmanaged_files: true`) and left untouched;
+`replace_modified` covers edited managed files only and never authorizes removing unmanaged
+files. Setup reports `plugin_install_failed` with a continuation: move those files, or the whole
+directory, outside `.agents/plugins`, then rerun setup. Plugin inspection reports such a tree as
+not exact (`installed_untrusted_unknown`), its digest binds the unmanaged files, and activation
+preview refuses it as `destination_conflict` before any Codex command.
+
 Activation is a standing-trust mutation for future sessions in one owner-selected Codex home. The
 owner must explicitly supply an existing absolute, non-symlink home; setup never derives it from a
 wrapper basename, ambient environment, or a pre-consent Codex diagnostic. Setup binds the exact
@@ -3339,7 +3350,8 @@ home-relative or drive-relative locator, or any `..` path is replaced by `<outsi
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
 (`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
-case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+case-insensitively one character at a time, as NTFS does (`ß` never matches `SS`), and no
+filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 
@@ -4167,8 +4179,10 @@ Host decisions for Codex; the shared classifier parts apply to Claude Code and C
   missing user fact never stands for its opposite: `verification_only_as_root` is decided over the
   verification runs that state a user and, when none does, over the commands that do. A completed
   `CommandExecution` item records an argv (`["/bin/bash", "-lc", CMD]`); its writes and heredoc
-  patch paths are read from that script, however long. A call whose row was written but which
-  Codex never ran (an interrupted turn, a declined approval) still counts as a verification run
+  patch paths are read from that script, however long. A legacy `shell` hook states the same argv
+  shape, and its install target is read from that script too, as its stream copy's is (#1435). A
+  call whose row was written but which Codex never ran (an interrupted turn, a declined approval)
+  still counts as a verification run
   with an unknown outcome, as a declined `PreToolUse` already did (gap kept; follow-up is the
   #1106 owner's). Supported.
 - **Exit codes of direct calls.** A Codex 0.159 `Bash` PostToolUse states no exit code. The

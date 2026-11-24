@@ -6,6 +6,8 @@ Desired-state files declare nonsecret policy intent. Apply maps onto existing
 
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
 from dataclasses import fields, is_dataclass
 from datetime import datetime
@@ -14,12 +16,16 @@ from pathlib import Path
 from typing import Final, cast
 
 from finishup.config.models import ConfigError
+from finishup.config.toml_text import load_toml_text
 from finishup.domain.privacy import PrivacyPolicy, policy_field_omitted
 from finishup.domain.values import format_rfc3339_millis
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 __all__ = [
+    "PRIVACY_DESIRED_OUTPUT_UNWRITABLE",
+    "PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY",
     "PRIVACY_DESIRED_SCHEMA",
+    "PrivacyDesiredOutputUnwritable",
     "load_privacy_desired_canonical",
     "render_privacy_desired_toml",
     "write_privacy_desired_toml",
@@ -27,6 +33,24 @@ __all__ = [
 
 # Frozen legacy identifier (ADR-048): the schema tag stored in existing desired-privacy files.
 PRIVACY_DESIRED_SCHEMA: Final = "yoetz.privacy-desired/1"
+
+# The one way an export can fail after the policy was read: the chosen path cannot be written.
+PRIVACY_DESIRED_OUTPUT_UNWRITABLE: Final = "privacy_desired_output_unwritable"
+PRIVACY_DESIRED_OUTPUT_UNWRITABLE_REMEDY: Final = (
+    "Nothing was saved. Choose a writable file path in an existing directory and export again."
+)
+
+
+class PrivacyDesiredOutputUnwritable(Exception):
+    """The export destination could not be written; nothing was saved.
+
+    Carries only its fixed reason code, never the caller's path or the operating-system message.
+    """
+
+    reason_code: Final = PRIVACY_DESIRED_OUTPUT_UNWRITABLE
+
+    def __init__(self) -> None:
+        super().__init__(PRIVACY_DESIRED_OUTPUT_UNWRITABLE)
 
 
 def _to_json(value: object) -> object:
@@ -51,14 +75,23 @@ def _to_json(value: object) -> object:
     raise TypeError("privacy_desired_value_invalid")
 
 
+# TOML basic strings may not carry a raw control character (U+0000-U+001F, U+007F), but the
+# loader accepts one spelled as an escape; spell every one back as an escape so a loaded value
+# always renders to a loadable file.
+_TOML_BASIC_ESCAPES: Final = str.maketrans(
+    {
+        **{code: f"\\u{code:04X}" for code in (*range(0x20), 0x7F)},
+        ord("\\"): "\\\\",
+        ord('"'): '\\"',
+        ord("\n"): "\\n",
+        ord("\r"): "\\r",
+        ord("\t"): "\\t",
+    }
+)
+
+
 def _escape_basic(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
+    return value.translate(_TOML_BASIC_ESCAPES)
 
 
 def render_privacy_desired_toml(policy: PrivacyPolicy) -> str:
@@ -82,8 +115,36 @@ def render_privacy_desired_toml(policy: PrivacyPolicy) -> str:
 
 
 def write_privacy_desired_toml(policy: PrivacyPolicy, path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_privacy_desired_toml(policy), encoding="utf-8")
+    """Write the desired-state TOML to *path* whole, or raise without leaving anything behind.
+
+    The file is written to a temporary file in the same directory, flushed, and renamed into
+    place, so a failed export never leaves a truncated file. A path that cannot be written (an
+    existing directory, a forbidden or read-only parent, a parent that is a file) raises
+    ``PrivacyDesiredOutputUnwritable``; the path and the operating-system
+    message are never carried in the error.
+    """
+
+    data = render_privacy_desired_toml(policy).encode("utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+    except OSError as error:
+        raise PrivacyDesiredOutputUnwritable from error
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException as error:
+        # Never leave a stray temporary beside the target, even on an interrupt.
+        temporary.unlink(missing_ok=True)
+        if isinstance(error, OSError):
+            raise PrivacyDesiredOutputUnwritable from error
+        raise
     return path
 
 
@@ -91,7 +152,7 @@ def load_privacy_desired_canonical(path: Path) -> bytes:
     """Load desired-state TOML and return the embedded canonical policy JSON bytes."""
 
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw = load_toml_text(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("config_value_invalid") from exc
     if raw.get("schema") != PRIVACY_DESIRED_SCHEMA:

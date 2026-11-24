@@ -797,8 +797,13 @@ shell/exec tool after light, semantics-preserving normalization: unquoted runs o
 collapse to one space, and a host shell wrapper (`/bin/bash -lc`, `bash -lc` including the WSL 2
 form, `sh -c`) is stripped when its argument is exact (an argv wrapper, or the canonical
 single-quoted string form). Quoting, expansions, escapes and line breaks are never rewritten, so
-commands with different shell meaning never share an identity. The hook process computes it and
-discards the text; the text is never persisted, displayed, or sent, with or without content consent.
+commands with different shell meaning never share an identity. A command with an unquoted
+here-document operator (`<<`, `<<-`, `<<<`) or ANSI-C `$'...'` string is kept byte for byte apart
+from its leading blanks: a body is data the shell passes on verbatim, and `$'...'` has its own
+escapes (#1448). A commitment recorded before that rule for such a command with a run of blanks no
+longer equals a newly computed one; that only keeps two identities apart. The hook process computes
+it and discards the text; the text is never persisted, displayed, or sent, with or without content
+consent.
 Edit tools (for example `apply_patch`, whose `command` argument is a patch) never carry one. The
 value crosses the unreleased control-request `2.9.0` wire, materializes as the command action's
 `omitted:<commitment>`, and the hook spool carries it for legacy replays. A plain `sha256` of a

@@ -86,10 +86,13 @@ instances; every dogfood run re-derived a private layout.
    package version), expiry, and the lock-stamped holder. `finishup instance dispose --root <dir>
    [--retain-logs <dir>] [--no-stop]` refuses anything that is not a marked persistent or
    disposable root (`instance_not_disposable`: the everyday install and unlabeled ADR-026 roots
-   are never removed here), stops only the process stamped in *that root's* lock after the flock
-   probe confirms the singleton is held (SIGTERM, bounded wait; `instance_service_running` leaves
-   the root in place; nothing is matched by name, path, or pattern), optionally copies the log
-   files out, removes the root, and removes a pin that names it. Repeating `dispose` is a no-op
+   are never removed here), refuses a `--retain-logs` destination that is relative, lies inside
+   the root being removed, has no existing parent, or already holds this installation's copy
+   (`instance_root_invalid`, checked before any service is stopped, so a kept copy is never
+   deleted with the root and then reported retained), stops only the process stamped in *that
+   root's* lock after the flock probe confirms the singleton is held (SIGTERM, bounded wait;
+   `instance_service_running` leaves the root in place; nothing is matched by name, path, or
+   pattern), optionally copies the log files out, removes the root, and removes a pin that names it. Repeating `dispose` is a no-op
    success. Expiry is enforced at service start and reported by status; there is no background
    sweeper and no claim of secure erasure.
 5. **Contributor provisioning is a script over the shipped commands.**

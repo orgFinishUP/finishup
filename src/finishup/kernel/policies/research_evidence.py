@@ -372,7 +372,11 @@ def _limitation_findings(case: DeterministicCase) -> list[DeterministicAssessmen
 
 
 def _rejection_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
-    output: list[DeterministicAssessment] = []
+    # Local findings of different rules can name one subject (for example a support mismatch and a
+    # diff mismatch on one claim's evidence, #1453), and the finding identity is (policy, rule,
+    # subject), so every hollow rejection on one subject is one assessment naming each rejected
+    # finding and response event.
+    groups: dict[tuple[FindingBasisRef, ...], list[tuple[FindingBasisRef, ...]]] = {}
     for finding_id, response_record in case.projection.responses.items():
         response = response_record.payload
         finding_record = case.projection.findings.get(finding_id)
@@ -397,16 +401,26 @@ def _rejection_findings(case: DeterministicCase) -> list[DeterministicAssessment
             continue
         response_event = response_record.source_event_id
         evidence_refs = tuple(ref for ref in response.evidence_refs if ref in case.allowed_ids)
-        present_refs = _refs((finding_id, response_event, *evidence_refs))
-        compared = _refs(evidence_refs)
+        groups.setdefault(finding.subject_refs, []).append(
+            (finding_id, response_event, *evidence_refs)
+        )
+    output: list[DeterministicAssessment] = []
+    for subject, rejections in groups.items():
+        present_refs = _refs(ref for row in rejections for ref in row)
+        compared = _refs(ref for row in rejections for ref in row[2:])
         output.append(
             build_policy_assessment(
                 case,
                 RESEARCH_EVIDENCE_POLICY_PACK,
                 FindingKind.QUESTIONABLE_FINDING_REJECTION,
-                finding.subject_refs,
+                subject,
                 (FindingFact(RESEARCH_REJECTION_PRESENT_FACT, present_refs),),
-                (_fact("rejection_basis_insufficient", finding_id, response_event),),
+                (
+                    FindingFact(
+                        "rejection_basis_insufficient",
+                        _refs(ref for row in rejections for ref in row[:2]),
+                    ),
+                ),
                 source_availability=(
                     policy_source_availability(case, compared)
                     if compared

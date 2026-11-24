@@ -19,6 +19,7 @@ from typing import Final, cast
 __all__ = [
     "MAX_REVIEWER_READS",
     "READ_NOT_SERVED_ENDING",
+    "REVIEWER_READ_REASONS",
     "ReviewerRead",
     "ReviewerRecord",
     "render_reviewer_lines",
@@ -31,6 +32,33 @@ MAX_REVIEWER_EXCHANGES: Final = MAX_REVIEWER_READ_ATTEMPTS + 2  # final judgment
 # #1242: ``ReviewerRecord.ended`` of a review that returned its final judgment after a read it
 # asked for was left unserved, because the read's own action left its exchange no room.
 READ_NOT_SERVED_ENDING: Final = "read_not_served_no_room"
+# Every ``reason`` a read result envelope or its owner-local usage row can carry (#1173): the
+# broker's refusals, truncations, declared-test limits (#1220) and image limits, the privacy
+# admission's refusals, and the usage row's own ``outcome_unknown``/``deadline``. Owner-local
+# read-usage validation accepts exactly this set; a reason the service issues joins it here.
+REVIEWER_READ_REASONS: Final = frozenset(
+    {
+        "forbidden_path",
+        "outside_scope",
+        "not_recorded",
+        "unsupported_type",
+        "invalid_request",
+        "source_changed",
+        "not_in_frozen_case",
+        "not_retained",
+        "byte_budget",
+        "inspection_limit",
+        "native_read_limit",
+        "declared_test_changed",
+        "declared_test_not_visible",
+        "image_byte_budget",
+        "image_permission_required",
+        "privacy_withheld",
+        "authorization_changed",
+        "outcome_unknown",
+        "deadline",
+    }
+)
 _ACTIONS: Final = frozenset({"read_packet_section", "read_ledger", "read_file"})
 _STATUSES: Final = frozenset({"ok", "partial", "unavailable", "denied", "stale"})
 _STANDINGS: Final = frozenset(

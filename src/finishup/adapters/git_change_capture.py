@@ -1329,18 +1329,22 @@ class GitChangeCaptureAdapter:
                     continue
                 ignored.add(path)
                 # Which rule ignores it: a negated match also prints here, so this second call
-                # runs only for a path the quiet query already proved ignored.
+                # runs only for a path the quiet query already proved ignored. With ``-z`` (which
+                # Git allows only with ``--stdin``) the rule's source is the first NUL-separated
+                # field, unquoted, so a rule file whose path holds a colon, a quote, or non-ASCII
+                # bytes keeps the exact name the change capture lists it under.
                 try:
                     _, verbose = self._git(
                         pinned,
-                        (*config, "check-ignore", "-v", "--", os.fsdecode(path)),
+                        (*config, "check-ignore", "-v", "-z", "--stdin"),
                         deadline=deadline,
                         limit=8_192,
                         accepted=frozenset({0, 1}),
+                        stdin_bytes=path + b"\0",
                     )
                 except (ValueError, ChangeCaptureUnavailable):
                     verbose = b""
-                sources[path] = verbose.split(b":", 1)[0] if b":" in verbose else b""
+                sources[path] = verbose.split(b"\0", 1)[0] if b"\0" in verbose else b""
         info_exclude = os.fsencode(pinned.root / ".git" / "info" / "exclude")
         holds_file: dict[bytes, bool | None] = {}
         probes: list[RequestedPathProbe] = []
@@ -2513,6 +2517,7 @@ class GitChangeCaptureAdapter:
         limit: int,
         accepted: frozenset[int] = frozenset({0}),
         keep_prefix_on_limit: bool = False,
+        stdin_bytes: bytes | None = None,
     ) -> tuple[int, bytes]:
         # Git runs at the root's pathname. Before and after each call that pathname, and its
         # ``.git``, must still be the validated directories: a directory renamed away and replaced
@@ -2534,6 +2539,7 @@ class GitChangeCaptureAdapter:
                 timeout_seconds=_remaining(deadline),
                 accepted_returncodes=accepted,
                 keep_prefix_on_limit=keep_prefix_on_limit,
+                stdin_bytes=stdin_bytes,
             )
         except ValueError as exc:
             _verify_same_root(pinned)

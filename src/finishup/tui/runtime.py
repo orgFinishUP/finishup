@@ -59,6 +59,7 @@ if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
     from finishup.domain.observation_budget import CapacityRequest
     from finishup.domain.observation_settings import ObservationDetailProfile
     from finishup.ports.harness_mcp import HarnessBinary, McpRegistrationPreview
+    from finishup.protocol.models import PublicErrorModel
     from finishup.service.confidential_protocol import ProviderCredentialTarget
 
 __all__ = [
@@ -409,13 +410,52 @@ async def _shared_route_change(
 
 
 class RuntimeError_(Exception):
-    """A bounded operation failure carrying a code the interface may show."""
+    """A bounded operation failure carrying a code the interface may show.
 
-    def __init__(self, reason: str, message: str, *, details: Sequence[str] = ()) -> None:
+    ``recovery`` holds the directive lines a public service error resolved from its gated safe
+    details (ADR-030), and ``retryable`` its retryable flag; both stay empty for a local reason,
+    whose directive the interface looks up from the reason itself.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        details: Sequence[str] = (),
+        recovery: Sequence[str] = (),
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
         self.message = message
         self.details = tuple(details)
+        self.recovery = tuple(recovery)
+        self.retryable = retryable
+
+
+def _public_failure(error: PublicErrorModel) -> RuntimeError_:
+    """Carry a public service error's identity and recovery into the interface (ADR-030).
+
+    The reason is the wire code, never the enum's Python spelling; the retryable flag and the
+    correlation ID survive; and the directive lines come from the same resolver the command line's
+    ``render_human_error`` uses, so the two surfaces cannot disagree about what to do next.
+    """
+
+    from finishup.cli.render import render_error_recovery_lines
+
+    code = str(getattr(error.code, "value", error.code))
+    return RuntimeError_(
+        code,
+        error.message,
+        details=(
+            f"reason={code}",
+            f"retryable={'yes' if error.retryable else 'no'}",
+            f"correlation_id={error.correlation_id}",
+        ),
+        recovery=render_error_recovery_lines(error.safe_details),
+        retryable=error.retryable,
+    )
 
 
 def _server_failure(error: Exception) -> RuntimeError_:
@@ -804,10 +844,18 @@ class FinishUpRuntime:
 
         Only Codex registrations carry a legacy key FinishUP reads here; another host's Yoetz-era
         install is reported with its plugin layer instead, so its legacy value is ``none``.
+        An unreadable connection status raises, as an unreadable Codex registration does, so the
+        readiness layers say unknown instead of not configured.
         """
 
         if option.host != "codex":
-            return await self.mcp_state(option), "none"
+            state = await self.mcp_state(option)
+            if state == "unknown":
+                raise RuntimeError_(
+                    "connection_status_unreadable",
+                    "the agent connection status could not be read",
+                )
+            return state, "none"
         from finishup.adapters.integrations.codex_mcp import CodexMcpAdapter
         from finishup.application.harness_mcp import HarnessMcpService
         from finishup.ports.harness_mcp import McpRegistrationError
@@ -2783,7 +2831,9 @@ class FinishUpRuntime:
         )
         return WorkDetail(
             item=item,
-            evidence_count=(None if open_obligation_count is None else int(open_obligation_count)),
+            open_obligation_count=(
+                None if open_obligation_count is None else int(open_obligation_count)
+            ),
             coverage=gaps or ("no gaps recorded",),
             limitations=tuple(str(code) for code in getattr(compact, "gaps", ()) or ()),
             receipt_available=False,
@@ -3036,10 +3086,15 @@ class FinishUpRuntime:
         return new_id(IdKind.REQUEST)
 
     def _unwrap(self, result: object, message: str) -> Any:
+        from finishup.protocol.models import PublicErrorModel
+
         payload = getattr(result, "root", getattr(result, "result", result))
         if getattr(payload, "ok", False) is not True:
             error = getattr(payload, "error", None)
-            reason = str(getattr(error, "code", "operation_failed"))
+            if isinstance(error, PublicErrorModel):
+                raise _public_failure(error)
+            code = getattr(error, "code", "operation_failed")
+            reason = str(getattr(code, "value", code))
             detail = str(getattr(error, "message", message))
             raise RuntimeError_(reason, detail)
         return payload

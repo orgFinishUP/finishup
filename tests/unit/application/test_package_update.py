@@ -530,3 +530,130 @@ def test_finishup_tip_has_no_alias_notice() -> None:
 
     assert advisory.package == "finishup"
     assert not any("yoetz" in line for line in advisory.tip_lines())
+
+
+_MALFORMED_VERSIONS = (
+    "9.9.9\x1b]0;pwned\x07",
+    "1.0\x00",
+    "not;a$version",
+    "1.0.0$(id)",
+    "release-candidate",
+    "1.0é",
+)
+
+
+@pytest.mark.parametrize("version", _MALFORMED_VERSIONS)
+def test_parse_latest_version_refuses_non_pep440_versions(version: str) -> None:
+    import json
+
+    body = json.dumps({"info": {"version": version}}).encode()
+    with pytest.raises(UpdateChecksTransportError, match="version_invalid"):
+        parse_latest_version(body)
+
+
+@pytest.mark.parametrize("version", _MALFORMED_VERSIONS)
+def test_a_malformed_registry_version_is_never_cached_or_reported(
+    tmp_path: Path, version: str
+) -> None:
+    import asyncio
+    import json
+
+    import httpx
+
+    from finishup.adapters.privacy.update_checks import fetch_latest_finishup_version
+    from finishup.application.package_update import package_update_report_fields
+
+    body = json.dumps({"info": {"version": version}}).encode()
+
+    class _RegistryTransport:
+        async def fetch_latest_version(self) -> str:
+            mock = httpx.MockTransport(lambda _request: httpx.Response(200, content=body))
+            async with httpx.AsyncClient(transport=mock) as client:
+                return await fetch_latest_finishup_version(client=client)
+
+    advisory = asyncio.run(
+        resolve_package_update_advisory(
+            policy=_policy(update_checks=True, network=True),
+            installed_version="1.0.0",
+            transport=_RegistryTransport(),
+            now=_NOW,
+            cache_root=tmp_path,
+            package="finishup",
+        )
+    )
+    assert advisory.outcome == "skipped_unavailable"
+    assert package_update_report_fields(advisory)["latest_version"] is None
+    assert load_package_update_cache(root=tmp_path, package="finishup") is None
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.parametrize("version", _MALFORMED_VERSIONS)
+def test_a_transport_returning_a_malformed_version_falls_back_to_the_cache(
+    tmp_path: Path, version: str
+) -> None:
+    import asyncio
+
+    store_package_update_cache(
+        latest_version="1.1.0",
+        fetched_at=_NOW - timedelta(days=2),
+        root=tmp_path,
+        package="finishup",
+    )
+    advisory = asyncio.run(
+        resolve_package_update_advisory(
+            policy=_policy(update_checks=True, network=True),
+            installed_version="1.0.0",
+            transport=_ScriptedTransport(version=version),  # type: ignore[arg-type]
+            now=_NOW,
+            cache_root=tmp_path,
+            package="finishup",
+        )
+    )
+    assert advisory.source == "cache"
+    assert advisory.latest_version == "1.1.0"
+    cached = load_package_update_cache(root=tmp_path, package="finishup")
+    assert cached is not None
+    assert cached.latest_version == "1.1.0"
+
+
+@pytest.mark.parametrize("version", _MALFORMED_VERSIONS)
+def test_a_poisoned_cache_entry_is_ignored_and_refetched(tmp_path: Path, version: str) -> None:
+    import asyncio
+    import json
+
+    (tmp_path / "package-update-cache-finishup.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": "2026-08-03T11:00:00Z",
+                "latest_version": version,
+                "package": "finishup",
+                "schema": "yoetz.package-update-cache/1",
+                "ttl_seconds": 86400,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_package_update_cache(root=tmp_path, package="finishup") is None
+    transport = _ScriptedTransport(version="1.2.0")
+    advisory = asyncio.run(
+        resolve_package_update_advisory(
+            policy=_policy(update_checks=True, network=True),
+            installed_version="1.0.0",
+            transport=transport,  # type: ignore[arg-type]
+            now=_NOW,
+            cache_root=tmp_path,
+            package="finishup",
+        )
+    )
+    assert transport.calls == 1
+    assert advisory.source == "network"
+    assert advisory.latest_version == "1.2.0"
+
+
+@pytest.mark.parametrize("version", _MALFORMED_VERSIONS)
+def test_storing_a_malformed_version_is_refused(tmp_path: Path, version: str) -> None:
+    with pytest.raises(ValueError, match="latest_version_invalid"):
+        store_package_update_cache(
+            latest_version=version, fetched_at=_NOW, root=tmp_path, package="finishup"
+        )
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []

@@ -62,6 +62,7 @@ from finishup.adapters.integrations.toml_tables import (
 )
 from finishup.config.foreign_write import project_root_admitted, writable_by_others
 from finishup.config.home_project import home_project_allowed
+from finishup.config.toml_text import load_toml_text
 from finishup.ports.integrations import (
     IntegrationError,
     IntegrationReason,
@@ -665,7 +666,7 @@ def _load_config(path: Path) -> tuple[bytes, Mapping[str, object]]:
         raise _error(IntegrationReason.SOURCE_INVALID)
     _owned_not_writable(path, directory=False)
     try:
-        parsed = tomllib.loads(raw.decode("utf-8"))
+        parsed = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.SOURCE_INVALID) from exc
     return raw, cast(Mapping[str, object], parsed)
@@ -916,7 +917,7 @@ def _legacy_config_plan(
     if plugin_owned:
         after = strip_exact_table(after, _LEGACY_PLUGIN_TABLE)
     try:
-        parsed = cast(Mapping[str, object], tomllib.loads(after.decode("utf-8") if after else ""))
+        parsed = cast(Mapping[str, object], load_toml_text(after.decode("utf-8") if after else ""))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
     remaining_marketplaces = _table(parsed, "marketplaces")
@@ -1267,7 +1268,7 @@ def _rebind_marketplace(raw: bytes, old: str, new: Path) -> bytes:
         + raw[start + len(old_table.encode()) :]
     )
     try:
-        tomllib.loads(rebound.decode("utf-8"))
+        load_toml_text(rebound.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.DESTINATION_CONFLICT) from exc
     return rebound
@@ -1400,8 +1401,13 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         # render), then bind the preview to the intended version-specific bytes.
         # Apply still requires an exact current renderer variant at its first
         # source fence before any mutation.
-        if plugin_tree_matches_marker(_read_managed_tree(source)):
+        installed = _read_managed_tree(source)
+        if plugin_tree_matches_marker(installed):
             return expected
+        # Files outside the managed inventory are owner content the source install refuses
+        # to remove (ADR-023 §9), not a partial FinishUP install.
+        if not installed.keys() <= expected.keys():
+            raise _error(IntegrationReason.DESTINATION_CONFLICT)
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
     for candidate in source.rglob("*"):
@@ -1848,7 +1854,7 @@ def _activation_plan(
     activation_config = (
         config
         if activation_raw == config_bytes
-        else cast(Mapping[str, object], tomllib.loads(activation_raw.decode("utf-8")))
+        else cast(Mapping[str, object], load_toml_text(activation_raw.decode("utf-8")))
     )
     block = _activation_block(project, activation_config)
     plugin_install_digest = _members_digest(cache_members)
@@ -2336,10 +2342,10 @@ def _activated_config_bytes(raw: bytes, config: Mapping[str, object], project: P
         # command in this home: move the exact FinishUP table to this project instead of adding a
         # second one (#1058).
         raw = _rebind_marketplace(raw, source, project)
-        config = cast(Mapping[str, object], tomllib.loads(raw.decode("utf-8")))
+        config = cast(Mapping[str, object], load_toml_text(raw.decode("utf-8")))
     merged = append_table_block(raw, _activation_block(project, config))
     try:
-        tomllib.loads(merged.decode("utf-8"))
+        load_toml_text(merged.decode("utf-8"))
     except tomllib.TOMLDecodeError as exc:
         # Legal owner TOML such as inline ``marketplaces = {}`` makes the appended
         # table headers re-declarations; refuse at plan time instead of writing a
@@ -2591,7 +2597,7 @@ def _config_table_plan(
         after = strip_exact_table(after, marketplace_table)
     if after != raw:
         try:
-            parsed = tomllib.loads(after.decode("utf-8") if after else "")
+            parsed = load_toml_text(after.decode("utf-8") if after else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
         remaining_configured, remaining_enabled, remaining_foreign = _config_state(
@@ -2604,7 +2610,7 @@ def _config_table_plan(
 
 def _parsed_config(raw: bytes) -> Mapping[str, object]:
     try:
-        return cast(Mapping[str, object], tomllib.loads(raw.decode("utf-8") if raw else ""))
+        return cast(Mapping[str, object], load_toml_text(raw.decode("utf-8") if raw else ""))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
 
@@ -3842,7 +3848,7 @@ def apply_removal(
         if current_config is None:
             current_config = b""
         try:
-            parsed_config = tomllib.loads(current_config.decode("utf-8") if current_config else "")
+            parsed_config = load_toml_text(current_config.decode("utf-8") if current_config else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             if mutation_started:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Final, Literal, cast
 from urllib.parse import urlsplit
 
+from finishup.adapters.process_group import group_has_only_exited_members, reap_group_members
 from finishup.adapters.providers.codex_capability import (
     CODEX_CODE_MODE_HOST_NAME,
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -541,7 +542,7 @@ class CodexReviewBudget:
 
     ``output_limit`` counts output tokens. The admitted app-server protocol has no per-turn output
     ceiling, so FinishUP enforces it against the runtime's reported visible (non-reasoning) output
-    tokens and records it as ``sampling_params.max_output_tokens``.
+    tokens of each turn and records it as ``sampling_params.max_output_tokens``.
     """
 
     budget_profile: SemanticBudgetProfile
@@ -1093,13 +1094,22 @@ async def _cleanup(
     process_exited = process.returncode is not None
 
     def group_exists() -> bool:
+        """Whether a live member of the app-server's process group remains.
+
+        Once the leader's exit is observed, members that are this process's children (it
+        inherits them as a child subreaper) are reaped, and a group whose remaining members
+        have all exited counts as gone: zombies still answer ``killpg(group, 0)``.
+        """
+
+        if process.returncode is not None:
+            reap_group_members(process.pid)
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
             return False
         except PermissionError:
             return True
-        return True
+        return not group_has_only_exited_members(process.pid)
 
     async def await_group_exit(timeout: float) -> bool:
         deadline = asyncio.get_running_loop().time() + timeout
@@ -2568,6 +2578,11 @@ class CodexAppServerEvaluator:
         # The thread's total before this turn's first reported request: that snapshot's total less
         # its own ``last``. It is the turn's start when the previous turn left no current total.
         first_request_start: _CacheCounters | None = None
+        # The thread's visible output before this turn: the output limit is per turn (ADR-006).
+        # It is exact for a new thread (zero) and after a turn that left a current total;
+        # otherwise it is the last known total until the turn's first reported request names it.
+        output_start = 0
+        output_start_known = True
         requests = first_cached = last_input = 0
         compacted = usage_refused = False
         try:
@@ -2678,6 +2693,8 @@ class CodexAppServerEvaluator:
                 "summary": "none",
             }
             turn_start_usage = token_usage
+            output_start = 0 if token_usage is None else _visible_output_tokens(token_usage)
+            output_start_known = held is None or held.usage_current
             events.wire_seen = getattr(runtime, "received_bytes", 0)
             inputs = [
                 part
@@ -2805,12 +2822,25 @@ class CodexAppServerEvaluator:
                                         first_request_start = _start_before_request(
                                             observed_usage, request_usage
                                         )
+                                        if not output_start_known:
+                                            before = _visible_output_tokens(
+                                                observed_usage
+                                            ) - _visible_output_tokens(request_usage)
+                                            # A stale start is the earlier total, never more.
+                                            output_start = max(output_start, before)
+                                            output_start_known = True
                                     last_input = request_usage.input_tokens
                                 token_usage = observed_usage
-                                if _visible_output_tokens(token_usage) > budget.output_limit:
+                                if (
+                                    _visible_output_tokens(token_usage) - output_start
+                                    > budget.output_limit
+                                ):
                                     # The app-server protocol has no per-turn output ceiling, so
                                     # the selected limit is enforced on the runtime's own
-                                    # cumulative counters; the turn is interrupted below.
+                                    # cumulative counters, less the thread's visible output
+                                    # before this turn: each turn of a held reviewer thread is
+                                    # held to its own limit, as an API route's request is. The
+                                    # turn is interrupted below.
                                     raise ValueError("codex_app_server_output_oversize")
                     continue
                 if method == "warning":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import shutil
 from collections.abc import Sequence
@@ -21,6 +22,7 @@ from finishup.adapters.integrations.claude_code_integration import (
     ClaudeCodePluginArtifact,
     ClaudeCodePluginTarget,
     apply_claude_code_plugin,
+    installed_claude_observation_profile,
     installed_claude_startup_mode,
     observe_claude_code_mcp,
     observe_claude_code_session_init,
@@ -71,6 +73,30 @@ def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
         )
         assert installed_claude_startup_mode(target) == ("required" if index == 0 else "optional")
         assert status_claude_code_plugin(target, artifact, commands=commands).marker_valid
+
+
+def test_ordinary_observation_install_inspect_and_reverse(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    assert installed_claude_observation_profile(target) == "structural"
+    ordinary = render_claude_code_plugin(observation_profile="ordinary")
+    commands = _ClaudeFixture(ordinary)
+    for index, artifact in enumerate((ordinary, render_claude_code_plugin())):
+        commands.artifact = artifact
+        action = ClaudeCodePluginAction.INSTALL if index == 0 else ClaudeCodePluginAction.UPDATE
+        preview = preview_claude_code_plugin(_REQUEST, target, action, artifact, commands=commands)
+        apply_claude_code_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_Review(),
+            commands=commands,
+        )
+        assert installed_claude_observation_profile(target) == (
+            "ordinary" if index == 0 else "structural"
+        )
 
 
 class _Review:
@@ -1133,6 +1159,34 @@ def test_mcp_ownership_reads_a_used_claude_config_with_decimal_values(tmp_path: 
     assert observed.observed is True
 
 
+@pytest.mark.parametrize("escape", ["\\ud83d", "\\u0000"])
+def test_mcp_ownership_reads_a_claude_config_with_an_unholdable_string_value(
+    tmp_path: Path, escape: str
+) -> None:
+    """A truncated emoji or escaped NUL in host-recorded text leaves the MCP tables readable."""
+
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    config = tmp_path / "config"
+    plugin.mkdir()
+    project.mkdir()
+    config.mkdir()
+    (config / ".claude.json").write_text(
+        '{"numStartups": 3, "tipsHistory": {"note": "cut ' + escape + '"},'
+        f' "projects": {{"{project}": {{"lastCost": 22.0157}}}}}}',
+        encoding="utf-8",
+    )
+
+    observed = observe_claude_code_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        claude_config_root=config,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.ABSENT
+    assert observed.observed is True
+
+
 def test_mcp_ownership_reads_a_claude_config_larger_than_plugin_files(tmp_path: Path) -> None:
     plugin = tmp_path / "plugin"
     project = tmp_path / "project"
@@ -1484,3 +1538,61 @@ def test_umask_0002_claude_home_is_a_safe_target_only_for_a_user_private_group(
             _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
         )
     assert refused.value.reason is PluginArtifactReason.TARGET_UNSAFE
+
+
+def _install_source(
+    tmp_path: Path,
+) -> tuple[ClaudeCodePluginTarget, ClaudeCodePluginArtifact, _ClaudeFixture]:
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    commands = _ClaudeFixture(artifact)
+    preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_Review(),
+        commands=commands,
+    )
+    return target, artifact, commands
+
+
+@pytest.mark.parametrize("name", ["notes-resume.md", "notes-résumé.md", "メモ/a.md"])
+def test_foreign_source_member_with_any_utf8_name_is_classified_modified(
+    tmp_path: Path, name: str
+) -> None:
+    target, artifact, commands = _install_source(tmp_path)
+    member = Path(target.marketplace_root) / name
+    member.parent.mkdir(mode=0o700, exist_ok=True)
+    member.write_bytes(b"mine\n")
+
+    status = status_claude_code_plugin(target, artifact, commands=commands)
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(ClaudeCodeIntegrationError) as update:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.UPDATE, artifact, commands=commands
+        )
+    assert update.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    with pytest.raises(ClaudeCodeIntegrationError) as removal:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.REMOVE, artifact, commands=commands
+        )
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert member.read_bytes() == b"mine\n"
+
+
+def test_source_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
+    target, artifact, commands = _install_source(tmp_path)
+    try:
+        (Path(target.marketplace_root) / os.fsdecode(b"notes-\xe9.md")).write_bytes(b"mine\n")
+    except OSError:
+        pytest.skip("this file system accepts only UTF-8 file names")
+
+    with pytest.raises(ClaudeCodeIntegrationError) as raised:
+        status_claude_code_plugin(target, artifact, commands=commands)
+    assert raised.value.reason is PluginArtifactReason.TARGET_UNSAFE

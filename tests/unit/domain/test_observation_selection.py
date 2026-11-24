@@ -9,6 +9,7 @@ from finishup.domain.observation_selection import (
     ObservationContentRole,
     classify_observation,
     command_runner_class,
+    compound_verification_gap_required,
     is_routine_read_candidate,
 )
 from finishup.protocol.canonical import JsonValue
@@ -212,6 +213,20 @@ def test_python_module_runs_and_build_named_scripts(command: str, runner: str) -
     """tb4n2 interleaved S (P1-2): `python -m pytest` is a test run; `build_model.py` is not a build."""
 
     assert command_runner_class({"command": command}) == runner
+
+
+@pytest.mark.parametrize(
+    "command", ["bash -nc 'pytest -q'", "bash -cn 'pytest -q'", "sh -lnc 'pytest -q'"]
+)
+def test_a_noexec_shell_wrapper_is_not_classed_as_the_command_it_only_reads(command: str) -> None:
+    """``bash -nc X`` reads ``X`` without running it, so it is no test run (#1444)."""
+
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    assert command_runner_class({"command": command}) == "other"
+    argv: list[JsonValue] = list(command.replace("'", "").split(" ", 2))
+    assert native_command_runner_class(argv) == "other"
+    assert command_runner_class({"command": "bash -lc 'pytest -q'"}) == "test"
 
 
 def test_a_codex_post_event_is_not_a_success_fact() -> None:
@@ -432,3 +447,64 @@ def test_only_a_path_ending_in_the_launcher_name_gates_the_proof(
     from finishup.domain.observation_selection import launcher_names_in
 
     assert launcher_names_in(command) == names
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q 2>&1",
+        "cd /app && pytest -q 2>&1",
+        "pytest -q &> log",
+        "pytest -q &>> log",
+        "pytest -q >&2",
+        "pytest -q > log",
+        "git commit -m 'a; b'",
+        'echo "x | y" && pytest -q',
+        "bash -lc 'pytest -q 2>&1'",
+        "cd /app && pytest -q",
+    ],
+)
+def test_redirections_and_quoted_separators_hide_no_nested_status(command: str) -> None:
+    """An fd redirection or a quoted separator leaves one exit status, so no gap (#1447)."""
+
+    assert compound_verification_gap_required({"command": command}) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "a; b",
+        "a | tail",
+        "a 2>&1 | tail -5",
+        "a |& tail",
+        "a || b",
+        "a & b",
+        "a && b &",
+        "a\nb",
+        "echo $(a)",
+        "echo `a`",
+        "diff <(a) b",
+        "bash -lc 'pytest -q; true'",
+        "echo 'unterminated && b",
+    ],
+)
+def test_masking_shapes_keep_the_compound_gap(command: str) -> None:
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "eval 'pytest -q; true'",
+        "bash -c 'pytest -q; true' arg0",
+        "bash -l -c 'pytest -q || true'",
+        "sudo bash -c 'pytest -q; true'",
+        "timeout 60 sh -c 'pytest -q | tail'",
+        "xargs sh -c 'pytest -q; true'",
+        'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"pytest -q; true\\\\\\"\\"\'"',
+    ],
+)
+def test_a_quoted_separator_that_a_shell_runs_keeps_the_compound_gap(command: str) -> None:
+    """Quoted text a shell or ``eval`` runs is shell text, even where the walk does not reach it."""
+
+    assert compound_verification_gap_required({"command": command}) is True

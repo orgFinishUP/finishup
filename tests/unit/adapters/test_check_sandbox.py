@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import platform
 import shutil
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+
+import pytest
 
 from finishup.adapters.approved_checks import (
     ApprovedCheckApproval,
@@ -202,6 +205,49 @@ def test_linux_sandbox_wraps_with_the_probed_launch_shape(tmp_path: Path) -> Non
     assert launch.env == {"HOME": str(tmp_path)}
     assert plain.argv == ("pytest",)
     assert plain.network_isolated is False
+
+
+def test_macos_network_denied_runs_leave_no_profile_files_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "service-tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    fake = tmp_path / "sandbox-exec"
+    # Stands in for sandbox-exec: drops the two profile arguments and runs the check argv.
+    fake.write_text('#!/bin/sh\nshift 2\nexec "$@"\n', encoding="ascii")
+    fake.chmod(0o755)
+    approval = _approval((_TRUE,))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval}, sandbox=MacOSCheckSandbox(sandbox_exec=str(fake))
+    )
+
+    for _ in range(3):
+        result = runner.run(
+            ApprovedCheckCommand(
+                workspace=open_inspect_workspace(workspace),
+                approval=approval,
+                subject_state_digest="sha256:" + "b" * 64,
+            )
+        )
+        assert result.status is ApprovedCheckStatus.PASSED
+
+    assert list(scratch.iterdir()) == []
+
+
+def test_macos_sandbox_passes_the_no_network_profile_inline(tmp_path: Path) -> None:
+    fake = tmp_path / "sandbox-exec"
+    fake.write_text("#!/bin/sh\n", encoding="ascii")
+    launch = MacOSCheckSandbox(sandbox_exec=str(fake)).prepare(
+        argv=("pytest", "-q"), cwd=tmp_path, env={}, deny_network=True
+    )
+
+    assert launch.argv[:2] == (str(fake), "-p")
+    assert "(deny network*)" in launch.argv[2]
+    assert launch.argv[3:] == ("pytest", "-q")
+    assert launch.network_isolated is True
 
 
 def test_macos_sandbox_names_a_missing_sandbox_exec() -> None:

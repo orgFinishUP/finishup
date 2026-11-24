@@ -178,6 +178,24 @@ class _DrainClient(Protocol):
 type DrainConnector = Callable[[ControlClientKind], Awaitable[_DrainClient]]
 
 
+class _RevocationFenceClient(Protocol):
+    async def observation_revoke(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject: ...
+
+    async def close(self) -> None: ...
+
+
+type RevocationFenceConnector = Callable[[ControlClientKind], Awaitable[_RevocationFenceClient]]
+
+_REVOCATION_FENCE_DEADLINE_MS: Final = 10_000
+_REVOCATION_FENCE_PENDING_CONTINUATION: Final = (
+    "Observation is revoked and stays stopped, but FinishUP could not reach its service to "
+    "finish withdrawing consent. Run `finishup observe revoke` again once the service can "
+    "start; until then a new grant for this workspace is refused."
+)
+
+
 _WORKSPACE_LOCATOR_INVALID: Final = "workspace_locator_invalid"
 _UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
     {
@@ -1948,10 +1966,19 @@ def reclaim_observation(*, workspace: str, json_output: bool, _state: Path | Non
 
 
 @_bounded_operation("grant")
-def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
+def grant_observation(
+    *,
+    workspace: str,
+    _state: Path | None = None,
+    _connect: RevocationFenceConnector | None = None,
+) -> int:
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
+    # A revoke whose project fence never finished (no service then) blocks every new grant;
+    # finish it first, so withdrawing consent is never a one-way door (#1479). A fence still
+    # pending after this is refused below as before.
+    _finish_revocation_fence(store, commitment, _revocation_fence_connector(_connect, _state))
     # A repeated grant keeps already-approved native content arms and the unchanged
     # content fence; only content-disable or revoke removes an arm (issue #835).
     grant = store.grant_consent(commitment)
@@ -2480,12 +2507,91 @@ def resume_observation(*, workspace: str, _state: Path | None = None) -> int:
     return 0
 
 
+def _revocation_fence_connector(
+    connect: RevocationFenceConnector | None, state: Path | None
+) -> RevocationFenceConnector | None:
+    """Return the service route that finishes a revoke, or None when none serves this store.
+
+    The service owns the project catalog a revoke must fence, and it serves the default state
+    root only; a store under any other root has no service of its own to ask.
+    """
+
+    if connect is not None:
+        return connect
+    if state is not None:
+        return None
+    return cast(RevocationFenceConnector, connect_service_on_demand)
+
+
+async def _finish_revocation_fence_async(
+    commitment: str, connect: RevocationFenceConnector
+) -> None:
+    from finishup.domain.observation import observation_revoke_command_to_json
+    from finishup.protocol.ids import IdKind, new_id
+
+    client = await connect(ControlClientKind.CLI)
+    try:
+        await client.observation_revoke(
+            JsonObject(
+                {
+                    "schema_version": "1.0.0",
+                    "request_id": new_id(IdKind.REQUEST),
+                    "command": observation_revoke_command_to_json(
+                        ObservationRevokeCommand(commitment, retain_evidence=True)
+                    ),
+                }
+            ),
+            deadline_ms=_REVOCATION_FENCE_DEADLINE_MS,
+        )
+    finally:
+        await client.close()
+
+
+def _finish_revocation_fence(
+    store: LocalObservationStore,
+    commitment: str,
+    connect: RevocationFenceConnector | None,
+) -> bool:
+    """Finish a pending consent-revocation fence through the service; True once none is pending.
+
+    A local revoke stops capture at once and records a durable fence token. Only the service's
+    observation coordinator can fence the project generations the revoked consent fed and then
+    clear that token; until it does, a new grant is refused. The service's revoke is idempotent
+    for an already-revoked consent, so asking it again replays the pending fence (#1479).
+    """
+
+    if store.pending_consent_revocation(commitment) is None:
+        return True
+    if connect is None:
+        return False
+    import anyio
+
+    async def run() -> None:
+        await _finish_revocation_fence_async(commitment, connect)
+
+    # The pending token, re-read below, is the authority on whether the fence finished; a
+    # service that could not be reached or refused the request leaves it in place.
+    with contextlib.suppress(Exception):
+        anyio.run(run)
+    return store.pending_consent_revocation(commitment) is None
+
+
 @_bounded_operation("revoke")
-def revoke_observation(*, workspace: str, _state: Path | None = None) -> int:
+def revoke_observation(
+    *,
+    workspace: str,
+    _state: Path | None = None,
+    _connect: RevocationFenceConnector | None = None,
+) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
     status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
     typer.echo(f"observation_revoked:{status.lifecycle.value}:evidence_retained")
+    if not _finish_revocation_fence(
+        store, commitment, _revocation_fence_connector(_connect, _state)
+    ):
+        typer.echo("observation_revoke_fence_pending:service_unavailable", err=True)
+        typer.echo(_REVOCATION_FENCE_PENDING_CONTINUATION, err=True)
     return 0
 
 
@@ -2639,10 +2745,15 @@ def observe_checks_status(
 
 
 def observe_checks_revoke(*, workspace: str | None, _state: Path | None = None) -> int:
-    root = _resolve_workspace(workspace)
-    store = LocalObservationStore(_state=_state)
-    commitment = store.workspace_commitment(str(root))
-    store.revoke_policy_trust(commitment)
+    # Revoke is the way out of a trusted policy: an unresolvable workspace or a store fault is the
+    # same bounded `unavailable` refusal its sibling verbs give, never an untyped crash (#428).
+    try:
+        root = _resolve_workspace(workspace)
+        store = LocalObservationStore(_state=_state)
+        commitment = store.workspace_commitment(str(root))
+        store.revoke_policy_trust(commitment)
+    except Exception as error:
+        return _check_policy_failure("revoke", error)
     typer.echo("observation_checks_revoked")
     return 0
 

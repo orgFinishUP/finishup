@@ -236,6 +236,82 @@ def test_a_policy_that_cannot_be_read_leaves_the_last_report_as_it_was(
     assert read_marker() == ReportedPolicy(True, _STAMP)
 
 
+class _SilentStream:
+    """A connected, authenticated control stream whose service never answers."""
+
+    def __init__(self) -> None:
+        self.peer_identity = object()
+        self.sent: list[bytes] = []
+        self.closed = asyncio.Event()
+
+    async def receive(self, max_bytes: int) -> bytes:
+        await self.closed.wait()
+        return b""
+
+    async def send_all(self, data: bytes) -> None:
+        self.sent.append(bytes(data))
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+
+def test_a_service_that_never_answers_is_unreadable_within_the_bound(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound covers the whole exchange, not only the connection: a running service that
+    accepts the connection but never replies is a policy that cannot be read, so the last
+    report stays the answer and the connection is still closed."""
+
+    import finishup.service.client as service_client
+    from finishup.ports.control import ControlClientKind, ControlMethod
+    from finishup.service.control_protocol import ControlSession
+
+    record_reported_policy(zero_network=True, now=_AT)
+    _everyday_service(home, monkeypatch, egress=True)
+    monkeypatch.setattr(zero_network, "_POLICY_READ_SECONDS", 0.2)
+    streams: list[_SilentStream] = []
+
+    async def connect(kind: ControlClientKind, *, workspace_locator: object = None) -> object:
+        assert workspace_locator is None
+        stream = _SilentStream()
+        streams.append(stream)
+        session = ControlSession(
+            protocol_version="1.0",
+            client_kind=kind,
+            service_instance_id="svc_00000000-0000-4000-8000-000000000001",
+            service_generation="1",
+            allowed_methods=tuple(sorted(ControlMethod, key=lambda method: method.value)),
+            peer_identity=stream.peer_identity,
+            connection_nonce="0" * 64,
+        )
+        return service_client._connected_client(  # pyright: ignore[reportPrivateUsage]
+            cast("service_client.ControlStream", stream), session, kind
+        )
+
+    monkeypatch.setattr("finishup.service.client.connect_service", connect)
+    machine_scope = JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "scope": {
+                "kind": "machine",
+                "installation_id": "ins_ec22785e-b432-4e0e-8994-66f747e21705",
+            },
+        }
+    )
+    monkeypatch.setattr("finishup.cli.provider_status.machine_scope_request", lambda: machine_scope)
+    result: list[str] = []
+    worker = threading.Thread(
+        target=lambda: result.append(zero_network.everyday_network_state()), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=10.0)
+
+    assert not worker.is_alive(), "the policy read outlived its bound"
+    assert result == ["unreadable"]
+    assert len(streams) == 1 and streams[0].sent and streams[0].closed.is_set()
+    assert read_marker() == ReportedPolicy(True, _STAMP)
+
+
 def test_a_computer_never_set_up_has_no_policy_and_keeps_no_report(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

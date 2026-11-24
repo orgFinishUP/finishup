@@ -58,6 +58,22 @@ _BOOTSTRAP_GUIDANCE_URIS = frozenset(
 _SKILLS = frozenset(FINISHUP_SKILL_NAMES)
 _DISCOVERY = frozenset({"ToolSearch", "AskUserQuestion", "AskQuestion", "ListMcpResources"})
 _PRE = frozenset({"PreToolUse", "preToolUse", "beforeMCPExecution"})
+# Direct launcher commands required startup leaves to the host's normal tool
+# admission: service status, diagnosis, restart and vault unlock, and the
+# consent decision path. Each pair names a registered ``finishup`` command.
+RECOVERY_COMMANDS = frozenset(
+    {
+        ("service", "status"),
+        ("service", "diagnostics"),
+        ("service", "restart"),
+        ("service", "unlock"),
+        ("consent", "catalog"),
+        ("consent", "prepare"),
+        ("consent", "status"),
+        ("consent", "review"),
+        ("consent", "authorize"),
+    }
+)
 _POST = frozenset({"PostToolUse", "PostToolUseFailure", "afterMCPExecution"})
 _RESET = frozenset({"SessionStart", "sessionStart", "UserPromptSubmit", "beforeSubmitPrompt"})
 _TRACKED_WRITES = frozenset({"start", "publish_work"})
@@ -111,7 +127,34 @@ def _object(value: object) -> Mapping[str, JsonValue] | None:
     return cast(Mapping[str, JsonValue], value) if isinstance(value, dict) else None
 
 
+def _text_block_result(blocks: object) -> Mapping[str, JsonValue] | None:
+    """Return the strict-JSON object carried by a single-text-block content list, else ``None``."""
+
+    if not isinstance(blocks, list) or len(cast(list[object], blocks)) != 1:
+        return None
+    block = cast(list[object], blocks)[0]
+    if not isinstance(block, dict) or cast(dict[str, object], block).get("type") != "text":
+        return None
+    return _object(cast(dict[str, object], block).get("text"))
+
+
 def _result(value: object) -> Mapping[str, JsonValue] | None:
+    """Parse a workflow tool result in the same host shapes the scoped ``start`` binder admits.
+
+    An object with ``structuredContent``, an object with a single-text-block ``content`` list,
+    a bare result object, a bare single-text-block content list, or a JSON string of any of
+    those. A bare list carries no ``isError``, so it is never an error result.
+    """
+
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        if len(value.encode()) > 262_144:
+            return None
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if isinstance(value, list):
+        return _text_block_result(cast(list[object], value))
     obj = _object(value)
     if obj is None:
         return None
@@ -119,10 +162,7 @@ def _result(value: object) -> Mapping[str, JsonValue] | None:
     if "structuredContent" in obj or "structured_content" in obj:
         result = _object(obj.get("structuredContent", obj.get("structured_content")))
     elif "content" in obj:
-        blocks = obj.get("content")
-        result = None
-        if isinstance(blocks, list) and len(blocks) == 1 and isinstance(blocks[0], dict):
-            result = _object(blocks[0].get("text"))
+        result = _text_block_result(obj.get("content"))
     if obj.get("isError") is True and (result is None or result.get("ok") is not False):
         return None
     return result
@@ -171,17 +211,7 @@ def bootstrap_tool(payload: Mapping[str, JsonValue], host: str, event: str) -> b
         # This only leaves the host's normal tool admission in force. It does
         # not authorize a named repair, consent decision, OS presence or unlock;
         # the existing runtime ceremony and current user instruction still do.
-        return (argv[1], argv[2]) in {
-            ("service", "status"),
-            ("service", "diagnostics"),
-            ("service", "restart"),
-            ("consent", "catalog"),
-            ("consent", "prepare"),
-            ("consent", "status"),
-            ("consent", "review"),
-            ("consent", "authorize"),
-            ("vault", "unlock"),
-        }
+        return (argv[1], argv[2]) in RECOVERY_COMMANDS
     return False
 
 

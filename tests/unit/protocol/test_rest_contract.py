@@ -111,6 +111,16 @@ def test_a_discovery_document_is_bounded_before_it_is_parsed() -> None:
         contract.parse_discovery(padded)
 
 
+@pytest.mark.parametrize("majors", [["1", "\u00b2"], ["1", "\u0661"], ["\u0661"], ["\uff11"]])
+def test_a_discovery_rest_major_is_ascii_digits_only(majors: list[str]) -> None:
+    document = dict(_CASE["valid"][1]["document"])
+    document["rest_majors"] = majors
+    with pytest.raises(RestDocumentError):
+        contract.parse_discovery(_bytes(document))
+    with pytest.raises(Exception):  # noqa: B017, PT011 - any schema refusal
+        validate_schema_instance("rest-discovery", "1.0.0", document)
+
+
 def test_the_claim_header_round_trips_and_names_no_path() -> None:
     vector = _CASE["headers"]["claim"]
     claim = WorkspaceClaim(**vector["claim"])

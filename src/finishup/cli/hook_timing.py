@@ -330,7 +330,9 @@ def _read_descriptor(descriptor: int) -> dict[str, object] | None:
         return None
     try:
         parsed: object = json.loads(raw)
-    except (UnicodeError, ValueError):
+    except (UnicodeError, ValueError, RecursionError):
+        # Nesting deeper than the decoder recurses is corrupt input like any other malformed
+        # document: it reads as unreadable and the next hook pass restarts it.
         return None
     return _valid_document(parsed)
 

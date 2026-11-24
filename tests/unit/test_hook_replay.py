@@ -223,6 +223,62 @@ def test_stop_carries_the_final_reply_only_when_the_selection_reaches_the_turn_e
     }
 
 
+def test_only_the_first_turn_is_replayed_when_a_later_turn_holds_a_call() -> None:
+    later_turn = [
+        _line("event_msg", {"last_agent_message": "Done.", "type": "task_complete"}),
+        _line("turn_context", {"cwd": "/app", "turn_id": "turn-2"}),
+        _line(
+            "response_item",
+            {
+                "content": [{"text": "Next", "type": "input_text"}],
+                "role": "user",
+                "type": "message",
+            },
+        ),
+        _line(
+            "response_item",
+            {
+                "arguments": json.dumps({"cmd": "pwd"}),
+                "call_id": "c4",
+                "name": "exec_command",
+                "type": "function_call",
+            },
+        ),
+        _line(
+            "response_item",
+            {
+                "call_id": "c4",
+                "output": "Process exited with code 0\n",
+                "type": "function_call_output",
+            },
+        ),
+        _line(
+            "response_item",
+            {
+                "content": [{"text": "Later.", "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            },
+        ),
+    ]
+    rollout = [*_rollout(), *later_turn]
+    # Both the default budget and one exactly the first turn's replayed call count (two) replay
+    # the first turn whole: the next turn's call is neither replayed under turn 1's id nor a cut.
+    for max_calls in (24, 2):
+        items, transcript = _MODULE.codex_corpus(
+            rollout, name="codex1", workspace="codex1", max_calls=max_calls
+        )
+        payloads = [json.loads(item["stdin"]) for item in items]
+        tool_ids = [p["tool_use_id"] for p in payloads if p["hook_event_name"] == "PreToolUse"]
+        assert tool_ids == ["c1", "c2"]
+        assert [p["prompt"] for p in payloads if "prompt" in p] == ["Fix the bug"]
+        stop = payloads[-2]
+        assert stop["hook_event_name"] == "Stop"
+        assert stop["turn_id"] == "turn-1"
+        assert stop["last_assistant_message"] == "Done."
+        assert items[-2]["transcript"]["upto"] == len(transcript) == len(_rollout())
+
+
 def test_codex_start_calls_also_reach_the_start_correlation_hook() -> None:
     rollout = _rollout()
     rollout[5] = rollout[5].replace('"name": "status"', '"name": "start"')

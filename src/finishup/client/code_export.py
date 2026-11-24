@@ -240,9 +240,9 @@ def _read_export_record(path: Path) -> _Record | None:
         next_ref = cast(int, source["next_ref"])
         sent = tuple(cast(list[str], source["sent"]))
         root = source["root"]
-        if not _EXPORT_ID.match(export_id) or type(next_ref) is not int or next_ref < 1:
+        if not _EXPORT_ID.fullmatch(export_id) or type(next_ref) is not int or next_ref < 1:
             raise ValueError("values")
-        if any(not _HEX.match(item.encode()) for item in sent):
+        if any(not _HEX.fullmatch(item.encode()) for item in sent):
             raise ValueError("sent")
         if root is not None and not _recordable_root(root):
             raise ValueError("root")
@@ -250,7 +250,7 @@ def _read_export_record(path: Path) -> _Record | None:
         if type(listed) is not list or len(listed) > _MAX_BASES:
             raise ValueError("bases")
         bases = tuple(cast(list[str], listed))
-        if any(not _HEX.match(item.encode()) for item in bases):
+        if any(not _HEX.fullmatch(item.encode()) for item in bases):
             raise ValueError("bases")
         claim = _claim_from(source["claim"]) if "claim" in source else None
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -547,7 +547,7 @@ def export_records(directory: Path) -> tuple[ExportRecord, ...]:
 
 def _record_of(folder: Path) -> ExportRecord:
     name = folder.name
-    if not _FOLDER_NAME.match(name):
+    if not _FOLDER_NAME.fullmatch(name):
         digest = hashlib.sha256(os.fsencode(name)).hexdigest()
         return ExportRecord(folder, digest[:8], None, False)
     record: _Record | None = None
@@ -996,7 +996,7 @@ class _Exporter:
         if refusal is not None:
             admission.held[path] = refusal
             return
-        if not _HEX.match(commit.encode()) or len(commit) != 40:
+        if not _HEX.fullmatch(commit.encode()) or len(commit) != 40:
             admission.held[path] = "unrepresentable"
             return
         admission.entries[path] = _Entry(MODE_GITLINK, commit, 0)
@@ -1392,11 +1392,11 @@ def _resolve_base(
         named = b""
     object_format: Literal["sha1", "sha256"] = "sha256" if named == b"sha256" else "sha1"
     head = _git(root, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).strip()
-    if head and not _HEX.match(head):
+    if head and not _HEX.fullmatch(head):
         raise ExportRefused("code_export_git_failed")
     current = head.decode("ascii") if head else None
     if requested is not None:
-        if not _HEX.match(requested.encode()):
+        if not _HEX.fullmatch(requested.encode()):
             raise ExportRefused("code_export_base_unknown")
         if requested != current and requested not in set(chosen):
             raise ExportRefused("code_export_base_unknown")

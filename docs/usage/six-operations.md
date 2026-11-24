@@ -237,7 +237,9 @@ current rather than reusable. When no enforcing sandbox is available the outcome
 
 Approved checks are optional. In a workspace without `.finishup/checks.toml`, `status` reports
 `state: not_configured` and exits successfully; `preview`, `trust`, and `run` stop with
-`policy_not_configured`. A file that exists but cannot be read or parsed reports `invalid_policy`.
+`policy_not_configured`. A file that exists but cannot be read or parsed reports `invalid_policy`,
+as does a check the file describes in a form FinishUP cannot approve, such as a `timeout_seconds`
+outside 0.1 to 300.
 Other local faults (for example an unreadable workspace) report `unavailable`. Configuring or
 trusting a policy is the owner's choice and no finding asks an agent for it, so neither state is a
 reason for an agent to stop; a limit it leaves unproven stays disclosed in the receipt.
@@ -351,6 +353,9 @@ after it ("The receipt will read ..."). `basis_frontier` is the frontier that co
 at. A current status read that is interrupted by new work reads the prediction again at the
 newer frontier and names it there. A status read you pinned with `at_frontier`, or continued with
 a cursor, stays on that frontier; if it is no longer a safe basis, the prediction is left out.
+`at_frontier` must name a frontier the task has reached: one beyond the current head, or `"0"` once
+the task has started (there is no task state before its first record), is refused as
+`INVALID_REQUEST`.
 
 `closure_readiness.state` tells you whether anything is left to do. `action_required` lists the
 work in `agent_actionable`: open obligations, unanswered findings, an unresolved finding you can

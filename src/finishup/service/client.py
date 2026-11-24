@@ -3390,7 +3390,12 @@ def _singleton_holder_lock_is_held() -> bool | None:
 
 
 async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
-    """Poll until the stamped holder ``pid`` no longer owns the singleton, or the deadline passes."""
+    """Poll until the stamped holder ``pid`` no longer owns the singleton, or the deadline passes.
+
+    The stamp is advisory: a holder that crashed leaves it behind, and its pid may since belong to
+    an unrelated live process. The flock is the fence, so a free flock is a release even while the
+    stamp still names a live ``pid``. A lock that cannot be inspected is not taken as a release.
+    """
 
     from finishup.service.lifecycle import probe_singleton_holder_identity
 
@@ -3398,6 +3403,8 @@ async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
     while True:
         current = probe_singleton_holder_identity(path)
         if current is None or current.pid != pid:
+            return True
+        if _singleton_holder_lock_is_held() is False:
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:

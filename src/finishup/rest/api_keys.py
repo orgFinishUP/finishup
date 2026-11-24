@@ -12,6 +12,9 @@ Either edge (the gateway process or the native listener) re-reads the file when 
 revoked key fails its very next request and its agents end. A rotated key (``create --rotate
 KEY_ID``) keeps its predecessor's principal, so the workspaces its client claimed stay reachable.
 
+At most 256 unrevoked keys are kept (``api_key_limit`` past that); the file holds at most 256
+records, so creating a key in a full file drops its oldest revoked record.
+
 Every failure is an ``ApiKeyError`` with a closed reason; no error, log or listing carries a key.
 Labels appear only in the owner's own ``list`` output on the server host.
 """
@@ -249,6 +252,23 @@ def _decode(encoded: bytes) -> tuple[ApiKeyRecord, ...]:
     return tuple(records)
 
 
+def _make_room(records: tuple[ApiKeyRecord, ...]) -> tuple[ApiKeyRecord, ...]:
+    """``records`` with room for one more: the oldest revoked record leaves a full file.
+
+    Only unrevoked keys count toward ``MAX_API_KEYS`` (``create`` refuses past it), so a full file
+    always holds a revoked record; dropping it keeps the file within its bound, and its key then
+    fails as ``api_key_invalid`` instead of ``api_key_revoked``.
+    """
+
+    if len(records) < MAX_API_KEYS:
+        return records
+    oldest = min(
+        (index for index, item in enumerate(records) if item.revoked_at is not None),
+        key=lambda index: (parse_rfc3339_ms(cast(str, records[index].revoked_at)), index),
+    )
+    return records[:oldest] + records[oldest + 1 :]
+
+
 def _encode(records: tuple[ApiKeyRecord, ...]) -> bytes:
     document: dict[str, JsonValue] = {
         "keys": [cast(JsonValue, record.body()) for record in records],
@@ -469,7 +489,7 @@ class ApiKeyStore:
         stamp = now or datetime.now(UTC)
         with self._locked():
             records = self._read()
-            if len(records) >= MAX_API_KEYS:
+            if sum(1 for item in records if item.revoked_at is None) >= MAX_API_KEYS:
                 raise ApiKeyError("api_key_limit")
             principal = f"p_{secrets.token_hex(8)}"
             if rotate is not None:
@@ -480,6 +500,7 @@ class ApiKeyStore:
             token, text = mint_api_key()
             while any(item.key_id == token.key_id for item in records):
                 token, text = mint_api_key()
+            records = _make_room(records)
             salt = secrets.token_bytes(_SALT_BYTES)
             record = ApiKeyRecord(
                 key_id=token.key_id,

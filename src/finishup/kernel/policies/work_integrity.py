@@ -1200,7 +1200,12 @@ def _freshness_question(
 
 
 def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
-    output: list[DeterministicAssessment] = []
+    # Local findings of different rules can name one subject (#1453), and the finding identity is
+    # (policy, rule, subject), so every weak response on one subject is one assessment whose facts
+    # name each responded finding and response event.
+    groups: dict[tuple[FindingBasisRef, ...], list[tuple[FindingBasisRef, ...]]] = {}
+    stale_refs: dict[tuple[FindingBasisRef, ...], list[FindingBasisRef]] = {}
+    insufficient_refs: dict[tuple[FindingBasisRef, ...], list[FindingBasisRef]] = {}
     for finding_id, response_record in case.projection.responses.items():
         response = response_record.payload
         finding_record = case.projection.findings.get(finding_id)
@@ -1234,20 +1239,31 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
             continue
         response_event = response_record.source_event_id
         evidence_refs = tuple(ref for ref in response.evidence_refs if ref in case.allowed_ids)
-        present_refs = _refs((finding_id, response_event, *evidence_refs))
-        observed: list[FindingFact] = [FindingFact(WORK_RESPONSE_PRESENT_FACT, present_refs)]
-        missing: list[FindingFact] = []
+        subject = finding.subject_refs
+        groups.setdefault(subject, []).append((finding_id, response_event, *evidence_refs))
         if stale:
-            observed.append(_fact("response_state_stale", finding_id, response_event))
+            stale_refs.setdefault(subject, []).extend((finding_id, response_event))
         if insufficient:
-            missing.append(_fact("response_basis_insufficient", finding_id, response_event))
-        compared = _refs(evidence_refs)
+            insufficient_refs.setdefault(subject, []).extend((finding_id, response_event))
+    output: list[DeterministicAssessment] = []
+    for subject, responses in groups.items():
+        observed: list[FindingFact] = [
+            FindingFact(WORK_RESPONSE_PRESENT_FACT, _refs(ref for row in responses for ref in row))
+        ]
+        missing: list[FindingFact] = []
+        if subject in stale_refs:
+            observed.append(FindingFact("response_state_stale", _refs(stale_refs[subject])))
+        if subject in insufficient_refs:
+            missing.append(
+                FindingFact("response_basis_insufficient", _refs(insufficient_refs[subject]))
+            )
+        compared = _refs(ref for row in responses for ref in row[2:])
         output.append(
             build_policy_assessment(
                 case,
                 WORK_INTEGRITY_POLICY_PACK,
                 FindingKind.WEAK_OR_STALE_RESPONSE,
-                finding.subject_refs,
+                subject,
                 tuple(observed),
                 tuple(missing),
                 source_availability=(

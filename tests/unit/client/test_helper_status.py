@@ -136,6 +136,86 @@ def test_the_lock_is_a_stamped_singleton(root: Path) -> None:
     assert stop_helper(root) is True
 
 
+def test_a_client_probing_the_lock_never_reads_as_a_holding_helper(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client's lock probe (a momentary shared flock) is not another helper: a helper taking the
+    lock while one is in flight still takes it, instead of exiting as ``HelperLockBusy``."""
+
+    import errno
+    import fcntl
+
+    from finishup.client.helper_status import helper_lock_held
+
+    path = root / "state" / helper_status.HELPER_LOCK_NAME
+    os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+    assert helper_lock_held(root) is False
+    # A probe in flight, exactly as ``helper_lock_held`` takes it; it ends right after the
+    # helper's first attempt meets it.
+    probe = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    real_flock = fcntl.flock
+    met: list[int] = []
+
+    def flock(descriptor: int, operation: int) -> None:
+        try:
+            real_flock(descriptor, operation)
+        except OSError as exc:
+            if operation & fcntl.LOCK_EX and exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                met.append(descriptor)
+                if len(met) == 1:
+                    real_flock(probe, fcntl.LOCK_UN)
+                    os.close(probe)
+            raise
+
+    monkeypatch.setattr(helper_status.fcntl, "flock", flock)
+    lock = HelperLock(root)
+    try:
+        lock.acquire(version="0.1.0", schema_manifest_digest=_DIGEST)
+        monkeypatch.undo()
+        assert len(met) == 1
+        holder = helper_holder(root)
+        assert holder is not None and holder.pid == os.getpid()
+    finally:
+        monkeypatch.undo()
+        lock.release()
+
+
+def test_concurrent_lock_probes_never_make_a_starting_helper_busy(root: Path) -> None:
+    import threading
+
+    from finishup.client.helper_status import helper_lock_held
+
+    os.close(
+        os.open(root / "state" / helper_status.HELPER_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    )
+    stop = threading.Event()
+
+    def probe() -> None:
+        while not stop.is_set():
+            helper_lock_held(root)
+            helper_holder(root)
+
+    probers = [threading.Thread(target=probe) for _ in range(2)]
+    for prober in probers:
+        prober.start()
+    busy = 0
+    try:
+        for _ in range(300):
+            lock = HelperLock(root)
+            try:
+                lock.acquire(version="0.1.0", schema_manifest_digest=_DIGEST)
+            except HelperLockBusy:
+                busy += 1
+                continue
+            lock.release()
+    finally:
+        stop.set()
+        for prober in probers:
+            prober.join()
+    assert busy == 0
+
+
 def test_the_style_is_relay_unless_the_owner_chose_direct(root: Path) -> None:
     assert read_connection_style(root) == "relay"
     write_connection_style(root, "direct")

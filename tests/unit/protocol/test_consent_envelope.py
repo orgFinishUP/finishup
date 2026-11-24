@@ -171,6 +171,18 @@ def test_an_unknown_member_or_value_is_kept_named_and_never_consentable() -> Non
             "envelope_field_invalid",
         ),
         ({**_document(), "Bad Member": 1}, "envelope_member_invalid"),
+        # Every pattern matches the whole value: a trailing line feed is not part of any token.
+        ({**_document(), "surprise\n": 1}, "envelope_member_invalid"),
+        (_document(**{"principal.principal": "owner\n"}), "envelope_field_invalid"),
+        (_document(**{"principal.key_id": "key-1\n"}), "envelope_field_invalid"),
+        (_document(**{"endpoint.identity": _IDENTITY + "\n"}), "envelope_field_invalid"),
+        (_document(**{"review.provider_disclosure": "provider-a\n"}), "envelope_field_invalid"),
+        (
+            _document(
+                code_sync={"methods": ["git_export\n"], "max_repo_bytes": 1, "max_file_bytes": 1}
+            ),
+            "envelope_field_invalid",
+        ),
     ],
 )
 def test_a_malformed_envelope_is_refused_with_a_closed_reason(

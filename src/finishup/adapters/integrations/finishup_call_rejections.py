@@ -252,16 +252,25 @@ def _write(
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, 0o600)
     try:
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temporary, directory / name)
     except OSError:
         with contextlib.suppress(OSError):
             temporary.unlink()
         return False
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
     return True
 
 

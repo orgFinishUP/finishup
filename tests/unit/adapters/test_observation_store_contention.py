@@ -37,6 +37,7 @@ from finishup.domain.observation import (
 )
 from finishup.domain.values import JsonObject, Timestamp
 from finishup.protocol.canonical import canonical_encode
+from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 
 pytestmark = pytest.mark.skipif(local.fcntl is None, reason="POSIX flock is unavailable")
 
@@ -533,12 +534,14 @@ def test_member_validation_rejects_exactly_what_whole_validation_rejects(
         ensure_canonical_value(strict_json_parse(raw, validate=False))
     with pytest.raises(ProtocolValueError):
         local._validate_state_document(strict_json_parse(raw, validate=False))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-    # The store treats the tampered document exactly as before: an unreadable, empty state.
+    # The store refuses the tampered document as corrupt rather than reading it as empty.
     path.write_bytes(raw + b"\n")
     path.chmod(0o600)
     fresh = LocalObservationStore(_state=tmp_path)
-    assert fresh.pending_outbox_count(workspace) == 0
-    assert fresh.consent_for(workspace) is None
+    for read in (fresh.pending_outbox_count, fresh.consent_for):
+        with pytest.raises(PublicOperationError) as refused:
+            read(workspace)
+        assert refused.value.code is PublicErrorCode.STORAGE_CORRUPT
 
 
 def test_member_validation_accepts_the_valid_document_and_reuses_envelopes(

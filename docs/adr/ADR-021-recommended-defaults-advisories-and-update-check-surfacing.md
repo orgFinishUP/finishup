@@ -194,7 +194,9 @@ upgrade from package exit zero. See [Upgrading](../usage/upgrading.md) for the u
 Concurrent refresh results retain the newer validated release from the pending projection or
 most recent package decision under the store lock. An older response, including one that called
 the older installation up to date, cannot regress that known release or resurrect dismissed older
-advice. Once the installed version catches up, the pending update clears. The READY refresh
+advice. Once the installed version catches up, the pending update clears, even when no comparison
+could run (update checks off or no answer available): the running version is a local fact, so a
+retained release at or below it is dropped rather than kept as unknown. The READY refresh
 deadline includes both gate acquisition and evaluation, preserving gate order and cancellation.
 
 ## Update-notice delivery amendment (issue #819)

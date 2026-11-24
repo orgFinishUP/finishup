@@ -892,7 +892,14 @@ single attempt requires only the effort its budget selected, and a missing effor
 The pinned app-server v2 protocol has no per-turn output ceiling. FinishUP therefore enforces the
 selected output limit on the runtime's own cumulative `thread/tokenUsage/updated` counters.
 Only visible output counts (`output_tokens − reasoning_output_tokens`), because reasoning
-tokens are governed by the effort. The check is applied to each valid snapshot. A snapshot over
+tokens are governed by the effort. The limit is per turn, as an API route's per-request
+`max_output_tokens` is: on a held reviewer thread (#1118) each turn counts only its own visible
+output, the thread's total less its visible output when the turn started. That start is the
+total the previous turn left, or, when that turn reported no usage or had a snapshot refused,
+the total before the turn's first reported request (that snapshot's `total` less its `last`).
+Until that request is reported, the last known total stands in, so a turn is never charged less
+than its own output. A one-shot check and a review's first turn start at zero. The check is
+applied to each valid snapshot. A snapshot over
 the limit interrupts the turn and ends it as the existing closed `output_oversize` stage
 (`invalid/response_schema_invalid`). That outcome is content-shaped, like API-path
 `max_output_tokens` truncation: it is never retried and never engages the fallback. When the
@@ -979,7 +986,9 @@ could have reached a provider (`authorization_missing` and `provider_unavailable
 refused admission writes no attempt, never claims review, and is reported with the coverage gap
 `advice_semantic_deferred`; the service schedules an in-memory revisit that rebuilds advice when
 the interval elapses, so the trailing condition is reviewed without waiting for another hook (the
-next hook re-derives the same deferral after a restart). A terminal non-success is never sticky:
+next hook re-derives the same deferral after a restart). Each session keeps one revisit at the
+earliest requested time: a sooner request replaces a later one, because each candidate identity has
+its own deferral. A terminal non-success is never sticky:
 the same identity is re-admitted as `<identity>#<generation>`, keeping every earlier receipt, after
 a backoff from its terminal time. `superseded` retries immediately; other pre-provider reasons
 (`authorization_missing`, `provider_unavailable`, `queue_full`) wait the base interval, and
@@ -1897,7 +1906,8 @@ claiming completion was never judged for completeness. Decisions:
   `citable_refs` lists only carried refs (content rows and surviving local assessment rows, the
   same set the text index holds); a challenge keeps the cited refs that were sent (disclosed as
   `semantic_review_refs_reduced`); a challenge with no sent ref — or any quote-bearing challenge
-  recovered without the text index — mints no finding but is counted as `ref_not_carried` and its
+  recovered without the text index, while its quote-free siblings stand as recorded (#1409) —
+  mints no finding but is counted as `ref_not_carried` and its
   summary and message are appended to the recorded review summary as an advisory, unverified
   concern. A verified row citing any unsent ref is still dropped. Quote proof tolerates transport
   form (whitespace, JSON escapes, typographic punctuation, a placeholder for FinishUP's `[REDACTED]`
@@ -3067,6 +3077,10 @@ content reads. Earlier 1.4.0/1.5.0 documents stay byte-identical.
 
 For attribution, each attempt's encrypted `yoetz.semantic-response/1` object gains optional
 `reviewer_read_usage`: at most five rows with call, action, validated args, status and reason.
+The reason is one of the closed set the service itself issues for a read result (the broker's
+refusals and truncations, the #1220 declared-test limits, the image limits and the privacy
+admission's refusals) or the row's own `outcome_unknown`/`deadline`; a row the service wrote is
+never dropped as unknown telemetry.
 Arguments are selector/path fields only; no returned text, hints, packet or judgment is copied.
 This private payload survives response recovery and includes failed reviews. Structural
 diagnostics contain the action/result code, request id and ordinal only; raw selectors/paths

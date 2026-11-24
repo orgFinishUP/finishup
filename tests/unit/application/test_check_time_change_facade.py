@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import cast
 
 import pytest
 
@@ -17,7 +17,6 @@ from builders.ledger_adapters import FixedClock, MemoryObjects, append_command, 
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
 from finishup.adapters.memory.ledger import MemoryLedgerAdapter
 from finishup.application.service import Application
-from finishup.application.start import StartInternalResult
 from finishup.ports.change_capture import (
     TASK_CHANGE_BASE_MEDIA_TYPE,
     CheckWorkspaceSource,
@@ -28,7 +27,7 @@ from finishup.ports.control import RepositoryPrivacyContext, WorkspaceLocator
 from finishup.ports.diagnostics import RuntimeCapability
 from finishup.ports.importer import ImporterPort
 from finishup.ports.objects import ObjectKind, ObjectStorePort
-from finishup.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
+from finishup.ports.runtime import TaskRuntime
 from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 from finishup.protocol.models import CheckRequest
 from unit.application.test_service_facade import (
@@ -41,6 +40,7 @@ from unit.application.test_service_facade import (
 )
 
 _COMMITMENT = "hmac-sha256:" + "a" * 64
+_REQUEST = "req_00000000-0000-4000-8000-000000000031"
 
 
 class _Port:
@@ -108,34 +108,6 @@ def test_repository_context_keeps_its_locator_out_of_equality_and_repr() -> None
     assert first.workspace_locator == WorkspaceLocator("/work/private-repository-name")
 
 
-class _Router:
-    def __init__(self, runtime: TaskRuntime) -> None:
-        self.runtime = runtime
-        self.routes: list[RouteCommand] = []
-
-    async def route(self, command: RouteCommand) -> TaskRuntime:
-        self.routes.append(command)
-        return self.runtime
-
-    async def release(self, runtime: TaskRuntime) -> None:
-        assert runtime is self.runtime
-
-
-def _start_result(
-    outcome: Literal["attached", "created", "replayed", "delegated"], runtime: TaskRuntime
-) -> StartInternalResult:
-    # Only the fields the post-start hook reads; a full result needs frontier and view models.
-    return cast(
-        StartInternalResult,
-        SimpleNamespace(
-            outcome=outcome,
-            session_id=runtime.session_id,
-            writer_id=runtime.writer_id,
-            request_id="req_00000000-0000-4000-8000-000000000031",
-        ),
-    )
-
-
 def _runtime() -> tuple[TaskRuntime, MemoryLedgerAdapter]:
     command = append_command()
     adapter = memory_adapter(command)
@@ -157,46 +129,40 @@ def _runtime() -> tuple[TaskRuntime, MemoryLedgerAdapter]:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("outcome", "recorded"),
-    (("created", True), ("delegated", True), ("attached", False), ("replayed", False)),
-)
-async def test_only_a_creating_start_records_the_task_base(
+async def test_the_creating_start_hook_keeps_the_base_of_the_runtime_it_is_given(
     tmp_path: Path,
-    outcome: Literal["attached", "created", "replayed", "delegated"],
-    recorded: bool,
 ) -> None:
+    """``execute_start`` hands the hook the created task's own runtime, so it routes nothing."""
+
     repository = tmp_path / "repo"
     repository.mkdir(mode=0o700)
     environment = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "PATH": os.defpath}
     subprocess.run(("git", "init", "--quiet"), cwd=repository, check=True, env=environment)
     runtime, adapter = _runtime()
-    router = _Router(runtime)
     app = replace(
         _application(_Catalog(_route())),
-        runtime=cast(BundleRuntimePort, router),
         clock=FixedClock(),  # pyright: ignore[reportArgumentType]
         change_capture=GitChangeCaptureAdapter(),
     )
     record = getattr(Application, "_record_task_change_base")
 
-    await record(app, _start_result(outcome, runtime), _context(os.fspath(repository)))
-
+    await record(app, runtime, _context(os.fspath(repository)), _REQUEST)
     base = await adapter.load_task_change_base()
-    assert (base is not None) is recorded
-    assert len(router.routes) == (1 if recorded else 0)
-    if base is not None:
-        assert base.metadata.kind is ObjectKind.CHANGE_CAPTURE
-        assert base.metadata.media_type == TASK_CHANGE_BASE_MEDIA_TYPE
-        objects = cast(MemoryObjects, getattr(adapter, "_objects"))
-        data = b"".join([chunk async for chunk in objects.open_verified(base)])
-        # An empty repository starts from the empty tree.
-        assert decode_task_change_base(data).commit == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    # A second call (a recovered start) keeps the first base.
+    await record(app, runtime, _context(os.fspath(repository)), _REQUEST)
+
+    assert base is not None
+    assert await adapter.load_task_change_base() == base
+    assert base.metadata.kind is ObjectKind.CHANGE_CAPTURE
+    assert base.metadata.media_type == TASK_CHANGE_BASE_MEDIA_TYPE
+    objects = cast(MemoryObjects, getattr(adapter, "_objects"))
+    data = b"".join([chunk async for chunk in objects.open_verified(base)])
+    # An empty repository starts from the empty tree.
+    assert decode_task_change_base(data).commit == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
-class _RefusingRouter:
-    async def route(self, command: RouteCommand) -> TaskRuntime:
-        del command
+class _RefusingPort(_Port):
+    def read_task_base(self, workspace: str) -> object:
         raise PublicOperationError(PublicErrorCode.BUNDLE_BUSY, "busy", True)
 
 
@@ -205,13 +171,12 @@ async def test_a_base_that_cannot_be_recorded_never_fails_the_start(tmp_path: Pa
     runtime, adapter = _runtime()
     app = replace(
         _application(_Catalog(_route())),
-        runtime=cast(BundleRuntimePort, _RefusingRouter()),
         clock=FixedClock(),  # pyright: ignore[reportArgumentType]
-        change_capture=GitChangeCaptureAdapter(),
+        change_capture=_RefusingPort(),  # pyright: ignore[reportArgumentType]
     )
     record = getattr(Application, "_record_task_change_base")
 
-    await record(app, _start_result("created", runtime), _context(os.fspath(tmp_path)))
+    await record(app, runtime, _context(os.fspath(tmp_path)), _REQUEST)
 
     assert await adapter.load_task_change_base() is None
 

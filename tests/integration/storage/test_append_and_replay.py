@@ -50,7 +50,9 @@ from finishup.ports.ledger import (
     OperationKind,
     OperationQuarantineCode,
     OperationState,
+    ProjectionQuery,
     ProjectionView,
+    QueryableProjectionView,
 )
 from finishup.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from finishup.protocol.canonical import canonical_digest, canonical_encode
@@ -1188,3 +1190,38 @@ async def test_undecodable_pending_resume_is_quarantined_not_latched(
         "quarantine_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
     }
     persisted_db.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("view", ["compact", "findings", "history", "obligations"])
+async def test_projection_query_before_the_first_record_is_a_typed_refusal(
+    tmp_path: Path, backend: str, view: QueryableProjectionView
+) -> None:
+    """A page pinned at genesis has no task state to show; it is invalid query input (#1395)."""
+
+    records = replay_records("wall-clock-reversal")
+    command, objects = command_from_records(records)
+    db: apsw.Connection | None = None
+    if backend == "memory":
+        ledger: MemoryLedgerAdapter | SqliteLedger = memory_for(command, objects)
+    else:
+        ledger, db = file_sqlite_for(command, objects, tmp_path / "genesis.sqlite3")
+    assert (await ledger.append_batch(command)).outcome == "accepted"
+
+    with pytest.raises(PublicOperationError) as refused:
+        await ledger.query_projection(
+            ProjectionQuery(command.session_id, view, None, Frontier.genesis(), 1, None, None)
+        )
+    assert refused.value.code is PublicErrorCode.INVALID_REQUEST
+    assert refused.value.retryable is False
+
+    # The earliest real frontier still answers.
+    first = [row async for row in ledger.load_events(command.session_id)][0]
+    pinned = Frontier(first.ledger.ingestion_sequence, first.entry_digest)
+    page = await ledger.query_projection(
+        ProjectionQuery(command.session_id, view, None, pinned, 1, None, None)
+    )
+    assert page.effective_frontier == pinned
+    if db is not None:
+        db.close()

@@ -38,6 +38,7 @@ from referencing import Registry
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import Schema
 
+from finishup.adapters.process_group import group_has_only_exited_members, reap_group_members
 from finishup.domain.values import validate_sha256_digest
 from finishup.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 from finishup.protocol.errors import ProtocolValueError
@@ -1039,10 +1040,13 @@ def _group_gone(group: int) -> bool:
     until the grace expires, which stays unconfirmed. The poll only observes: it never signals
     the numeric group again, because once the leader is reaped that id could in principle be
     reused by an unrelated group, and SIGKILL is not ignorable, so the one kill above suffices.
+    Members this process inherited as a child subreaper are reaped here, so a probe leaves no
+    zombie behind in a long-lived service.
     """
 
     deadline = time.monotonic() + _GROUP_CLEANUP_GRACE_SECONDS
     while True:
+        reap_group_members(group)
         try:
             os.killpg(group, 0)
         except ProcessLookupError:
@@ -1068,27 +1072,7 @@ def _only_zombies(group: int) -> bool:
     bounded wait above decides.
     """
 
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return False
-    members = 0
-    try:
-        entries = tuple(proc.iterdir())
-    except OSError:
-        return False
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            fields = (entry / "stat").read_text().rpartition(")")[2].split()
-        except OSError:
-            continue
-        if len(fields) < 3 or fields[2] != str(group):
-            continue
-        if fields[0] not in {"Z", "X"}:
-            return False
-        members += 1
-    return members > 0
+    return group_has_only_exited_members(group)
 
 
 def _scratch_environment(home: Path) -> dict[str, str]:

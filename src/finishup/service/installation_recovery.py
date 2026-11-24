@@ -880,6 +880,10 @@ class InstallationRecoverySetStore:
             # Only file contents were fsynced during extraction.  The snapshot tree is renamed
             # into the published set by `stage`, so its directories must be durable first.
             _fsync_tree(incoming)
+            if self._yield_pending_generation(artifact):
+                # The identical set is already the pending material: a retried import is a
+                # no-op that reports the same staged generation.
+                return metadata
             staged_metadata = self.stage(artifact, prepared)
             # Deliberately not activated: the archive header is unauthenticated, so an imported
             # set stays pending until the restore ceremony proves it with a real secret.
@@ -890,6 +894,44 @@ class InstallationRecoverySetStore:
         finally:
             os.close(descriptor)
             _remove_stage(incoming)
+
+    def _yield_pending_generation(self, artifact: InstallationRecoveryArtifact) -> bool:
+        """Settle a pending import of the same generation before a new import stages over it.
+
+        Return True when the pending set is byte-identical to `artifact`, so the import is an
+        idempotent retry.  Otherwise release the pending claim so `stage` can reclaim the
+        directory: a pending set is unauthenticated, so an operator who imported the wrong one
+        (often another installation's generation 1) must be able to replace it.  The claim is
+        released before the new set is staged and the new record is written only after, so a
+        crash at any point leaves either no pending record or one that matches the set on disk.
+
+        The claim is kept while a restore ceremony for it is in flight, or while a clean-profile
+        quarantine installed from it awaits its ceremony, because both already depend on that
+        exact material.
+        """
+
+        metadata = _metadata_from_artifact(artifact)
+        pending = self._pending_import_optional()
+        if pending is None or pending.metadata.recovery_generation != metadata.recovery_generation:
+            return False
+        state = self._load_state_optional()
+        if state is not None and metadata.recovery_generation <= state.active_generation:
+            # Published authority owns this number; `stage` refuses the collision.
+            return False
+        try:
+            staged = self.load(metadata.recovery_generation)
+        except (OSError, ValueError):
+            staged = None
+        if (
+            staged is not None
+            and pending.metadata == metadata
+            and staged.canonical_bytes == artifact.canonical_bytes
+        ):
+            return True
+        if pending.continuation_id is not None or self._clean_restore_path.exists():
+            raise FileExistsError("installation_recovery_generation_exists")
+        self._clear_pending()
+        return False
 
     def install_snapshot_into_pristine(self, recovery_generation: int) -> str:
         """Atomically install one imported snapshot into a marker-free profile.

@@ -497,7 +497,11 @@ executable is gone; `unbound` — portable or legacy `/1` marker; `unobserved`);
 `package_version`, the `control-result` schema version, and `resource_manifest_digest` with the
 runtime reading status (`observed: false` when it cannot answer). `mcp.runtime.executable_activation`
 compares live Cursor-helper children with the installed launcher: `executable_mismatch` forces
-`activation: full_restart_required`. A tree rendered before issue #468 stays marker-valid and shows
+`activation: full_restart_required`. On macOS the live children come from the `ps` table, which
+joins argv with spaces; a project child whose `--project-root` workspace path contains whitespace
+(for example `~/Documents/My Project`) is still classified from that text form, as Linux and WSL 2
+classify it from `/proc`, and a row longer than 4,096 characters is left unclassified on both,
+never read from a cut-off prefix. A tree rendered before issue #468 stays marker-valid and shows
 `state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
 fully quit Cursor.
 
@@ -553,6 +557,9 @@ Host admission (issue #467) writes both project-scoped entries for exactly `chec
 finishup integrate cursor admission preview --project-root <project> --cursor-config-root <root> --mcp-ownership plugin-managed --json
 finishup integrate cursor admission grant --project-root <project> --cursor-config-root <root> ... --accept --preview-digest <digest>
 ```
+
+The preview's `next_command` repeats `--cursor-config-root <cursor-config-root>` and a non-default
+`--mcp-ownership` or `--route-profile` so the apply step reads the same route.
 
 `.cursor/permissions.json` receives `finishup:check` (the docs name the server by its `mcp.json`
 key, which is `finishup` for every FinishUP route). `.cursor/cli.json` receives `Mcp(finishup:check)`
@@ -1057,8 +1064,11 @@ acceptance on macOS, Linux and Windows through WSL 2 is not established by sourc
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
 return to structural hooks, preview a replacement with `--observation-profile structural` and
-apply that exact preview. Portable artifacts reject ordinary observation; selecting a native
-artifact does not grant content capture.
+apply that exact preview. `finishup connect` keeps the profile of a marker-verified installed
+user plugin: re-running it after an upgrade, or connecting another project under the same config
+root, never reverts ordinary hooks to structural ones. A new installation starts structural.
+Portable artifacts reject ordinary observation; selecting a native artifact does not grant
+content capture.
 Preview names the selected profile. Status reports the requested profile and confirms an installed
 profile only when its verified marker and artifact digest match; otherwise that installed value is
 unknown rather than inferred from the request.
@@ -1445,7 +1455,8 @@ perform one exact previewed replacement (or safe removal) instead of being stran
 timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
 `afterFileEdit`/`afterMCPExecution`, and 3 seconds for `sessionEnd`; `failClosed` remains false.
 `sessionStart` uses Cursor's documented `session_id`/`conversation_id` conversation identity and
-persists the validated pair as a bounded local alias, so later events carrying only
+persists the validated pair as a bounded local alias (64 conversations; the oldest binding is
+evicted first, and a rebound conversation counts as newest), so later events carrying only
 `conversation_id` resolve to the same FinishUP session; an event whose pair contradicts the validated
 alias is rejected as `cursor_session_ambiguous` rather than splitting one conversation across
 sessions. Cursor's hooks reference (re-read 2026-08-28) describes `sessionStart`'s `session_id` as
@@ -1777,7 +1788,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade FinishUP service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no AI-powered review | expected route ceiling; authorize a separate policy route when intended |
-| Modified plugin cannot remove | preserved local change; inspect and resolve manually |
+| Modified plugin cannot remove | preserved local change; inspect and resolve manually. A file you added inside the installed plugin tree reads `modified` whatever its name (non-ASCII UTF-8 names included, #1386); a name that is not valid UTF-8 is refused `target_unsafe`. Move the file out, then re-run status |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | the platform presence cell refused: on macOS LocalAuthentication was cancelled, unavailable, or timed out; on Linux or WSL 2 the password was wrong, empty, or cancelled, the command did not run from your own foreground terminal, or PAM is unavailable; any other platform has no cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
@@ -2316,7 +2327,8 @@ home-relative or drive-relative locator, or any `..` path is replaced by `<outsi
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
 (`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
-case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+case-insensitively one character at a time, as NTFS does (`ß` never matches `SS`), and no
+filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 

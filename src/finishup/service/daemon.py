@@ -2281,12 +2281,22 @@ class ServiceDaemon:
             await lifecycle.client_connected()
             connected = True
             await handler(stream)
+        except LifecycleError:
+            # A draining or failed service refuses the connection before any handler owns it;
+            # the close below is the refusal. Raised from the handler, the error is its own.
+            if connected:
+                raise
         finally:
             if connected:
                 try:
                     await lifecycle.client_disconnected()
                 except LifecycleError:
                     pass
+            else:
+                # The handler is the stream's only other closer. Without this close a refused
+                # connection keeps its listener admission slot and its peer never sees EOF.
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
 
     async def _resolve_repository_context(
         self, locator: WorkspaceLocator
@@ -5035,14 +5045,23 @@ class _LockedHumanEffects:
         action = target.action
         if action != "set" and action != "rotate":
             raise HumanControlError("target_invalid")
-        await self._vault.store_provider_credential(
-            action,
-            binding,
-            secret,
-            proof,
-            now_monotonic,
-            target_digest=target.target_digest(),
-        )
+        try:
+            await self._vault.store_provider_credential(
+                action,
+                binding,
+                secret,
+                proof,
+                now_monotonic,
+                target_digest=target.target_digest(),
+            )
+        except VaultError as exc:
+            # A key the vault refuses (wrong length, not token68) is the owner's to retype, and a
+            # rotate with nothing stored names the missing record; neither is an internal fault.
+            if exc.reason in {"credential_invalid", "secret_purpose_mismatch"}:
+                raise HumanControlError("secret_rejected") from None
+            raise HumanControlError(
+                "record_missing" if exc.reason == "record_missing" else "internal_error"
+            ) from None
         generation = self._vault._provider_generations.get(binding, 1)  # pyright: ignore[reportPrivateUsage]
         # The credential is the one setup answer nothing downstream can infer. Verify it while
         # the person who can fix it is still here, rather than leaving the first evidence to a
@@ -6194,6 +6213,8 @@ def _human_error_code(exc: Exception) -> str:
             "pending_unavailable",
             "kind_forbidden",
             "phase_invalid",
+            # A rotate or remove whose credential record is not stored: the owner sets one first.
+            "record_missing",
             "presence_refused",
             "presence_timeout",
             "presence_unavailable",

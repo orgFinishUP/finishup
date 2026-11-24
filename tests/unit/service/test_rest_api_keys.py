@@ -18,7 +18,7 @@ from typing import cast
 
 import pytest
 
-from finishup.rest.api_keys import API_KEYS_SCHEMA, ApiKeyError, ApiKeyStore
+from finishup.rest.api_keys import API_KEYS_SCHEMA, MAX_API_KEYS, ApiKeyError, ApiKeyStore
 from finishup.rest.contract import parse_api_key
 
 _NOW = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
@@ -193,3 +193,39 @@ def test_a_key_stored_but_not_flushed_is_revoked_before_create_fails(
     monkeypatch.setattr(os, "fsync", real_fsync)
     second = [record for record in store.records() if record.label == "second"]
     assert len(second) == 1 and second[0].revoked_at is not None
+
+
+def test_a_revoked_key_frees_its_slot_and_the_file_stays_bounded(store: ApiKeyStore) -> None:
+    """``api_key_limit`` counts unrevoked keys, so revoking one (its named remedy, and ``create``'s
+    reverse) lets a new key be made; the oldest revoked record leaves the file to keep it within
+    its bound, and a key whose record left fails as ``api_key_invalid``."""
+
+    made = [store.create(f"key {index}", "agent", now=_NOW) for index in range(MAX_API_KEYS)]
+    with pytest.raises(ApiKeyError) as full:
+        store.create("one more", "agent", now=_NOW)
+    assert full.value.reason == "api_key_limit"
+    later = _NOW + timedelta(minutes=1)
+    assert store.revoke(made[5][0].key_id, now=later) is True
+    assert store.revoke(made[3][0].key_id, now=later + timedelta(minutes=1)) is True
+    with pytest.raises(ApiKeyError) as revoked:
+        store.authenticate(made[5][1], now=later)
+    assert revoked.value.reason == "api_key_revoked"
+
+    first, first_token = store.create("replacement", "agent", now=later)
+    records = store.records()
+    assert len(records) == MAX_API_KEYS
+    assert made[5][0].key_id not in {record.key_id for record in records}
+    assert made[3][0].key_id in {record.key_id for record in records}
+    assert store.authenticate(first_token, now=later) == first
+    with pytest.raises(ApiKeyError) as pruned:
+        store.authenticate(made[5][1], now=later)
+    assert pruned.value.reason == "api_key_invalid"
+
+    second, second_token = store.create("another", "agent", rotate=made[3][0].key_id, now=later)
+    assert second.principal == made[3][0].principal
+    assert made[3][0].key_id not in {record.key_id for record in store.records()}
+    assert len(store.records()) == MAX_API_KEYS
+    assert store.authenticate(second_token, now=later) == second
+    with pytest.raises(ApiKeyError) as again:
+        store.create("full again", "agent", now=later)
+    assert again.value.reason == "api_key_limit"

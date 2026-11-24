@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from finishup.config.env import ENV_PREFIXES, EnvNameConflictError, canonical_env_name, read_env
 from finishup.config.models import ConfigError, FinishUpConfig
 from finishup.config.paths import config_file_path
+from finishup.config.toml_text import load_toml_text
 from finishup.legacy_names import ENV_PREFIX
 
 __all__ = [
@@ -257,7 +258,7 @@ def _read_config(path: Path) -> tuple[dict[str, object], bool]:
         raise ConfigError("config_file_too_large")
     try:
         document = data.decode("utf-8")
-        parsed = tomllib.loads(document)
+        parsed = load_toml_text(document)
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         line, column = _toml_error_position(exc, data)
         raise ConfigError(

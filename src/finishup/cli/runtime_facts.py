@@ -23,7 +23,9 @@ for delivery are reduced here to closed tokens and nothing else crosses into the
   environment's. Only the existence of ``pyvenv.cfg`` is read. ``--user`` installs into the user
   site of the interpreter running pip, which that (non-virtual-environment) interpreter imports
   for the same user, and pip refuses it inside a virtual environment, so it classifies as that
-  interpreter.
+  interpreter. Every simple command of a shell call is read, split by the same lexer as its
+  writes (``domain.shell_writes.shell_command_segments``): an unquoted newline separates commands
+  as ``;`` does, while a quoted newline, a comment or a heredoc body installs nothing.
 * ``write_scope`` — ``outside_workspace`` when an edit tool names a file outside the workspace
   root, or a shell command redirects or ``tee``s into an absolute path outside it. A scratch
   write into a temporary directory (``/tmp``, ``/var/tmp``, ``/dev/shm``, their macOS
@@ -58,9 +60,9 @@ from typing import Final, cast
 from finishup.domain.shell_writes import APPLY_PATCH_PATH as _PATCH_PATH
 from finishup.domain.shell_writes import (
     SHELL_APPLY_PATCH,
-    bound_command,
     heredoc_patch_paths,
     heredoc_patch_writes,
+    shell_command_segments,
     shell_command_text,
     shell_heredocs,
     shell_write_scope,
@@ -87,7 +89,6 @@ INSTALL_TARGET_VALUES: Final = (
 )
 # Ranked: the first class any install segment reaches is reported.
 _TARGET_RANK: Final = ("yoetz_runtime", "private_env", "unresolved", "system", "workspace_env")
-_SEPARATORS: Final = frozenset({"&&", "||", ";", "|", "&", ";;", "(", ")"})
 _PREFIX_COMMANDS: Final = frozenset({"sudo", "env", "command", "exec", "nohup", "time"})
 _PIP_NAME: Final = re.compile(r"^pip(?:[0-9]+(?:\.[0-9]+)?)?$", re.ASCII)
 _PYTHON_NAME: Final = re.compile(r"^python(?:[0-9]+(?:\.[0-9]+)?)?$", re.ASCII)
@@ -124,29 +125,19 @@ def _raw_command(tool_input: Mapping[str, JsonValue]) -> str | None:
     return None
 
 
-def _segments(command: str) -> list[list[str]]:
-    # ``shlex`` builds a token by repeated concatenation: bound the text it reads, as the shell
-    # write parser does, so a megabyte of one token cannot stall the hook.
-    lexer = shlex.shlex(bound_command(command), posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return []
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SEPARATORS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    return [segment for segment in segments if segment]
-
-
 # Prefix-command options that take a separate operand (``sudo -u user``, ``env -u NAME``,
-# ``time -o file``); every other ``-x`` option of a prefix command takes none.
-_PREFIX_OPTIONS_WITH_OPERAND: Final = frozenset(
-    {"-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U", "-o", "-f", "-S"}
-)
+# ``time -o file``), keyed by prefix command: an option one command reads an operand for is
+# operand-less in another (``sudo -S`` reads the password from stdin, ``env -S`` takes a string;
+# ``time -p`` selects POSIX output, ``sudo -p`` takes a prompt). Every other ``-x`` option of a
+# prefix command takes none.
+_PREFIX_OPTIONS_WITH_OPERAND: Final[Mapping[str, frozenset[str]]] = {
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+    "time": frozenset({"-o", "-f"}),
+    "exec": frozenset({"-a"}),
+    "command": frozenset(),
+    "nohup": frozenset(),
+}
 
 
 def _strip_prefix(segment: list[str]) -> list[str]:
@@ -154,15 +145,17 @@ def _strip_prefix(segment: list[str]) -> list[str]:
     while index < len(segment) and (
         _ASSIGNMENT.match(segment[index]) or segment[index] in _PREFIX_COMMANDS
     ):
-        prefix = segment[index] in _PREFIX_COMMANDS
+        operand_options = _PREFIX_OPTIONS_WITH_OPERAND.get(segment[index])
         index += 1
         # ``sudo -H -u builder pip install x``: skip the prefix command's own options.
-        while prefix and index < len(segment) and segment[index].startswith("-"):
+        while (
+            operand_options is not None and index < len(segment) and segment[index].startswith("-")
+        ):
             option = segment[index]
             index += 1
             if option == "--":
                 break
-            if option in _PREFIX_OPTIONS_WITH_OPERAND and index < len(segment):
+            if option in operand_options and index < len(segment):
                 index += 1
     return segment[index:]
 
@@ -323,7 +316,7 @@ def install_target_class(command: str, workspace: str | None) -> str | None:
 
     found = {
         target
-        for segment in _segments(command)
+        for segment in shell_command_segments(command)
         if (target := _segment_target(segment, workspace)) is not None
     }
     return next((target for target in _TARGET_RANK if target in found), None)
@@ -463,7 +456,19 @@ def runtime_structural_facts(
     command = _raw_command(tool_input)
     if command is None:
         return facts
-    target = install_target_class(command, workspace_locator)
+    # A native argv is read as its script (``["bash", "-lc", SCRIPT]``), by the install reader
+    # and the write reader alike, exactly as its session-stream copy is handed that script: the
+    # joined argv shows only ``bash`` to the install reader (#1435), and a heredoc patch longer
+    # than the token parsers' bound is still named (#1106 r2).
+    script = next(
+        (
+            text
+            for key in _COMMAND_KEYS
+            if (text := shell_command_text(tool_input.get(key))) is not None and text
+        ),
+        command,
+    )
+    target = install_target_class(script, workspace_locator)
     if target is not None:
         facts["install_target"] = target
     if workspace_locator is not None:
@@ -474,16 +479,6 @@ def runtime_structural_facts(
         # headers name (#1046 review, n7 RC2): no shell token shows them, and for an intercepted
         # ``apply_patch`` Codex fires only this pre-event, so this token is the only record that
         # it changed the work.
-        # A native argv is read as its script (``["bash", "-lc", SCRIPT]``), so a heredoc patch
-        # longer than the token parsers' bound is still named (#1106 r2).
-        script = next(
-            (
-                text
-                for key in _COMMAND_KEYS
-                if (text := shell_command_text(tool_input.get(key))) is not None and text
-            ),
-            command,
-        )
         start, relocated = _working_directory(
             working_directory if working_directory is not None else payload.get("cwd"),
             workspace_locator,

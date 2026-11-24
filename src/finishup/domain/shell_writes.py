@@ -52,6 +52,7 @@ __all__ = [
     "heredoc_patch_paths",
     "heredoc_patch_writes",
     "patch_command_words",
+    "shell_command_segments",
     "shell_command_text",
     "shell_heredocs",
     "shell_write_paths",
@@ -364,35 +365,59 @@ def _starts_word(text: str, index: int, start: int) -> bool:
     return before in " \t\n;&|("
 
 
+class _HeredocEnd:
+    """Bash's rule for the line that closes one heredoc body, fed one physical line at a time.
+
+    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
+    tabs, and only tabs: never spaces, so a unified-diff context line `` EOF`` is data). In an
+    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
+    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``). Both the token lexer
+    (``_skip_heredocs``) and the heredoc patch reader (``_heredocs``) end a body here.
+    """
+
+    __slots__ = ("_carry", "_dead", "_delimiter", "_quoted", "_strip_tabs")
+
+    def __init__(self, delimiter: str, *, strip_tabs: bool, quoted: bool) -> None:
+        self._delimiter = delimiter
+        self._strip_tabs = strip_tabs
+        self._quoted = quoted
+        self._carry = ""  # the continued lines so far, while they could still equal the delimiter
+        self._dead = False  # ... and once they cannot
+
+    def closes(self, physical: str) -> bool:
+        """Whether *physical* (one line, no newline) closes the body."""
+
+        if not self._quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
+            if not self._dead:
+                self._carry += physical[:-1]
+                if len(self._carry.lstrip("\t")) > len(self._delimiter):
+                    self._carry, self._dead = "", True
+            return False
+        line = self._carry + physical
+        matched = not self._dead and (
+            (line.lstrip("\t") if self._strip_tabs else line) == self._delimiter
+        )
+        self._carry, self._dead = "", False
+        return matched
+
+
 def _skip_heredocs(text: str, index: int, pending: list[tuple[str, bool, bool]]) -> int:
     """The index after the bodies of the heredocs started on the line that just ended.
 
-    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
-    tabs, and only tabs); an unterminated body runs to the end of the text, as in bash. In an
-    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
-    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``).
+    Each body ends at its closing line (``_HeredocEnd``); an unterminated body runs to the end of
+    the text, as in bash.
     """
 
     size = len(text)
     for delimiter, strip_tabs, quoted in pending:
-        carry = ""  # the continued lines so far, while they could still equal the delimiter
-        dead = False  # ... and once they cannot
+        end_rule = _HeredocEnd(delimiter, strip_tabs=strip_tabs, quoted=quoted)
         while index < size:
             end = text.find("\n", index)
             if end < 0:
                 end = size
             physical = text[index:end]
             index = min(end + 1, size)
-            if not quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
-                if not dead:
-                    carry += physical[:-1]
-                    if len(carry.lstrip("\t")) > len(delimiter):
-                        carry, dead = "", True
-                continue
-            line = carry + physical
-            matched = not dead and (line.lstrip("\t") if strip_tabs else line) == delimiter
-            carry, dead = "", False
-            if matched:
+            if end_rule.closes(physical):
                 break
     return index
 
@@ -957,6 +982,61 @@ def shell_write_paths(command: str) -> list[str]:
     return list(_write_targets(command))
 
 
+def shell_command_segments(command: str) -> list[list[str]]:
+    """The words of each simple command in *command*, as this module's lexer reads them.
+
+    The same segments the write reader scans (#1434): an unquoted newline ends a command as
+    ``;``, ``&&``, ``||``, ``|``, ``|&`` and ``&`` do, while a quoted or backslash-escaped newline,
+    a comment and a heredoc body are data. Words lose their quotes; a redirection and its operand
+    (a target, a source, a heredoc delimiter) are not words of the command. Text is read up to
+    ``MAX_SHELL_WRITE_CHARS`` (``bound_command``); a command the bound cuts short is dropped, and
+    text the lexer cannot read with certainty has no segments. An unquoted word that ends in a
+    command substitution (``echo $(pip install x)``, ``v="$(pip install x)"``) also contributes
+    the segments of the command it runs, a bounded number of levels deep.
+    """
+
+    text, cut = _bounded(command)
+    return _command_segments(text, partial=cut, depth=0)
+
+
+_MAX_SUBSTITUTION_DEPTH: Final = 3
+
+
+def _command_segments(text: str, *, partial: bool, depth: int) -> list[list[str]]:
+    lexed = _lex(text, partial=partial)
+    if lexed is None:
+        return []
+    tokens, incomplete = lexed
+    # Each segment's words, then the segments of the substitutions it runs.
+    segments: list[tuple[list[str], list[list[str]]]] = [([], [])]
+    operand = False
+    for token in tokens:
+        if token.kind == "op" and token.text in _SEPARATORS:
+            segments.append(([], []))
+            operand = False
+        elif token.kind == "op":
+            operand = True  # a redirection: its next word is its operand
+        elif operand:
+            operand = False
+        else:
+            words, substituted = segments[-1]
+            words.append(token.text)
+            start = token.text.find("$(")
+            if (
+                not token.literal
+                and start >= 0
+                and token.text.endswith(")")
+                and depth < _MAX_SUBSTITUTION_DEPTH
+            ):
+                inner = token.text[start + 2 : -1]
+                substituted.extend(_command_segments(inner, partial=False, depth=depth + 1))
+    if incomplete:
+        segments.pop()
+    return [words for words, _ in segments if words] + [
+        segment for _, substituted in segments for segment in substituted
+    ]
+
+
 def shell_write_scope(
     command: str,
     *,
@@ -1272,7 +1352,6 @@ def _placed_docs_class(
 
 
 # A heredoc that feeds a patch tool writes the files the patch names, which no shell token shows.
-_HEREDOC_START: Final = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 # A heredoc fed to ``apply_patch``: the line before ``<<`` ends in the command name.
 SHELL_APPLY_PATCH: Final = re.compile(r"(?:^|[\s;&|(])(?:apply_patch|applypatch)\s*$")
 APPLY_PATCH_PATH: Final = re.compile(
@@ -1372,31 +1451,77 @@ class _Heredoc(NamedTuple):
     end: int  # the index of the closing delimiter line
 
 
-def _heredocs(command: str) -> list[_Heredoc]:
+class _HeredocStart(NamedTuple):
+    operator: int  # where ``<<`` starts in the line
+    end: int  # just after the delimiter word, or after ``<<`` when it has none it can read
+    delimiter: tuple[str, bool, bool] | None  # ``_heredoc_delimiter``'s, ``None`` if unreadable
+
+
+def _heredoc_start(line: str, offset: int) -> _HeredocStart | None:
+    """The first heredoc operator (``<<``/``<<-``, never a ``<<<`` here-string) in *line*.
+
+    Searched from *offset*. Its delimiter is read by the token lexer's rule
+    (``_heredoc_delimiter``): the word after the operator, quotes and backslash escapes removed,
+    so ``<<\\EOF``, ``<<'END-PATCH'`` and ``<<"END PATCH"`` are heredocs as in bash.
+    """
+
+    index = line.find("<<", offset)
+    while index >= 0 and line.startswith("<<<", index):
+        index = line.find("<<", index + 3)
+    if index < 0:
+        return None
+    parsed = _heredoc_delimiter(line, index + 2)
+    if parsed is None:
+        return _HeredocStart(index, index + 2, None)
+    delimiter, end = parsed
+    return _HeredocStart(index, end, delimiter)
+
+
+def _heredoc_scan(command: str) -> tuple[list[_Heredoc], list[str]]:
+    """The complete heredocs of *command*, and the prefixes of ``<<`` it cannot read.
+
+    A delimiter the reader cannot read (``$'E\\x4fF'``, an unclosed quote) leaves its body's end
+    unknown; its prefix lets a patch tool it feeds count as unplaced. A ``<<`` whose body never
+    closes (an arithmetic ``1<<2``, or text in quotes) is passed over for the next one, a bounded
+    number of times, so a patch after it is still read.
+    """
+
     lines = command.split("\n")
     found: list[_Heredoc] = []
+    unread: list[str] = []
+    misses = 0
     index = 0
     while index < len(lines) and len(found) < _MAX_SHELL_HEREDOCS:
         line = lines[index]
         start = index
-        match = _HEREDOC_START.search(line)
         index += 1
-        if match is None:
-            continue
-        delimiter = match.group(2)
-        body: list[str] = []
-        while index < len(lines) and lines[index].strip() != delimiter:
-            body.append(lines[index])
-            index += 1
-        if index >= len(lines):
-            break  # unterminated heredoc: not a complete edit
-        found.append(
-            _Heredoc(
-                line[: match.start()], line[match.end() :], "\n".join(body) + "\n", start, index
-            )
-        )
-        index += 1
-    return found
+        offset = 0
+        while (opened := _heredoc_start(line, offset)) is not None:
+            offset = opened.end
+            if opened.delimiter is None:
+                if len(unread) < _MAX_SHELL_HEREDOCS:
+                    unread.append(line[: opened.operator])
+                break  # an unclosed quote runs to the end of the line
+            delimiter, strip_tabs, quoted = opened.delimiter
+            end_rule = _HeredocEnd(delimiter, strip_tabs=strip_tabs, quoted=quoted)
+            close = start + 1
+            while close < len(lines) and not end_rule.closes(lines[close]):
+                close += 1
+            if close < len(lines):
+                body = "\n".join(lines[start + 1 : close]) + "\n"
+                found.append(
+                    _Heredoc(line[: opened.operator], line[opened.end :], body, start, close)
+                )
+                index = close + 1
+                break
+            misses += 1  # unterminated: not a complete edit, and maybe not a heredoc at all
+            if misses > _MAX_SHELL_HEREDOCS:
+                return found, unread
+    return found, unread
+
+
+def _heredocs(command: str) -> list[_Heredoc]:
+    return _heredoc_scan(command)[0]
 
 
 def shell_heredocs(command: str) -> list[tuple[str, str, str]]:
@@ -1490,8 +1615,13 @@ def _wrapped_script(command: str) -> str | None:
 
 def _heredoc_patch_writes(command: str) -> HeredocPatchWrites:
     paths: list[str] = []
-    unplaced = False
-    for heredoc in _heredocs(command):
+    found, unread = _heredoc_scan(command)
+    # A patch tool fed a heredoc whose delimiter the reader cannot read still applies a patch.
+    unplaced = any(
+        SHELL_APPLY_PATCH.search(prefix) or _diff_patch_strip(prefix) is not None
+        for prefix in unread
+    )
+    for heredoc in found:
         if SHELL_APPLY_PATCH.search(heredoc.prefix):
             paths.extend(match.strip() for match in APPLY_PATCH_PATH.findall(heredoc.body))
             continue

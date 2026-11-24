@@ -6,10 +6,10 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import apsw
 import pytest
@@ -3160,6 +3160,215 @@ async def test_sqlite_reclaim_persistence_failure_does_not_adopt_clone() -> None
     assert adapter._state is prior_state  # pyright: ignore[reportPrivateUsage]
     after = await adapter.lookup_operation(command.writer_id, operation_id)
     assert after == before
+
+
+class _FailNextSync:
+    """Make the next SQLite runtime-state write fail inside its transaction, then heal."""
+
+    def __init__(self, adapter: SqliteLedger) -> None:
+        self._adapter = adapter
+        self._original = adapter._sync_runtime_state  # pyright: ignore[reportPrivateUsage]
+        adapter._sync_runtime_state = self._fail  # pyright: ignore[reportPrivateUsage,method-assign]
+
+    def _fail(self) -> None:
+        self._adapter._sync_runtime_state = self._original  # pyright: ignore[reportPrivateUsage,method-assign]
+        raise RuntimeError("test_lifecycle_sync_failure")
+
+
+async def _lifecycle_view(
+    adapter: SqliteLedger, command: AppendCommand, operation_id: str
+) -> tuple[object, ...]:
+    operation = await adapter.lookup_operation(command.writer_id, operation_id)
+    job = await adapter.load_semantic_job(command.writer_id, operation_id)
+    attempts = () if job is None else await adapter.list_semantic_attempts(job.job_id)
+    wait = await adapter.load_disclosure_wait(command.writer_id, operation_id)
+    # Recovery re-derives a response ref's media type from its kind, so compare by identity.
+    responses = tuple(
+        None if ref is None else (ref.object_id, ref.envelope_digest)
+        for ref in (
+            None if job is None else job.selected_result_object_ref,
+            *(attempt.result_object_ref for attempt in attempts),
+        )
+    )
+
+    def without_response(record: object, name: str) -> tuple[object, ...]:
+        return tuple(
+            (field.name, getattr(record, field.name))
+            for field in fields(cast(Any, record))
+            if field.name != name
+        )
+
+    job_view = None if job is None else without_response(job, "selected_result_object_ref")
+    attempt_views = tuple(without_response(attempt, "result_object_ref") for attempt in attempts)
+    return operation, job_view, attempt_views, wait, responses
+
+
+@pytest.mark.anyio
+async def test_sqlite_lifecycle_sync_failure_keeps_live_state_durable_and_retryable() -> None:
+    """A check or AI-powered review lifecycle write whose SQLite commit fails changes nothing.
+
+    The live adapter must keep reporting exactly what a restart recovers from the bundle, and the
+    same lease holder's retry must then succeed and commit.
+    """
+
+    command = ledger_command(request_suffix="0")
+    operation_id = "req_00000000-0000-4000-8000-0000000000b0"
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, operation_id)
+    case_digest = "sha256:" + "7" * 64
+    case_ref = await _object_ref(
+        adapter, command, ObjectKind.SEMANTIC_CASE, semantic_case_digest=case_digest
+    )
+    response_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
+    handles: list[SemanticAttemptHandle] = []
+
+    async def enqueue() -> object:
+        return await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
+
+    async def claim() -> object:
+        job = await adapter.load_semantic_job(command.writer_id, operation_id)
+        assert job is not None
+        handle = await adapter.claim_semantic_job(lease, job.job_id)
+        handles[:] = [handle]
+        return handle
+
+    async def record_wait() -> object:
+        return await adapter.record_disclosure_wait(
+            handles[0],
+            "ppr_00000000-0000-4000-8000-0000000000b0",
+            datetime(2026, 7, 19, 12, 1, tzinfo=UTC),
+        )
+
+    async def resolve_wait() -> object:
+        return await adapter.resolve_disclosure_wait(handles[0].job_id)
+
+    async def record_outcome() -> object:
+        await adapter.record_attempt_outcome(
+            handles[0], AttemptOutcome.RESPONSE_DURABLE, response_ref
+        )
+        return None
+
+    async def select() -> object:
+        return await adapter.select_attempt(lease, handles[0], response_ref)
+
+    async def advance() -> object:
+        return await adapter.advance_check_phase(
+            lease, CheckPhase.SEMANTIC_WAIT, CheckPhase.READY_TO_FINALIZE
+        )
+
+    steps = (enqueue, claim, record_wait, resolve_wait, record_outcome, select, advance)
+    for step in steps:
+        before = await _lifecycle_view(adapter, command, operation_id)
+        _FailNextSync(adapter)
+        with pytest.raises(RuntimeError, match="test_lifecycle_sync_failure"):
+            await step()
+        live = await _lifecycle_view(adapter, command, operation_id)
+        durable = await _lifecycle_view(_restarted_sqlite(adapter, command), command, operation_id)
+        assert live == before, step.__name__
+        assert durable == before, step.__name__
+        await step()
+        live = await _lifecycle_view(adapter, command, operation_id)
+        durable = await _lifecycle_view(_restarted_sqlite(adapter, command), command, operation_id)
+        assert live != before, step.__name__
+        assert durable == live, step.__name__
+    operation = await adapter.lookup_operation(command.writer_id, operation_id)
+    assert operation is not None and operation.phase is CheckPhase.READY_TO_FINALIZE
+
+
+@pytest.mark.anyio
+async def test_sqlite_suspension_and_job_failure_sync_failure_are_retryable() -> None:
+    """Suspensions and a queued job's terminal failure adopt memory only after COMMIT."""
+
+    command = ledger_command(request_suffix="0")
+    operation_id = "req_00000000-0000-4000-8000-0000000000b0"
+    for suspend in ("review_input", "repository_grant", "fail_job"):
+        adapter = sqlite_ledger(command)
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(adapter, command, operation_id)
+        job_id = ""
+        if suspend == "fail_job":
+            case_ref = await _object_ref(
+                adapter,
+                command,
+                ObjectKind.SEMANTIC_CASE,
+                semantic_case_digest="sha256:" + "8" * 64,
+            )
+            job_id = (
+                await adapter.enqueue_semantic_job(lease, "sha256:" + "8" * 64, case_ref)
+            ).job_id
+
+        async def step(adapter: SqliteLedger = adapter, job_id: str = job_id) -> None:
+            if suspend == "review_input":
+                await adapter.suspend_check_for_review_input(lease)
+            elif suspend == "repository_grant":
+                await adapter.suspend_check_for_repository_grant(lease)
+            else:
+                await adapter.fail_semantic_job(lease, job_id, SemanticReason.PROVIDER_TIMEOUT)
+
+        before = await _lifecycle_view(adapter, command, operation_id)
+        _FailNextSync(adapter)
+        with pytest.raises(RuntimeError, match="test_lifecycle_sync_failure"):
+            await step()
+        assert await _lifecycle_view(adapter, command, operation_id) == before, suspend
+        await step()
+        live = await _lifecycle_view(adapter, command, operation_id)
+        durable = await _lifecycle_view(_restarted_sqlite(adapter, command), command, operation_id)
+        assert live != before, suspend
+        assert durable == live, suspend
+
+
+@pytest.mark.anyio
+async def test_sqlite_busy_suspension_leaves_live_state_at_the_bundle(tmp_path: Path) -> None:
+    """A write lock held by another connection fails the suspension; nothing leaks or sticks."""
+
+    command = ledger_command(request_suffix="0")
+    operation_id = "req_00000000-0000-4000-8000-0000000000b0"
+    path = tmp_path / "busy-suspension.sqlite3"
+    seed = apsw.Connection(str(path))
+    seed.execute("PRAGMA journal_mode=WAL")
+    initialize_bundle(
+        seed,
+        {"task_id": command.task_id, "owner_generation": "1", "owner_nonce": "ledger-test-nonce"},
+    )
+    seed.close()
+    ids = _Ids()
+    adapter = SqliteLedger(
+        db=apsw.Connection(str(path)),
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=ids,
+        objects=_Objects(ids),
+    )
+    await adapter.append_batch(command)
+    lease = await _semantic_wait_lease(adapter, command, operation_id)
+    before = await adapter.lookup_operation(command.writer_id, operation_id)
+    assert before is not None and before.suspension_kind is None
+
+    other = apsw.Connection(str(path))
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(apsw.BusyError):
+            await adapter.suspend_check_for_review_input(lease)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    assert await adapter.lookup_operation(command.writer_id, operation_id) == before
+
+    await adapter.suspend_check_for_review_input(lease)
+    restarted = SqliteLedger(
+        db=apsw.Connection(str(path)),
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=ids,
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    durable = await restarted.lookup_operation(command.writer_id, operation_id)
+    assert durable is not None
+    assert durable.suspension_kind is CheckSuspensionKind.REVIEW_INPUT
+    assert durable == await adapter.lookup_operation(command.writer_id, operation_id)
 
 
 def _restarted_sqlite(adapter: SqliteLedger, command: AppendCommand) -> SqliteLedger:

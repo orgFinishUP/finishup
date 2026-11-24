@@ -143,3 +143,42 @@ def test_a_channel_ceiling_above_262144_bytes_is_written_only_as_1_3_0() -> None
     llm["max_bytes"] = "524289"
     with pytest.raises(SchemaInstanceInvalid):
         validate_schema_instance("privacy-policy", "1.3.0", cast(JsonValue, over))
+
+
+@pytest.mark.parametrize(
+    "digit_zero", [0xFF10, 0x0660, 0x0966], ids=["fullwidth", "arabic", "deva"]
+)
+@pytest.mark.parametrize(
+    "field", ["version", "max_bytes", "max_tokens", "authorization_ttl_seconds"]
+)
+def test_wire_decode_refuses_a_counter_spelled_in_non_ascii_digits(
+    tmp_path: Path, digit_zero: int, field: str
+) -> None:
+    """The frozen schema's decimal counters are ASCII ``[0-9]``; a Unicode-digit spelling of the
+    same number is outside the wire grammar and must not decode, even from a desired-state file."""
+    from finishup.config.privacy_desired import (
+        PRIVACY_DESIRED_SCHEMA,
+        load_privacy_desired_canonical,
+    )
+
+    wire = encode_privacy_policy_json(minimal_external_policy())
+    if field == "version":
+        target: dict[str, JsonValue] = wire
+    else:
+        channels = cast(list[dict[str, JsonValue]], wire["channel_policies"])
+        target = next(item for item in channels if item["channel"] == "llm_inference")
+    target[field] = "".join(chr(digit_zero + int(ch)) for ch in cast(str, target[field]))
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("privacy-policy", cast(str, wire["schema_version"]), wire)
+    with pytest.raises(ValueError, match="_row_corrupt"):
+        decode_privacy_policy_canonical(canonical_encode(wire))
+
+    desired = tmp_path / "desired.toml"
+    desired.write_text(
+        f'schema = "{PRIVACY_DESIRED_SCHEMA}"\n\n[privacy.desired]\npolicy_json = '
+        + json.dumps(json.dumps(wire, ensure_ascii=False), ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="_row_corrupt"):
+        decode_privacy_policy_canonical(load_privacy_desired_canonical(desired))

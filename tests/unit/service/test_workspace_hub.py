@@ -9,11 +9,14 @@ from collections.abc import Callable
 import pytest
 
 from finishup.ports.approved_checks import ApprovedCheckApproval, approval_commitment
-from finishup.ports.change_capture import TaskChangeBase
+from finishup.ports.change_capture import RequestedPathProbe, TaskChangeBase
 from finishup.ports.control import WorkspaceAgentDeclaration, WorkspaceCall, WorkspaceReply
 from finishup.ports.workspace_agent import (
     WORKSPACE_OPERATION_NAMES,
     CodeSyncReadArguments,
+    LstatCandidatesArguments,
+    LstatFacts,
+    ProbeRequestedPathsArguments,
     RunApprovedCheckArguments,
     WorkspaceAgentUnavailable,
     WorkspaceOnlyArguments,
@@ -266,6 +269,59 @@ async def test_a_reply_that_is_not_the_operations_result_is_reply_invalid() -> N
     with pytest.raises(WorkspaceAgentUnavailable) as caught:
         await hub.call(_HANDLE, WorkspaceOperation.READ_TASK_BASE, _ARGS, timeout_seconds=1.0)
     assert caught.value.reason == "reply_invalid"
+
+
+_LSTAT_ROW = LstatFacts(0o100644, 1, 1)
+_PROBE_ROW = RequestedPathProbe("outside")
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments", "rows"),
+    (
+        (WorkspaceOperation.LSTAT_CANDIDATES, LstatCandidatesArguments(("/data/a",)), ()),
+        (
+            WorkspaceOperation.LSTAT_CANDIDATES,
+            LstatCandidatesArguments(("/data/a",)),
+            (None, _LSTAT_ROW),
+        ),
+        (
+            WorkspaceOperation.LSTAT_CANDIDATES,
+            LstatCandidatesArguments(("/data/a", "/data/b")),
+            (None,),
+        ),
+        (
+            WorkspaceOperation.PROBE_REQUESTED_PATHS,
+            ProbeRequestedPathsArguments(_HANDLE, ("a.py",)),
+            (),
+        ),
+        (
+            WorkspaceOperation.PROBE_REQUESTED_PATHS,
+            ProbeRequestedPathsArguments(_HANDLE, ("a.py",)),
+            (_PROBE_ROW, _PROBE_ROW),
+        ),
+    ),
+)
+async def test_a_per_path_reply_with_another_row_count_is_reply_invalid(
+    operation: WorkspaceOperation, arguments: object, rows: tuple[object, ...]
+) -> None:
+    # The rows decode, but they are not one answer per path asked: never matched up by guess.
+    hub = _hub()
+    await _register(hub, lambda call: _ok(call, rows))
+    with pytest.raises(WorkspaceAgentUnavailable) as caught:
+        await hub.call(_HANDLE, operation, arguments, timeout_seconds=1.0)
+    assert caught.value.reason == "reply_invalid"
+
+
+async def test_a_per_path_reply_with_one_row_per_path_is_delivered() -> None:
+    hub = _hub()
+    await _register(hub, lambda call: _ok(call, (None, _LSTAT_ROW)))
+    found = await hub.call(
+        _HANDLE,
+        WorkspaceOperation.LSTAT_CANDIDATES,
+        LstatCandidatesArguments(("/data/a", "/data/b")),
+        timeout_seconds=1.0,
+    )
+    assert found == (None, _LSTAT_ROW)
 
 
 async def test_no_reply_by_the_deadline_is_deadline_exceeded_and_a_late_reply_is_dropped() -> None:

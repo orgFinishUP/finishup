@@ -141,6 +141,10 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    `shopt -o` naming any other option (`shopt -os noexec`), and a command word the reader cannot
    resolve to one program are refused alike: a substitution (`$RUN`), a redirection written
    against it (`exec>log true`, `exit>/dev/null`) or a brace or pathname expansion (`{exit,0}`).
+   A shell wrapper given the noexec flag (`bash -nc '...'`, `sh -cn '...'`, or `bash -n` fed a
+   here-document) reads its script without running it and still exits zero, so its script is
+   neither unwrapped into the command identity nor listed, classified or certified as a run
+   (#1444).
    Signalling the shell (`kill $$`, `pkill -f ...`) is not refused: a shell a signal ends exits
    with a failure, which certifies nothing anyway. Every other earlier segment counts as
    returning, exactly as a separate earlier call always has; the builtin list is best-effort for

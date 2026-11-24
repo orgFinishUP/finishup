@@ -924,6 +924,33 @@ def installed_claude_startup_mode(
     return "required" if b" hooks startup-gate --host claude " in hooks else "optional"
 
 
+def installed_claude_observation_profile(
+    target: ClaudeCodePluginTarget,
+) -> Literal["structural", "ordinary"] | None:
+    """The observation profile of the marker-verified shared source, if it can be verified.
+
+    The source under the config root serves every project's install (#1058), so a connection
+    that names no profile keeps the installed one rather than reverting the owner's ordinary
+    hooks for every project. ``None`` when the source is unverifiable; an absent source is
+    ``"structural"``, the default for a new installation.
+    """
+    _validate_target(target)
+    root = Path(target.marketplace_root)
+    if not root.exists():
+        legacy_root = _legacy_location(target)
+        if _legacy_tree(legacy_root)[0] != "legacy":
+            return "structural"
+        root = legacy_root
+    files = _safe_tree(root)
+    if not _valid_source_marker(files)[0]:
+        return None
+    hooks = files.get("plugins/finishup/hooks/hooks.json") or files.get(
+        f"plugins/{_LEGACY_PLUGIN_NAME}/hooks/hooks.json", b""
+    )
+    flag = f" --observation-profile {shlex.quote(CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID)} "
+    return "ordinary" if flag.encode() in hooks else "structural"
+
+
 def installed_claude_route_profile(
     target: ClaudeCodePluginTarget,
 ) -> Literal["strict", "policy"] | None:
@@ -1170,7 +1197,17 @@ def _validate_target(target: ClaudeCodePluginTarget) -> str:
 
 def _safe_tree(root: Path) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().encode("utf-8")):
+    # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
+    # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda item: item.as_posix().encode("utf-8", "surrogateescape"),
+    )
+    for path in paths:
+        try:
+            path.as_posix().encode("utf-8")
+        except UnicodeEncodeError:
+            raise _error(PluginArtifactReason.TARGET_UNSAFE) from None
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
@@ -1192,7 +1229,7 @@ def _tree_digest(files: Mapping[str, bytes]) -> str:
         {
             "files": [
                 {"relative_path": path, "sha256": _sha(data), "size": len(data)}
-                for path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii"))
+                for path, data in sorted(files.items(), key=lambda item: item[0].encode("utf-8"))
             ]
         }
     )

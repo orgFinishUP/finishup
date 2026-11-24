@@ -637,14 +637,23 @@ def forget_lines(record: ServerTarget, outcomes: tuple[ForgetOutcome, ...]) -> t
             )
         lines.append(named + f"not forgotten ({outcome.reason}): {remedy}.")
     missed = sum(1 for outcome in outcomes if not outcome.forgotten)
+    # A ``never_sent`` repository is no miss, but nothing of it was forgotten either (as the
+    # JSON's ``forgotten`` count says): only a copy the server deleted earns the summary and the
+    # trailer about what its deletion takes from the tasks that read it.
+    forgotten = sum(1 for outcome in outcomes if outcome.forgotten and outcome.sent)
     if missed:
         lines.append(
             f"{missed} of {len(outcomes)} not forgotten: each stays on {record.name} until it "
             "expires or is forgotten."
         )
-    else:
+    elif forgotten:
         lines.append(f"Every copy this computer sent to {record.name} is forgotten there.")
-    if missed < len(outcomes):
+    else:
+        lines.append(
+            f"This computer sent {record.name} nothing from these repositories, so FinishUP "
+            f"asked {record.name} nothing; nothing was deleted."
+        )
+    if forgotten:
         lines.append(FORGET_TRAILER)
     return tuple(lines)
 
@@ -840,6 +849,15 @@ def _update(
         raise ServerCommandRefused(error.reason) from None
 
 
+def _room_for(entries: tuple[object, ...], entry: object) -> None:
+    """Refuse adding ``entry`` to a list already holding the most entries a repository keeps."""
+
+    from finishup.client.code_copy_settings import MAX_ENTRIES
+
+    if entry not in entries and len(entries) >= MAX_ENTRIES:
+        raise ServerCommandRefused("code_copy_settings_limit")
+
+
 def _confirm(record: ServerTarget, lines: tuple[str, ...]) -> None:
     from finishup.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 
@@ -870,6 +888,7 @@ def server_code_exclude_add(pattern: str, repository: _REPOSITORY_OPTION = None)
     here = repository_here(repository)
 
     def add(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        _room_for(settings.exclude, pattern)
         return replace(settings, exclude=tuple(sorted({*settings.exclude, pattern})))
 
     _update(record, here.key, add)
@@ -967,6 +986,8 @@ def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> N
     finally:
         os.close(descriptor)
     content = "sha256:" + digest.hexdigest()
+    # A full list is refused before the owner is asked anything (and again under the lock).
+    _room_for(_settings(record, here.key).allow, (relative, content))
     _confirm(
         record,
         (
@@ -978,6 +999,7 @@ def server_code_allow_add(file: str, repository: _REPOSITORY_OPTION = None) -> N
     )
 
     def allow(settings: RepositoryCodeSettings) -> RepositoryCodeSettings:
+        _room_for(settings.allow, (relative, content))
         return replace(settings, allow=tuple(sorted({*settings.allow, (relative, content)})))
 
     _update(record, here.key, allow)

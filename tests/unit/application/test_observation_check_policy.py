@@ -91,6 +91,40 @@ def test_policy_reader_keeps_present_but_broken_policy_invalid(tmp_path: Path) -
     assert caught.value.reason_code == "invalid_approved_check_policy"
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    ["9" * 400, "1000", "-5", "0", "300.5", "1e400", "nan", "inf"],
+    ids=["too_large_for_a_float", "1000", "-5", "0", "300.5", "1e400", "nan", "inf"],
+)
+def test_policy_with_an_unusable_timeout_is_an_invalid_policy(timeout: str) -> None:
+    raw = _policy().replace(b"timeout_seconds = 10", f"timeout_seconds = {timeout}".encode())
+    with pytest.raises(ProtocolValueError) as caught:
+        parse_observation_check_policy(raw)
+    assert caught.value.reason_code == "invalid_approved_check_policy"
+
+
+def test_policy_with_an_unapprovable_argv_is_an_invalid_policy() -> None:
+    with pytest.raises(ProtocolValueError) as caught:
+        parse_observation_check_policy(_policy(argv='["/bin/sh", "-c", "echo unsafe"]'))
+    assert caught.value.reason_code == "invalid_approved_check_policy"
+
+
+@pytest.mark.parametrize("timeout", ["0.1", "300", "300.0"])
+def test_policy_accepts_timeouts_at_the_approved_bounds(timeout: str) -> None:
+    raw = _policy().replace(b"timeout_seconds = 10", f"timeout_seconds = {timeout}".encode())
+    assert parse_observation_check_policy(raw).checks[0].timeout_seconds == float(timeout)
+
+
+def test_policy_reader_reports_a_huge_timeout_as_invalid_not_a_crash(tmp_path: Path) -> None:
+    policy_dir = tmp_path / ".finishup"
+    policy_dir.mkdir()
+    raw = _policy().replace(b"timeout_seconds = 10", b"timeout_seconds = " + b"9" * 400)
+    (policy_dir / "checks.toml").write_bytes(raw)
+    with pytest.raises(ProtocolValueError) as caught:
+        load_observation_check_policy(tmp_path)
+    assert caught.value.reason_code == "invalid_approved_check_policy"
+
+
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 def test_policy_reader_treats_non_directory_policy_dir_as_invalid(
     tmp_path: Path, kind: str
@@ -205,3 +239,16 @@ def test_a_policy_fifo_never_blocks_the_reader(
     expected = ObservationCheckPolicyAmbiguous if other_present else ProtocolValueError
     with pytest.raises(expected):
         load_observation_check_policy(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"x = " + b"1" * 4301 + b"\n", b"x = " + b"[" * 5000 + b"]" * 5000 + b"\n"],
+    ids=["huge_int", "deep"],
+)
+def test_policy_tomllib_cannot_load_is_invalid(body: bytes) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    with pytest.raises(ProtocolValueError) as caught:
+        parse_observation_check_policy(body)
+    assert caught.value.reason_code == "invalid_approved_check_policy"

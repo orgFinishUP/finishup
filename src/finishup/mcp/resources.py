@@ -377,7 +377,14 @@ class GuidancePageAssembler:
 
 
 def _canonical_nonnegative_int(value: object) -> int:
-    if type(value) is not str or not value.isdigit() or (value != "0" and value.startswith("0")):
+    # ``isdigit`` alone admits superscript and other-script digits; the wire contract's
+    # ``canonical_uint`` is ASCII-only, so anything else is a malformed page, never a crash.
+    if (
+        type(value) is not str
+        or not value.isascii()
+        or not value.isdigit()
+        or (value != "0" and value.startswith("0"))
+    ):
         raise GuidanceAssemblyError("guidance_integer_invalid")
     parsed = int(value)
     if parsed > 9_007_199_254_740_991:
@@ -713,11 +720,14 @@ def guidance_sections(uri: str) -> tuple[GuidanceSection, ...]:
     now names the sections to read instead. The list is generated from the closed topic catalog
     and the packaged bytes, the same source ``read_guidance`` admits anchors from, so it cannot
     drift the way a hand-written map can. A whole document lists every catalogued topic; a heading
-    topic lists the catalogued topics that start inside it; a focused topic lists none.
+    topic lists the catalogued topics that start inside it; a focused topic lists none. A caller
+    that names the resource in the legacy scheme reads the same list spelled in that scheme
+    (ADR-048).
     """
 
     resource = _resource_for_uri(uri)
-    document = uri.partition("#")[0]
+    canonical = canonical_guidance_uri(uri) or uri
+    document = canonical.partition("#")[0]
     if document not in _RESOURCE_BY_URI:
         return ()
     start = resource.section_start or 0
@@ -727,7 +737,7 @@ def guidance_sections(uri: str) -> tuple[GuidanceSection, ...]:
     prefix = document + "#"
     found: list[tuple[int, GuidanceSection]] = []
     for topic_uri in GUIDANCE_TOPIC_URIS:
-        if not topic_uri.startswith(prefix) or topic_uri == uri:
+        if not topic_uri.startswith(prefix) or topic_uri == canonical:
             continue
         topic = _topic_resource(topic_uri)
         topic_start = cast(int, topic.section_start)
@@ -735,7 +745,10 @@ def guidance_sections(uri: str) -> tuple[GuidanceSection, ...]:
             found.append(
                 (
                     topic_start,
-                    GuidanceSection(topic_uri, cast(int, topic.section_end) - topic_start),
+                    GuidanceSection(
+                        guidance_uri_in_scheme_of(topic_uri, uri),
+                        cast(int, topic.section_end) - topic_start,
+                    ),
                 )
             )
     found.sort(key=lambda item: item[0])

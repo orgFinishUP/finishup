@@ -1481,6 +1481,66 @@ async def test_resolver_discloses_selected_capture_it_cannot_reach() -> None:
 
 
 @pytest.mark.anyio
+async def test_profileless_codex_keeps_disclosure_of_selected_capture_it_cannot_reach(
+    tmp_path: Path,
+) -> None:
+    frozen, runtime, objects, observation = _codex_profileless_fixture()
+    first = frozen.case.projection.evidence[evd(1)]
+    assert first.payload is not None
+    unreachable_payload = replace(
+        first.payload,
+        evidence_id=evd(2),
+        captured_object_id=object_id("obj_00000000-0000-4000-8000-000000000399"),
+    )
+    unreachable = replace(
+        first,
+        payload=unreachable_payload,
+        payload_digest=canonical_digest(encode_payload(unreachable_payload)),
+        source_event_id=event_id("evt_00000000-0000-4000-8000-000000000399"),
+    )
+    frozen = FrozenCase(
+        replace(
+            frozen.case,
+            projection=replace(
+                frozen.case.projection,
+                evidence={**frozen.case.projection.evidence, evd(2): unreachable},
+            ),
+            allowed_ids=frozenset({*frozen.case.allowed_ids, evd(2)}),
+            coverage_by_ref={
+                **frozen.case.coverage_by_ref,
+                evd(2): frozen.case.coverage_by_ref[evd(1)],
+            },
+        ),
+        frozen.lease,
+    )
+    ref_calls: list[tuple[str, ...]] = []
+
+    def list_envelopes_for_content_refs(
+        _workspace: str, _session_commitment: str, object_ids: tuple[str, ...]
+    ) -> tuple[ObservationEnvelope, ...]:
+        ref_calls.append(object_ids)
+        return ()
+
+    observation.list_envelopes_for_content_refs = list_envelopes_for_content_refs  # type: ignore[attr-defined]
+    local = LocalObservationStore(_state=tmp_path / "local-state")
+    local.grant_consent(_WORKSPACE, timestamp_from_string("2026-07-01T00:00:00.000Z"))
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=_WORKSPACE,
+        local_observation=local,
+    )
+
+    assert ref_calls == [("obj_00000000-0000-4000-8000-000000000399",)]
+    assert len(resolved.content) == 1
+    assert resolved.scope is not None
+    assert ObservationSource.CODEX_HOOK.value in resolved.scope.authorized_profiles
+    assert objects.open_calls == 1
+    assert resolved.gaps == ("content_unselected",)
+
+
+@pytest.mark.anyio
 async def test_response_linked_multipart_repair_precedes_old_claim_evidence() -> None:
     from builders.policy_cases import BASE_COVERAGE, finding_record, fnd, record
     from finishup.domain.events import ResponseRecordedPayload

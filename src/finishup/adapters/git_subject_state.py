@@ -212,6 +212,7 @@ class _GitRunner:
         stdout_limit: int,
         accepted_returncodes: frozenset[int] = frozenset({0}),
         keep_prefix_on_limit: bool = False,
+        stdin_bytes: bytes | None = None,
     ) -> tuple[int, bytearray]:
         argv = (
             os.fspath(self.executable),
@@ -244,7 +245,7 @@ class _GitRunner:
                 cwd=root,
                 env=environment,
                 shell=False,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL if stdin_bytes is None else subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 close_fds=True,
@@ -255,6 +256,7 @@ class _GitRunner:
                 stderr_limit=_STDERR_LIMIT,
                 timeout_seconds=self.timeout_seconds,
                 keep_prefix_on_limit=keep_prefix_on_limit,
+                stdin_bytes=stdin_bytes,
             )
             _overwrite(stderr)
             if process.returncode not in accepted_returncodes:
@@ -274,6 +276,8 @@ class _GitRunner:
             raise _GitProcessFailure() from exc
         finally:
             if process is not None:
+                if process.stdin is not None:
+                    process.stdin.close()
                 if process.stdout is not None:
                     process.stdout.close()
                 if process.stderr is not None:
@@ -417,6 +421,7 @@ def run_read_only_git(
     timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
     accepted_returncodes: frozenset[int] = frozenset({0}),
     keep_prefix_on_limit: bool = False,
+    stdin_bytes: bytes | None = None,
 ) -> tuple[int, bytes]:
     """Run one hardened Git subcommand at a validated workspace root.
 
@@ -426,6 +431,8 @@ def run_read_only_git(
     other failure is ``ValueError("git_failed")``. Neither carries Git output, except that
     ``keep_prefix_on_limit`` turns the limit error into ``GitOutputTruncated`` holding the stdout
     bytes that fit, for a listing whose caller can use and disclose a partial answer.
+    ``stdin_bytes``, when given, is Git's whole standard input (a ``--stdin -z`` query, say);
+    otherwise Git reads nothing.
     """
 
     if type(stdout_limit) is not int or stdout_limit < 1:
@@ -439,6 +446,7 @@ def run_read_only_git(
             stdout_limit=stdout_limit,
             accepted_returncodes=accepted_returncodes,
             keep_prefix_on_limit=keep_prefix_on_limit,
+            stdin_bytes=stdin_bytes,
         )
     except _OutputLimit as exc:
         if keep_prefix_on_limit:
@@ -1024,8 +1032,11 @@ def _bounded_communicate(
     stderr_limit: int,
     timeout_seconds: float,
     keep_prefix_on_limit: bool = False,
+    stdin_bytes: bytes | None = None,
 ) -> tuple[bytearray, bytearray]:
     if process.stdout is None or process.stderr is None:
+        raise _GitProcessFailure()
+    if (stdin_bytes is None) != (process.stdin is None):
         raise _GitProcessFailure()
     selector = selectors.DefaultSelector()
     stdout_buffer = bytearray()
@@ -1039,9 +1050,21 @@ def _bounded_communicate(
         os.set_blocking(descriptor, False)
         selector.register(descriptor, selectors.EVENT_READ)
         streams[descriptor] = (buffer, limit)
+    # Standard input is written as Git becomes ready for it, in the same loop that drains its
+    # output, so neither side can block the other however large either grows.
+    pending = memoryview(stdin_bytes or b"")
+    stdin = process.stdin
+    writer = -1
+    if stdin is not None:
+        writer = stdin.fileno()
+        os.set_blocking(writer, False)
+        if pending:
+            selector.register(writer, selectors.EVENT_WRITE)
+        else:
+            stdin.close()
     deadline = time.monotonic() + timeout_seconds
     try:
-        while streams:
+        while streams or pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise _GitProcessFailure()
@@ -1050,6 +1073,18 @@ def _bounded_communicate(
                 raise _GitProcessFailure()
             for key, _ in events:
                 descriptor = key.fd
+                if descriptor == writer:
+                    try:
+                        pending = pending[os.write(writer, pending[:_READ_CHUNK]) :]
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        # Git stopped reading; its exit status, not this write, is the answer.
+                        pending = pending[:0]
+                    if not pending and stdin is not None:
+                        selector.unregister(writer)
+                        stdin.close()
+                    continue
                 buffer, limit = streams[descriptor]
                 try:
                     chunk = os.read(descriptor, _READ_CHUNK)

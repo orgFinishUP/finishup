@@ -308,6 +308,54 @@ def test_a_chain_whose_earlier_segments_return_control_still_certifies(command: 
     assert segment_certification_commitment(pytest_q) in listed
 
 
+# A shell given the noexec flag (``-n``) reads its script without running it and still exits zero.
+_NOEXEC_SHELLS = [
+    "bash -nc 'pytest -q'",
+    "bash -cn 'pytest -q'",
+    "bash -lnc 'pytest -q'",
+    "sh -nc 'pytest -q'",
+    "/bin/bash -nc 'pytest -q'",
+    "bash -n <<'EOF'\npytest -q\nEOF",
+    "bash -n -s <<'EOF'\npytest -q\nEOF",
+]
+
+
+@pytest.mark.parametrize("command", _NOEXEC_SHELLS)
+def test_a_noexec_shell_never_lists_or_certifies_the_command_it_only_reads(command: str) -> None:
+    from finishup.domain.command_segments import segment_certification_commitment
+    from finishup.kernel.observed_failures import success_certified_identities
+
+    pytest_q = observed_command_commitment(_KEY, "pytest -q")
+    normalized = normalize_observed_command(command)
+    assert normalized is not None
+    assert observed_command_commitment(_KEY, normalized) != pytest_q
+    committed = command_segment_commitments(_KEY, command)
+    assert committed is not None
+    listed = set(committed[0])
+    assert pytest_q not in listed
+    assert segment_certification_commitment(pytest_q) not in listed
+    field = observed_command_field(
+        observed_command_commitment(_KEY, normalized), committed[0], committed[1]
+    )
+    assert pytest_q not in success_certified_identities(field)
+
+
+@pytest.mark.parametrize("argv", [["bash", "-nc", "pytest -q"], ["/bin/sh", "-cn", "pytest -q"]])
+def test_a_noexec_host_shell_wrapper_is_not_stripped_from_the_command_identity(
+    argv: list[str],
+) -> None:
+    assert normalize_observed_command(argv) != "pytest -q"
+
+
+@pytest.mark.parametrize(
+    "command", ["bash -lc 'pytest -q'", "bash -ec 'pytest -q'", "bash <<'EOF'\npytest -q\nEOF"]
+)
+def test_a_shell_that_runs_its_script_still_lists_the_command(command: str) -> None:
+    committed = command_segment_commitments(_KEY, command)
+    assert committed is not None
+    assert observed_command_commitment(_KEY, "pytest -q") in set(committed[0])
+
+
 @pytest.mark.parametrize(
     "command",
     ["exec true && pytest -q", "source .venv/bin/activate && pytest -q", "{exit,0} && pytest -q"],

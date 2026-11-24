@@ -115,6 +115,37 @@ def test_unbalanced_quotes_do_not_raise(env: dict[str, Path]) -> None:
     assert _target("pip install 'x", env) is None
 
 
+def test_an_install_on_a_later_line_is_classified(env: dict[str, Path]) -> None:
+    # A newline ends a command exactly as ``;`` does (#1434).
+    assert _target("cd /w\nuv pip install requests", env) == "unresolved"
+    assert _target("echo start\npipx install ruff", env) == "private_env"
+    assert _target(f"cd {env['workspace']}\n{env['private']}/bin/pip install x", env) == (
+        "private_env"
+    )
+    assert _target("echo one\n\n  pip install x\n", env) == "system"
+    assert _target("make 2>&1 |& tee log\npipx install ruff", env) == "private_env"
+    assert _target("make |& pipx install ruff", env) == "private_env"
+
+
+def test_a_newline_that_is_not_a_command_separator_splits_nothing(env: dict[str, Path]) -> None:
+    # Inside quotes, after a backslash, in a comment or in a heredoc body a newline (or a line
+    # that reads as an install) is data.
+    assert _target("echo 'first\npip install x'", env) is None
+    assert _target('git commit -m "notes\npipx install ruff"', env) is None
+    assert _target("pip \\\n  install x", env) == "system"
+    assert _target("# pip install x\nls", env) is None
+    assert _target("cat <<'EOF' > notes.md\npipx install ruff\nEOF\nls", env) is None
+    assert _target("cat <<EOF\npipx install ruff\nEOF\npip install x", env) == "system"
+
+
+def test_an_install_inside_a_command_substitution_is_classified(env: dict[str, Path]) -> None:
+    assert _target("echo $(pip install x)", env) == "system"
+    assert _target('log="$(pipx install ruff)"', env) == "private_env"
+    assert _target("echo $(echo $(pip install x))", env) == "system"
+    assert _target("echo '$(pip install x)'", env) is None
+    assert _target("echo $(pip list)", env) is None
+
+
 # --- task interpreter (tb4n1 regressions) ------------------------------------------------------
 
 
@@ -304,6 +335,32 @@ def test_git_apply_and_patch_heredocs_are_workspace_writes(tmp_path: Path) -> No
     assert scope("git apply <<'EOF'\n--- a/src/x.py\n+++ b/src/x.py\n@@\n-a\n+b\n") is None
 
 
+def test_a_code_section_after_a_padded_delimiter_line_is_a_workspace_write(
+    tmp_path: Path,
+) -> None:
+    """A README context line `` EOF`` does not end the heredoc, so the patch's later code section
+    keeps the command an ordinary edit rather than a stale-exempt documentation one."""
+
+    command = (
+        "git apply <<'EOF'\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n cat <<EOF\n"
+        "-old\n+new\n EOF\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "EOF\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
+@pytest.mark.parametrize("opener", ["git apply <<\\EOF", "git apply <<'END-PATCH'"])
+def test_a_heredoc_patch_with_any_bash_delimiter_is_a_workspace_write(
+    opener: str, tmp_path: Path
+) -> None:
+    delimiter = "END-PATCH" if "END-" in opener else "EOF"
+    command = (
+        f"{opener}\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        f"{delimiter}\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
 def test_shell_redirect_scope(tmp_path: Path) -> None:
     assert (
         _facts("Bash", {"command": "echo x > /opt/elsewhere/y"}, tmp_path)["write_scope"]
@@ -368,6 +425,34 @@ def test_install_target_fact_is_closed_token_only(env: dict[str, Path], tmp_path
     )
     assert facts["install_target"] in runtime_facts.INSTALL_TARGET_VALUES
     assert "secret-pkg" not in repr(facts)
+
+
+@pytest.mark.parametrize("shell", ["bash", "/bin/bash"])
+@pytest.mark.parametrize("tool", ["shell", "local_shell"])
+@pytest.mark.parametrize("workspace_known", [True, False])
+def test_a_native_argv_install_is_read_from_its_script(
+    env: dict[str, Path], shell: str, tool: str, workspace_known: bool
+) -> None:
+    """A Codex ``shell`` hook states ``["bash", "-lc", SCRIPT]``; its install target is the
+    script's, the one its session-stream copy (handed that script) carries (#1435)."""
+
+    script = f"{env['private'] / 'bin' / 'pip'} install x"
+    locator = str(env["workspace"]) if workspace_known else None
+
+    def facts(tool_name: str, command: JsonValue) -> dict[str, JsonValue]:
+        return dict(
+            runtime_structural_facts(
+                {"tool_input": {"command": command}},
+                tool_name=tool_name,
+                workspace_locator=locator,
+                inside=_inside(env["workspace"]),
+            )
+        )
+
+    hook = facts(tool, [shell, "-lc", script])
+    stream = facts("Bash", script)
+    assert stream["install_target"] == "private_env"
+    assert hook["install_target"] == stream["install_target"]
 
 
 def test_quoted_text_and_heredoc_bodies_are_not_write_targets(tmp_path: Path) -> None:
@@ -578,6 +663,21 @@ def test_sudo_options_and_attached_target_are_read(env: dict[str, Path], task_ve
     assert _target(f"sudo -H -u builder {telecom}/bin/pip install x", env) == "private_env"
     assert _target("sudo -E pip install x", env) == "system"
     assert _target("pip install -t/opt/deps x", env) == "private_env"
+
+
+def test_prefix_options_take_an_operand_only_where_their_command_reads_one(
+    env: dict[str, Path], task_venv: Path
+) -> None:
+    """``sudo -S`` and ``time -p`` take no operand, so the installer after them is still read."""
+
+    telecom = _venv(env["system"].parent / "tmp" / "telecom_venv", "pip", "python")
+    pip = f"{telecom}/bin/pip"
+    for prefix in ("sudo -S", "time -p", "exec -c", "sudo -S -u builder", "env -i"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    # Options that do take an operand still consume it.
+    for prefix in ("env -S 'A=1'", "env -u NAME", "sudo -p prompt", "time -o out", "exec -a n"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    assert _target(f"echo pw | sudo -S {pip} install x", env) == "private_env"
 
 
 def test_a_conda_environment_is_an_environment_of_its_own(

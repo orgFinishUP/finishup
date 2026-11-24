@@ -16,6 +16,7 @@ from finishup.adapters.integrations.cursor_mcp_runtime import (
     CursorMcpProcessSnapshot,
     FixedCursorMcpProcesses,
     classify_cursor_semantic_ceiling,
+    classify_serve_argv,
     classify_serve_suffix,
     observe_cursor_mcp_runtime,
 )
@@ -411,6 +412,156 @@ def test_darwin_scanner_uses_the_text_match_for_whitespace_launchers(
     snapshot = module._darwin_snapshots(spaced)  # pyright: ignore[reportPrivateUsage]
     assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("filler_rows", [0, 509, 700, 4_000])
+def test_darwin_scanner_reads_the_whole_process_table(
+    monkeypatch: pytest.MonkeyPatch, filler_rows: int
+) -> None:
+    # ``ps`` lists by PID and Cursor usually starts late, so its helper child can sit past any
+    # fixed row count; macOS must see it just as the Linux /proc walk does.
+    import subprocess
+
+    import finishup.adapters.integrations.cursor_mcp_runtime as module
+
+    launcher = "/opt/finishup/bin/finishup"
+    pids = range(100, 100 + filler_rows)
+    comm_table = b"".join(f"{pid} 1 /usr/libexec/d{pid}\n".encode() for pid in pids)
+    arg_table = b"".join(f"{pid} 1 /usr/libexec/d{pid} --flag\n".encode() for pid in pids)
+    comm_table += b"9000 1 Cursor\n9001 9000 mcp-process\n9002 9001 finishup\n"
+    arg_table += (
+        b"9000 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"9001 9000 mcp-process\n" + f"9002 9001 {launcher} mcp serve --host cursor\n".encode()
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    snapshot = module._darwin_snapshots((launcher,))  # pyright: ignore[reportPrivateUsage]
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
+    observation = observe_cursor_mcp_runtime(
+        installed_route="policy", processes=FixedCursorMcpProcesses(snapshot)
+    )
+    assert observation.activation == "matched"
+    assert observation.executable_activation == "matched"
+
+
+@pytest.mark.parametrize(
+    ("root", "tail", "route"),
+    [
+        ("/Users/dev/Documents/My Project", (), "policy"),
+        ("/Users/dev/Documents/My Project", ("--semantic", "off"), "strict"),
+        ("/Users/dev/Library/Mobile Documents/com~apple~CloudDocs/a b  c", (), "policy"),
+        ("/Users/dev/x --semantic off/y", (), "policy"),
+        ("/Users/dev/x --semantic off/y", ("--semantic", "off"), "strict"),
+        ("/Users/dev/" + "deep dir/" * 40 + "app", ("--semantic", "off"), "strict"),
+    ],
+)
+@pytest.mark.parametrize(
+    "launcher", [("/opt/finishup/bin/finishup",), ("/opt/FinishUP Tools/bin/finishup",)]
+)
+def test_darwin_scanner_classifies_a_project_root_that_contains_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+    root: str,
+    tail: tuple[str, ...],
+    route: str,
+    launcher: tuple[str, ...],
+) -> None:
+    # Cursor expands ``--project-root ${workspaceFolder}`` to the workspace path, which on macOS
+    # often contains spaces (``~/Documents/My Project``, iCloud ``Mobile Documents``). ``ps``
+    # joins argv with spaces, so the scanner must classify the same child Linux classifies.
+    import subprocess
+
+    import finishup.adapters.integrations.cursor_mcp_runtime as module
+
+    argv = (*launcher, "mcp", "serve", "--host", "cursor", "--project-root", root, *tail)
+    assert classify_serve_argv(argv, launcher) == (route, "matched")
+
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /opt/finishup\n"
+    arg_table = (
+        b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"11 10 mcp-process\n" + b"12 11 " + " ".join(argv).encode() + b"\n"
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    snapshot = module._darwin_snapshots(launcher)  # pyright: ignore[reportPrivateUsage]
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", route, "matched"),)  # pyright: ignore[reportArgumentType]
+    observation = observe_cursor_mcp_runtime(
+        installed_route=route,  # pyright: ignore[reportArgumentType]
+        processes=FixedCursorMcpProcesses(snapshot),
+    )
+    assert observation.activation == "matched"
+    assert observation.live_route_profile == route
+    assert observation.executable_activation == "matched"
+
+
+def test_macos_ps_text_classifies_only_the_exact_project_registration() -> None:
+    from finishup.adapters.integrations.cursor_mcp_runtime import classify_project_serve_text
+
+    bound = ("/opt/finishup/bin/finishup",)
+    text = "/opt/finishup/bin/finishup mcp serve --host cursor --project-root /Users/a/My Project"
+    assert classify_project_serve_text(text, bound) == ("policy", "matched")
+    assert classify_project_serve_text(text + " --semantic off", bound) == ("strict", "matched")
+    assert classify_project_serve_text(text, None) == ("policy", None)
+    other = text.replace("/opt/finishup/", "/opt/older/")
+    assert classify_project_serve_text(other, bound) == ("policy", "different")
+    # Not a FinishUP launcher before ``mcp serve``, a relative or traversing root, an unknown
+    # trailing flag, or no project root at all: not this registration.
+    assert classify_project_serve_text(text.replace("bin/finishup", "bin/other"), bound) is None
+    assert (
+        classify_project_serve_text(text.replace("/Users/a/My Project", "My Project"), bound)
+        is None
+    )
+    assert classify_project_serve_text(text.replace("/Users/a/My", "/Users/../My"), bound) is None
+    assert classify_project_serve_text("/opt/finishup/bin/finishup mcp serve", bound) is None
+    assert classify_project_serve_text("", bound) is None
+
+
+def test_darwin_scanner_skips_a_process_row_too_long_to_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A row past the bound is not classified from a cut-off prefix (which could drop a trailing
+    # ``--semantic off`` and misread the route); it is skipped, as Linux skips a long cmdline.
+    import subprocess
+
+    import finishup.adapters.integrations.cursor_mcp_runtime as module
+
+    launcher = "/opt/finishup/bin/finishup"
+    root = "/Users/dev/" + "d/" * 3_000 + "app"
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 finishup\n"
+    arg_table = (
+        b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"11 10 mcp-process\n"
+        + f"12 11 {launcher} mcp serve --host cursor --project-root {root} --semantic off\n".encode()
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert module._darwin_snapshots((launcher,)) == ()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(

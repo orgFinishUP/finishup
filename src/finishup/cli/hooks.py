@@ -22,6 +22,7 @@ from finishup.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
+    pending_mapping_paths,
     queue_mapping_store,
     scoped_child_session_id,
     store_mapping,
@@ -789,20 +790,17 @@ def _pending_mapping_snapshot(
     """
 
     try:
-        mapping = mapping_path(codex_session_id, _state=_state)
-        pending = mapping.parent / f".{codex_session_id}.pending.json"
-        applying = pending.with_name(pending.name + ".applying")
         from finishup.adapters.integrations.codex_lifecycle import (
             _load_pending_mapping_operation,  # pyright: ignore[reportPrivateUsage]
         )
 
-        candidates = tuple(
-            candidate
-            for candidate in (applying, pending)
-            if candidate.exists() or candidate.is_symlink()
-        )
+        candidates = pending_mapping_paths(codex_session_id, _state=_state)
         if not candidates:
             return _PendingMappingSnapshot(False, None)
+        if len(candidates) > 2:
+            # A legacy-layout queue left by an older writer plus a current one:
+            # defer to the recovery owner, which replays them in order.
+            return _PendingMappingSnapshot(True, None)
         operations = tuple(
             _load_pending_mapping_operation(
                 codex_session_id,
@@ -981,11 +979,8 @@ def _mapping_state_before_start(
                     _session_lock_owned=True,
                 )
             mapping = load_mapping(codex_session_id, _state=_state)
-            path = mapping_path(codex_session_id, _state=_state)
-            pending = path.parent / f".{codex_session_id}.pending.json"
-            applying = pending.with_name(pending.name + ".applying")
-            return mapping, (not owned) or any(
-                item.exists() or item.is_symlink() for item in (pending, applying)
+            return mapping, (not owned) or bool(
+                pending_mapping_paths(codex_session_id, _state=_state)
             )
     except Exception:
         # An unreadable lock or pending marker cannot establish that the raw
@@ -1257,11 +1252,7 @@ def recover_pending_start_mapping(
     """
 
     try:
-        mapping = mapping_path(codex_session_id, _state=_state)
-        pending = mapping.parent / f".{codex_session_id}.pending.json"
-        applying = pending.with_name(pending.name + ".applying")
-        paths = (pending, applying)
-        if not any(path.exists() or path.is_symlink() for path in paths):
+        if not pending_mapping_paths(codex_session_id, _state=_state):
             return PendingMappingRecovery(applied=False, pending=False)
         lifecycle_lock = (
             contextlib.nullcontext(True)
@@ -1276,7 +1267,7 @@ def recover_pending_start_mapping(
                 if not apply_pending_mapping(codex_session_id, _state=_state):
                     break
                 applied = True
-        still_pending = any(path.exists() or path.is_symlink() for path in paths)
+        still_pending = bool(pending_mapping_paths(codex_session_id, _state=_state))
         return PendingMappingRecovery(applied=applied, pending=still_pending)
     except Exception:
         return PendingMappingRecovery(applied=False, pending=True)

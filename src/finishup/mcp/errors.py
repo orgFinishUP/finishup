@@ -324,7 +324,7 @@ _CHECK_SCOPE_CORRECTION: Final = (
 _STATUS_FILTER_CORRECTION: Final = (
     "filter is admitted only with view assignment, candidate_findings, evidence, findings, "
     "history, obligations, operation, or results; omit filter for advice, compact, lineage, "
-    "project, and versions"
+    "project, and versions; each view admits only its own filter keys"
 )
 _CORRECTIVE_HINTS: Final[Mapping[tuple[str, str, str], tuple[str, tuple[str, ...]]]] = (
     MappingProxyType(

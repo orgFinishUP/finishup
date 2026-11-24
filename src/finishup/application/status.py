@@ -1488,7 +1488,11 @@ async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[F
     if target == head.sequence:
         return head, head
     if target == 0:
-        return Frontier.genesis(), head
+        # A started task has no state before its first record, so genesis is not a readable
+        # frontier once the head has moved; refuse it like a future frontier (#1395).
+        raise _error(
+            PublicErrorCode.INVALID_REQUEST, "The requested frontier precedes the first record."
+        )
     found: Frontier | None = None
     async for record in runtime.ledger.load_events(runtime.session_id, through=target):
         found = Frontier(record.ledger.ingestion_sequence, record.entry_digest)

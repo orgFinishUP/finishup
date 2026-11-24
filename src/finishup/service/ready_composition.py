@@ -7369,8 +7369,78 @@ async def provide_service_ready_context(
 
     ``workspace_hub`` reaches the workspace agents of claim-bound connections (ADR-051); every
     workspace read of a claim-bound task goes there, never to this machine's disk.
+
+    A composition that fails at any phase after the catalog writer opened, including a vault
+    relock landing during an awaited step, closes what it had built (runtime, privacy
+    coordinator, catalog) before the failure propagates: no ``ServiceReadyContext`` exists for
+    the caller to close, and a retry must not race a half-composed generation's writer.
     """
 
+    cleanup = _ReadyCompositionCleanup()
+    try:
+        return await _compose_service_ready_context(
+            service_generation,
+            vault_generation,
+            cleanup=cleanup,
+            lifecycle=lifecycle,
+            vault=vault,
+            config=config,
+            paths=paths,
+            clock=clock,
+            secret_memory=secret_memory,
+            diagnostics=diagnostics,
+            observation_gate=observation_gate,
+            startup_bundle_upgrade=startup_bundle_upgrade,
+            workspace_hub=workspace_hub,
+        )
+    except BaseException:
+        await cleanup.close()
+        raise
+
+
+class _ReadyCompositionCleanup:
+    """Closers for resources a READY composition built, run only when it fails.
+
+    On success the returned context owns every resource, so nothing here runs. On failure the
+    closers run newest first (runtime and privacy before the catalog they share); a closer's own
+    failure never replaces the composition failure and never skips an older closer.
+    """
+
+    __slots__ = ("_closers",)
+
+    def __init__(self) -> None:
+        self._closers: list[Callable[[], Awaitable[None] | None]] = []
+
+    def push(self, closer: Callable[[], Awaitable[None] | None]) -> None:
+        self._closers.append(closer)
+
+    async def close(self) -> None:
+        while self._closers:
+            closer = self._closers.pop()
+            try:
+                pending = closer()
+                if pending is not None:
+                    await pending
+            except BaseException:
+                continue
+
+
+async def _compose_service_ready_context(
+    service_generation: int,
+    vault_generation: int,
+    *,
+    cleanup: _ReadyCompositionCleanup,
+    lifecycle: _Lifecycle,
+    vault: _Vault,
+    config: FinishUpConfig,
+    paths: _Paths,
+    clock: ClockPort,
+    secret_memory: object,
+    diagnostics: DiagnosticsPort | None,
+    observation_gate: asyncio.Lock | None,
+    startup_bundle_upgrade: _StartupBundleUpgrade | None,
+    workspace_hub: WorkspaceAgentHub | None,
+) -> ServiceReadyContext:
     if not vault.ready or vault.generation != vault_generation:
         raise ControlError("vault_locked", retryable=True)
     ensure_owner_only_dir(paths.bundle)
@@ -7387,6 +7457,7 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
     )
+    cleanup.push(lambda: _close_db(cast(apsw.Connection | None, getattr(catalog, "_db", None))))
     # Name this process's store-lock ownership and route lock timeouts and long holds, with the
     # holder's role and phase, to the diagnostic ring. Hook replays on the spool worker keep their
     # own scoped attribution (#689).
@@ -7403,23 +7474,20 @@ async def provide_service_ready_context(
         register_command_identity_key(local_observation.key_material())
     # The storage-owned startup phase is deliberately after catalog migration and before any
     # lineage/runtime clients are composed.  It may inspect and upgrade existing task bundles,
-    # but ordinary lazy runtime opening remains fail-closed for a stale schema.  A failed phase
-    # closes the catalog immediately so a retry cannot race a half-composed generation.
+    # but ordinary lazy runtime opening remains fail-closed for a stale schema.  A failed phase,
+    # this one or any later one, closes the catalog immediately (provide_service_ready_context's
+    # cleanup) so a retry cannot race a half-composed generation.
     if startup_bundle_upgrade is not None:
-        try:
-            await startup_bundle_upgrade(
-                catalog=catalog,
-                bundle_root=paths.bundle,
-                installation_id=installation_id,
-                service_generation=service_generation,
-                vault_generation=vault_generation,
-                clock=clock,
-                ids=ids,
-                diagnostics=diagnostics,
-            )
-        except BaseException:
-            _close_db(cast(apsw.Connection | None, getattr(catalog, "_db", None)))
-            raise
+        await startup_bundle_upgrade(
+            catalog=catalog,
+            bundle_root=paths.bundle,
+            installation_id=installation_id,
+            service_generation=service_generation,
+            vault_generation=vault_generation,
+            clock=clock,
+            ids=ids,
+            diagnostics=diagnostics,
+        )
     # Lineage shares the catalog connection with start/status.  The adapter only validates the
     # numbered catalog migration; all lineage tables are installed by that migration before this
     # composition point.  The handle MAC is installation-owned and never falls back to a fixed
@@ -7610,6 +7678,7 @@ async def provide_service_ready_context(
         ids=ids,
         config=config,
     )
+    cleanup.push(cast(Callable[[], Awaitable[None]], getattr(privacy, "close")))
     privacy_application = cast(PrivacyCoordinator, privacy).policy_application
     lineage_semantic_gate = (
         None
@@ -7823,6 +7892,7 @@ async def provide_service_ready_context(
         diagnostics or _NullDiagnostics(),
         manifest,
     )
+    cleanup.push(runtime.close)
     runtime_ref = runtime
 
     def generation_is_current(current_service: int, current_vault: int) -> bool:
@@ -8863,6 +8933,9 @@ async def provide_service_ready_context(
         observation_sweeper.close()
         claim_observation.close()
         observation_coordinator.close()
+
+    cleanup.push(legacy_spool_forwarder.wait_closed)
+    cleanup.push(close_observation_maintenance)
 
     async def refresh_ready_recommendations() -> object:
         # READY has no exact selected-Codex-home identity.  Never infer the

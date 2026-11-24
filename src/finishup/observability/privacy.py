@@ -107,6 +107,8 @@ _ORIGIN = re.compile(
 )
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._/+:-]{0,127}$", re.ASCII)
 _HASH = re.compile(r"^(?:hmac-)?sha256:[0-9a-f]{64}$", re.ASCII)
+# The only line ends Python's tokenizer counts; ast line numbers are relative to these.
+_PYTHON_LINE_END = re.compile(rb"\r\n|\r|\n")
 
 
 # A private key is matched from its BEGIN line through the END line of the same label (#1248,
@@ -770,12 +772,11 @@ def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ..
         tree = ast.parse(source, mode="exec")
     except (RecursionError, UnicodeDecodeError, SyntaxError, ValueError):
         return ()
-    lines = source.splitlines(keepends=True)
-    line_offsets: list[int] = []
-    offset = 0
-    for line in lines:
-        line_offsets.append(offset)
-        offset += len(line.encode("utf-8"))
+    # ast reports 1-based line numbers counted the way Python's tokenizer ends lines (``\r\n``,
+    # ``\r``, ``\n``) and UTF-8 byte columns. ``str.splitlines`` also splits on form feed,
+    # vertical tab, U+2028 and other separators, which would shift every later span onto
+    # earlier bytes, so line starts are computed from the encoded bytes instead.
+    line_offsets = [0, *(match.end() for match in _PYTHON_LINE_END.finditer(data))]
 
     def node_span(node: ast.AST) -> tuple[int, int] | None:
         lineno = getattr(node, "lineno", None)
@@ -823,7 +824,13 @@ def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ..
         ):
             continue
         span = node_span(node)
-        if span is not None:
+        # Defense in depth: keep a span only when its bytes are the assignment itself, so a
+        # misaligned offset can only withdraw an exemption, never grant one to other bytes.
+        if (
+            span is not None
+            and data[span[0] : span[1]].startswith(b"token")
+            and data[span[0] : span[1]].endswith(b".token")
+        ):
             spans.append(span)
     return tuple(sorted(set(spans)))
 

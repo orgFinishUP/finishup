@@ -57,7 +57,10 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
     ),
     "api_key_scope_invalid": ("--scope is agent or operator", _USAGE),
     "api_key_expiry_invalid": ("--expires-in-days takes 1 to 3650", _USAGE),
-    "api_key_limit": ("this server holds its maximum of 256 keys; revoke unused ones", _USAGE),
+    "api_key_limit": (
+        "this server holds its maximum of 256 unrevoked keys; revoke unused ones",
+        _USAGE,
+    ),
     "api_key_output_exists": (
         "the output file already exists; choose a new path (a key is never written over a file)",
         _USAGE,

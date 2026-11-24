@@ -20,6 +20,7 @@ from finishup.observability.privacy import (
     Sensitivity,
     assert_plaintext_safe,
     build_diagnostic_manifest,
+    heuristic_value_lines,
     prepare_persisted_plaintext,
     privacy_request_commitment,
     redact_diagnostic_record,
@@ -200,6 +201,87 @@ def test_python_attribute_assignment_uses_syntax_proof_only() -> None:
     malformed = scan_for_sensitive_content(b"token = node.token\nnot valid python ???")
     assert len(malformed) == 1
     assert malformed[0].confidence is ScanConfidence.HEURISTIC
+
+
+# Characters ``str.splitlines`` treats as line ends but Python's tokenizer does not; the empty
+# separator is the control. None may move the attribute-assignment proof onto other bytes.
+_LINE_BOUNDARY_SEPARATORS = (
+    b"",
+    b"\x0b",
+    b"\x0c",
+    b"\x1c",
+    b"\x1d",
+    b"\x1e",
+    b"\xc2\x85",  # U+0085 NEXT LINE
+    b"\xe2\x80\xa8",  # U+2028 LINE SEPARATOR
+    b"\xe2\x80\xa9",  # U+2029 PARAGRAPH SEPARATOR
+)
+_UNQUOTED_VALUE = b"Zq8rT5vW2xY9abc"
+
+
+@pytest.mark.parametrize(
+    "page_break",
+    [b"", b"\x0c"] + [b"# page" + separator for separator in _LINE_BOUNDARY_SEPARATORS],
+)
+def test_python_attribute_proof_survives_page_break_lines(page_break: bytes) -> None:
+    source = (
+        b"import os\n" + page_break + b"\n"
+        b"def refresh(credentials):\n"
+        b"    # token=" + _UNQUOTED_VALUE + b"\n"
+        b"    token = credentials.token\n"
+        b"    return token\n"
+    )
+    value_start = source.index(_UNQUOTED_VALUE)
+
+    findings = scan_for_sensitive_content(source)
+    assert len(findings) == 1
+    assert findings[0].start_offset <= value_start < findings[0].end_offset
+
+    redacted, count = redact_heuristic_spans(source)
+    assert count == 1
+    assert _UNQUOTED_VALUE not in redacted
+    assert b"    token = credentials.token\n" in redacted
+    assert heuristic_value_lines(source) == (4,)
+
+
+@pytest.mark.parametrize("separator", _LINE_BOUNDARY_SEPARATORS)
+def test_python_attribute_proof_never_exempts_an_earlier_docstring_value(
+    separator: bytes,
+) -> None:
+    source = (
+        b'def f(obj):\n    """Doc.' + separator + b"\n    token=" + _UNQUOTED_VALUE + b'"""\n'
+        b"    token      =      obj.token\n    return token\n"
+    )
+    value_start = source.index(_UNQUOTED_VALUE)
+
+    findings = scan_for_sensitive_content(source)
+    assert any(f.start_offset <= value_start < f.end_offset for f in findings)
+
+    redacted, count = redact_heuristic_spans(source)
+    assert count == 1
+    assert _UNQUOTED_VALUE not in redacted
+    assert b"    token      =      obj.token\n" in redacted
+    assert heuristic_value_lines(source) == (3,)
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
+def test_python_attribute_proof_follows_tokenizer_line_ends(newline: bytes) -> None:
+    source = newline.join(
+        (
+            b"import os",
+            b"def refresh(credentials):",
+            b"    # token=" + _UNQUOTED_VALUE,
+            b"    token = credentials.token",
+            b"    return token",
+            b"",
+        )
+    )
+    findings = scan_for_sensitive_content(source)
+    assert len(findings) == 1
+    assert findings[0].start_offset == source.index(b"token=" + _UNQUOTED_VALUE)
+    redacted, count = redact_heuristic_spans(source)
+    assert count == 1
+    assert b"    token = credentials.token" + newline in redacted
 
 
 _PLACEHOLDER = EGRESS_CREDENTIAL_PLACEHOLDER.decode("ascii")

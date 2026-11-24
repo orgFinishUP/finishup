@@ -7,10 +7,13 @@ the whole file for one such number, which turned every used Claude Code installa
 unreadable, ``ambiguous`` MCP owner.
 
 This reader keeps the structural checks that matter for ownership decisions (UTF-8 only, no NUL
-byte or byte-order mark, no duplicate key, bounded nesting) and replaces each value the canonical
-profile cannot hold (a decimal or non-finite number, an integer outside the safe range) with
-``null``. FinishUP reads only string and table fields from these files, so a replaced number never
-reaches an ownership or launcher decision.
+byte or byte-order mark, no duplicate key, no object key holding an escaped NUL or lone surrogate,
+bounded nesting) and replaces each value the canonical profile cannot hold (a decimal or non-finite
+number, an integer outside the safe range, a string whose escapes decode to a NUL or a lone
+surrogate, such as a truncated emoji in host-recorded text) with ``null``. FinishUP reads only the
+string and table fields it needs from these files, so an unrelated replaced value never reaches an
+ownership or launcher decision. A key stays structural: it decides which table is read, so a key
+the profile cannot hold still makes the file unreadable.
 
 Use it for read-only observation. Every read-modify-write path keeps
 :func:`finishup.protocol.canonical.strict_json_parse` and refuses such a file, so a lossy read can
@@ -26,6 +29,7 @@ from finishup.protocol.canonical import MAX_JSON_DEPTH, JsonValue, ensure_canoni
 from finishup.protocol.errors import ProtocolValueError
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
+_MAX_SAFE_INTEGER_DIGITS: Final = len(str(_MAX_SAFE_INTEGER))
 
 
 class _Unrepresentable:
@@ -53,6 +57,10 @@ def parse_host_config_json(data: bytes) -> JsonValue:
         return _UNREPRESENTABLE
 
     def _integer(literal: str) -> object:
+        # A literal longer than the largest safe integer is out of range without converting it,
+        # which also keeps ``int()`` off literals past the interpreter's conversion limit.
+        if len(literal) - literal.startswith("-") > _MAX_SAFE_INTEGER_DIGITS:
+            return _UNREPRESENTABLE
         value = int(literal)
         if literal == "-0" or not -_MAX_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER:
             return _UNREPRESENTABLE
@@ -77,6 +85,7 @@ def parse_host_config_json(data: bytes) -> JsonValue:
     except RecursionError as exc:
         raise ProtocolValueError("nesting_too_deep") from exc
     value = _replace(parsed, depth=0)
+    # Also rejects an object key holding an escaped NUL or lone surrogate: keys are structural.
     ensure_canonical_value(value)
     return value
 
@@ -93,4 +102,10 @@ def _replace(value: object, *, depth: int) -> JsonValue:
         }
     if isinstance(value, list):
         return [_replace(item, depth=depth + 1) for item in cast(list[object], value)]
+    if isinstance(value, str):
+        try:
+            ensure_canonical_value(value)
+        except ProtocolValueError:
+            return None
+        return value
     return cast(JsonValue, value)

@@ -25,6 +25,7 @@ from finishup.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
+    pending_mapping_paths,
     queue_mapping_clear,
     queue_mapping_store,
     scoped_child_session_id,
@@ -195,7 +196,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
+from finishup.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from finishup.protocol.ids import IdKind, is_valid_id
 from finishup.protocol.recovery import READ_ONLY_CHECK_MODES
 
@@ -807,7 +808,9 @@ def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path 
             aliases[conversation] = session
             while len(aliases) > _MAX_CURSOR_ALIASES:
                 aliases.pop(next(iter(aliases)))
-            encoded = json.dumps(aliases, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            # The file keeps binding order (oldest first) so the bound above evicts
+            # the oldest binding; sorting keys would evict the smallest identifier.
+            encoded = json.dumps(aliases, separators=(",", ":")).encode("utf-8")
             temporary = path.with_name(path.name + ".tmp")
             descriptor = os.open(
                 temporary,
@@ -1864,7 +1867,8 @@ def _absolute_path_key(value: str) -> tuple[str, bool] | None:
 
     POSIX/macOS paths stay case-sensitive. Windows drive paths (``C:\\x``/``C:/x``) are keyed
     in their WSL 2 ``/mnt/c/x`` spelling so that a Windows-side and a WSL-side locator for the
-    same file compare equal; drive, WSL-mount and UNC keys compare case-insensitively.
+    same file compare equal; drive, WSL-mount and UNC keys compare case-insensitively, one
+    character at a time (``_fold_path_key``).
     """
 
     text = value.replace("\\", "/")
@@ -1879,6 +1883,22 @@ def _absolute_path_key(value: str) -> tuple[str, bool] | None:
     if text.startswith(("/", "~")) or _WINDOWS_DRIVE_RELATIVE.match(text):
         return text, False
     return None
+
+
+def _fold_char(char: str) -> str:
+    upper = char.upper()
+    return upper if len(upper) == 1 else char
+
+
+def _fold_path_key(key: str) -> str:
+    """Fold a case-insensitive path key one character at a time, keeping its length.
+
+    Like the NTFS upcase table, each character maps to exactly one character, so "ß" never
+    becomes "SS" and a ligature never expands: a folded prefix always has the length of the
+    unfolded one, and a name NTFS tells apart never compares equal.
+    """
+
+    return "".join(_fold_char(char) for char in key)
 
 
 def _hook_runtime_facts(
@@ -2016,8 +2036,8 @@ def workspace_relative_edit_path(value: str, workspace_locator: str | None) -> s
         root_key, root_folds = root
         root_key = root_key.rstrip("/")
         folds = path_folds or root_folds
-        compare_path = path_key.casefold() if folds else path_key
-        compare_root = root_key.casefold() if folds else root_key
+        compare_path = _fold_path_key(path_key) if folds else path_key
+        compare_root = _fold_path_key(root_key) if folds else root_key
         if not root_key or not compare_path.startswith(compare_root + "/"):
             return None
         relative = path_key[len(root_key) + 1 :]
@@ -3753,12 +3773,8 @@ def _queue_and_reconcile_mapping(
             _session_lock_owned=True,
         ).pending:
             return False
-        pending = mapping_path(mapping.codex_session_id, _state=_state).with_name(
-            f".{mapping.codex_session_id}.pending.json"
-        )
-        applying = pending.with_name(pending.name + ".applying")
         return load_mapping(mapping.codex_session_id, _state=_state) == mapping and not (
-            pending.exists() or pending.is_symlink() or applying.exists() or applying.is_symlink()
+            pending_mapping_paths(mapping.codex_session_id, _state=_state)
         )
 
 
@@ -5839,8 +5855,9 @@ def handle_observe(
             else:
                 try:
                     workspace_commitment = store.workspace_commitment(workspace_locator)
-                except ObservationStoreLockTimeout:
-                    # Contention while creating the key is not a missing consent.
+                except (ObservationStoreLockTimeout, PublicOperationError):
+                    # Contention while creating the key, or an existing key that cannot be
+                    # read, is not a missing consent: fail the pass and name the reason.
                     raise
                 except Exception:
                     workspace_commitment = None

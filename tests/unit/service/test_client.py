@@ -1924,6 +1924,56 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
             foreign.wait(timeout=5)
 
 
+@pytest.mark.anyio
+async def test_singleton_release_trusts_the_flock_over_a_stamp_whose_pid_was_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashed holder's stamp naming a reused live pid is released once the flock is free.
+
+    The stamp is advisory and its pid can be reused by an unrelated process after a crash, so
+    ``finishup service restart`` must not wait out its budget on a singleton nobody holds. A held
+    flock still waits, and a lock that cannot be inspected is never taken as a release.
+    """
+
+    import fcntl
+
+    import finishup.service.client as client_module
+    from finishup.protocol.canonical import canonical_encode
+    from finishup.service.lifecycle import probe_singleton_holder_identity
+
+    lock = tmp_path / "service.lock"
+    monkeypatch.setattr(client_module, "_singleton_lock_path", lambda: lock)
+    # This test process stands in for the unrelated live process that now owns the stamped pid.
+    reused_pid = os.getpid()
+    lock.write_bytes(canonical_encode({"instance_id": "svc_test", "pid": reused_pid}) + b"\n")
+    lock.chmod(0o600)
+    holder = probe_singleton_holder_identity(lock)
+    assert holder is not None and holder.pid == reused_pid
+
+    started = time.monotonic()
+    released = await client_module.wait_for_singleton_release(reused_pid, deadline=started + 30.0)
+    assert released is True
+    assert time.monotonic() - started < 5.0
+
+    # A held flock is a live holder: the wait runs to its deadline.
+    descriptor = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = await client_module.wait_for_singleton_release(
+            reused_pid, deadline=time.monotonic() + 0.3
+        )
+        assert held is False
+    finally:
+        os.close(descriptor)
+
+    # A lock that cannot be inspected proves nothing either way.
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: None)
+    unknown = await client_module.wait_for_singleton_release(
+        reused_pid, deadline=time.monotonic() + 0.3
+    )
+    assert unknown is False
+
+
 def test_holder_version_order_orders_packages_and_never_guesses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

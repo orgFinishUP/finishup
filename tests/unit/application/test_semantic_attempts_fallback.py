@@ -334,6 +334,29 @@ async def test_a_single_fallback_failure_keeps_its_exact_reason_under_its_own_bu
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("terminal", [_REFUSED, _SCHEMA_INVALID], ids=lambda e: e.reason.value)
+async def test_a_never_retry_fallback_answer_on_its_last_slot_keeps_its_own_reason(
+    terminal: _Eval,
+) -> None:
+    # The fallback spends its one retry on a timeout; its last slot then ends on a class that
+    # never retries, which stays the honest terminal instead of reading as budget exhaustion.
+    ledger = _FakeLedger(_queued_job(), _lease())
+    outcome = await _run_paired(
+        ledger,
+        [_TRANSPORT, _TRANSPORT],
+        [_TIMEOUT, terminal],
+        plan=_plan(primary_retries=2, fallback_retries=1),
+    )
+
+    assert outcome.fallback == (_ATT3, _ATT4)
+    assert (outcome.status, outcome.reason) == (terminal.status, terminal.reason)
+    assert ledger.job.terminal_code is terminal.reason
+    fallback = outcome.accounting.endpoint("fallback")
+    assert fallback is not None
+    assert fallback.last_terminal_reason == terminal.reason.value
+
+
+@pytest.mark.anyio
 async def test_the_fallback_budget_is_its_own_not_the_primary_remainder() -> None:
     # Primary spent all three of its attempts; the fallback still gets its full three.
     ledger = _FakeLedger(_queued_job(), _lease())

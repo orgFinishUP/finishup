@@ -258,3 +258,79 @@ def test_claim_limit_must_be_positive(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="hook_spool_claim_limit_invalid"):
             with spool.claim(commitment, limit=invalid):  # type: ignore[arg-type]
                 pass
+
+
+def _short_write_then_disk_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the next record write land only half its bytes before the disk fills."""
+
+    real_write = os.write
+    calls = 0
+
+    def write(descriptor: int, data: bytes) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_write(descriptor, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", write)
+
+
+def test_append_after_a_failed_partial_write_is_still_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool, workspace, commitment = _spool(tmp_path)
+    _append(spool, workspace, "First")
+    with monkeypatch.context() as patch:
+        _short_write_then_disk_full(patch)
+        assert not spool.append(
+            workspace=workspace,
+            event_name="Torn",
+            payload={"session_id": "session-1", "tool_name": "Torn"},
+        )
+    _append(spool, workspace, "Third")
+
+    with spool.claim(commitment, limit=64) as records:
+        assert tuple(record.event_name for record in records) == ("First", "Third")
+    assert spool.pending_workspaces() == ()
+
+
+def test_append_after_a_torn_draining_tail_is_still_claimed(tmp_path: Path) -> None:
+    spool, workspace, commitment = _spool(tmp_path)
+    _append(spool, workspace, "First")
+    _append(spool, workspace, "Second")
+    digest = commitment.removeprefix("hmac-sha256:")
+    draining = tmp_path / "hook-spool" / f"{digest}.draining"
+
+    with spool.claim(commitment, limit=1) as records:
+        assert tuple(record.event_name for record in records) == ("First",)
+        # A hook killed mid-write leaves a partial line at the end of the claimed file.
+        with draining.open("ab") as handle:
+            handle.write(b'{"event":"Torn","payl')
+        _append(spool, workspace, "Third")
+
+    with spool.claim(commitment, limit=64) as records:
+        assert tuple(record.event_name for record in records) == ("Second", "Third")
+    assert spool.pending_workspaces() == ()
+
+
+def test_append_after_a_torn_tail_the_service_already_passed_is_still_claimed(
+    tmp_path: Path,
+) -> None:
+    spool, workspace, commitment = _spool(tmp_path)
+    _append(spool, workspace, "First")
+    digest = commitment.removeprefix("hmac-sha256:")
+    pending = tmp_path / "hook-spool" / f"{digest}.jsonl"
+    with pending.open("ab") as handle:
+        handle.write(b'{"event":"Torn","payl')
+
+    with spool.claim(commitment, limit=1) as records:
+        assert tuple(record.event_name for record in records) == ("First",)
+    with spool.claim(commitment, limit=1) as records:
+        # The cursor now rests after the unterminated fragment, at the end of the file.
+        assert records == ()
+        _append(spool, workspace, "Third")
+
+    with spool.claim(commitment, limit=64) as records:
+        assert tuple(record.event_name for record in records) == ("Third",)
+    assert spool.pending_workspaces() == ()

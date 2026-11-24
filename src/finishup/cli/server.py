@@ -467,6 +467,34 @@ _REMEDIES: Final[dict[str, tuple[str, int]]] = {
         "'finishup server code forget' in each repository",
         _UNSAFE,
     ),
+    # 'server code exclude|allow|level' (ADR-054 decision 10): this computer's own record of the
+    # owner's choices, never a server fault; fixed text, never a path or pattern.
+    "code_copy_settings_limit": (
+        "FinishUP already keeps the most code-copy choices it allows for that server (256 "
+        "patterns and 256 allowed files for each repository, and choices for 256 repositories), "
+        "so nothing was changed; remove one first with 'finishup server code exclude remove', "
+        "'allow remove' or 'level default'",
+        _USAGE,
+    ),
+    "code_copy_settings_invalid": (
+        "this computer's record of your code-copy choices for that server (code-copy.json in "
+        "that server's folder of this computer's FinishUP state) is damaged, so no copy of any "
+        "repository's code is sent to it and its choices cannot be read or changed; remove that "
+        "file and record your choices again with 'finishup server code exclude add', 'allow "
+        "add' and 'level L1' before work there syncs again, since until then only the "
+        "always-excluded names and the server's own are left out",
+        _UNSAFE,
+    ),
+    "code_copy_settings_unsafe": (
+        "this computer's record of your code-copy choices for that server (code-copy.json in "
+        "that server's folder of this computer's FinishUP state) is not an owner-only regular "
+        "file, is a link, is larger than FinishUP reads, or could not be read or written, so no "
+        "copy of any repository's code is sent to it and its choices cannot be read or changed; "
+        "make it a regular file only you can read and write (mode 600) in an owner-only folder, "
+        "or, if it is larger than 1 MiB, remove it and record your choices again before work "
+        "there syncs, then run this command again",
+        _UNSAFE,
+    ),
 }
 
 DISCLOSURE_LINES: Final = (
@@ -1267,10 +1295,7 @@ def server_add(
             choice=LevelChoice(level, retention),
         )
         return
-    if level is not None or retention is not None:
-        raise ServerCommandRefused(
-            "usage", message="--level and --retention apply to a server elsewhere"
-        )
+    _refuse_level_choice_here(LevelChoice(level, retention))
     _require_selection_in_force()
     try:
         validate_name(name)
@@ -1960,6 +1985,15 @@ def _leave(record: ServerTarget | None, previous: ServerTarget | None) -> Target
     return TargetSwitch(record, previous)
 
 
+def _refuse_level_choice_here(choice: LevelChoice | None) -> None:
+    """Refuse ``--level``/``--retention`` for a server on this computer (it keeps no copies)."""
+
+    if choice is not None and (choice.level is not None or choice.retention is not None):
+        raise ServerCommandRefused(
+            "usage", message="--level and --retention apply to a server elsewhere"
+        )
+
+
 def use_target(
     name: str,
     *,
@@ -1982,6 +2016,9 @@ def use_target(
     """
 
     if name == "local":
+        # Refused before anything is read or written: the selection and the connection to a
+        # server elsewhere stay as they were, as for a named server on this computer.
+        _refuse_level_choice_here(choice)
         # The way back never resolves the selection it removes: a damaged selection, or one that
         # names a missing or unsafe target folder, is exactly what it must clear.
         _require_no_explicit_source()
@@ -1998,10 +2035,7 @@ def use_target(
         if not _open_kind(record.kind):
             raise ServerCommandRefused("remote_kind_unavailable", message=_USE_REFUSED)
         return _use_remote(record, authorize, choice)
-    if choice is not None and (choice.level is not None or choice.retention is not None):
-        raise ServerCommandRefused(
-            "usage", message="--level and --retention apply to a server elsewhere"
-        )
+    _refuse_level_choice_here(choice)
     try:
         with registry_lock():
             # Read again under the lock: a target removed meanwhile stays gone, and one whose

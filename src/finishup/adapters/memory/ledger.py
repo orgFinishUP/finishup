@@ -2981,6 +2981,10 @@ class MemoryLedgerAdapter:
             for row in records
             if row.ledger.ingestion_sequence <= query.requested_frontier.sequence
         )
+        if not prefix:
+            # A frontier before the task's first record (genesis) has no task state to page:
+            # it is invalid query input, like a future frontier (#1395).
+            raise _error(PublicErrorCode.INVALID_REQUEST)
         effective_projection = (
             cached[0]
             if cached is not None

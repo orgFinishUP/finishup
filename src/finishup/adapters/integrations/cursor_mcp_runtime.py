@@ -26,6 +26,7 @@ __all__ = [
     "FixedCursorMcpProcesses",
     "OsCursorMcpProcesses",
     "classify_cursor_semantic_ceiling",
+    "classify_project_serve_text",
     "classify_serve_argv",
     "launcher_precedes_serve_in_text",
     "observe_cursor_mcp_runtime",
@@ -35,6 +36,11 @@ _MAX_PROCESSES: Final = 64
 _MAX_TOKENS: Final = 12
 _MAX_COMM: Final = 32
 _MAX_PROJECT_SELECTOR: Final = 8_192
+# Per-row bound on the macOS ``ps`` text, matching the Linux ``/proc/<pid>/cmdline`` bound. A row
+# past it is skipped rather than classified from a cut-off prefix.
+_MAX_PS_TEXT: Final = 4_096
+_PROJECT_SERVE_MARKER: Final = " mcp serve --host cursor --project-root "
+_STRICT_TEXT_TAIL: Final = " --semantic off"
 _PS_EXECUTABLE: Final = "/bin/ps"
 _POLICY_SUFFIXES: Final = frozenset(
     {
@@ -261,6 +267,45 @@ def launcher_precedes_serve_in_text(text: str, expected_launcher: tuple[str, ...
     return (" " + needle + " " in padded + " ") or padded.endswith(" " + needle)
 
 
+def classify_project_serve_text(
+    text: str,
+    expected_launcher: tuple[str, ...] | None,
+) -> tuple[Literal["strict", "policy"], CursorLauncherMatch | None] | None:
+    """Classify the project registration from the macOS ``ps`` text form of its argv.
+
+    ``ps`` renders argv as one whitespace-joined string, so a ``--project-root`` that Cursor
+    expanded to a workspace path containing whitespace (``~/Documents/My Project``) cannot be
+    recovered by splitting. The text after ``mcp serve --host cursor --project-root `` is the root,
+    less one trailing `` --semantic off`` (strict); the root must pass the same lexical selector
+    check as the argv form, and a FinishUP launcher token must precede ``mcp serve``. Returns
+    ``None`` when the text is not that registration. The launcher match compares the tokens before
+    ``mcp serve`` exactly as :func:`classify_serve_argv` does.
+    """
+
+    if type(text) is not str or not text or len(text) > _MAX_PS_TEXT:
+        return None
+    start = 0
+    while True:
+        index = text.find(_PROJECT_SERVE_MARKER, start)
+        if index < 0:
+            return None
+        head = tuple(text[:index].split())
+        if head and _finishup_launcher_token(head[-1]):
+            break
+        start = index + 1
+    root = text[index + len(_PROJECT_SERVE_MARKER) :]
+    kind: Literal["strict", "policy"] = "policy"
+    if root.endswith(_STRICT_TEXT_TAIL):
+        root = root[: -len(_STRICT_TEXT_TAIL)]
+        kind = "strict"
+    if not _valid_project_selector(root):
+        return None
+    launcher: CursorLauncherMatch | None = None
+    if expected_launcher:
+        launcher = _launcher_match((*head, "mcp"), len(head), expected_launcher)
+    return kind, launcher
+
+
 def classify_serve_argv(
     tokens: Sequence[str],
     expected_launcher: tuple[str, ...] | None,
@@ -457,8 +502,11 @@ def _linux_snapshots(
 
 
 def _parse_ps_table(payload: bytes) -> tuple[tuple[int, int, str], ...]:
+    # Every row is read, as the Linux /proc walk reads every PID: ``ps`` lists by PID and Cursor
+    # usually starts late, so a row cap would drop its helper child. ``_MAX_PROCESSES`` bounds
+    # classified serve children only; each row keeps its own text bound below.
     rows: list[tuple[int, int, str]] = []
-    for raw_line in payload.splitlines()[: 8 * _MAX_PROCESSES]:
+    for raw_line in payload.splitlines():
         line = raw_line.decode("utf-8", errors="ignore").strip()
         if not line:
             continue
@@ -471,7 +519,8 @@ def _parse_ps_table(payload: bytes) -> tuple[tuple[int, int, str], ...]:
         except ValueError:
             continue
         rest = parts[2] if len(parts) == 3 else ""
-        rows.append((pid, ppid, rest[:512]))
+        # One character past the bound keeps an over-long row detectable by its consumer.
+        rows.append((pid, ppid, rest[: _MAX_PS_TEXT + 1]))
     return tuple(rows)
 
 
@@ -507,10 +556,18 @@ def _darwin_snapshots(
     for pid, _ppid, args in _parse_ps_table(arg_table.stdout):
         if len(classified) > _MAX_PROCESSES:
             break
+        if len(args) > _MAX_PS_TEXT:
+            continue
         tokens = tuple(args.split())
         kind, launcher = classify_serve_argv(tokens, expected_launcher)
         if kind is None:
             continue
+        if kind == "foreign":
+            # A ``--project-root`` containing whitespace splits into extra tokens; the text form
+            # recovers the same registration the Linux NUL-split argv classifies.
+            project = classify_project_serve_text(args, expected_launcher)
+            if project is not None:
+                kind, launcher = project
         if (
             expected_launcher is not None
             and launcher != "matched"

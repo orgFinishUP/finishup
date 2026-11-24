@@ -386,6 +386,44 @@ async def test_tui_skill_conflict_carries_an_actionable_continuation(
     assert result.next_step == step
 
 
+async def test_tui_plugin_owner_files_are_kept_with_an_actionable_continuation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from finishup.adapters.integrations.codex_plugin import plugin_unmanaged_files_continuation
+    from finishup.application.codex_plugin import CodexPluginService
+    from finishup.cli import setup
+    from finishup.protocol.canonical import JsonValue
+    from finishup.tui.models import HarnessOption
+    from finishup.tui.runtime import FinishUpRuntime
+
+    project, home = tmp_path / "project", tmp_path / "home"
+    project.mkdir(mode=0o700)
+    home.mkdir(mode=0o700)
+    owner_file = project / ".agents/plugins/finishup/notes.md"
+    owner_file.parent.mkdir(parents=True, mode=0o700)
+    owner_file.write_bytes(b"owner notes\n")
+    _bind(monkeypatch, tmp_path)
+    _install_fakes(
+        monkeypatch, home=home, outputs=[*_absent(), *_absent()], state_dir=tmp_path / "state"
+    )
+
+    async def skill_installed(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        return {"outcome": "installed"}
+
+    monkeypatch.setattr(setup, "_install_project_skill", skill_installed)
+    # The real plugin installer meets the owner file.
+    monkeypatch.setattr(setup, "CodexPluginService", CodexPluginService)
+    option = HarnessOption(str(tmp_path / "codex"), "0.150.1", "Codex", "")
+    runtime = FinishUpRuntime(cwd=project)
+    plan = await runtime.integration_plan(option, home, "policy")
+    result = await runtime.apply_integration(option, plan)
+
+    assert result.reason == "plugin_install_failed"
+    assert result.next_step == plugin_unmanaged_files_continuation(project)
+    assert owner_file.read_bytes() == b"owner notes\n"
+    assert sorted(path.name for path in owner_file.parent.iterdir()) == ["notes.md"]
+
+
 def test_current_plugin_does_not_hide_an_outdated_project_skill(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

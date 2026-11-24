@@ -462,6 +462,86 @@ def test_a_locked_restart_is_unlocked_and_reaches_key_entry(
     assert keys == ["gpt-6-astra"]
 
 
+@pytest.mark.parametrize("reload_after_entry", ["locked", "raises"])
+def test_a_stored_key_keeps_the_new_model_when_readiness_does_not_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reload_after_entry: str
+) -> None:
+    """Issue #1423: once the hidden entry stored the new model's key, never roll back to the old."""
+
+    from finishup.cli import unlock
+    from finishup.config.load import load_config
+    from finishup.ports.control import ControlError
+
+    config_path = _model_switch_harness(monkeypatch, tmp_path)
+    restarts: list[bool] = []
+
+    # A passphrase vault with no stored copy comes back locked from every restart.
+    async def restart(**_: object) -> dict[str, object]:
+        restarts.append(True)
+        if reload_after_entry == "raises" and len(restarts) > 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return {"reachable": True, "state": "locked"}
+
+    async def unlocked(*_: object) -> object:
+        return SimpleNamespace(state="ready")
+
+    async def no_key_stored(**_: object) -> dict[str, object]:
+        return {
+            "credential_connected": False,
+            "endpoint": {"credential_authority": "finishup_vault_api_credential"},
+        }
+
+    stored_for: list[tuple[str, str]] = []
+
+    def ceremony(action: str) -> None:
+        provider = load_config({}, {}, config_path).provider
+        assert provider is not None
+        stored_for.append((action, provider.model))
+
+    monkeypatch.setattr(setup, "restart_service_for_semantic_composition", restart)
+    monkeypatch.setattr(unlock, "unlock_vault", unlocked)
+    monkeypatch.setattr(provider_status, "provider_status_report", no_key_stored)
+    monkeypatch.setattr(cli, "run_configured_provider_credential", ceremony)
+    result = CliRunner().invoke(cli.app, ["ai", "model", "gpt-6-astra"])
+
+    provider = load_config({}, {}, config_path).provider
+    assert stored_for == [("set", "gpt-6-astra")]
+    assert result.exit_code == 20, result.output
+    assert provider is not None and provider.model == "gpt-6-astra", result.output
+    assert "Key entry completed" in result.output
+    assert "finishup service unlock" in result.output
+    assert "did not finish" not in result.output
+    # No rollback restart followed the reload after key entry.
+    assert len(restarts) == 2
+
+
+def test_a_key_entry_that_fails_before_storing_still_restores_the_previous_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from finishup.config.load import load_config
+
+    config_path = _model_switch_harness(monkeypatch, tmp_path)
+
+    async def presence_unknown(**_: object) -> dict[str, object]:
+        return {
+            "credential_connected": None,
+            "endpoint": {"credential_authority": "finishup_vault_api_credential"},
+        }
+
+    def never_entered(_action: str) -> None:
+        raise AssertionError("an unknown key presence must not reach hidden entry")
+
+    monkeypatch.setattr(provider_status, "provider_status_report", presence_unknown)
+    monkeypatch.setattr(cli, "run_configured_provider_credential", never_entered)
+    result = CliRunner().invoke(cli.app, ["ai", "model", "gpt-6-astra"])
+
+    provider = load_config({}, {}, config_path).provider
+    assert result.exit_code == 20
+    assert provider is not None and provider.model == "gpt-6.1-sol"
+    assert "Key stored: unknown" in result.output
+    assert "previous model is active again" in result.output
+
+
 def test_a_restart_that_stays_locked_restores_the_previous_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

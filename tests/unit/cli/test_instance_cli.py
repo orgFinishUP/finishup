@@ -590,6 +590,63 @@ def test_dispose_bounded_wait_leaves_root_when_holder_ignores_the_stop(
         os.close(fd)
 
 
+def test_dispose_refuses_a_retain_folder_inside_the_root_it_removes(
+    cell: Path, prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy kept inside the root would be deleted with it, so it is refused, not claimed."""
+
+    _scrub(monkeypatch)
+    root = cell / "state"
+    create_instance(root=root, lifecycle="disposable", now=_NOW, runtime_prefix=prefix)
+    (root / "log").mkdir(mode=0o700)
+    (root / "log" / "service.stderr.jsonl").write_bytes(b'{"kept":true}\n')
+
+    for retain in (root / "kept-logs", root, root / "log" / ".." / "kept-logs"):
+        with pytest.raises(InstanceIdentityError) as refused:
+            dispose_instance(root=root, retain_logs=retain, runtime_prefix=prefix)
+        assert refused.value.reason == "instance_root_invalid"
+        assert (root / "log" / "service.stderr.jsonl").read_bytes() == b'{"kept":true}\n'
+        assert not (root / "kept-logs").exists()
+
+    outside = cell / "retained"
+    result = dispose_instance(root=root, retain_logs=outside, runtime_prefix=prefix)
+    assert result["logs_retained"] is True
+    assert not root.exists()
+
+
+def test_dispose_refuses_an_unusable_retain_folder_before_signalling_the_holder(
+    cell: Path, prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _scrub(monkeypatch)
+    root = cell / "state"
+    created = create_instance(root=root, lifecycle="disposable", now=_NOW, runtime_prefix=prefix)
+    (root / "log").mkdir(mode=0o700)
+    (root / "log" / "service.stderr.jsonl").write_bytes(b'{"kept":true}\n')
+    retain = cell / "retained"
+    (retain / str(created["installation_id"])).mkdir(mode=0o700, parents=True)
+    lock = root / "state" / SINGLETON_LOCK_NAME
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(fd, canonical_encode({"instance_id": "svc_self", "pid": os.getpid()}) + b"\n")
+    calls: list[tuple[int, int]] = []
+
+    def record_kill(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(os, "kill", record_kill)
+    try:
+        for unusable in (retain, Path("relative-retained"), cell / "missing" / "retained"):
+            with pytest.raises(InstanceIdentityError) as refused:
+                dispose_instance(
+                    root=root, retain_logs=unusable, runtime_prefix=prefix, wait_seconds=0.3
+                )
+            assert refused.value.reason == "instance_root_invalid"
+        assert calls == []
+        assert (root / "log" / "service.stderr.jsonl").exists()
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Typer surface
 # ---------------------------------------------------------------------------

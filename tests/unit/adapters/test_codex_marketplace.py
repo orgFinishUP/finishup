@@ -2974,3 +2974,20 @@ def _assert_bound_plugin_mcp(cache: Path, *, pinned: str, root: str, foreign: st
     }
     assert foreign not in rendered
     assert "finishup hooks" in (cache / "hooks/hooks.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["x = " + "1" * 4301 + "\n", "x = " + "[" * 5000 + "]" * 5000 + "\n"],
+    ids=["huge_int", "deep"],
+)
+def test_user_config_tomllib_cannot_load_is_source_invalid(tmp_path: Path, body: str) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    (home / "config.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(IntegrationError) as caught:
+        preview_activation(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.SOURCE_INVALID
+    assert (home / "config.toml").read_text(encoding="utf-8") == body

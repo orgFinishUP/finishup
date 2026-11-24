@@ -885,23 +885,31 @@ class ObservationAdviceSemanticSupervisor:
     def schedule_revisit(self, workspace: str, finishup_session_id: str, delay: float) -> None:
         """Rebuild one session's advice after ``delay`` seconds (trailing edge, #888).
 
-        At most one timer per session; an existing earlier timer is kept because the rebuild
-        simply defers again, rescheduling itself, if it fires before eligibility. The table is
-        bounded, in memory, and cleared on stop; after a restart the next hook rebuild re-derives
-        the same deferral from durable rows.
+        At most one timer per session, and it holds the earliest requested revisit: deferral
+        delays are per candidate identity, so a sooner request replaces a later armed timer, while
+        a later request keeps the earlier one because the rebuild simply defers again,
+        rescheduling itself, if it fires before eligibility. The table is bounded, in memory, and
+        cleared on stop; after a restart the next hook rebuild re-derives the same deferral from
+        durable rows.
         """
 
         if self._closed or self._revisit_handler is None:
             return
         key = (workspace, finishup_session_id)
-        if key in self._revisit_timers or len(self._revisit_timers) >= _MAX_REVISIT_TIMERS:
+        existing = self._revisit_timers.get(key)
+        if existing is None and len(self._revisit_timers) >= _MAX_REVISIT_TIMERS:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        wait = max(delay, 1.0)
+        if existing is not None:
+            if loop.time() + wait >= existing.when():
+                return
+            existing.cancel()
         self._revisit_timers[key] = loop.call_later(
-            max(delay, 1.0), self._fire_revisit, workspace, finishup_session_id
+            wait, self._fire_revisit, workspace, finishup_session_id
         )
 
     def _fire_revisit(self, workspace: str, finishup_session_id: str) -> None:
@@ -928,6 +936,12 @@ class ObservationAdviceSemanticSupervisor:
 
     def pending_revisits(self) -> tuple[tuple[str, str], ...]:
         return tuple(sorted(self._revisit_timers))
+
+    def revisit_deadline(self, workspace: str, finishup_session_id: str) -> float | None:
+        """Event-loop time at which this session's pending revisit fires, if one is armed."""
+
+        timer = self._revisit_timers.get((workspace, finishup_session_id))
+        return None if timer is None else timer.when()
 
     def register(self, handle: AdviceSemanticDrainHandle) -> bool:
         if self._closed:

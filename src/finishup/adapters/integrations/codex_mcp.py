@@ -33,6 +33,7 @@ from finishup.config.paths import (
     PathSafetyError,
     isolated_root,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.domain.values import JsonValue
 from finishup.legacy_names import LAUNCHER_NAMES, LEGACY_LAUNCHER_NAME
 from finishup.ports.harness_mcp import (
@@ -1028,7 +1029,7 @@ def read_bounded_toml(path: Path) -> Mapping[str, object] | None:
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > _OUTPUT_LIMIT_BYTES:
             return None
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        return load_toml_text(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return None
 
@@ -1074,7 +1075,7 @@ def project_transport_dependence(
     import tomllib
 
     try:
-        parsed = tomllib.loads(raw.decode("utf-8"))
+        parsed = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError):
         return "unknown"
     servers = parsed.get("mcp_servers")
@@ -1121,7 +1122,7 @@ def project_config_unreadable_reason(project: Path) -> str | None:
     if problem is not None or raw is None:
         return problem
     try:
-        tomllib.loads(raw.decode("utf-8"))
+        load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError):
         return "not_valid_toml"
     return None
@@ -1161,7 +1162,7 @@ def _read_user_config(path: Path) -> Mapping[str, object] | None:
             return None
         if path.stat().st_size > _USER_CONFIG_LIMIT_BYTES:
             return None
-        return tomllib.loads(path.read_bytes().decode("utf-8"))
+        return load_toml_text(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return None
 

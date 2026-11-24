@@ -301,6 +301,12 @@ AppArmor profile that permits it; a still-blocked host can relax
 prefix plus `--chdir <workspace>`: the whole host filesystem is bound read-write and only the
 network namespace is unshared, mirroring the macOS profile `(allow default) (deny network*)`.
 
+The `bwrap` leader shares the check's process group, so a check that signals its own group
+(`kill 0`) ends the leader too; under Seatbelt the check is the leader, so a crash ends it the same
+way. A check that ends by a signal is recorded `failed` / `nonzero_exit` with the shell's
+`128 + signal` exit status (143 for `SIGTERM`), never as an error. A return code no exit status can
+carry (above 255) is recorded `nonzero_exit` without an exit status.
+
 **`finishup service status` does not report sandbox availability, and is not going to.** Issue #720
 asked for the fact to be named once in setup diagnostics *and* in `finishup service status`; the
 second half is deliberately declined here, and those three surfaces are the whole supported set.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import plistlib
 import shlex
 import shutil
@@ -18,6 +19,7 @@ from finishup.adapters.integrations.cursor_integration import (
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
     CursorIntegrationError,
     CursorMcpSource,
+    CursorPluginArtifact,
     CursorPluginTarget,
     CursorSdkBinding,
     apply_cursor_plugin,
@@ -25,6 +27,7 @@ from finishup.adapters.integrations.cursor_integration import (
     discover_cursor_cli,
     discover_cursor_ide,
     discover_cursor_sdk,
+    installed_cursor_observation_profile,
     installed_cursor_startup_mode,
     observe_cursor_mcp,
     preview_cursor_plugin,
@@ -78,6 +81,30 @@ def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
         )
         assert installed_cursor_startup_mode(target) == mode
         assert status_cursor_plugin(target, artifact).marker_valid
+
+
+def test_ordinary_observation_install_inspect_and_reverse(tmp_path: Path) -> None:
+    launcher = _fake_finishup(tmp_path / "bin" / "finishup")
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    assert installed_cursor_observation_profile(target) == "structural"
+    for index, profile in enumerate(("ordinary", "structural")):
+        artifact = render_cursor_plugin(
+            PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+            finishup_launcher=launcher,
+            observation_profile="ordinary" if profile == "ordinary" else "structural",
+        )
+        action = PluginArtifactAction.INSTALL if index == 0 else PluginArtifactAction.REPLACE
+        preview = preview_cursor_plugin(_REQUEST, target, action, artifact)
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_AcceptingReview(),
+        )
+        assert installed_cursor_observation_profile(target) == profile
 
 
 class _AcceptingReview:
@@ -1720,6 +1747,31 @@ def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) ->
     assert observed.present_sources == (CursorMcpSource.USER,)
 
 
+@pytest.mark.parametrize("escape", ["\\ud83d", "\\u0000"])
+def test_mcp_configuration_with_an_unholdable_string_value_stays_observable(
+    tmp_path: Path, escape: str
+) -> None:
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    user = tmp_path / "user"
+    plugin.mkdir()
+    project.mkdir()
+    user.mkdir()
+    (user / "mcp.json").write_text(
+        '{"mcpServers": {"other": {"command": "other", "description": "cut ' + escape + '"}}}',
+        encoding="utf-8",
+    )
+
+    observed = observe_cursor_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        user_config_root=user,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.ABSENT
+    assert observed.observed is True
+
+
 def test_sdk_profiles_require_explicit_sources_and_pin_bridge_protocol(tmp_path: Path) -> None:
     package_json = tmp_path / "package.json"
     package_json.write_text('{"name":"@cursor/sdk","version":"1.0.23"}', encoding="utf-8")
@@ -1998,3 +2050,50 @@ def test_same_name_entry_with_any_extra_key_is_foreign_not_a_recognized_route(
     assert observation.ownership_state is McpOwnershipState.FOREIGN
     assert observation.route_profile is None
     assert observation.winning_source is CursorMcpSource.USER
+
+
+def _install_portable(tmp_path: Path) -> tuple[CursorPluginTarget, CursorPluginArtifact, Path]:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
+    preview = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
+    )
+    return target, artifact, tmp_path / ".cursor" / "plugins" / "local" / "finishup"
+
+
+@pytest.mark.parametrize("name", ["notes-resume.md", "notes-résumé.md", "メモ/a.md"])
+def test_foreign_member_with_any_utf8_name_is_classified_modified(
+    tmp_path: Path, name: str
+) -> None:
+    target, artifact, plugin = _install_portable(tmp_path)
+    member = plugin / name
+    member.parent.mkdir(mode=0o700, exist_ok=True)
+    member.write_bytes(b"mine\n")
+
+    assert status_cursor_plugin(target, artifact).state is PluginArtifactState.MODIFIED
+    with pytest.raises(CursorIntegrationError) as removal:
+        preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.REMOVE, artifact)
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    with pytest.raises(CursorIntegrationError) as replacement:
+        preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.REPLACE, artifact)
+    assert replacement.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert member.read_bytes() == b"mine\n"
+
+
+def test_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
+    target, artifact, plugin = _install_portable(tmp_path)
+    try:
+        (plugin / os.fsdecode(b"notes-\xe9.md")).write_bytes(b"mine\n")
+    except OSError:
+        pytest.skip("this file system accepts only UTF-8 file names")
+
+    with pytest.raises(CursorIntegrationError) as raised:
+        status_cursor_plugin(target, artifact)
+    assert raised.value.reason is PluginArtifactReason.TARGET_UNSAFE

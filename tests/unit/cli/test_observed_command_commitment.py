@@ -31,6 +31,7 @@ from finishup.domain.observation_profiles import (
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
 )
 from finishup.domain.values import JsonValue
+from finishup.kernel.task_facts import register_command_identity_key, requested_command_identity
 from finishup.protocol.canonical import canonical_encode
 
 # A distinctive token: if any byte of it survives anywhere, command text leaked.
@@ -70,6 +71,15 @@ def test_normalization_refuses_arguments_it_cannot_commit_to(argument: object) -
     assert normalize_observed_command(argument) is None
 
 
+# Two programs that differ only in one body line's indentation, and so print different output.
+_NESTED_HEREDOC = (
+    "python3 - <<'EOF'\nfor i in range(2):\n    if i:\n        print('a')\n        print('b')\nEOF"
+)
+_OUTER_HEREDOC = (
+    "python3 - <<'EOF'\nfor i in range(2):\n    if i:\n        print('a')\n    print('b')\nEOF"
+)
+
+
 @pytest.mark.parametrize(
     ("first", "second"),
     [
@@ -79,6 +89,10 @@ def test_normalization_refuses_arguments_it_cannot_commit_to(argument: object) -
         ('bash -lc "echo $HOME"', "echo $HOME"),
         ('bash -lc "echo $HOME"', "bash -lc 'echo $HOME'"),
         ("pytest -q a\npytest -q b", "pytest -q a pytest -q b"),
+        (_NESTED_HEREDOC, _OUTER_HEREDOC),
+        ("cat <<-EOF\n\t\tx\n\tEOF", "cat <<-EOF\n x\n EOF"),
+        ("cat <<< 'a'  b", "cat <<< 'a' b"),
+        ("echo $'a\\'  b'", "echo $'a\\' b'"),
     ],
 )
 def test_normalization_never_merges_commands_with_different_shell_meaning(
@@ -91,6 +105,37 @@ def test_normalization_never_merges_commands_with_different_shell_meaning(
     """
 
     assert normalize_observed_command(first) != normalize_observed_command(second)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _NESTED_HEREDOC,
+        "python3  -   <<'EOF'\nprint( 'a  b' )\nEOF  ",
+        "cat <<-EOF\n\t\tx\n\tEOF",
+        "echo $'a\\'  b'   c",
+    ],
+)
+def test_here_document_bodies_and_ansi_c_strings_are_kept_byte_for_byte(command: str) -> None:
+    assert normalize_observed_command(f"  {command}") == command
+    assert normalize_observed_command(["/bin/bash", "-lc", command]) == command
+
+
+def test_heredoc_programs_that_differ_in_indentation_keep_distinct_identities() -> None:
+    hook = [
+        _codex_envelope(_exec_command(command, "call-1")).structural_payload["command_commitment"]
+        for command in (_NESTED_HEREDOC, _OUTER_HEREDOC)
+    ]
+    register_command_identity_key(_KEY)
+    try:
+        planned = [
+            requested_command_identity(command) for command in (_NESTED_HEREDOC, _OUTER_HEREDOC)
+        ]
+    finally:
+        register_command_identity_key(None)
+    assert hook[0] != hook[1]
+    assert planned[0] != planned[1]
+    assert hook == planned
 
 
 def test_the_linux_and_wsl2_wrapper_forms_commit_to_one_identity() -> None:

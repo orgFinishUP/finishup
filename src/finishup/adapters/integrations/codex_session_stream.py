@@ -2436,7 +2436,8 @@ def _rollout_item_decisions(
       decision 15 then corrects the hook's ``unknown`` row), and an item whose id is a stated
       hook call is that post's ``copy``;
     * a command item whose exit equals an unpaired stated exit of a hook post for the same
-      command commitment is that post's ``copy``;
+      command commitment is that post's ``copy``; a stated post has one copy, so once its own
+      item (same call id) is decided, its exit is no longer unpaired, whichever arrived first;
     * otherwise a command item is ``pending`` until the outcome-less hook calls of its
       commitment can be told apart from the calls it may still be a copy of.
 
@@ -2459,7 +2460,9 @@ def _rollout_item_decisions(
 
     unstated_calls: dict[str, str | None] = {}
     owed: dict[str, int] = {}
-    stated_exits: dict[str, list[int | None]] = {}
+    # Each unpaired stated post's exit, with the call id of the post it came from, so the post's
+    # own item, once it arrives, consumes that one entry and the post has exactly one copy.
+    stated_exits: dict[str, list[tuple[str | None, int | None]]] = {}
     stated_calls: set[str] = set()
     seen_exits: dict[str, set[int | None]] = {}
     open_calls: dict[str, set[str]] = {}
@@ -2556,7 +2559,7 @@ def _rollout_item_decisions(
             if joined is not None:
                 decide(joined, _ITEM_COPY)
             elif commitment is not None:
-                stated_exits.setdefault(commitment, []).append(exit_fact)
+                stated_exits.setdefault(commitment, []).append((call_id, exit_fact))
             settle(commitment)
             continue
         if envelope.source is not ObservationSource.CODEX_SESSION_STREAM or not _hooked_tool_item(
@@ -2573,9 +2576,18 @@ def _rollout_item_decisions(
             if earlier is not None and owed.get(earlier, 0) > 0:
                 owed[earlier] -= 1
         elif call_id is not None and call_id in stated_calls:
+            # The post's own item: its exit is no longer free for another call's item to claim.
+            if commitment is not None:
+                unpaired = stated_exits.get(commitment, [])
+                stated_exits[commitment] = [entry for entry in unpaired if entry[0] != call_id]
             decisions[envelope.source_identity] = _ITEM_COPY
-        elif commitment is not None and exit_fact in stated_exits.get(commitment, []):
-            stated_exits[commitment].remove(exit_fact)
+        elif commitment is not None and (
+            claimed := next(
+                (entry for entry in stated_exits.get(commitment, []) if entry[1] == exit_fact),
+                None,
+            )
+        ):
+            stated_exits[commitment].remove(claimed)
             decisions[envelope.source_identity] = _ITEM_COPY
         else:
             pending.append(

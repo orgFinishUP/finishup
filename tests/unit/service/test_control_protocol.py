@@ -662,6 +662,42 @@ def test_legacy_hello_remains_unbound_and_never_invokes_locator_resolver() -> No
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("with_resolver", [True, False])
+def test_a_locator_over_the_byte_bound_is_a_peer_refusal_not_a_service_fault(
+    with_resolver: bool,
+) -> None:
+    """The hello schema bounds the path in characters; the locator bounds it in UTF-8 bytes."""
+
+    path = "/" + "\u00e9" * 5000  # 5001 characters, 10001 UTF-8 bytes
+    hello = _hello()
+    hello["workspace_locator"] = {"schema_version": "1.0.0", "path": path}
+    validate_schema_instance("control-hello", "2.10.0", hello)
+    payload = canonical_encode(hello)
+    resolved: list[str] = []
+
+    async def resolve(locator: WorkspaceLocator) -> RepositoryPrivacyContext | None:
+        resolved.append(locator.path)
+        return None
+
+    async def exercise() -> tuple[ControlProtocolError, _MemoryStream]:
+        client, server, client_peer = _stream_pair()
+        await client.send_all(struct.pack(">I", len(payload)) + payload)
+        with pytest.raises(ControlProtocolError) as error:
+            await server_handshake(
+                server,
+                client_peer,
+                _status(),
+                repository_context_resolver=resolve if with_resolver else None,
+            )
+        return error.value, server
+
+    error, server = asyncio.run(exercise())
+    assert server.closed
+    assert resolved == []
+    assert not isinstance(error, HandshakeServiceFault)
+    assert error.reason == "protocol_mismatch"
+
+
 @pytest.mark.parametrize(
     ("raised", "refusal"),
     [

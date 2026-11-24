@@ -1043,6 +1043,19 @@ def parse_workspace_reply(frame: ControlFrame) -> WorkspaceReply:
         raise ControlProtocolError("frame_invalid") from None
 
 
+def _workspace_locator_from_wire(value: object) -> WorkspaceLocator:
+    if not isinstance(value, Mapping):
+        _fail("protocol_mismatch")
+    source = cast(Mapping[str, object], value)
+    try:
+        return WorkspaceLocator(
+            path=cast(str, source["path"]),
+            schema_version=cast(Literal["1.0.0"], source["schema_version"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ControlProtocolError("protocol_mismatch") from None
+
+
 def _workspace_claim_from_wire(value: object) -> WorkspaceClaim:
     if not isinstance(value, Mapping):
         _fail("protocol_mismatch")
@@ -1448,21 +1461,18 @@ async def server_handshake(
                         _fail("protocol_mismatch")
                     # One handle per claimed worktree: the commitment is the repository's.
                     workspace_handle = repository_context.workspace_handle
-        if raw_locator is not None and repository_context_resolver is not None:
-            if not isinstance(raw_locator, Mapping):
-                _fail("protocol_mismatch")
-            locator_wire = cast(Mapping[str, JsonValue], raw_locator)
-            repository_context = await repository_context_resolver(
-                WorkspaceLocator(
-                    path=cast(str, locator_wire["path"]),
-                    schema_version=cast(Literal["1.0.0"], locator_wire["schema_version"]),
-                )
-            )
-            if repository_context is not None and (
-                type(repository_context) is not RepositoryPrivacyContext
-                or repository_context.identity_kind == "client_claim"
-            ):
-                _fail("protocol_mismatch")
+        if raw_locator is not None:
+            # The peer's locator is checked whether or not anything resolves it: a path the
+            # schema admits (in characters) but the locator refuses (in UTF-8 bytes) is the
+            # peer's malformed value, never a fault on the service's side.
+            locator = _workspace_locator_from_wire(raw_locator)
+            if repository_context_resolver is not None:
+                repository_context = await repository_context_resolver(locator)
+                if repository_context is not None and (
+                    type(repository_context) is not RepositoryPrivacyContext
+                    or repository_context.identity_kind == "client_claim"
+                ):
+                    _fail("protocol_mismatch")
         allowed = _allowed_for(kind)
         await write_control_frame(
             stream,
