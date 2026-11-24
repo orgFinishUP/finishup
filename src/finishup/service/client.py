@@ -87,12 +87,6 @@ from finishup.ports.control import (
     WorkspaceLocator,
     WorkspaceReply,
 )
-from finishup.ports.privacy import (
-    LocalDisclosureReceiptView,
-    NetworkEgressReceiptView,
-    PrivacyReceiptPage,
-    PrivacyReceiptView,
-)
 from finishup.ports.workspace_agent import outcome_for_reason
 from finishup.protocol.canonical import (
     canonical_encode,
@@ -106,21 +100,7 @@ from finishup.protocol.errors import (
     SERVICE_START_TIMEOUT_PHASE,
 )
 from finishup.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
-from finishup.protocol.models import (
-    CheckRequest,
-    CheckResult,
-    DataCategory,
-    PublishWorkRequest,
-    PublishWorkResult,
-    ReceiptRequest,
-    ReceiptResult,
-    RespondRequest,
-    RespondResult,
-    StartRequest,
-    StartResult,
-    StatusRequest,
-    StatusResult,
-)
+from finishup.protocol.model_values import DataCategory
 from finishup.protocol.server_profile import (
     ProfileError,
     ServerProfile,
@@ -145,9 +125,17 @@ from finishup.service.control_protocol import (
 )
 
 if TYPE_CHECKING:
+    import finishup.protocol.models as _protocol_models
     from finishup.client.helper_status import HelperStamp
+    from finishup.ports.privacy import PrivacyReceiptPage, PrivacyReceiptView
     from finishup.service.confidential_protocol import OwnerReceiptViewTarget
     from finishup.service.lifecycle import SingletonHolder
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The workflow models load on first use: their annotations still resolve to the real classes,
+    # and a process that only asks for service status never imports pydantic.
+    _protocol_models = LazyModule("finishup.protocol.models")
 
 __all__ = [
     "GENERATION_RECHECK_SECONDS",
@@ -624,6 +612,9 @@ class PrivacyReceiptFound:
     def __post_init__(self) -> None:
         if self.schema_version != "1.0.0" or self.outcome != "found":
             raise ValueError("privacy_receipt_get_result_invalid")
+        # ports.privacy pulls in ports.semantic and the kernel; only receipt callers pay for it.
+        from finishup.ports.privacy import LocalDisclosureReceiptView, NetworkEgressReceiptView
+
         if type(self.receipt) not in {
             NetworkEgressReceiptView,
             LocalDisclosureReceiptView,
@@ -1096,6 +1087,8 @@ def _receipt_capacity_from_wire(value: object) -> ReceiptCapacity | None:
 
 
 def _receipt_view_from_wire(value: object) -> PrivacyReceiptView:
+    from finishup.ports.privacy import LocalDisclosureReceiptView, NetworkEgressReceiptView
+
     wrapper = _object(value)
     receipt = _object(wrapper["receipt"])
     # Stage-less v1.0 receipts cannot prove whether scanning reached a prepared case.  Preserve
@@ -1174,6 +1167,8 @@ def _receipt_page_from_wire(value: JsonObject) -> PrivacyReceiptPage:
     raw_undecodable_ids = source.get("undecodable_receipt_ids", ())
     if type(raw_undecodable_ids) is not tuple:
         raise ValueError("privacy_receipt_wire_invalid")
+    from finishup.ports.privacy import PrivacyReceiptPage
+
     return PrivacyReceiptPage(
         snapshot_generation=_decimal(source["snapshot_generation"]),
         receipts=tuple(_receipt_view_from_wire(item) for item in receipt_members),
@@ -1844,29 +1839,32 @@ class ServiceClient(ControlClientPort):
             raise error
         return result.body
 
-    async def start(self, request: StartRequest, *, deadline_ms: int | None = None) -> StartResult:
+    async def start(
+        self, request: _protocol_models.StartRequest, *, deadline_ms: int | None = None
+    ) -> _protocol_models.StartResult:
         return cast(
-            StartResult, await self._invoke(ControlMethod.START, request, deadline_ms=deadline_ms)
+            "_protocol_models.StartResult",
+            await self._invoke(ControlMethod.START, request, deadline_ms=deadline_ms),
         )
 
     async def publish_work(
-        self, request: PublishWorkRequest, *, deadline_ms: int | None = None
-    ) -> PublishWorkResult:
+        self, request: _protocol_models.PublishWorkRequest, *, deadline_ms: int | None = None
+    ) -> _protocol_models.PublishWorkResult:
         return cast(
-            PublishWorkResult,
+            "_protocol_models.PublishWorkResult",
             await self._invoke(ControlMethod.PUBLISH_WORK, request, deadline_ms=deadline_ms),
         )
 
     async def check(
         self,
-        request: CheckRequest,
+        request: _protocol_models.CheckRequest,
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
         host_profile: McpHostProfile | None = None,
-    ) -> CheckResult:
+    ) -> _protocol_models.CheckResult:
         return cast(
-            CheckResult,
+            "_protocol_models.CheckResult",
             await self._invoke(
                 ControlMethod.CHECK,
                 request,
@@ -1877,22 +1875,22 @@ class ServiceClient(ControlClientPort):
         )
 
     async def respond(
-        self, request: RespondRequest, *, deadline_ms: int | None = None
-    ) -> RespondResult:
+        self, request: _protocol_models.RespondRequest, *, deadline_ms: int | None = None
+    ) -> _protocol_models.RespondResult:
         return cast(
-            RespondResult,
+            "_protocol_models.RespondResult",
             await self._invoke(ControlMethod.RESPOND, request, deadline_ms=deadline_ms),
         )
 
     async def status(
         self,
-        request: StatusRequest,
+        request: _protocol_models.StatusRequest,
         *,
         deadline_ms: int | None = None,
         route_profile: McpRouteProfile | None = None,
-    ) -> StatusResult:
+    ) -> _protocol_models.StatusResult:
         return cast(
-            StatusResult,
+            "_protocol_models.StatusResult",
             await self._invoke(
                 ControlMethod.STATUS,
                 request,
@@ -1901,7 +1899,9 @@ class ServiceClient(ControlClientPort):
             ),
         )
 
-    def owner_receipt_view_target(self, request: ReceiptRequest) -> OwnerReceiptViewTarget:
+    def owner_receipt_view_target(
+        self, request: _protocol_models.ReceiptRequest
+    ) -> OwnerReceiptViewTarget:
         """The human-control target that binds an owner view to this request on this connection.
 
         The connection nonce never leaves the client; the target carries only its digest.
@@ -1913,10 +1913,10 @@ class ServiceClient(ControlClientPort):
         return owner_receipt_view_target(request, self._session.connection_nonce)
 
     async def receipt(
-        self, request: ReceiptRequest, *, deadline_ms: int | None = None
-    ) -> ReceiptResult:
+        self, request: _protocol_models.ReceiptRequest, *, deadline_ms: int | None = None
+    ) -> _protocol_models.ReceiptResult:
         return cast(
-            ReceiptResult,
+            "_protocol_models.ReceiptResult",
             await self._invoke(ControlMethod.RECEIPT, request, deadline_ms=deadline_ms),
         )
 

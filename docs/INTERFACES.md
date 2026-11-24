@@ -874,6 +874,18 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
 
 ## 3. Protocol constants (`protocol/models.py` unless noted)
 
+The bounds below, the wire enums `DataCategory`, `ClientKind`, `IntegrationKind`,
+`LineageReadGapReason`, `LineageProvenanceRestriction`, `ReceiptRedactionProfile`,
+`SemanticStatus`, `SemanticReason`, and `SemanticProgressPhase`, and the AI-powered outcome
+validators are defined in the pydantic-free `protocol/model_values.py` and re-exported unchanged
+by `protocol/models.py`: each is the same object through both modules and keeps
+`finishup.protocol.models` as its `__module__`. The domain, kernel, and port modules an
+observation hook loads to refresh its advice import them from `protocol/model_values.py` and
+name pydantic or a protocol model only through `protocol/lazy_module.LazyModule`, so that hook
+never imports pydantic. The control client (`service/client.py`, `service/control_protocol.py`)
+likewise imports the workflow request and result models on the first workflow call or result, so
+`finishup service status` and an observation hook's outbox drain never import pydantic either.
+
 - `PROTOCOL_VERSION = "0.1"`; request/result `schema_version = "1.0.0"` per operation.
 - `MAX_EVENTS_PER_BATCH = 100`; `MAX_CANONICAL_REQUEST_BYTES = 1_048_576` (1 MiB);
   `MAX_FINDINGS_DEFAULT = 3`; `MAX_FINDINGS_LIMIT = 10`; `MAX_REASON_BYTES = 4_096`;
@@ -981,6 +993,14 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   tuple[JsonValue, ...] | Mapping[str, JsonValue]`; arbitrary `Sequence` implementations are not
   protocol arrays.
 - `canonical_encode(value: JsonValue) -> bytes` — restricted-JCS bytes (ADR-002).
+  A value made only of exact `dict`, `list`, `tuple`, `str`, `int`, `bool` and `None` nodes is
+  checked in one walk and then written by the C JSON encoder; every other value takes the
+  node-by-node walker, with the same bytes and the same errors in the same order. The checked
+  value is read twice, so a caller must not mutate a value while it is being encoded: a value
+  that another thread or a finalizer changes between the check and the write can be encoded
+  as text the walker would reject, or raise the C encoder's `ValueError` instead of the
+  walker's `ProtocolValueError`
+  ([startup and hot-path performance](runbooks/startup-and-hot-path-performance.md)).
 - `canonical_digest(value) -> str` — `"sha256:" + hex(sha256(canonical_encode(value)))`.
 - `strict_json_parse(data: bytes | bytearray) -> JsonValue` — snapshots a `bytearray` once to
   immutable bytes, then performs strict UTF-8 parsing and rejects BOM/NUL, duplicate keys,
@@ -1026,6 +1046,16 @@ member's byte length and SHA-256.
 One boundary is narrower than before. A member outside every loaded closure whose bytes still match
 the manifest digest, but are not canonical or carry a wrong `$id`, is no longer refused by a hook.
 The service still refuses it, and so does any later full load.
+
+Protocol and config models (`finishup.protocol.models` and `finishup.config.models` with their
+subclasses) are likewise built on first use instead of at import. Every build of one runs under a
+single process-wide lock and resolves names from the model's own module, as the import-time build
+did; a JSON schema asked of a model and a `TypeAdapter` over one also wait for that build (every
+`TypeAdapter` over a model class adapts the model `ensure_built` returned, and an architecture
+test holds `src/` and `scripts/` to that). The service and the MCP bridge build every model before
+they serve, and the native REST edge builds them before its port listens. Validation results,
+errors, serialization, and JSON schemas are unchanged; only a class's introspected `__init__`
+signature stays generic until the model is first used.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
@@ -1473,7 +1503,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 MCP process receives an AI-powered check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
-its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
+its pair and final-provenance-binding validators (defined in `protocol/model_values.py`, see §3). `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
 objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
 `CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance. A present
 provenance record always repeats that same selected/final status and reason. Earlier late or
@@ -8873,7 +8903,9 @@ preimages/proposals, installed managed source-tree digest, cache root
 `<home>/plugins/cache/finishup/finishup` and cache preimage/intended tree digest, and exact post-consent
 `plugin list --marketplace finishup --json` and `plugin add finishup@finishup --json` commands. Preview runs
 the version probe with both home variables set to a fresh owner-private temporary home, removes its
-scratch afterward, and performs no selected-home inventory read. After consent, apply forces both
+scratch afterward, and performs no selected-home inventory read. While one connection plan is
+prepared, its activation inspections and preview share one such probe of the same executable and
+home; a plan status and an apply probe afresh. After consent, apply forces both
 home variables to the approved home, re-probes under its lock, and CAS-fences each write. A later
 failure preserves approved partial marketplace/config/cache state for retry and performs no
 pathname rollback that could race a concurrent replacement.
@@ -9939,7 +9971,9 @@ and reports `version_provenance`: `tested` for an exactly proven cell
 `version_unsupported`/`minimum_version`. An `untested` host is admitted but never promoted to a
 proven cell. Preview also re-hashes the executable to detect stale identity, and refuses with
 `recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
-before any mutation.
+before any mutation. Within one read-only observation (preparing a connection plan, or one plan
+status), a later check of the same unchanged executable (same device, inode, size, modification and
+change times) reuses the digest the first check took; an apply always re-hashes.
 
 `ClaudeCodePluginArtifact` contains one `PortablePluginPlan`, sorted native member mapping,
 generated strict marketplace manifest, separate artifact/marketplace digests, the exact bound
@@ -10639,8 +10673,12 @@ facade and are never MCP tools.
   cursor-observe|spool` fast paths without loading typer, then refuses native Windows
   (`os.name == "nt"`) with the fixed `unsupported_platform` line and exit 20 — the exit an absent
   service already carries, because no FinishUP service can be reached from that process — before the
-  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). Everything else
-  falls through to `cli/app.py` unchanged.
+  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). The exact
+  argument lists `--version` and `version` then print the bare package version, and exactly
+  `version --json` writes the version manifest, without loading typer, with the full CLI's bytes,
+  exit codes and failure lines, unless typer's `_FINISHUP_COMPLETE` completion variable is set. A
+  manifest that cannot be built falls through, so the full CLI renders the refusal. Everything
+  else falls through to `cli/app.py` unchanged.
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
   ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
   installation marker owns immutable vault-mode publication. Unlock calls only
@@ -13063,8 +13101,11 @@ is a deletion or a submodule, otherwise it is omitted as `not_regular_file` with
 (Git's output for it is discarded). Every blob a shown section reads (`src`, and a non-zero `dst`,
 of mode 100644, 100755 or 120000) is verified: a loose object must be a regular, owner-only file
 (any link count) whose descriptor still has the recorded identity before and after it is read, and
-is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file blob`
-(at most 8 MiB each, 64 MiB in all) and hashed. Either mismatch omits the section as
+is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file`
+(at most 8 MiB each, 64 MiB in all) and hashed. With three or more such blobs, one
+`cat-file --batch-check` and one `cat-file --batch` read them, holding at most 8 MiB at once and
+using at most half the time left (none when under 5 seconds are left); any blob that batch does not
+answer cleanly is read on its own with `git cat-file blob`. Either mismatch omits the section as
 `object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld. The
 adapter overwrites the compressed and inflated buffers it owns. Tracked and untracked files whose
 base name is on the adapter's credential-name list are listed by name only (`credential_name`). The

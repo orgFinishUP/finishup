@@ -380,6 +380,14 @@ def rest_run(
         keys = store.records()
     except ApiKeyError as error:
         raise _fail(error.reason) from None
+    if edge == "native":
+        # The native edge runs the service in this process. Build the protocol and config models
+        # before the port listens, as the import-time build did, so the service's own eager build
+        # (which then finds them built) does not lengthen the time between the port accepting
+        # connections and the control channel answering.
+        from finishup.protocol.deferred_build import build_deferred_models
+
+        build_deferred_models()
     try:
         listener = RestListener.bind(
             listen, tls_cert=tls_cert, tls_key=tls_key, behind_proxy=behind_proxy

@@ -36,7 +36,12 @@ project_app = typer.Typer(
 _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _DEADLINE = Annotated[
     int | None,
-    typer.Option("--deadline-ms", min=1, max=86_400_000),
+    typer.Option(
+        "--deadline-ms",
+        min=1,
+        max=86_400_000,
+        help="Bound the call to this many milliseconds; a timeout leaves the outcome unknown.",
+    ),
 ]
 _REQUEST_ID = Annotated[
     str | None,
@@ -234,7 +239,10 @@ def _run_status(
         raise typer.Exit(usage_failure())
 
 
-@project_app.command("create")
+@project_app.command(
+    "create",
+    help="Create a general project.",
+)
 def project_create(
     title: Annotated[str, typer.Argument(help="Human title; encrypted by the service.")],
     owner_task_id: Annotated[
@@ -270,7 +278,10 @@ def project_create(
     )
 
 
-@project_app.command("link")
+@project_app.command(
+    "link",
+    help="Add a member to a project.",
+)
 def project_link(
     project_id: Annotated[str, typer.Option("--project-id")],
     member_kind: Annotated[str, typer.Option("--member-kind")],
@@ -302,7 +313,10 @@ def project_link(
     )
 
 
-@project_app.command("unlink")
+@project_app.command(
+    "unlink",
+    help="Remove a member from a project.",
+)
 def project_unlink(
     project_id: Annotated[str, typer.Option("--project-id")],
     member_kind: Annotated[str, typer.Option("--member-kind")],
@@ -326,7 +340,10 @@ def project_unlink(
     )
 
 
-@project_app.command("amend")
+@project_app.command(
+    "amend",
+    help="Change a project's title or description.",
+)
 def project_amend(
     project_id: Annotated[str, typer.Option("--project-id")],
     owner_task_id: Annotated[
@@ -356,7 +373,10 @@ def project_amend(
     )
 
 
-@project_app.command("dissolve")
+@project_app.command(
+    "dissolve",
+    help="Dissolve a project; accepted delegations, obligations and receipts are kept.",
+)
 def project_dissolve(
     project_id: Annotated[str, typer.Option("--project-id")],
     expected_generation: Annotated[int | None, typer.Option("--expected-generation", min=1)] = None,
@@ -394,7 +414,10 @@ def _project_opt(
     )
 
 
-@project_app.command("opt-out")
+@project_app.command(
+    "opt-out",
+    help="Turn off automatic grouping for a repository.",
+)
 def project_opt_out(
     repository_commitment: Annotated[str, typer.Option("--repository-commitment")],
     request_id: _REQUEST_ID = None,
@@ -404,7 +427,10 @@ def project_opt_out(
     _project_opt("opt_out", repository_commitment, json_output, deadline_ms, request_id)
 
 
-@project_app.command("opt-in")
+@project_app.command(
+    "opt-in",
+    help="Turn automatic grouping back on for a repository.",
+)
 def project_opt_in(
     repository_commitment: Annotated[str, typer.Option("--repository-commitment")],
     request_id: _REQUEST_ID = None,
@@ -414,7 +440,10 @@ def project_opt_in(
     _project_opt("opt_in", repository_commitment, json_output, deadline_ms, request_id)
 
 
-@project_app.command("grant")
+@project_app.command(
+    "grant",
+    help="Apply an approved coordination grant for one exact project membership generation.",
+)
 def project_grant(
     project_id: Annotated[str, typer.Option("--project-id")],
     membership_generation: Annotated[int, typer.Option("--membership-generation", min=1)],
@@ -436,7 +465,10 @@ def project_grant(
     )
 
 
-@project_app.command("revoke")
+@project_app.command(
+    "revoke",
+    help="Revoke coordination approval for one exact project membership generation.",
+)
 def project_revoke(
     project_id: Annotated[str, typer.Option("--project-id")],
     membership_generation: Annotated[int, typer.Option("--membership-generation", min=1)],
@@ -458,7 +490,10 @@ def project_revoke(
     )
 
 
-@project_app.command("status")
+@project_app.command(
+    "status",
+    help="Show the admitted project view for a task's session.",
+)
 def project_status(
     session_id: Annotated[
         str,

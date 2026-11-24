@@ -14,10 +14,11 @@ import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 
+from finishup.adapters.integrations import claude_code_integration
 from finishup.adapters.integrations.claude_code_integration import (
     ClaudeCodeCapabilityIdentity,
     ClaudeCodeCommandResult,
@@ -25,6 +26,7 @@ from finishup.adapters.integrations.claude_code_integration import (
     ClaudeCodePluginAction,
     ClaudeCodePluginArtifact,
     ClaudeCodePluginTarget,
+    PluginListMemo,
     apply_claude_code_plugin,
     installed_claude_startup_mode,
     observe_claude_code_activation_cues,
@@ -42,6 +44,7 @@ from finishup.ports.plugin_artifacts import (
 )
 from finishup.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
+_REAL_DIGEST_WINDOW = claude_code_integration._DIGEST_WINDOW  # pyright: ignore[reportPrivateUsage]
 _NEW = ("finishup-local", "finishup@finishup-local", "finishup")
 _OLD = ("yoetz-local", "yoetz@yoetz-local", "yoetz")
 # A pre-rename installation's launcher; only the legacy marker that recorded it proves it.
@@ -665,6 +668,235 @@ def test_guided_connection_migrates_and_disconnect_removes_a_legacy_install(
     assert _legacy_root(target).is_dir()
     assert claude.installed[_OLD[1]] is False
     assert _OLD[0] not in claude.registered
+
+
+class _PassThrough:
+    """The listing port before the memo: every call reaches Claude."""
+
+    def __init__(self, delegate: object | None = None) -> None:
+        from finishup.adapters.integrations import claude_code_integration as module
+
+        self._delegate = delegate
+        self._module = module
+
+    def clear(self) -> None:
+        return None
+
+    def run(
+        self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+    ) -> ClaudeCodeCommandResult:
+        delegate = cast(
+            _Claude,
+            self._module.SubprocessClaudeCodeCommands()
+            if self._delegate is None
+            else self._delegate,
+        )
+        return delegate.run(target, arguments)
+
+
+class _NoDigestWindow:
+    """The executable digest before the window: every check hashes the file."""
+
+    def get(self) -> None:
+        return None
+
+    def set(self, _value: object) -> None:
+        return None
+
+    def reset(self, _token: object) -> None:
+        return None
+
+
+def _connect_counting_listings(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, memo: bool, window: bool = True
+) -> tuple[dict[str, object], tuple[int, int], tuple[int, int, int]]:
+    from finishup.adapters.integrations import claude_code_integration as module
+    from finishup.adapters.integrations.host_discovery import HostInstallation
+    from finishup.adapters.integrations.observation_local import LocalObservationStore
+    from finishup.application import host_connection
+    from finishup.application.host_connection import (
+        ConnectionPlan,
+        apply_connection,
+        prepare_connection,
+    )
+
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir()
+    # Each run starts without the observation consent an earlier run granted.
+    state = root.parent / f"observation-{memo}-{window}"
+    state.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        host_connection, "_observation_store", lambda: LocalObservationStore(_state=state)
+    )
+    target, artifact, claude = _legacy_install(root)
+
+    def discover(_executable: Path) -> ClaudeCodeCapabilityIdentity:
+        return target.identity
+
+    monkeypatch.setattr(module, "discover_claude_code", discover)
+    monkeypatch.setattr(module, "SubprocessClaudeCodeCommands", lambda: claude)
+    monkeypatch.setattr(module, "PluginListMemo", PluginListMemo if memo else _PassThrough)
+    monkeypatch.setattr(
+        module,
+        "_DIGEST_WINDOW",
+        _REAL_DIGEST_WINDOW if window else _NoDigestWindow(),
+    )
+    hash_stream = module._hash_stream  # pyright: ignore[reportPrivateUsage]
+    hashes: list[str] = []
+
+    def counted(stream: BinaryIO) -> str:
+        hashes.append(stream.name)
+        return hash_stream(stream)
+
+    monkeypatch.setattr(module, "_hash_stream", counted)
+    installation = HostInstallation(
+        "claude",
+        Path(target.executable),
+        target.identity.version,
+        Path(target.claude_config_root),
+        "Claude Code",
+    )
+
+    def prepare() -> ConnectionPlan:
+        return prepare_connection(
+            _request(30),
+            installation,
+            Path(target.project_root),
+            action="connect",
+            route="policy",
+            launcher=artifact.finishup_launcher,
+        )
+
+    listing = ("plugin", "list", "--json")
+    plan = prepare()
+    prepared = claude.calls.count(listing)
+    prepared_hashes = len(hashes)
+    claude.calls.clear()
+    before = plan.status()
+    status = claude.calls.count(listing)
+    status_hashes = len(hashes) - prepared_hashes
+    claude.calls.clear()
+    after = apply_connection(
+        plan,
+        accepted_digest=plan.digest,
+        refresh=prepare,
+        authority=ArtifactAuthority("review_only", plan.digest, "test"),
+        review=_Review(),
+    )
+    # The status after apply lists afresh: it sees the install, not the preimage.
+    assert claude.calls[-1] == listing
+    assert (before["installed"], after["installed"], after["enabled"]) == (False, True, True)
+    observed: dict[str, object] = {
+        "body": plan.body,
+        "disclosure": plan.disclosure,
+        "before": before,
+        "after": after,
+        "mutations": [call for call in claude.calls if call != listing],
+    }
+    applied_hashes = len(hashes) - prepared_hashes - status_hashes
+    return observed, (prepared, status), (prepared_hashes, status_hashes, applied_hashes)
+
+
+def test_a_connection_plan_lists_plugins_once_per_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare and each status list once; plan, status and apply match the unmemoized run."""
+
+    root = tmp_path / "claude"
+    unmemoized, plain_counts, _ = _connect_counting_listings(root, monkeypatch, memo=False)
+    memoized, memo_counts, _ = _connect_counting_listings(root, monkeypatch, memo=True)
+    assert plain_counts == (3, 2)
+    assert memo_counts == (1, 1)
+    assert memoized == unmemoized
+
+
+def test_a_connection_plan_hashes_the_executable_once_per_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare and each status hash once; apply keeps every check; results are unchanged."""
+
+    root = tmp_path / "claude"
+    plain, _, plain_hashes = _connect_counting_listings(root, monkeypatch, memo=True, window=False)
+    windowed, _, windowed_hashes = _connect_counting_listings(root, monkeypatch, memo=True)
+    assert plain_hashes[:2] == (5, 2)
+    assert windowed_hashes[:2] == (1, 1)
+    # The apply revalidates outside any plan window, as often as before; only its refresh and
+    # the status after it are windows of their own.
+    assert plain_hashes[2] - windowed_hashes[2] == (5 - 1) + (2 - 1)
+    assert windowed == plain
+
+
+def test_the_plugin_list_memo_forgets_on_any_other_command(tmp_path: Path) -> None:
+    target, _artifact, claude = _legacy_install(tmp_path)
+    memo = PluginListMemo(claude)
+    listing = ("plugin", "list", "--json")
+    first = memo.run(target, listing)
+    assert memo.run(target, listing) is first
+    assert claude.calls == [listing]
+    claude.installed[_OLD[1]] = False
+    # A mutation passes through and forgets the listing.
+    assert memo.run(target, ("plugin", "enable", _OLD[1])).returncode == 0
+    second = memo.run(target, listing)
+    assert second.stdout != first.stdout
+    assert claude.calls == [listing, ("plugin", "enable", _OLD[1]), listing]
+    memo.clear()
+    memo.run(target, listing)
+    assert claude.calls.count(listing) == 3
+
+
+def test_the_plugin_list_memo_does_not_remember_a_failed_run(tmp_path: Path) -> None:
+    target, _artifact, claude = _legacy_install(tmp_path)
+    failures = [OSError("spawn")]
+
+    class _Flaky:
+        def run(
+            self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+        ) -> ClaudeCodeCommandResult:
+            if failures:
+                raise failures.pop()
+            return claude.run(target, arguments)
+
+    memo = PluginListMemo(_Flaky())
+    listing = ("plugin", "list", "--json")
+    with pytest.raises(OSError):
+        memo.run(target, listing)
+    memo.run(target, listing)
+    memo.run(target, listing)
+    assert claude.calls == [listing]
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [
+        ClaudeCodeCommandResult(1, b"", b"network unreachable"),
+        ClaudeCodeCommandResult(0, b'[{"id": ', b""),
+        ClaudeCodeCommandResult(0, b"{}", b""),
+    ],
+)
+def test_the_plugin_list_memo_lists_again_after_a_listing_it_could_not_read(
+    tmp_path: Path, unread: ClaudeCodeCommandResult
+) -> None:
+    """A transient failure is answered as before: the next request lists again."""
+
+    target, _artifact, claude = _legacy_install(tmp_path)
+    unread_runs = [unread]
+
+    class _FailsOnce:
+        def run(
+            self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+        ) -> ClaudeCodeCommandResult:
+            if unread_runs:
+                return unread_runs.pop()
+            return claude.run(target, arguments)
+
+    memo = PluginListMemo(_FailsOnce())
+    listing = ("plugin", "list", "--json")
+    assert memo.run(target, listing) is unread
+    read = memo.run(target, listing)
+    assert read.returncode == 0 and read.stdout != unread.stdout
+    assert memo.run(target, listing) is read
+    assert claude.calls == [listing]
 
 
 class _Projects:

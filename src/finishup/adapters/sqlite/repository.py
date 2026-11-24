@@ -76,8 +76,8 @@ from finishup.domain.values import (
 from finishup.kernel.deterministic_checks import CaseAvailabilityFacts
 from finishup.kernel.projections import (
     PROJECTION_VERSION,
+    ProjectionDigester,
     ProjectionState,
-    projection_digest,
     unanswered_finding_count,
 )
 from finishup.kernel.reducers import replay
@@ -419,6 +419,9 @@ class SqliteLedger:
         # Events whose envelope says ``present`` but whose payload object the object store refused
         # as ``object_verification_failed`` while this ledger recovered the task (ADR-051 D4b).
         self._unverifiable_payload_event_ids: frozenset[str] = frozenset()
+        # Each commit stores the projection digest; this ledger's digester re-encodes only the
+        # projection records that changed since the last one (same bytes as projection_digest).
+        self._projection_digester = ProjectionDigester()
 
     def open_observation_store(self) -> SqliteObservationStore:
         """Public durable-observation seam over this bundle's connection.
@@ -637,7 +640,9 @@ class SqliteLedger:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         canonical, status, logical_key, payload_digest, _ = row
         try:
-            parsed = strict_json_parse(cast(bytes, canonical))
+            # canonical_encode below walks the full profile, exactly the walk validate=True would
+            # repeat; both raise the same ValueError, mapped to STORAGE_CORRUPT below.
+            parsed = strict_json_parse(cast(bytes, canonical), validate=False)
             if canonical_encode(parsed) != canonical or not isinstance(parsed, Mapping):
                 raise ValueError("canonical_entry_invalid")
             source = cast(Mapping[str, object], parsed)
@@ -1828,7 +1833,7 @@ class SqliteLedger:
         self._db.execute(
             "UPDATE projection_state SET applied_through_seq=?,state_digest=? "
             "WHERE projection_name='work'",
-            (projection.frontier, projection_digest(projection)),
+            (projection.frontier, self._projection_digester.digest(projection)),
         )
         # Status coverage is the applicable-check fold, not the last event's envelope
         # (engine-derived check/receipt envelopes hardcode check_types=none). Always mirror
@@ -1956,7 +1961,7 @@ class SqliteLedger:
         self._db.execute(
             "UPDATE projection_state SET applied_through_seq=?,state_digest=? "
             "WHERE projection_name='work'",
-            (projection.frontier, projection_digest(projection)),
+            (projection.frontier, self._projection_digester.digest(projection)),
         )
         # Mirror the reducer's applicable-check coverage and latest-check aggregate, never
         # the last event envelope. When latest_tested_state is absent, clear the seven
@@ -3295,7 +3300,11 @@ class SqliteLedger:
                 self._db.execute(
                     "UPDATE projection_state SET projection_version=?,applied_through_seq=?,"
                     "state_digest=? WHERE projection_name='work'",
-                    (PROJECTION_VERSION, projection.frontier, projection_digest(projection)),
+                    (
+                        PROJECTION_VERSION,
+                        projection.frontier,
+                        self._projection_digester.digest(projection),
+                    ),
                 )
                 self._db.execute("COMMIT")
             except BaseException:

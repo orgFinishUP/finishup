@@ -70,7 +70,9 @@ adapt the checker or accept the fallback on purpose.
 The change keeps every decision and every byte:
 
 - Valid instances are decided by a first-error validity checker: the same keywords, except that
-  `anyOf`/`oneOf` stop each failing branch at its first error and `$ref` resolves once per base URI.
+  `anyOf`/`oneOf` stop each failing branch at its first error and skip a branch whose string
+  `const` discriminator the instance contradicts, and `$ref` resolves once per base URI. Each
+  checker builds one validator per schema on first use and reuses it across calls and threads.
   Anything it rejects is validated again by the stock validator, which builds the unchanged
   diagnostic. A bounded per-process memory of (schema, canonical bytes) pairs found valid answers
   repeated validations of identical content, including a control envelope's body already validated

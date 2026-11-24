@@ -6,6 +6,7 @@ import errno
 import fcntl
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -108,7 +109,7 @@ def test_interpreter_links_target_the_base_not_the_replaceable_installation(
 def test_source_change_during_copy_never_publishes_a_generation(
     prefix: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    copyfile = runtimes.shutil.copyfile
+    copyfile = shutil.copyfile
     changed = False
 
     def copy(source: Path, destination: Path, *, follow_symlinks: bool) -> str:
@@ -119,11 +120,32 @@ def test_source_change_during_copy_never_publishes_a_generation(
             (prefix / "pyvenv.cfg").write_text("home = /changed-python\n")
         return str(result)
 
-    monkeypatch.setattr(runtimes.shutil, "copyfile", copy)
+    # The module imports shutil only where it copies, so patch the module it then binds.
+    monkeypatch.setattr(shutil, "copyfile", copy)
     with pytest.raises(runtimes.ReleaseRuntimeError, match="release_runtime_changed_retry"):
         runtimes.prepare_release_runtime(prefix)
     with runtimes.release_update_lock(prefix) as root:
         assert [p.name for p in root.iterdir()] == [".lock"]
+
+
+def test_importing_the_launcher_module_defers_generation_only_imports() -> None:
+    """Every hook's launcher imports this module; only creating or pruning a copy needs these."""
+
+    deferred = ("tempfile", "shutil", "importlib.util", "py_compile")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            "import finishup.adapters.release_runtime\n"
+            f"print(sorted(name for name in {deferred!r} if name in sys.modules))\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout == "[]\n"
 
 
 def test_prune_retains_a_running_generation_until_lease_released(prefix: Path) -> None:
@@ -627,14 +649,16 @@ def test_sealed_generation_imports_from_its_bytecode(prefix: Path) -> None:
 
 
 def _spy_compiles(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    import py_compile
+
     compiled: list[str] = []
-    original = runtimes.py_compile.compile
+    original = py_compile.compile
 
     def spy(file: str, *args: object, **kwargs: object) -> object:
         compiled.append(Path(file).name)
         return original(file, *args, **kwargs)  # pyright: ignore[reportArgumentType]
 
-    monkeypatch.setattr(runtimes.py_compile, "compile", spy)
+    monkeypatch.setattr(py_compile, "compile", spy)
     return compiled
 
 
@@ -910,3 +934,26 @@ def test_install_epoch_reaches_only_the_install_and_its_build_backends(
     pyc = site / "__pycache__" / f"epochprobe_mod.{_TAG}.pyc"
     assert int.from_bytes(pyc.read_bytes()[4:8], "little") == (0b11 if owned else 0)
     assert "SOURCE_DATE_EPOCH" not in os.environ
+
+
+def test_importing_the_runtime_handoff_never_loads_the_bytecode_compiler() -> None:
+    """Importing this module on its own never loads the bytecode compiler; only a build does.
+
+    ``py_compile`` stays inside ``_compile_sources``, which runs only while a new generation is
+    staged. The probe imports the module alone: real hook, MCP and service processes still load
+    ``traceback`` and ``_colorize`` through ``logging`` and ``asyncio``, so there the saving is
+    ``py_compile`` itself.
+    """
+
+    import subprocess
+
+    probe = (
+        "import sys\n"
+        "import finishup.adapters.release_runtime\n"
+        "print(sorted(m for m in ('py_compile', 'traceback', '_colorize') if m in sys.modules))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=60
+    )
+
+    assert result.stdout == "[]\n"

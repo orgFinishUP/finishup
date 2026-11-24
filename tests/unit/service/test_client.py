@@ -7,6 +7,7 @@ import gc
 import os
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Buffer, Generator, Mapping
 from contextlib import contextmanager
@@ -2536,3 +2537,37 @@ async def test_on_demand_names_a_service_still_starting_at_the_deadline(
     assert raised.value.retryable is True
     assert raised.value.phase == ("handshake_timeout" if alive else None)
     assert client_module.start_timed_out(raised.value) is alive
+
+
+def test_importing_the_client_leaves_the_privacy_port_unloaded() -> None:
+    """``service status`` and other non-receipt callers never load ports.privacy's graph."""
+
+    completed = subprocess.run(  # noqa: S603 - no shell and a fixed interpreter
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys, finishup.cli.bootstrap, finishup.service.client; "
+            "print(sorted(name for name in ('finishup.ports.privacy', 'finishup.ports.semantic') "
+            "if name in sys.modules))",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "[]\n"
+
+
+def test_privacy_receipt_decoding_loads_the_privacy_port_on_first_use() -> None:
+    """The deferred imports resolve to the port's own classes."""
+
+    import finishup.ports.privacy as privacy
+    import finishup.service.client as client
+
+    assert not hasattr(client, "PrivacyReceiptPage")
+    page = client._receipt_page_from_wire(  # pyright: ignore[reportPrivateUsage]
+        JsonObject({"snapshot_generation": "1", "receipts": ()})
+    )
+    assert type(page) is privacy.PrivacyReceiptPage
+    assert page.receipts == ()

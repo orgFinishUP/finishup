@@ -602,8 +602,26 @@ def _entry_from_json(value: JsonValue) -> _ResourceEntry:
     )
 
 
+# The last manifest that verified, keyed on its exact bytes. The bytes are re-read on every load,
+# so a changed install is still seen and fully re-verified; a failure is never stored, so every
+# integrity error still comes from a fresh evaluation. The result is a frozen dataclass of tuples
+# and a pure function of the bytes, so sharing it is unobservable. One slot keeps memory bounded,
+# and the tuple is replaced in a single assignment.
+_verified_manifest: tuple[bytes, _ResourceManifest] | None = None
+
+
 def _load_resource_manifest() -> _ResourceManifest:
+    global _verified_manifest
     raw = _package_bytes("manifest.json")
+    verified = _verified_manifest
+    if verified is not None and verified[0] == raw:
+        return verified[1]
+    manifest = _resource_manifest_from(raw)
+    _verified_manifest = (raw, manifest)
+    return manifest
+
+
+def _resource_manifest_from(raw: bytes) -> _ResourceManifest:
     manifest = _canonical_document(raw, limit=_MANIFEST_LIMIT, reason="manifest_invalid")
     if set(manifest) != {
         "entries",

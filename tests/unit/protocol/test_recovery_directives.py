@@ -88,6 +88,34 @@ class TestRatchet:
         ):
             recovery._check_registry()  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.parametrize("field", ["directive", "nudge"])
+    @pytest.mark.parametrize("control", ["\x00", "\x07", "\t", "\n", "\x1f", "\x7f"])
+    def test_a_control_character_in_any_text_fails_the_import_gate(
+        self, monkeypatch: pytest.MonkeyPatch, field: str, control: str
+    ) -> None:
+        import dataclasses
+
+        import finishup.protocol.recovery as recovery
+
+        token, entry = next(iter(recovery.RECOVERY_DIRECTIVES.items()))
+        tainted = dataclasses.replace(entry, **{field: "Retry " + control + "now."})
+        monkeypatch.setattr(
+            recovery, "RECOVERY_DIRECTIVES", {**recovery.RECOVERY_DIRECTIVES, token: tainted}
+        )
+        with pytest.raises(RuntimeError, match="^recovery_directive_control_character$"):
+            recovery._check_registry()  # pyright: ignore[reportPrivateUsage]
+
+    def test_control_pattern_is_exactly_the_c0_and_del_predicate(self) -> None:
+        import finishup.protocol.recovery as recovery
+
+        pattern = recovery._CONTROL_CHARACTER  # pyright: ignore[reportPrivateUsage]
+        for code_point in range(0x110000):
+            character = chr(code_point)
+            assert (pattern.search(character) is not None) is (
+                code_point <= 0x1F or code_point == 0x7F
+            ), code_point
+        assert pattern.search("plain ascii ~ text") is None
+
     def test_every_reason_code_has_a_disposition(self) -> None:
         """A reason code with neither a directive nor an exemption is the regression to catch."""
 

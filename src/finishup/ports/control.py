@@ -6,9 +6,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
 from finishup.domain.coordination import CoordinationErrorCode
 from finishup.domain.values import JsonObject, freeze_json, validate_commitment
@@ -27,20 +28,15 @@ from finishup.ports.workspace_agent import (
 from finishup.protocol.canonical import JsonValue, parse_canonical_integer_string
 from finishup.protocol.errors import SafeDetailValue, normalize_safe_details
 from finishup.protocol.ids import IdKind, validate_id
-from finishup.protocol.models import (
-    CheckRequest,
-    CheckResult,
-    PublishWorkRequest,
-    PublishWorkResult,
-    ReceiptRequest,
-    ReceiptResult,
-    RespondRequest,
-    RespondResult,
-    StartRequest,
-    StartResult,
-    StatusRequest,
-    StatusResult,
-)
+
+if TYPE_CHECKING:
+    import finishup.protocol.models as _protocol_models
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The protocol models load on first use: only a workflow call or result body is one of them,
+    # so a client that sends service or observation calls never imports pydantic.
+    _protocol_models = LazyModule("finishup.protocol.models")
 
 __all__ = [
     "CONTROL_ERROR_REASONS",
@@ -366,43 +362,81 @@ class ServiceStopResult:
 
 
 type ControlCallBody = (
-    StartRequest
-    | PublishWorkRequest
-    | CheckRequest
-    | RespondRequest
-    | StatusRequest
-    | ReceiptRequest
+    _protocol_models.StartRequest
+    | _protocol_models.PublishWorkRequest
+    | _protocol_models.CheckRequest
+    | _protocol_models.RespondRequest
+    | _protocol_models.StatusRequest
+    | _protocol_models.ReceiptRequest
     | JsonObject
 )
 type McpRouteProfile = Literal["policy", "strict"]
 type ControlSuccessBody = (
-    StartResult
-    | PublishWorkResult
-    | CheckResult
-    | RespondResult
-    | StatusResult
-    | ReceiptResult
+    _protocol_models.StartResult
+    | _protocol_models.PublishWorkResult
+    | _protocol_models.CheckResult
+    | _protocol_models.RespondResult
+    | _protocol_models.StatusResult
+    | _protocol_models.ReceiptResult
     | JsonObject
     | ServiceStatus
     | ServiceStopResult
 )
 
-_WORKFLOW_REQUEST_TYPES: dict[ControlMethod, type[object]] = {
-    ControlMethod.START: StartRequest,
-    ControlMethod.PUBLISH_WORK: PublishWorkRequest,
-    ControlMethod.CHECK: CheckRequest,
-    ControlMethod.RESPOND: RespondRequest,
-    ControlMethod.STATUS: StatusRequest,
-    ControlMethod.RECEIPT: ReceiptRequest,
-}
-_WORKFLOW_RESULT_TYPES: dict[ControlMethod, type[object]] = {
-    ControlMethod.START: StartResult,
-    ControlMethod.PUBLISH_WORK: PublishWorkResult,
-    ControlMethod.CHECK: CheckResult,
-    ControlMethod.RESPOND: RespondResult,
-    ControlMethod.STATUS: StatusResult,
-    ControlMethod.RECEIPT: ReceiptResult,
-}
+# The workflow methods, whose call and result bodies are protocol models; every other method's
+# body is a JSON object. Naming them here lets a non-workflow call skip the model import.
+_WORKFLOW_METHODS: Final = frozenset(
+    {
+        ControlMethod.START,
+        ControlMethod.PUBLISH_WORK,
+        ControlMethod.CHECK,
+        ControlMethod.RESPOND,
+        ControlMethod.STATUS,
+        ControlMethod.RECEIPT,
+    }
+)
+
+
+@cache
+def _workflow_request_types() -> Mapping[ControlMethod, type[object]]:
+    models = _protocol_models
+    return MappingProxyType(
+        {
+            ControlMethod.START: models.StartRequest,
+            ControlMethod.PUBLISH_WORK: models.PublishWorkRequest,
+            ControlMethod.CHECK: models.CheckRequest,
+            ControlMethod.RESPOND: models.RespondRequest,
+            ControlMethod.STATUS: models.StatusRequest,
+            ControlMethod.RECEIPT: models.ReceiptRequest,
+        }
+    )
+
+
+@cache
+def _workflow_result_types() -> Mapping[ControlMethod, type[object]]:
+    models = _protocol_models
+    return MappingProxyType(
+        {
+            ControlMethod.START: models.StartResult,
+            ControlMethod.PUBLISH_WORK: models.PublishWorkResult,
+            ControlMethod.CHECK: models.CheckResult,
+            ControlMethod.RESPOND: models.RespondResult,
+            ControlMethod.STATUS: models.StatusResult,
+            ControlMethod.RECEIPT: models.ReceiptResult,
+        }
+    )
+
+
+def _expected_call_body_type(method: ControlMethod) -> type[object]:
+    if method not in _WORKFLOW_METHODS:
+        return JsonObject
+    return _workflow_request_types()[method]
+
+
+def _expected_success_body_type(method: ControlMethod) -> type[object]:
+    if method not in _WORKFLOW_METHODS:
+        return JsonObject
+    return _workflow_result_types()[method]
 
 
 def _validate_protocol_version(value: object) -> None:
@@ -450,7 +484,7 @@ class ControlCallRequest:
         _validate_generation(self.service_generation)
         if type(self.method) is not ControlMethod:
             raise ValueError("control_method_invalid")
-        expected_body_type = _WORKFLOW_REQUEST_TYPES.get(self.method, JsonObject)
+        expected_body_type = _expected_call_body_type(self.method)
         if type(self.body) is not expected_body_type:
             raise ValueError("control_method_body_mismatch")
         _validate_deadline(self.deadline_ms)
@@ -635,7 +669,7 @@ class ControlResult:
         if (self.outcome == "error") is not isinstance(self.body, ControlError):
             raise ValueError("control_outcome_body_mismatch")
         if self.outcome == "ok":
-            expected_body_type = _WORKFLOW_RESULT_TYPES.get(self.method, JsonObject)
+            expected_body_type = _expected_success_body_type(self.method)
             if self.method in {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK}:
                 expected_body_type = ServiceStatus
             elif self.method is ControlMethod.SERVICE_STOP:

@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, NotImplementedType
@@ -1612,6 +1613,15 @@ class ObservationCursor:
         )
 
 
+# The exact payload object ``observation_envelope_from_json`` has just validated, so the envelope
+# it constructs skips a second identical walk. Context-local, so concurrent decoders never see
+# each other's marker; any other construction validates as before.
+# The default is a private sentinel no caller can pass, never ``None``.
+_PREVALIDATED_STRUCTURAL_PAYLOAD: Final[ContextVar[object]] = ContextVar(
+    "_PREVALIDATED_STRUCTURAL_PAYLOAD", default=object()
+)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ObservationEnvelope:
     session_commitment: str
@@ -1634,7 +1644,10 @@ class ObservationEnvelope:
             raise _invalid()
         if type(self.receipt_time) is not Timestamp:
             raise _invalid("invalid_timestamp")
-        object.__setattr__(self, "structural_payload", _structural_payload(self.structural_payload))
+        if _PREVALIDATED_STRUCTURAL_PAYLOAD.get() is not self.structural_payload:
+            object.__setattr__(
+                self, "structural_payload", _structural_payload(self.structural_payload)
+            )
         object.__setattr__(
             self, "content_object_refs", _content_object_refs(self.content_object_refs)
         )
@@ -2511,17 +2524,28 @@ def observation_envelope_from_json(value: JsonValue) -> ObservationEnvelope:
         observation_source = ObservationSource(cast(str, source["source"]))
     except ValueError as exc:
         raise _invalid("invalid_event_enum") from exc
-    return ObservationEnvelope(
-        session_commitment=cast(str, source["session_commitment"]),
-        event_kind=cast(str, source["event_kind"]),
-        source_identity=cast(str, source["source_identity"]),
-        source=observation_source,
-        cursor=observation_cursor_from_json(source["cursor"]),
-        receipt_time=timestamp_from_string(source["receipt_time"]),
-        structural_payload=_structural_payload(source["structural_payload"]),
-        content_object_refs=_content_object_refs(source["content_object_refs"]),
-        gap_codes=_sorted_unique_gap_codes(source["gap_codes"]),
-    )
+    cursor = observation_cursor_from_json(source["cursor"])
+    receipt_time = timestamp_from_string(source["receipt_time"])
+    structural_payload = _structural_payload(source["structural_payload"])
+    content_object_refs = _content_object_refs(source["content_object_refs"])
+    gap_codes = _sorted_unique_gap_codes(source["gap_codes"])
+    # ``_structural_payload`` returns its validated object unchanged and is deterministic, so
+    # validating that same object again in ``__post_init__`` cannot change the outcome.
+    marker = _PREVALIDATED_STRUCTURAL_PAYLOAD.set(structural_payload)
+    try:
+        return ObservationEnvelope(
+            session_commitment=cast(str, source["session_commitment"]),
+            event_kind=cast(str, source["event_kind"]),
+            source_identity=cast(str, source["source_identity"]),
+            source=observation_source,
+            cursor=cursor,
+            receipt_time=receipt_time,
+            structural_payload=structural_payload,
+            content_object_refs=content_object_refs,
+            gap_codes=gap_codes,
+        )
+    finally:
+        _PREVALIDATED_STRUCTURAL_PAYLOAD.reset(marker)
 
 
 def advice_item_to_json(value: AdviceItem) -> JsonObject:

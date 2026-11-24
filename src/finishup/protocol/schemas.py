@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -200,41 +201,121 @@ _FORMAT_CHECKER.checks("date-time")(_is_rfc3339_date_time)
 
 
 type _KeywordErrors = Iterator[ValidationError]
+# Per branch of one ``anyOf``/``oneOf`` list, the (property, string ``const``) pairs its
+# ``properties`` keyword pins.
+type _BranchPins = tuple[tuple[tuple[str, str], ...], ...]
 
 
-def _any_of_first_error(
-    validator: Any, any_of: Sequence[object], instance: object, schema: object
-) -> _KeywordErrors:
+def _branch_pins(branches: Sequence[object]) -> _BranchPins:
+    """The string ``const`` each branch's ``properties`` keyword requires of a property."""
+
+    pins: list[tuple[tuple[str, str], ...]] = []
+    for branch in branches:
+        pinned: list[tuple[str, str]] = []
+        if type(branch) is dict:
+            properties = cast(dict[str, object], branch).get("properties")
+            if type(properties) is dict:
+                for key, subschema in cast(dict[str, object], properties).items():
+                    if type(subschema) is dict:
+                        const = cast(dict[str, object], subschema).get("const")
+                        if type(const) is str:
+                            pinned.append((key, const))
+        pins.append(tuple(pinned))
+    return tuple(pins)
+
+
+class _BranchScreen:
+    """Skips ``anyOf``/``oneOf`` branches whose string ``const`` an object instance contradicts.
+
+    The control envelopes are ``oneOf`` unions of dozens of branches keyed by ``method`` (and
+    ``outcome``) constants, and descending into each wrong one built its errors before failing.
+    A branch whose ``properties`` pins a property to one string, for an object instance holding
+    a different string there, fails that ``const`` whatever else it says, so skipping it cannot
+    change a verdict. Only exact ``str`` values on both sides are compared, where ``==`` is the
+    keyword's own equality. The pins of each branch list are computed once per checker; the
+    catalog it reads is immutable for the checker's lifetime.
+    """
+
+    __slots__ = ("_pins",)
+
+    def __init__(self) -> None:
+        self._pins: dict[int, tuple[Sequence[object], _BranchPins]] = {}
+
+    def excluded(self, branches: Sequence[object], instance: object) -> tuple[bool, ...] | None:
+        """Per branch, whether *instance* contradicts one of its pins; ``None`` when none can."""
+
+        if type(instance) is not dict:
+            return None
+        entry = self._pins.get(id(branches))
+        if entry is None or entry[0] is not branches:
+            entry = (branches, _branch_pins(branches))
+            self._pins[id(branches)] = entry
+        source = cast(dict[str, object], instance)
+        excluded: list[bool] = []
+        for pinned in entry[1]:
+            contradicted = False
+            for key, const in pinned:
+                value = source.get(key)
+                if type(value) is str and value != const:
+                    contradicted = True
+                    break
+            excluded.append(contradicted)
+        return tuple(excluded)
+
+
+def _any_of_first_error(screen: _BranchScreen) -> Any:
     """``anyOf`` that stops each failing branch at its first error.
 
     The stock keyword runs every failing branch to exhaustion so it can report the best error.
     Validity only depends on whether a branch has *an* error, and a status page's ``page`` is an
     ``anyOf`` over thirteen page shapes, each failing one of which otherwise walked every row
-    (issue #916). This accepts and rejects exactly what the stock keyword does.
+    (issue #916). Branches *screen* proves failing are not entered. This accepts and rejects
+    exactly what the stock keyword does.
     """
 
-    del schema
-    for index, subschema in enumerate(any_of):
-        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
-            return
-    yield ValidationError("instance is not valid under any of the given schemas")
-
-
-def _one_of_first_error(
-    validator: Any, one_of: Sequence[object], instance: object, schema: object
-) -> _KeywordErrors:
-    """``oneOf`` with the stock keyword's decision, stopping each failing branch at one error."""
-
-    del schema
-    branches = enumerate(one_of)
-    for index, subschema in branches:
-        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
-            break
-    else:
+    def keyword(
+        validator: Any, any_of: Sequence[object], instance: object, schema: object
+    ) -> _KeywordErrors:
+        del schema
+        excluded = screen.excluded(any_of, instance)
+        for index, subschema in enumerate(any_of):
+            if excluded is not None and excluded[index]:
+                continue
+            if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+                return
         yield ValidationError("instance is not valid under any of the given schemas")
-        return
-    if any(validator.evolve(schema=each).is_valid(instance) for _, each in branches):
-        yield ValidationError("instance is valid under more than one of the given schemas")
+
+    return keyword
+
+
+def _one_of_first_error(screen: _BranchScreen) -> Any:
+    """``oneOf`` with the stock keyword's decision, stopping each failing branch at one error.
+
+    Branches *screen* proves failing are not entered.
+    """
+
+    def keyword(
+        validator: Any, one_of: Sequence[object], instance: object, schema: object
+    ) -> _KeywordErrors:
+        del schema
+        excluded = screen.excluded(one_of, instance)
+        branches = enumerate(one_of)
+        for index, subschema in branches:
+            if excluded is not None and excluded[index]:
+                continue
+            if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+                break
+        else:
+            yield ValidationError("instance is not valid under any of the given schemas")
+            return
+        if any(
+            validator.evolve(schema=each).is_valid(instance)
+            for index, each in branches
+            if excluded is None or not excluded[index]
+        ):
+            yield ValidationError("instance is valid under more than one of the given schemas")
+
+    return keyword
 
 
 def _ref_resolved_once(
@@ -581,10 +662,14 @@ def _derive_role(path: str) -> SchemaArtifactRole:
 def _freeze_json(value: JsonValue) -> JsonValue:
     if type(value) is dict:
         source = cast(dict[str, JsonValue], value)
-        frozen = {
-            key: _freeze_json(source[key])
-            for key in sorted(source, key=lambda item: item.encode("utf-16-be"))
-        }
+        # Code-point order is UTF-16BE byte order for ASCII keys, which schema keys almost always
+        # are, and plain ``sorted`` skips encoding every key.
+        keys = (
+            sorted(source)
+            if all(key.isascii() for key in source)
+            else sorted(source, key=lambda item: item.encode("utf-16-be"))
+        )
+        frozen = {key: _freeze_json(source[key]) for key in keys}
         return MappingProxyType(frozen)
     if type(value) is list:
         return tuple(_freeze_json(item) for item in cast(list[JsonValue], value))
@@ -682,15 +767,23 @@ def _validate_document_references(
     schema: dict[str, JsonValue],
     registry: SchemaRegistry,
     known_ids: frozenset[str],
+    refs: Iterable[str] | None = None,
 ) -> None:
     """Admit and resolve every ``$ref`` one catalog document carries.
 
     *registry* must hold every document *known_ids* names that this document references; the full
     catalog passes all of them, the lazy catalog the document's transitive reference closure.
+    *refs*, when given, is ``list(_walk_refs(schema))`` already collected by the caller.
     """
 
     resolver = registry.resolver(schema_id)
-    for ref in _walk_refs(schema):
+    # Admitting and resolving a reference depends only on the document and the reference, so a
+    # repeated one (about half of all) is already known good; refs keep first-occurrence order,
+    # so the first refusal is the same one.
+    admitted: set[str] = set()
+    for ref in _walk_refs(schema) if refs is None else refs:
+        if ref in admitted:
+            continue
         split = urlsplit(ref)
         if split.query:
             _protocol_error("schema_reference_unresolved")
@@ -710,6 +803,7 @@ def _validate_document_references(
             resolver.lookup(ref)
         except BaseException:
             raise ProtocolValueError("schema_reference_unresolved") from None
+        admitted.add(ref)
 
 
 def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
@@ -899,13 +993,48 @@ def _uses_dynamic_reference(value: JsonValue) -> bool:
     return False
 
 
+_DYNAMIC_REFERENCE: Final = 1
+_NON_STRING_REFERENCE: Final = 2
+
+
+def _scan_refs(value: JsonValue, refs: list[str]) -> int:
+    """One walk standing in for ``_uses_dynamic_reference`` and ``_walk_refs`` over *value*.
+
+    Appends every string ``$ref`` to *refs* in ``_walk_refs`` order and returns flags:
+    ``_DYNAMIC_REFERENCE`` when ``_uses_dynamic_reference`` is true, ``_NON_STRING_REFERENCE``
+    when ``_walk_refs`` would refuse a ``$ref`` that is not a string. With neither flag, *refs*
+    is exactly ``list(_walk_refs(value))``; with either, the caller refuses and discards *refs*.
+    """
+
+    flags = 0
+    if type(value) is dict:
+        for key, item in cast(dict[str, JsonValue], value).items():
+            if key == "$ref":
+                if type(item) is str:
+                    refs.append(item)
+                    continue
+                flags |= _NON_STRING_REFERENCE
+            elif key == "$dynamicRef" or key == "$recursiveRef":
+                flags |= _DYNAMIC_REFERENCE
+            kind = type(item)  # not narrowed: *item* stays ``JsonValue`` for the recursion
+            if kind is dict or kind is list:
+                flags |= _scan_refs(item, refs)
+    elif type(value) is list:
+        for item in cast(list[JsonValue], value):
+            kind = type(item)
+            if kind is dict or kind is list:
+                flags |= _scan_refs(item, refs)
+    return flags
+
+
 @dataclass(frozen=True, slots=True)
 class _ValidityChecker:
     """Decides schema validity for one loaded catalog without building diagnostics (issue #916).
 
     It accepts and rejects exactly what the stock ``Draft202012Validator`` does; its keywords
     differ only in how much they evaluate. ``anyOf`` and ``oneOf`` stop each failing branch at its
-    first error, and ``$ref`` resolves each reference once. Documents drop their root ``$schema``
+    first error and skip a branch whose string ``const`` the instance contradicts, and ``$ref``
+    resolves each reference once. Documents drop their root ``$schema``
     marker because ``jsonschema`` picks the class for a referenced document from it, which would
     hand every cross-document reference back to the stock class; every member is draft 2020-12
     (``_plain_schema`` refuses anything else) and is registered with that specification
@@ -919,6 +1048,12 @@ class _ValidityChecker:
     # Remembers and reuses verdicts; the other one never does, for an instance holding a fragment.
     remembering_class: Any
     forgetful_class: Any
+    # One validator per (schema id, remembers verdicts), built on first use. A validator keeps no
+    # per-call state (``iter_errors`` only reads it and ``descend`` evolves new ones), so the
+    # threads that validate can share it; building one cost a few hundred microseconds per call.
+    validators: dict[tuple[str, bool], Any] = dataclasses.field(
+        default_factory=dict[tuple[str, bool], Any], repr=False, compare=False
+    )
 
     @classmethod
     def build(cls, state: _CatalogState) -> _ValidityChecker | None:
@@ -945,14 +1080,15 @@ class _ValidityChecker:
             {id(plain): schema_id for schema_id, plain in stripped.items()}
         )
         extend = cast(Callable[..., Any], getattr(jsonschema_validators, "extend"))
+        screen = _BranchScreen()
 
         def validator_class(memory: _ValidInstanceVerdicts | None) -> Any:
             return extend(
                 Draft202012Validator,
                 {
                     "$ref": _ref_resolved_once({}, document_roots, memory),
-                    "anyOf": _any_of_first_error,
-                    "oneOf": _one_of_first_error,
+                    "anyOf": _any_of_first_error(screen),
+                    "oneOf": _one_of_first_error(screen),
                 },
             )
 
@@ -974,12 +1110,16 @@ class _ValidityChecker:
         try:
             if digest is not None and self.verdicts.seen((schema_id, digest)):
                 return True
-            validator_class = self.forgetful_class if digest is None else self.remembering_class
-            validator = validator_class(
-                self.plain_by_id[schema_id],
-                registry=self.registry,
-                format_checker=_FORMAT_CHECKER,
-            )
+            key = (schema_id, digest is not None)
+            validator = self.validators.get(key)
+            if validator is None:
+                validator_class = self.remembering_class if key[1] else self.forgetful_class
+                validator = validator_class(
+                    self.plain_by_id[schema_id],
+                    registry=self.registry,
+                    format_checker=_FORMAT_CHECKER,
+                )
+                self.validators[key] = validator
             valid = next(validator.iter_errors(instance), None) is None
         except Exception:
             return False
@@ -1126,12 +1266,16 @@ class _LazyCatalog:
             checker = self._checker
             if checker is not None and schema_id in checker.plain_by_id:
                 return checker
-            added = self._closure_of(schema_id)
+            added, refs_by_id = self._closure_of(schema_id)
             plain = {**self._plain, **added}
             registry = _build_registry(plain)
             for document_id in sorted(added, key=str.encode):
                 _validate_document_references(
-                    document_id, added[document_id], registry, self.index.known_ids
+                    document_id,
+                    added[document_id],
+                    registry,
+                    self.index.known_ids,
+                    refs_by_id[document_id],
                 )
             # Commit only a closure that passed every check.
             self._plain = plain
@@ -1146,10 +1290,17 @@ class _LazyCatalog:
             self._checker = checker
             return checker
 
-    def _closure_of(self, schema_id: str) -> dict[str, dict[str, JsonValue]]:
-        """Parse and check every not-yet-loaded document reachable from *schema_id*."""
+    def _closure_of(
+        self, schema_id: str
+    ) -> tuple[dict[str, dict[str, JsonValue]], dict[str, list[str]]]:
+        """Parse and check every not-yet-loaded document reachable from *schema_id*.
+
+        Returns the documents and, per document, its ``$ref`` values in ``_walk_refs`` order, so
+        reference validation does not walk the document again.
+        """
 
         added: dict[str, dict[str, JsonValue]] = {}
+        refs_by_id: dict[str, list[str]] = {}
         pending = [schema_id]
         while pending:
             document_id = pending.pop()
@@ -1161,16 +1312,24 @@ class _LazyCatalog:
             plain = _plain_schema(data, digest_verified=True)
             if plain.get("$id") != document_id:
                 _protocol_error("schema_id_mismatch")
-            if _uses_dynamic_reference(plain):
+            # One walk yields both refusals; they keep their precedence: a dynamic reference
+            # anywhere first, then a non-string ``$ref`` (``_walk_refs`` raised on it mid-walk,
+            # which committed nothing either).
+            refs: list[str] = []
+            flags = _scan_refs(plain, refs)
+            if flags & _DYNAMIC_REFERENCE:
                 # The full catalog builds no checker at all then; its stock path decides.
                 raise _LazyCatalogCannotDecide
+            if flags & _NON_STRING_REFERENCE:
+                _protocol_error("schema_reference_unresolved")
             added[document_id] = plain
-            for ref in _walk_refs(plain):
+            refs_by_id[document_id] = refs
+            for ref in refs:
                 if not ref.startswith("#"):
                     base, _ = urldefrag(ref)
                     if base in self.index.known_ids:
                         pending.append(base)
-        return added
+        return added, refs_by_id
 
 
 _LAZY_CATALOG_LOCK: Final = threading.Lock()

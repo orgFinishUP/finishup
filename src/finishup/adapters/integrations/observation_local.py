@@ -50,7 +50,9 @@ from finishup.domain.finishup_tools import (
     FINISHUP_PREFIXED_TOOL_PREFIXES,
     FINISHUP_SCOPED_TOOL_PREFIXES,
     FINISHUP_TOOL_SERVER_NAMES,
+    FINISHUP_WORKFLOW_TOOL_NAMES,
 )
+from finishup.domain.hook_pairing import observation_pairing_contract
 from finishup.domain.observation import (
     CAPTURE_HANDOFF_RECONCILE_AGE_MS,
     OBSERVATION_BACKPRESSURE_REASON,
@@ -135,7 +137,6 @@ from finishup.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
-from finishup.ports.integrations import FINISHUP_WORKFLOW_TOOL_NAMES, observation_pairing_contract
 from finishup.ports.observation_errors import ObservationStoreLockTimeout
 from finishup.protocol.canonical import (
     MAX_JSON_DEPTH,

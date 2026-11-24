@@ -1308,3 +1308,55 @@ def test_codex_mcp_error_is_rendered_as_its_typed_reason(
     )
     report = json.loads(capsys.readouterr().out)
     assert report["reason"] == "preview_stale"
+
+
+def test_importing_the_connection_entrypoints_defers_bootstrap_and_readiness() -> None:
+    """Their imports cost about 280 ms; only a rendered continuation or an error needs them."""
+
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, finishup.cli.host_connection\n"
+        "print(','.join(sorted(name for name in ("
+        "'finishup.cli.privacy_setup', 'finishup.cli.setup_readiness', "
+        "'finishup.service.confidential_protocol', 'finishup.service.elevated_bootstrap'"
+        ") if name in sys.modules)))\n"
+    )
+    loaded = subprocess.run(
+        (sys.executable, "-c", probe), capture_output=True, check=True, text=True
+    ).stdout.strip()
+    assert loaded == ""
+
+
+def test_the_connection_errors_and_continuation_are_unchanged() -> None:
+    from finishup.adapters.integrations.claude_code_integration import ClaudeCodeIntegrationError
+    from finishup.adapters.integrations.cursor_integration import CursorIntegrationError
+    from finishup.application.host_connection import ConnectionError
+    from finishup.cli import setup_readiness
+    from finishup.cli.host_connection import CONNECTION_ERRORS
+    from finishup.ports.harness_mcp import McpRegistrationError
+    from finishup.ports.integrations import IntegrationError
+    from finishup.ports.plugin_artifacts import PluginArtifactError
+    from finishup.tui.runtime import RuntimeError_
+
+    assert CONNECTION_ERRORS == (
+        PluginArtifactError,
+        ClaudeCodeIntegrationError,
+        CursorIntegrationError,
+        IntegrationError,
+        McpRegistrationError,
+        ConnectionError,
+        ElevatedBootstrapError,
+        RuntimeError_,
+        OSError,
+        ValueError,
+    )
+    assert cli.CONNECTION_ERRORS is CONNECTION_ERRORS
+    with pytest.raises(AttributeError):
+        getattr(cli, "NOT_A_NAME")  # noqa: B009
+    arguments = ["setup", "run", "--host", "claude"]
+    assert cli.continuation(arguments) == setup_readiness.continuation(arguments)
+    assert cli.continuation(arguments, project=Path("/p")) == setup_readiness.continuation(
+        arguments, project=Path("/p")
+    )

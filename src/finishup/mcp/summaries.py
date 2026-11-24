@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
@@ -240,6 +241,33 @@ _FAILURE_SINK: ContextVar[list[tuple[str, BaseException]] | None] = ContextVar(
 # rendering depends on it (the acceptance re-read, whose answer differed per host, was removed);
 # the server still sets it and ``recheck_note`` accepts and ignores it.
 _SUMMARY_HOST: ContextVar[str | None] = ContextVar("finishup_summary_host", default=None)
+# The one result body the bridge render in progress has already checked against the canonical
+# JSON profile. ``_mapping`` skips re-checking exactly that object; every other value is checked.
+_PREVALIDATED_WIRE: ContextVar[object | None] = ContextVar(
+    "finishup_summary_prevalidated_wire", default=None
+)
+
+
+@contextmanager
+def prevalidated_wire(wire: Mapping[str, object]) -> Generator[None]:
+    """Check ``wire`` once for the sections rendered inside the block.
+
+    ``ensure_canonical_value`` only validates, so a body that passes once passes every later
+    check of the same unmodified object. A body that fails is not marked: each section then
+    checks it and fails exactly as it would without this block.
+    """
+
+    try:
+        ensure_canonical_value(cast(JsonValue, wire))
+    except Exception:  # noqa: BLE001 - each section re-checks and records its own failure
+        token = None
+    else:
+        token = _PREVALIDATED_WIRE.set(wire)
+    try:
+        yield
+    finally:
+        if token is not None:
+            _PREVALIDATED_WIRE.reset(token)
 
 
 class _Render:
@@ -353,7 +381,8 @@ def _mapping(value: object) -> Mapping[str, JsonValue]:
         return cast(Mapping[str, JsonValue], dumped)
     if isinstance(value, Mapping):
         candidate = cast(JsonValue, value)
-        ensure_canonical_value(candidate)
+        if value is not _PREVALIDATED_WIRE.get():
+            ensure_canonical_value(candidate)
         return cast(Mapping[str, JsonValue], candidate)
     raise TypeError("summary_envelope_wrong_type")
 

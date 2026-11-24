@@ -18,6 +18,7 @@ import pytest
 
 import finishup.adapters.memory.ledger as memory_ledger_module
 import finishup.adapters.sqlite.repository as sqlite_repository
+import finishup.protocol.canonical as canonical_module
 from builders.ledger_adapters import (
     FixedClock,
     FixedIds,
@@ -1225,3 +1226,119 @@ async def test_projection_query_before_the_first_record_is_a_typed_refusal(
     assert page.effective_frontier == pinned
     if db is not None:
         db.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("vector", ["all-event-families", "supersession-redaction"])
+async def test_stored_state_digest_matches_the_full_projection_digest_after_each_append(
+    vector: str,
+) -> None:
+    # The ledger re-encodes only changed projection records for state_digest; every stored
+    # digest must equal the digest of the whole replayed projection, including after redaction.
+    records = replay_records(vector)
+    store = MemoryObjects(FixedIds())
+    db = apsw.Connection(":memory:")
+    ledger: SqliteLedger | None = None
+    for position, record in enumerate(records):
+        command, _ = command_from_records(
+            [record],
+            request_number=position + 1,
+            expected_frontier=position,
+            objects=store,
+        )
+        if ledger is None:
+            ledger = sqlite_for(command, store, db)
+        await ledger.append_batch(command)
+        durable = tuple([row async for row in ledger.load_events(command.session_id)])
+        stored = db.execute(
+            "SELECT applied_through_seq,state_digest FROM projection_state "
+            "WHERE projection_name='work'"
+        ).fetchone()
+        assert stored == (position + 1, projection_digest(replay(durable)))
+
+
+def _decode_outcome(
+    ledger: SqliteLedger, row: tuple[object, ...]
+) -> tuple[str, object, str | None, str | None]:
+    async def decode() -> LedgerRecord:
+        return await ledger._decode_durable_record(row, set())  # pyright: ignore[reportPrivateUsage]
+
+    try:
+        record = asyncio.run(decode())
+    except PublicOperationError as exc:
+        cause = exc.__cause__
+        return (
+            "error",
+            exc.code,
+            None if cause is None else type(cause).__name__,
+            None if cause is None else str(cause),
+        )
+    return ("record", record, None, None)
+
+
+def test_recovery_decode_rejects_every_corrupt_entry_exactly_like_the_validating_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Recovery parses each canonical entry without the profile walk because canonical_encode
+    # repeats that exact walk on the next line. Every corrupt entry must still fail with the same
+    # public code and the same underlying cause as the validating parse, and an intact entry must
+    # decode to the same record.
+    command, objects = command_from_records(replay_records("projection-rebuild")[:2])
+    db = apsw.Connection(":memory:")
+    ledger = sqlite_for(command, objects, db)
+    asyncio.run(ledger.append_batch(command))
+    rows = db.execute(
+        "SELECT e.canonical_entry,e.projection_status,l.logical_key,"
+        "l.canonical_payload_digest,l.redaction_target_event_ids "
+        "FROM events AS e JOIN event_projection_locators AS l USING(event_id) "
+        "ORDER BY e.ingestion_seq"
+    ).fetchall()
+    canonical = cast(bytes, rows[0][0])
+    first_value = canonical.index(b':"') + 2
+    nested = b"[" * 70 + b"]" * 70
+    variants = [
+        canonical,
+        b" " + canonical,
+        canonical.replace(b"{", b"{ ", 1),
+        canonical[:first_value] + b"\\ud800" + canonical[first_value:],
+        canonical[:first_value] + b"\\u0000" + canonical[first_value:],
+        canonical[:-1] + b',"zz":' + nested + b"}",
+        canonical[:-1] + b',"zz":' + b"[" * 40 + b"]" * 40 + b"}",
+        canonical[:-1] + b',"zz":1.5}',
+        canonical[:-1] + b',"zz":9007199254740993}',
+        canonical[:-1] + b',"zz":1,"zz":1}',
+        canonical[:-1] + b',"\xff":1}',
+        b"[]",
+        b"{}",
+    ]
+    legacy_parse = sqlite_repository.strict_json_parse
+
+    def validating(data: bytes | bytearray, *, validate: bool = True) -> object:
+        return legacy_parse(data)
+
+    causes: set[object] = set()
+    for variant in variants:
+        row = (variant, *rows[0][1:])
+        fast = _decode_outcome(ledger, row)
+        with monkeypatch.context() as patched:
+            patched.setattr(sqlite_repository, "strict_json_parse", validating)
+            legacy = _decode_outcome(ledger, row)
+        assert fast == legacy, variant
+        if variant is canonical:
+            assert fast[0] == "record"
+        else:
+            assert fast[:2] == ("error", PublicErrorCode.STORAGE_CORRUPT), variant
+            causes.add(fast[3])
+    # The profile walk's own rejections are among those compared, not only lexical ones.
+    assert {"lone_surrogate", "nul_byte_forbidden", "nesting_too_deep"} <= causes
+
+    # The canonical entry is walked once, by canonical_encode, not again by the parse.
+    walks: list[object] = []
+
+    def counting_walk(value: object, *, depth: int = 0) -> None:
+        walks.append(value)
+
+    monkeypatch.setattr(canonical_module, "ensure_canonical_value", counting_walk)
+    assert _decode_outcome(ledger, rows[0])[0] == "record"
+    assert not any(isinstance(value, dict) and "entry_digest" in value for value in walks)
+    db.close()

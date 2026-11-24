@@ -20,11 +20,12 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Final, Literal, Protocol, cast
+from typing import BinaryIO, Final, Literal, Protocol, cast
 
 from finishup import __version__
 from finishup.adapters.integrations.host_config_json import parse_host_config_json
@@ -77,6 +78,8 @@ from finishup.protocol.errors import ProtocolValueError
 from finishup.protocol.guidance_uris import FOCUSED_GUIDANCE_URIS, GUIDANCE_DOCUMENT_URIS
 
 __all__ = [
+    "PluginListMemo",
+    "digest_window",
     "claude_code_other_projects",
     "CLAUDE_CODE_HARNESS_PROFILE",
     "CLAUDE_CODE_HOOK_EVENTS",
@@ -646,6 +649,46 @@ class SubprocessClaudeCodeCommands:
         return ClaudeCodeCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+_PLUGIN_LIST_ARGUMENTS: Final = ("plugin", "list", "--json")
+
+
+class PluginListMemo:
+    """Answer repeated ``claude plugin list --json`` for one target from one run.
+
+    Each listing spawns Claude Code, which reaches the network, yet one connection plan asks
+    for the same inventory several times with nothing changed in between. Scope one memo to
+    one read-only observation window, never to a process: any other command is passed through
+    and forgets every remembered listing, so a mutation is always followed by a fresh one.
+    Only a listing that was read is remembered: a run that raised, exited nonzero, or printed
+    no plugin list runs again on the next request. Without a delegate, the default subprocess
+    port is resolved at run time.
+    """
+
+    __slots__ = ("_delegate", "_listings")
+
+    def __init__(self, delegate: ClaudeCodeCommandPort | None = None) -> None:
+        self._delegate = delegate
+        self._listings: dict[tuple[str, str, str], ClaudeCodeCommandResult] = {}
+
+    def clear(self) -> None:
+        self._listings.clear()
+
+    def run(
+        self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+    ) -> ClaudeCodeCommandResult:
+        delegate = SubprocessClaudeCodeCommands() if self._delegate is None else self._delegate
+        if tuple(arguments) != _PLUGIN_LIST_ARGUMENTS:
+            self._listings.clear()
+            return delegate.run(target, arguments)
+        key = (target.executable, target.claude_config_root, target.project_root)
+        remembered = self._listings.get(key)
+        if remembered is None:
+            remembered = delegate.run(target, arguments)
+            if _plugin_rows(remembered) is not None:
+                self._listings[key] = remembered
+        return remembered
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class _SourceInspection:
     state: PluginArtifactState
@@ -705,16 +748,64 @@ def claude_code_version_provenance(version: str) -> ClaudeCodeVersionProvenance 
     return "untested"
 
 
+type _FileIdentity = tuple[int, int, int, int, int]
+
+# Digests already taken in the open observation window, by file identity (`digest_window`).
+_DIGEST_WINDOW: ContextVar[dict[_FileIdentity, str] | None] = ContextVar(
+    "claude_code_digest_window", default=None
+)
+
+
+def _file_identity(facts: os.stat_result) -> _FileIdentity:
+    return (facts.st_dev, facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+
+
+@contextlib.contextmanager
+def digest_window() -> Generator[None]:
+    """Hash Claude Code's executable once per read-only observation, not once per check.
+
+    One connection plan checks the executable's digest against its discovered identity about
+    eight times, and the executable is hundreds of megabytes. Inside one window that makes no
+    change and waits for nobody, a later check of the same unchanged file (same device, inode,
+    size, modification and change times) reuses the digest the first one took; that is the
+    answer the checks would give if the file changed just after the window instead. The window
+    ends with the block, so a check after it, or one for an apply, hashes afresh. A window
+    opened inside another one shares it.
+    """
+
+    if _DIGEST_WINDOW.get() is not None:
+        yield
+        return
+    token = _DIGEST_WINDOW.set({})
+    try:
+        yield
+    finally:
+        _DIGEST_WINDOW.reset(token)
+
+
+def _hash_stream(stream: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _digest_file(path: Path) -> str:
     if path.is_symlink():
         path = path.resolve(strict=True)
     if not path.is_file():
         raise ValueError("claude_code_executable_unavailable")
-    digest = hashlib.sha256()
+    window = _DIGEST_WINDOW.get()
+    if window is not None:
+        remembered = window.get(_file_identity(path.stat()))
+        if remembered is not None:
+            return remembered
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+        identity = _file_identity(os.fstat(stream.fileno()))
+        value = _hash_stream(stream)
+    if window is not None:
+        window[identity] = value
+    return value
 
 
 def discover_claude_code(executable: Path) -> ClaudeCodeCapabilityIdentity:
@@ -1834,17 +1925,23 @@ def observe_claude_code_mcp(
 def _list_plugins(
     target: ClaudeCodePluginTarget, commands: ClaudeCodeCommandPort
 ) -> tuple[list[Mapping[str, JsonValue]], bool]:
-    result = commands.run(target, ("plugin", "list", "--json"))
+    rows = _plugin_rows(commands.run(target, ("plugin", "list", "--json")))
+    return ([], False) if rows is None else (rows, True)
+
+
+def _plugin_rows(result: ClaudeCodeCommandResult) -> list[Mapping[str, JsonValue]] | None:
+    """The rows of one ``claude plugin list --json`` run, or ``None`` when it was not read."""
+
     if result.returncode != 0:
-        return [], False
+        return None
     try:
         # Host output: other plugins' rows may carry values the wire profile does not admit.
         parsed = parse_host_config_json(result.stdout)
     except (ProtocolValueError, UnicodeError):
-        return [], False
+        return None
     if type(parsed) is not list or any(not isinstance(item, Mapping) for item in parsed):
-        return [], False
-    return [cast(Mapping[str, JsonValue], item) for item in parsed], True
+        return None
+    return [cast(Mapping[str, JsonValue], item) for item in parsed]
 
 
 def _exact_plugin_entry(

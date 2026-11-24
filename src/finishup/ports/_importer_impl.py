@@ -35,7 +35,10 @@ from finishup.protocol.canonical import canonical_digest, canonical_encode, stri
 from finishup.protocol.coverage import Coverage
 from finishup.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 from finishup.protocol.ids import IdKind, validate_id
-from finishup.protocol.models import MAX_CANONICAL_REQUEST_BYTES, MAX_EVENTS_PER_BATCH
+from finishup.protocol.model_values import (
+    MAX_CANONICAL_REQUEST_BYTES,
+    MAX_EVENTS_PER_BATCH,
+)
 
 __all__ = [
     "CapturedImportSource",

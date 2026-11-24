@@ -7,7 +7,7 @@ import shlex
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -1596,3 +1596,71 @@ def test_source_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: 
     with pytest.raises(ClaudeCodeIntegrationError) as raised:
         status_claude_code_plugin(target, artifact, commands=commands)
     assert raised.value.reason is PluginArtifactReason.TARGET_UNSAFE
+
+
+def _counting_hashes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from finishup.adapters.integrations import claude_code_integration as module
+
+    hash_stream = module._hash_stream  # pyright: ignore[reportPrivateUsage]
+    hashes: list[str] = []
+
+    def counted(stream: BinaryIO) -> str:
+        hashes.append(stream.name)
+        return hash_stream(stream)
+
+    monkeypatch.setattr(module, "_hash_stream", counted)
+    return hashes
+
+
+def test_the_digest_window_hashes_an_unchanged_executable_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import claude_code_integration as module
+
+    digest_file = module._digest_file  # pyright: ignore[reportPrivateUsage]
+    executable = tmp_path / "claude"
+    executable.write_bytes(b"claude-one")
+    expected = f"sha256:{hashlib.sha256(b'claude-one').hexdigest()}"
+    hashes = _counting_hashes(monkeypatch)
+    assert digest_file(executable) == digest_file(executable) == expected
+    assert len(hashes) == 2  # Outside a window every check hashes, as before.
+    hashes.clear()
+    with module.digest_window():
+        assert digest_file(executable) == expected
+        with module.digest_window():  # A nested window shares the outer one.
+            assert digest_file(executable) == expected
+        assert digest_file(executable) == expected
+        assert len(hashes) == 1
+        # A rewrite changes the file's identity, so the check sees the new bytes.
+        executable.write_bytes(b"claude-two, longer")
+        assert (
+            digest_file(executable) == f"sha256:{hashlib.sha256(b'claude-two, longer').hexdigest()}"
+        )
+        assert len(hashes) == 2
+    hashes.clear()
+    assert digest_file(executable) != expected
+    assert len(hashes) == 1
+
+
+def test_the_digest_window_closes_when_its_block_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import claude_code_integration as module
+
+    digest_file = module._digest_file  # pyright: ignore[reportPrivateUsage]
+    executable = tmp_path / "claude"
+    executable.write_bytes(b"claude")
+    hashes = _counting_hashes(monkeypatch)
+
+    @module.digest_window()
+    def refused() -> None:
+        digest_file(executable)
+        raise ValueError("refused")
+
+    with pytest.raises(ValueError, match="refused"):
+        refused()
+    digest_file(executable)
+    assert len(hashes) == 2
+    missing = tmp_path / "missing"
+    with module.digest_window(), pytest.raises(ValueError, match="executable_unavailable"):
+        digest_file(missing)

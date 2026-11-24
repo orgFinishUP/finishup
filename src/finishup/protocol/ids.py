@@ -101,6 +101,22 @@ _UUID_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.ASCII,
 )
+# Exactly the strings validate_id's step-by-step checks accept for each non-actor kind: the
+# 4-character prefix, then a lowercase-hex UUID with version 4 and variant 8, 9, a or b (40
+# printable ASCII characters in all). A match returns at once; anything else, and any str
+# subclass, takes the step-by-step checks, which alone choose the error and its order.
+_CANONICAL_ID_BY_KIND: Final[Mapping[IdKind, re.Pattern[str]]] = MappingProxyType(
+    {
+        kind: re.compile(
+            re.escape(prefix)
+            + r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            re.ASCII,
+        )
+        for kind, prefix in PREFIX_BY_KIND.items()
+        if kind is not IdKind.ACTOR
+    }
+)
+_PRINTABLE_ASCII: Final = bytes(range(0x21, 0x7F))
 _ACTOR_PATTERN: Final[re.Pattern[str]] = re.compile(ACTOR_ID_PATTERN, re.ASCII)
 _OPAQUE_ITEM_PATTERN: Final[re.Pattern[str]] = re.compile(OPAQUE_ITEM_ID_PATTERN, re.ASCII)
 
@@ -141,6 +157,10 @@ def new_id(kind: IdKind) -> str:
 def validate_id(kind: IdKind, value: object) -> str:
     """Validate one ID against an expected kind and return the same string object."""
 
+    if type(value) is str and type(kind) is IdKind:
+        canonical = _CANONICAL_ID_BY_KIND.get(kind)
+        if canonical is not None and canonical.fullmatch(value) is not None:
+            return value
     validated_kind = _validate_kind(kind)
     if validated_kind is IdKind.ACTOR:
         return validate_actor_id(value)
@@ -153,7 +173,7 @@ def validate_id(kind: IdKind, value: object) -> str:
         encoded = str.encode(candidate, "ascii", "strict")
     except UnicodeEncodeError as exc:
         raise ProtocolValueError("id_not_ascii") from exc
-    if any(byte < 0x21 or byte > 0x7E for byte in encoded):
+    if encoded.translate(None, _PRINTABLE_ASCII):
         raise ProtocolValueError("id_not_ascii")
     if _string_slice(candidate, 0, 4) != PREFIX_BY_KIND[validated_kind]:
         raise ProtocolValueError("id_wrong_prefix")

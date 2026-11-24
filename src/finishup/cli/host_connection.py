@@ -8,7 +8,7 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
 import typer
 
@@ -31,7 +31,6 @@ from finishup.application.host_connection import (
     apply_connection,
     prepare_connection,
 )
-from finishup.cli.setup_readiness import continuation
 from finishup.config.home_project import allowed_home_project, home_project_allowed
 from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, isolated_root
 from finishup.domain.values import request_id
@@ -40,22 +39,87 @@ from finishup.ports.integrations import IntegrationError, IntegrationReason
 from finishup.ports.plugin_artifacts import ArtifactAuthority, PluginArtifactError
 from finishup.protocol.canonical import JsonValue
 from finishup.protocol.ids import IdKind, new_id
-from finishup.service.elevated_bootstrap import ElevatedBootstrapError
-from finishup.tui.runtime import RuntimeError_
 
-CONNECTION_ERRORS = (
-    PluginArtifactError,
-    ClaudeCodeIntegrationError,
-    CursorIntegrationError,
-    IntegrationError,
-    McpRegistrationError,
-    ConnectionError,
-    ElevatedBootstrapError,
-    RuntimeError_,
-    OSError,
-    ValueError,
-)
-_POSTURE_ERRORS = (*CONNECTION_ERRORS, RuntimeError)
+if TYPE_CHECKING:
+    from finishup.tui.runtime import RuntimeError_
+
+    CONNECTION_ERRORS: tuple[
+        type[PluginArtifactError],
+        type[ClaudeCodeIntegrationError],
+        type[CursorIntegrationError],
+        type[IntegrationError],
+        type[McpRegistrationError],
+        type[ConnectionError],
+        type[Exception],  # ElevatedBootstrapError, through _elevated_bootstrap_error
+        type[RuntimeError_],
+        type[OSError],
+        type[ValueError],
+    ]
+
+
+class _ReasonBearing(Protocol):
+    reason: str
+
+
+def _elevated_bootstrap_error() -> type[Exception]:
+    """``ElevatedBootstrapError``, through this module's one import of it.
+
+    The import was at module level before it became lazy. Keeping it in one function keeps the
+    client/server ledger at a single crossing for it (ADR-051): nothing else here imports it,
+    not even for type checking.
+    """
+
+    from finishup.service.elevated_bootstrap import ElevatedBootstrapError
+
+    return ElevatedBootstrapError
+
+
+def _connection_errors() -> tuple[type[Exception], ...]:
+    """Every failure a connection reports as ``incomplete``, built on first use.
+
+    The elevated-bootstrap and terminal-interface modules it names are imported only once an
+    error is being classified, not whenever this module is imported. ``CONNECTION_ERRORS``
+    (module attribute) is the same tuple.
+    """
+
+    errors = globals().get("CONNECTION_ERRORS")
+    if errors is None:
+        from finishup.tui.runtime import RuntimeError_
+
+        errors = (
+            PluginArtifactError,
+            ClaudeCodeIntegrationError,
+            CursorIntegrationError,
+            IntegrationError,
+            McpRegistrationError,
+            ConnectionError,
+            _elevated_bootstrap_error(),
+            RuntimeError_,
+            OSError,
+            ValueError,
+        )
+        globals()["CONNECTION_ERRORS"] = errors
+    return cast(tuple[type[Exception], ...], errors)
+
+
+def _posture_errors() -> tuple[type[Exception], ...]:
+    return (*_connection_errors(), RuntimeError)
+
+
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> object:
+        if name == "CONNECTION_ERRORS":
+            return _connection_errors()
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def continuation(arguments: list[str], *, project: Path | None = None) -> str:
+    """``setup_readiness.continuation``, imported when a continuation is first rendered."""
+
+    from finishup.cli.setup_readiness import continuation as pinned
+
+    return pinned(arguments, project=project)
 
 
 def installation_rows(project: Path | None = None) -> list[JsonValue]:
@@ -97,7 +161,7 @@ def claude_activation_cues(
     if invocation is not None:
         try:
             launcher = resolve_finishup_launcher(invocation)
-        except _POSTURE_ERRORS:
+        except _posture_errors():
             launcher = None
     try:
         return observe_claude_code_activation_cues(
@@ -105,7 +169,7 @@ def claude_activation_cues(
             claude_config_root=installation.config_root,
             finishup_launcher=launcher,
         ).as_json()
-    except _POSTURE_ERRORS:
+    except _posture_errors():
         return None
 
 
@@ -1256,9 +1320,11 @@ def run_host_connection(
             if isinstance(final_status, dict):
                 for step in kept_pieces_steps(action, final_status, selected, project):
                     report["next_step"] = f"{report['next_step']}\n{step}"
-    except CONNECTION_ERRORS as error:
+    except _connection_errors() as error:
         from finishup.adapters.integrations.cursor_project_mcp import CursorProjectMcpError
+        from finishup.tui.runtime import RuntimeError_
 
+        bootstrap_error = _elevated_bootstrap_error()
         reason = (
             error.reason.value
             if isinstance(
@@ -1272,7 +1338,9 @@ def run_host_connection(
                 ),
             )
             else error.reason
-            if isinstance(error, (CursorProjectMcpError, ElevatedBootstrapError, RuntimeError_))
+            if isinstance(error, (CursorProjectMcpError, RuntimeError_))
+            else cast(_ReasonBearing, error).reason
+            if isinstance(error, bootstrap_error)
             else str(error)
             if isinstance(error, ConnectionError)
             else "connection_unavailable"

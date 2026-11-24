@@ -12,19 +12,14 @@ import contextlib
 import errno
 import fcntl
 import hashlib
-import importlib.util
 import json
 import marshal
 import os
-import py_compile
 import re
-import shutil
 import stat
 import sys
-import tempfile
 import time
 import types
-import warnings
 from collections.abc import Generator, Mapping
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -353,6 +348,11 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
         _revalidate_interpreter_links(target)
         return target
     before = _members(prefix)
+    # Imported here, like shutil below: only a new generation stages a copy, and the launcher
+    # imports this module on every hook.
+    import shutil
+    import tempfile
+
     temporary = Path(tempfile.mkdtemp(prefix=".creating-", dir=root))
     try:
         (temporary / _STAGING).write_text(
@@ -434,6 +434,8 @@ def _compile_bytecode(prefix: Path, staging: Path, published: Path) -> None:
     tag: object = getattr(sys.implementation, "cache_tag", None)
     if type(tag) is not str:
         return  # An implementation that disables bytecode caching.
+    import warnings
+
     # A dependency's SyntaxWarning must not reach a hook's stderr.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -461,6 +463,8 @@ def hash_bytecode_environment(base: Mapping[str, str]) -> dict[str, str]:
 
 def _reusable_bytecode(installed: Path, source: bytes) -> bytes | None:
     """The installed pyc as an unchecked-hash pyc of ``source``, or None when not provably it."""
+
+    import importlib.util
 
     try:
         fd = os.open(installed, os.O_RDONLY | os.O_NOFOLLOW)
@@ -500,6 +504,9 @@ def _reusable_bytecode(installed: Path, source: bytes) -> bytes | None:
 
 
 def _compile_sources(prefix: Path, staging: Path, published: Path, tag: str) -> None:
+    # Imported here: it pulls in traceback and _colorize, and only a new generation compiles.
+    import py_compile
+
     for source in sorted(staging.joinpath("lib").rglob("*.py")):
         if source.is_symlink() or not source.is_file():
             continue
@@ -541,6 +548,8 @@ def _remove_copy(path: Path) -> None:
     for member in path.rglob("*"):
         if member.is_dir() and not member.is_symlink():
             member.chmod(0o700)
+    import shutil
+
     shutil.rmtree(path)
 
 

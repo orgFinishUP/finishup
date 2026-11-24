@@ -57,6 +57,11 @@ _GIT_CONFIG_LIMIT: Final = 1_048_576
 _COMMAND_OUTPUT_LIMIT: Final = MAX_SUBJECT_STATE_HASH_BYTES + 1
 _PATH_OUTPUT_LIMIT: Final = 8_388_608
 _READ_CHUNK: Final = 65_536
+# Output bounds of the single ``rev-parse`` answers; a combined call holds each line to its own.
+_BARE_LIMIT: Final = 32
+_ROOT_PATH_LIMIT: Final = 4_096
+_OBJECT_FORMAT_LIMIT: Final = 32
+_HEAD_LIMIT: Final = 128
 _UNTRACKED_DOMAIN: Final = b"yoetz/git-untracked/v1\0"
 _INDEX_DOMAIN: Final = b"yoetz/git-index-delta/v1\0"
 _WORKTREE_DOMAIN: Final = b"yoetz/git-worktree-delta/v1\0"
@@ -431,8 +436,9 @@ def run_read_only_git(
     other failure is ``ValueError("git_failed")``. Neither carries Git output, except that
     ``keep_prefix_on_limit`` turns the limit error into ``GitOutputTruncated`` holding the stdout
     bytes that fit, for a listing whose caller can use and disclose a partial answer.
-    ``stdin_bytes``, when given, is Git's whole standard input (a ``--stdin -z`` query, say);
-    otherwise Git reads nothing.
+    ``stdin_bytes``, when given, is Git's whole standard input (a ``--stdin -z`` query, or a batch
+    command such as ``cat-file --batch``); otherwise Git reads ``/dev/null``. Every other argument,
+    limit and variable is unchanged.
     """
 
     if type(stdout_limit) is not int or stdout_limit < 1:
@@ -633,10 +639,17 @@ class GitSubjectStateAdapter:
             _overwrite(worktree)
 
     def _head_identity(self, root: Path) -> tuple[Literal["sha1", "sha256"], str]:
+        combined = _combined_head_identity(root, self._runner)
+        if combined is None:
+            return self._head_identity_separately(root)
+        object_format, head_state = combined
+        return object_format, self._unborn_head(root) if head_state is None else head_state
+
+    def _head_identity_separately(self, root: Path) -> tuple[Literal["sha1", "sha256"], str]:
         _, object_format_bytes = self._runner.run(
             root,
             ("rev-parse", "--show-object-format"),
-            stdout_limit=32,
+            stdout_limit=_OBJECT_FORMAT_LIMIT,
         )
         try:
             object_format_text = _one_line_ascii(object_format_bytes)
@@ -651,27 +664,32 @@ class GitSubjectStateAdapter:
         returncode, head_bytes = self._runner.run(
             root,
             ("rev-parse", "--verify", "--quiet", "HEAD"),
-            stdout_limit=128,
+            stdout_limit=_HEAD_LIMIT,
             accepted_returncodes=frozenset({0, 1}),
         )
         if returncode == 1:
             _overwrite(head_bytes)
-            _, symbolic = self._runner.run(
-                root,
-                ("symbolic-ref", "--quiet", "HEAD"),
-                stdout_limit=512,
-            )
-            try:
-                _one_line_ascii(symbolic)
-            finally:
-                _overwrite(symbolic)
-            head_state = "unborn"
+            head_state = self._unborn_head(root)
         else:
             try:
                 head_state = _one_line_ascii(head_bytes)
             finally:
                 _overwrite(head_bytes)
         return object_format, head_state
+
+    def _unborn_head(self, root: Path) -> str:
+        """``HEAD`` names no commit: it must still be a symbolic ref, to a branch yet unborn."""
+
+        _, symbolic = self._runner.run(
+            root,
+            ("symbolic-ref", "--quiet", "HEAD"),
+            stdout_limit=512,
+        )
+        try:
+            _one_line_ascii(symbolic)
+        finally:
+            _overwrite(symbolic)
+        return "unborn"
 
     def _reject_unsupported_index_entries(self, workspace: _WorkspaceDescriptor) -> None:
         _, staged = self._runner.run(
@@ -971,11 +989,116 @@ def _verify_root_facts(facts: os.stat_result) -> None:
         raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
 
 
+def _combined_head_identity(
+    root: Path, runner: _GitRunner
+) -> tuple[Literal["sha1", "sha256"], str | None] | None:
+    """``_head_identity``'s two answers from one Git call, or ``None`` to ask them separately.
+
+    Only the plain answer is taken here: a supported object format, then a born ``HEAD`` (or, with
+    exit status 1, no ``HEAD`` commit at all, given back as ``None``), each line within the bound
+    its own call has. Anything else (a refused exit status, too much output, any other shape)
+    returns ``None`` and the separate calls decide, refusals included. A call Git never answered
+    (a timeout, a failed spawn) raises the failure the first separate call would have raised.
+    """
+
+    try:
+        returncode, answer = runner.run(
+            root,
+            ("rev-parse", "--show-object-format", "--verify", "--quiet", "HEAD"),
+            stdout_limit=_OBJECT_FORMAT_LIMIT + _HEAD_LIMIT,
+            accepted_returncodes=frozenset({0, 1}),
+        )
+    except _GitProcessFailure as exc:
+        # Git never answered (a timeout, a failed spawn, an interrupt): the first separate call
+        # would fail the same way, so it is not given a second full timeout.
+        if exc.returncode is None:
+            raise
+        return None
+    except _OutputLimit:
+        return None
+    try:
+        first, separator, rest = bytes(answer).partition(b"\n")
+        if not separator or first not in {b"sha1", b"sha256"} or len(rest) > _HEAD_LIMIT:
+            return None
+        object_format = cast(Literal["sha1", "sha256"], first.decode("ascii"))
+        if returncode == 1:
+            return (object_format, None) if not rest else None
+        try:
+            return object_format, _one_line_ascii(rest)
+        except _GitProcessFailure:
+            return None
+    finally:
+        _overwrite(answer)
+
+
 def _verify_git_root(root: Path, runner: _GitRunner) -> None:
+    """Require ``root`` to be a non-bare repository's top level with ``.git`` beneath it.
+
+    The three ``rev-parse`` answers come from one call when it gives the plain answer; any other
+    outcome is decided by the three separate calls, so every refusal is theirs. A call Git never
+    answered (a timeout, a failed spawn) raises the failure the first separate call would have
+    raised, without a second full timeout.
+    """
+
+    if not _verify_git_root_combined(root, runner):
+        _verify_git_root_separately(root, runner)
+
+
+def _verify_git_root_combined(root: Path, runner: _GitRunner) -> bool:
+    try:
+        _, answer = runner.run(
+            root,
+            ("rev-parse", "--is-bare-repository", "--show-toplevel", "--absolute-git-dir"),
+            stdout_limit=_BARE_LIMIT + 2 * _ROOT_PATH_LIMIT,
+        )
+    except _GitProcessFailure as exc:
+        # As in ``_combined_head_identity``: a call Git never answered is not asked again.
+        if exc.returncode is None:
+            raise
+        return False
+    except _OutputLimit:
+        return False
+    try:
+        lines = bytes(answer).split(b"\n")
+    finally:
+        _overwrite(answer)
+    if (
+        len(lines) != 4
+        or lines[3]
+        or lines[0] != b"false"
+        or len(lines[1]) >= _ROOT_PATH_LIMIT
+        or len(lines[2]) >= _ROOT_PATH_LIMIT
+    ):
+        return False
+    try:
+        top_path = absolute_rev_parse_path(lines[1], root)
+        git_path = absolute_rev_parse_path(lines[2], root)
+    except ValueError:
+        return False
+    if not top_path.is_absolute() or top_path != root or git_path != root / ".git":
+        return False
+    # The same checks, in the same order, the separate calls make after their answers.
+    try:
+        top_facts = top_path.lstat()
+    except OSError as exc:
+        raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT) from exc
+    root_facts = root.lstat()
+    if (top_facts.st_dev, top_facts.st_ino) != (root_facts.st_dev, root_facts.st_ino):
+        raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
+    try:
+        git_facts = git_path.lstat()
+    except OSError as exc:
+        raise _CaptureFailure(SubjectStateLimitation.NOT_GIT) from exc
+    if not stat.S_ISDIR(git_facts.st_mode) or git_facts.st_uid != root_facts.st_uid:
+        raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
+    return True
+
+
+def _verify_git_root_separately(root: Path, runner: _GitRunner) -> None:
     _, bare = runner.run(
         root,
         ("rev-parse", "--is-bare-repository"),
-        stdout_limit=32,
+        stdout_limit=_BARE_LIMIT,
     )
     try:
         is_bare = _one_line_ascii(bare)
@@ -986,7 +1109,7 @@ def _verify_git_root(root: Path, runner: _GitRunner) -> None:
     _, top = runner.run(
         root,
         ("rev-parse", "--show-toplevel"),
-        stdout_limit=4_096,
+        stdout_limit=_ROOT_PATH_LIMIT,
     )
     try:
         top_path = absolute_rev_parse_path(bytes(top).rstrip(b"\n"), root)
@@ -1006,7 +1129,7 @@ def _verify_git_root(root: Path, runner: _GitRunner) -> None:
     _, git_dir = runner.run(
         root,
         ("rev-parse", "--absolute-git-dir"),
-        stdout_limit=4_096,
+        stdout_limit=_ROOT_PATH_LIMIT,
     )
     try:
         git_path = absolute_rev_parse_path(bytes(git_dir).rstrip(b"\n"), root)
@@ -1051,7 +1174,8 @@ def _bounded_communicate(
         selector.register(descriptor, selectors.EVENT_READ)
         streams[descriptor] = (buffer, limit)
     # Standard input is written as Git becomes ready for it, in the same loop that drains its
-    # output, so neither side can block the other however large either grows.
+    # output, so neither side can block the other however large either grows: a batch command
+    # whose answers fill its stdout pipe never deadlocks against its input.
     pending = memoryview(stdin_bytes or b"")
     stdin = process.stdin
     writer = -1

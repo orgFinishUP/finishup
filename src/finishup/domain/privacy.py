@@ -24,7 +24,10 @@ from finishup.protocol.canonical import (
 )
 from finishup.protocol.coverage import PublicationChannel
 from finishup.protocol.ids import IdKind, validate_id
-from finishup.protocol.models import MAX_REVIEW_EXCERPTS, DataCategory
+from finishup.protocol.model_values import (
+    MAX_REVIEW_EXCERPTS,
+    DataCategory,
+)
 from finishup.protocol.redacted_values import (
     SemanticRedactedValue,
     validate_semantic_redacted_values,

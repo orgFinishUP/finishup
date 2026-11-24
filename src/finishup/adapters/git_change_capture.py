@@ -118,6 +118,14 @@ _ASSEMBLY_SHARE: Final = 0.75
 _MAX_VERIFIED_OBJECT_BYTES: Final = 8 * 1024 * 1024
 _MAX_TOTAL_VERIFIED_OBJECT_BYTES: Final = 64 * 1024 * 1024
 _MAX_PACK_DIRECTORY_ENTRIES: Final = 4_096
+# Blobs to verify are read in two batched ``cat-file`` calls when there are at least this many,
+# holding at most this many bytes at once; any other blob is read on its own.
+_PREFETCH_MIN_OBJECTS: Final = 3
+_MAX_PREFETCH_BYTES: Final = 8 * 1024 * 1024
+# The batched read runs before the priority-ordered loop, so it is skipped when less than this
+# is left, and its two calls never use more than half of what is left: a slow batch cannot spend
+# the time the one-at-a-time loop needs to verify the declared deliverables first.
+_PREFETCH_MIN_SECONDS_LEFT: Final = 5.0
 _BLOB_MODES: Final = frozenset({"100644", "100755", "120000"})
 # Transports are disabled outright: diffing a partial clone must fail, never fetch a blob.
 # Replace refs are ignored so every object is read under its own name, which is what is verified.
@@ -204,6 +212,9 @@ _BASELINE_FIELDS: Final = (0, 2, 3, 4, 5)
 type _Identity = tuple[int, int, int, int, int, int, int, int, int]
 # A path reachable only through a link or a non-directory component.
 _BLOCKED: Final[_Identity] = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+# The 256 loose-object fan-out directories, in the order the object-store fence lists them.
+_FAN_OUT_NAMES: Final = tuple(b".git/objects/%02x" % index for index in range(256))
+_LOWER_HEX: Final = frozenset(b"0123456789abcdef")
 
 
 class _ChangedDuringCapture(Exception):
@@ -2675,9 +2686,13 @@ class GitChangeCaptureAdapter:
             if not stat.S_ISDIR(facts.st_mode) or facts.st_uid != expected_uid:
                 raise ChangeCaptureUnavailable("unsafe_root")
         snapshot: list[tuple[bytes, _Identity]] = [(b".git/objects", _identity(objects))]
-        for index in range(256):
-            name = b".git/objects/%02x" % index
-            identity = _path_identity(descriptor, name)
+        # One listing answers for all 256 fan-out names; without it each is walked on its own.
+        listed = _listed_fan_out_identities(descriptor)
+        for name in _FAN_OUT_NAMES:
+            if listed is None:
+                identity = _path_identity(descriptor, name)
+            else:
+                identity = listed.get(name)
             if identity is not None:
                 if not stat.S_ISDIR(identity[0]):
                     raise ChangeCaptureUnavailable("unsafe_root")
@@ -3077,10 +3092,12 @@ class GitChangeCaptureAdapter:
         budget = [_MAX_TOTAL_VERIFIED_OBJECT_BYTES]
         # Deliverables, then small files, take the verification budget first (tb4n2 R7): a
         # budget spent on large scratch blobs never withholds a declared output.
-        for entry, section in sorted(
+        ordered = sorted(
             zip(entries, sections, strict=True),
             key=lambda pair: _section_rank(pair[1], priority),
-        ):
+        )
+        prefetched = self._prefetch_blobs(pinned, object_format, ordered, deadline)
+        for entry, section in ordered:
             if section.text is None:
                 continue
             for oid, mode in ((entry.src_oid, entry.src_mode), (entry.dst_oid, entry.dst_mode)):
@@ -3088,7 +3105,7 @@ class GitChangeCaptureAdapter:
                     continue
                 if oid not in verified:
                     verified[oid] = self._verify_object(
-                        pinned, object_format, oid, identities, deadline, budget
+                        pinned, object_format, oid, identities, deadline, budget, prefetched
                     )
                 reason = verified[oid]
                 if reason is not None:
@@ -3106,6 +3123,7 @@ class GitChangeCaptureAdapter:
         identities: dict[bytes, _Identity | None],
         deadline: float,
         budget: list[int],
+        prefetched: dict[str, bytes] | None = None,
     ) -> _OmitReason | None:
         """Prove one blob a shown diff read is the object its name commits to.
 
@@ -3114,7 +3132,9 @@ class GitChangeCaptureAdapter:
         (a hard-linked one, as a local clone makes, is fine: its bytes must still hash); it is
         inflated and hashed from that same open descriptor. The object is also read the way the
         diff read it (``git cat-file``, packs first) and hashed. Packs are fenced and pinned by
-        ``_refuse_unsafe_object_store``.
+        ``_refuse_unsafe_object_store``. ``prefetched`` holds blob contents one batched
+        ``cat-file`` already read the same way; an object found there is not read again, and
+        every other object is read on its own exactly as before.
         """
 
         fan_out, loose = _loose_paths(oid)
@@ -3132,20 +3152,26 @@ class GitChangeCaptureAdapter:
         if budget[0] <= 0:
             return "capture_limit"
         limit = min(_MAX_VERIFIED_OBJECT_BYTES, budget[0])
-        try:
-            _, content = self._git(
-                pinned, ("cat-file", "blob", oid), deadline=deadline, limit=limit
-            )
-        except ValueError:
-            # Over its own bound the file is too large; over what is left of the total, the
-            # capture reached its limit.
-            return "too_large" if limit == _MAX_VERIFIED_OBJECT_BYTES else "capture_limit"
-        except ChangeCaptureUnavailable as exc:
-            if _ran_out(exc, deadline):
-                return "capture_limit"
-            if exc.reason != "git_failed":
-                raise
-            return "object_unverified"
+        content = prefetched.pop(oid, None) if prefetched else None
+        if content is not None:
+            if len(content) > limit:
+                # The same answer the single read below gives when it overruns ``limit``.
+                return "too_large" if limit == _MAX_VERIFIED_OBJECT_BYTES else "capture_limit"
+        else:
+            try:
+                _, content = self._git(
+                    pinned, ("cat-file", "blob", oid), deadline=deadline, limit=limit
+                )
+            except ValueError:
+                # Over its own bound the file is too large; over what is left of the total, the
+                # capture reached its limit.
+                return "too_large" if limit == _MAX_VERIFIED_OBJECT_BYTES else "capture_limit"
+            except ChangeCaptureUnavailable as exc:
+                if _ran_out(exc, deadline):
+                    return "capture_limit"
+                if exc.reason != "git_failed":
+                    raise
+                return "object_unverified"
         budget[0] -= len(content)
         hasher = hashlib.new(object_format)
         hasher.update(b"blob %d\0" % len(content))
@@ -3154,6 +3180,122 @@ class GitChangeCaptureAdapter:
         # its own buffer); drop the reference so it is not kept beyond the hash.
         del content
         return None if hasher.hexdigest() == oid else "object_unverified"
+
+    def _prefetch_blobs(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        ordered: Sequence[tuple[_RawEntry, _Section]],
+        deadline: float,
+    ) -> dict[str, bytes]:
+        """Read the blobs ``_verify_object`` will most likely read, in two Git calls in all.
+
+        A speed-up only: ``cat-file --batch-check`` sizes every candidate, the budget walk
+        ``_verify_section_objects`` makes picks the ones it would read in full, and one
+        ``cat-file --batch`` reads those. Anything this cannot answer cleanly (a missing or
+        non-blob object, an answer of the wrong shape, a failed call) is left out, so that object
+        is read on its own exactly as before; its bytes are still hashed against its name. A
+        replaced root is refused here exactly as the single read refuses it. The batch is skipped
+        when the capture is short of time and never uses more than half of what is left.
+        """
+
+        oid_length = 40 if object_format == "sha1" else 64
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for entry, section in ordered:
+            if section.text is None:
+                continue
+            for oid, mode in ((entry.src_oid, entry.src_mode), (entry.dst_oid, entry.dst_mode)):
+                if mode not in _BLOB_MODES or not oid.strip("0") or oid in seen:
+                    continue
+                seen.add(oid)
+                if len(oid) == oid_length and all(c in "0123456789abcdef" for c in oid):
+                    candidates.append(oid)
+        # One or two objects cost as many single reads as the two batched calls would.
+        if len(candidates) < _PREFETCH_MIN_OBJECTS:
+            return {}
+        left = deadline - time.monotonic()
+        if left < _PREFETCH_MIN_SECONDS_LEFT:
+            return {}
+        batch_deadline = deadline - left / 2
+        try:
+            sizes = self._batch_sizes(pinned, candidates, batch_deadline)
+            planned: list[tuple[str, int]] = []
+            budget = _MAX_TOTAL_VERIFIED_OBJECT_BYTES
+            held = 0
+            for oid in candidates:
+                size = sizes.get(oid)
+                if budget <= 0:
+                    break
+                if size is None or size > min(_MAX_VERIFIED_OBJECT_BYTES, budget):
+                    continue
+                budget -= size
+                if held + size > _MAX_PREFETCH_BYTES:
+                    continue
+                held += size
+                planned.append((oid, size))
+            if len(planned) < _PREFETCH_MIN_OBJECTS:
+                return {}
+            return self._batch_contents(pinned, planned, batch_deadline)
+        except ValueError:
+            return {}
+        except ChangeCaptureUnavailable as exc:
+            # As the single read does, a replaced root ends the capture; a failed or timed-out
+            # call only leaves every object to be read on its own.
+            if exc.reason != "git_failed":
+                raise
+            return {}
+
+    def _batch_sizes(
+        self, pinned: _Workspace, candidates: Sequence[str], deadline: float
+    ) -> dict[str, int]:
+        """The size of every candidate that is a blob; ``ValueError`` on any other answer."""
+
+        request = "".join(f"{oid}\n" for oid in candidates).encode("ascii")
+        _, raw = self._git(
+            pinned,
+            ("cat-file", "--batch-check"),
+            deadline=deadline,
+            limit=len(candidates) * 96 + 1,
+            stdin_bytes=request,
+        )
+        lines = raw.split(b"\n")
+        if lines.pop() != b"" or len(lines) != len(candidates):
+            raise ValueError("batch_check_shape")
+        sizes: dict[str, int] = {}
+        for oid, line in zip(candidates, lines, strict=True):
+            fields = line.split(b" ")
+            if fields[0] != oid.encode("ascii"):
+                raise ValueError("batch_check_shape")
+            if len(fields) == 3 and fields[1] == b"blob" and fields[2].isdigit():
+                sizes[oid] = int(fields[2])
+        return sizes
+
+    def _batch_contents(
+        self, pinned: _Workspace, planned: Sequence[tuple[str, int]], deadline: float
+    ) -> dict[str, bytes]:
+        """Every planned blob's bytes from one ``cat-file --batch``; ``ValueError`` otherwise."""
+
+        headers = [b"%s blob %d\n" % (oid.encode("ascii"), size) for oid, size in planned]
+        request = "".join(f"{oid}\n" for oid, _ in planned).encode("ascii")
+        _, raw = self._git(
+            pinned,
+            ("cat-file", "--batch"),
+            deadline=deadline,
+            limit=sum(len(header) + size + 1 for header, (_, size) in zip(headers, planned)),
+            stdin_bytes=request,
+        )
+        contents: dict[str, bytes] = {}
+        position = 0
+        for header, (oid, size) in zip(headers, planned, strict=True):
+            end = position + len(header)
+            if raw[position:end] != header or raw[end + size : end + size + 1] != b"\n":
+                raise ValueError("batch_shape")
+            contents[oid] = raw[end : end + size]
+            position = end + size + 1
+        if position != len(raw):
+            raise ValueError("batch_shape")
+        return contents
 
     @staticmethod
     def _split_sections(diff: bytes) -> list[bytes]:
@@ -4597,6 +4739,52 @@ def _identity(facts: os.stat_result) -> _Identity:
         facts.st_uid,
         facts.st_gid,
     )
+
+
+def _listed_fan_out_identities(root_descriptor: int) -> dict[bytes, _Identity] | None:
+    """The identity of every fan-out directory ``.git/objects/00``..``ff``, from one listing.
+
+    The same answers ``_path_identity`` gives each of the 256 names (an absent name is left out;
+    nothing is followed through a link), read through one ``O_NOFOLLOW`` descriptor of
+    ``.git/objects`` instead of 256 walks from the root. Only names that are exactly two
+    lowercase hex digits count. ``None`` when anything goes other
+    than plainly (``.git/objects`` cannot be opened or listed, an entry cannot be ``stat``-ed):
+    the caller then asks for each name on its own, as before. ``None`` too when an entry could
+    answer a lookup of a fan-out name under another spelling (two hex digits not all lowercase,
+    or any non-ASCII name): on a case-insensitive or case-folding file system (APFS, HFS+, WSL's
+    drvfs, ext4 casefold) the walk finds such an entry, so only the walk can decide.
+    """
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    opened: list[int] = []
+    found: dict[bytes, _Identity] = {}
+    try:
+        current = root_descriptor
+        for part in (b".git", b"objects"):
+            current = os.open(part, directory_flags, dir_fd=current)
+            opened.append(current)
+        with os.scandir(current) as entries:
+            for entry in entries:
+                name = os.fsencode(entry.name)
+                if not name.isascii() or (
+                    len(name) == 2
+                    and name != name.lower()
+                    and all(byte in _LOWER_HEX for byte in name.lower())
+                ):
+                    return None
+                if len(name) != 2 or not all(byte in _LOWER_HEX for byte in name):
+                    continue
+                try:
+                    facts = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                found[b".git/objects/" + name] = _identity(facts)
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+    return found
 
 
 def _path_identity(root_descriptor: int, path: bytes) -> _Identity | None:

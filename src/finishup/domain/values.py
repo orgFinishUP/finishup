@@ -430,11 +430,22 @@ def format_rfc3339_millis(dt: object) -> str:
 def parse_rfc3339_millis(value: object) -> datetime:
     if type(value) is not str or _RFC3339_MILLIS_PATTERN.fullmatch(value) is None:
         raise ProtocolValueError("invalid_timestamp")
+    # The pattern pins every field to fixed-position ASCII digits, so slicing is exact; the
+    # constructor rejects the same out-of-range fields (month 13, Feb 30, second 60, year 0)
+    # that ``strptime`` did, without importing ``_strptime`` and its locale machinery.
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+        normalized = datetime(
+            int(value[0:4]),
+            int(value[5:7]),
+            int(value[8:10]),
+            int(value[11:13]),
+            int(value[14:16]),
+            int(value[17:19]),
+            int(value[20:23]) * 1000,
+            tzinfo=UTC,
+        )
     except ValueError as exc:
         raise ProtocolValueError("invalid_timestamp") from exc
-    normalized = parsed.replace(tzinfo=UTC)
     if format_rfc3339_millis(normalized) != value:
         raise ProtocolValueError("invalid_timestamp")
     return normalized
@@ -466,8 +477,11 @@ class Timestamp:
 
 
 def timestamp_from_string(value: object) -> Timestamp:
-    parse_rfc3339_millis(value)
-    return Timestamp(str(value))
+    # ``Timestamp.__post_init__`` parses the wire form, so parse it once there; an exact
+    # ``str`` is its own ``str()``.
+    if type(value) is not str:
+        raise ProtocolValueError("invalid_timestamp")
+    return Timestamp(value)
 
 
 def timestamp_from_datetime(dt: object) -> Timestamp:
