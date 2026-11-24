@@ -1442,6 +1442,27 @@ def test_a_rollout_noexec_shell_call_is_not_recorded_as_a_test_run(
     assert _rollout_command_envelope(command).structural_payload["runner_class"] == "other"
 
 
+@pytest.mark.parametrize(
+    ("command", "gap"),
+    [
+        ("fish -c 'pytest -q; true'", True),
+        (["fish", "-c", "pytest -q; true"], True),
+        (["script", "-qec", "pytest -q; true", "/dev/null"], True),
+        (["git", "rebase", "-x", "pytest -q || true", "main"], True),
+        # A message is data to ``git commit``, in the argv form as in the string form (#1447).
+        (["git", "commit", "-m", "a; b"], False),
+        ("git commit -m 'a; b'", False),
+    ],
+)
+def test_a_rollout_command_with_quoted_text_another_program_may_run_keeps_the_nested_gap(
+    command: str | list[str], gap: bool
+) -> None:
+    """An argv word holding a separator is quoted text: only a data program makes it data."""
+
+    codes = _rollout_command_envelope(command).gap_codes
+    assert (ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value in codes) is gap
+
+
 @pytest.mark.parametrize("vector", VECTORS, ids=[f"{n:03d}" for n, _ in enumerate(VECTORS)])
 def test_a_rollout_command_earns_the_scope_the_shared_vectors_name(
     vector: ShellWriteVector,

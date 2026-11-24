@@ -424,6 +424,40 @@ def test_redirection_or_quoted_separator_records_no_nested_gap(command: str) -> 
     assert "compound_outcome_unavailable" not in envelope.gap_codes
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "key"), [("Bash", "command"), ("exec_command", "cmd"), ("Shell", "command")]
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "$SHELL -c 'pytest -q; true'",
+        "fish -c 'pytest -q; true'",
+        "script -qec 'pytest -q; true' /dev/null",
+        "git rebase -x 'pytest -q || true' main",
+    ],
+)
+def test_quoted_text_another_program_may_run_records_the_nested_gap(
+    tool_name: str, key: str, command: str
+) -> None:
+    """Only a program known to read its arguments as data makes a quoted separator data (#1447)."""
+
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_use_id": "call-quoted-text",
+            "tool_input": {key: command},
+            "tool_response": {"exit_code": 0, "output": ""},
+        },
+        session_commitment="hmac-sha256:" + ("1e" * 32),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert envelope.structural_payload["exit_status"] == 0
+    assert "compound_outcome_unavailable" in envelope.gap_codes
+
+
 def test_runner_class_is_derived_instead_of_copied_from_host_payload() -> None:
     envelope = map_hook_payload_to_envelope(
         "PostToolUse",

@@ -221,8 +221,15 @@ conformance test freezes that against the table's own predecessor. The changes, 
 * **G3 (`compound_outcome_unavailable`).** Joins the guarded host-observation set: a piped or
   chained command has one exit status. Only a shape that can hide a nested result raises it
   (`;`, `||`, a pipe, a background `&`, a line break, substitution, unparseable text); an `&&`
-  chain, an fd redirection such as `2>&1` or `&> log`, and a separator inside quotes do not,
-  unless a shell or `eval` in the command could run that quoted text (`eval 'a; b'`).
+  chain and an fd redirection such as `2>&1` or `&> log` do not. A separator inside quotes does
+  not either, but only where the command holding it runs a program known to only read its
+  arguments (the closed set the background-launch rule already uses, such as `echo`, `printf`,
+  `grep`, `rg`, `jq`, `curl`, `cat` and one plain `sed` substitution, plus
+  `git commit -m 'a; b'`) and no shell or `eval` is named anywhere in the command. Any other
+  program may run its quoted argument as shell text (`eval 'a; b'`, `$SHELL -c`, `fish -c`,
+  `script -c`, `git rebase -x`, `find -exec ... \;`), and no list can name them all, so there
+  the quoted or escaped separator keeps the gap. So does text the reader may misread: ANSI-C
+  quoting (`$'...'`), an unquoted `#` beside the quoted separator, and a comment that holds one.
 * **G2 (`check_current_as_of_earlier_frontier`).** Follows `CheckStanding`, not a suffix guess.
 * **G1 (`semantic_review_not_requested`).** Follows the route the check recorded.
 

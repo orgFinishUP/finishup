@@ -25,9 +25,11 @@ from finishup.domain.command_segments import (
     command_separators,
     command_structure,
     opens_files_without_a_command,
+    segment_reads_arguments_as_data,
     segment_words_without_redirections,
     strip_one_wrapper,
     strip_wrappers,
+    top_level_segments,
 )
 from finishup.domain.shell_writes import patch_command_words, shell_write_paths
 from finishup.protocol.canonical import JsonValue as CanonicalJsonValue
@@ -1290,9 +1292,45 @@ _NESTED_STATUS_MASKING_SEPARATORS: Final = frozenset({";", "||", "|", "&", "\n"}
 # Programs that run a quoted argument as shell text. A quoted separator in their arguments can be
 # a real one that the quote-aware parse never descends into (``eval 'a; b'``, ``sudo bash -c
 # 'a; b'``, ``bash -c 'a; b' arg0``, a wrapper nested past the walk's depth), so when one is
-# present the raw text decides, with only fd redirections (``2>&1``, ``&> log``) set aside.
+# present the raw text decides, with only fd redirections (``2>&1``, ``&> log``) set aside. The
+# list cannot name every such program (``fish``, ``$SHELL``, ``script -c``, ``git rebase -x``),
+# so it only adds to ``_quoted_separators_are_data``: a word from it anywhere in the command
+# keeps the raw-text decision even when a data program holds the quoted separator.
 _SHELL_TEXT_RUNNERS: Final = _SHELL_WRAPPERS | frozenset({"eval", "su", "runuser", "ssh", "watch"})
 _FD_REDIRECTION_RE: Final = re.compile(r"[0-9]*[<>]&(?:[0-9]+-?|-)?|&>>?", re.ASCII)
+
+
+def _separator_characters(text: str) -> int:
+    """How many ``;``, ``|``, ``&`` and line breaks *text* holds beside ``&&`` and fd redirections."""
+
+    unredirected = _FD_REDIRECTION_RE.sub("", text).replace("&&", "")
+    return sum(unredirected.count(marker) for marker in ("\n", ";", "|", "&"))
+
+
+def _quoted_separators_are_data(raw: str) -> bool:
+    """Whether every separator character left in *raw* is data to the program that receives it.
+
+    Asked once the splitter found no masking separator, so each remaining ``;``, ``|``, ``&`` or
+    line break is quoted, escaped or in a comment. A program may still run its quoted argument as
+    shell text, and no list names every program that does, so the answer is ``True`` only when
+    each simple command holding such a character is a plain call of a program known to only read
+    its arguments (``segment_reads_arguments_as_data``: ``echo``, ``grep``, ``git commit`` ...).
+    It is ``False`` as well when the splitter's reading cannot be relied on: ANSI-C quoting
+    (``$'\\''``) escapes a quote the splitter takes as closing, and a character the commands do
+    not account for was dropped as a comment, which bash may not read as one (``${x:- #}``). A
+    line continuation is no separator and is not counted. A program is taken by its name: a
+    function, alias or ``PATH`` that an earlier call or an earlier segment set is not tracked.
+    """
+
+    split = top_level_segments(raw)
+    if split is None or "$'" in raw:
+        return False
+    accounted = 0
+    for segment in split[0]:
+        if _separator_characters(segment) and not segment_reads_arguments_as_data(segment):
+            return False
+        accounted += _separator_characters(segment.replace("\\\n", ""))
+    return accounted == _separator_characters(raw.replace("\\\n", ""))
 
 
 def _compound_is_read_only(
@@ -1336,11 +1374,14 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
     ``||``, pipelines, background jobs, line breaks, command or process substitution, and
     malformed shell text can hide a nested result; those shapes receive the bounded
     ``compound_outcome_unavailable`` coverage gap. Separators are read quote-aware, at every
-    wrapper depth: a redirection (``2>&1``, ``>&2``, ``&>``, ``&>> log``) or a separator inside
-    quotes (``git commit -m 'a; b'``) leaves one exit status and is no masking shape (#1447).
-    A quoted separator still counts when a shell or ``eval`` could run that quoted text
-    (``_SHELL_TEXT_RUNNERS``): ``eval 'a; b'`` and ``sudo bash -c 'a; b'`` keep the gap.
-    Output text is never inspected.
+    wrapper depth: a redirection (``2>&1``, ``>&2``, ``&>``, ``&>> log``) leaves one exit status
+    and is no masking shape, and neither is a separator inside quotes when the command holding it
+    runs a program known to only read its arguments (``git commit -m 'a; b'``, ``grep 'a|b' f``,
+    #1447). Any other program may run its quoted argument as shell text (``eval 'a; b'``, ``sudo
+    bash -c 'a; b'``, ``$SHELL -c``, ``fish -c``, ``script -c``, ``git rebase -x``, ``find -exec
+    ... \\;``), so there a quoted or escaped separator keeps the gap
+    (``_quoted_separators_are_data``), as it does when a shell or ``eval`` is named anywhere in
+    the command (``_SHELL_TEXT_RUNNERS``). Output text is never inspected.
     """
 
     raw = _raw_command(payload)
@@ -1353,10 +1394,11 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
     separators = command_separators(raw)
     if separators is None or separators & _NESTED_STATUS_MASKING_SEPARATORS:
         return True
-    if any(word.rsplit("/", 1)[-1] in _SHELL_TEXT_RUNNERS for word in words):
-        unredirected = _FD_REDIRECTION_RE.sub("", raw).replace("&&", "")
-        if any(marker in unredirected for marker in ("\n", ";", "|", "&")):
-            return True
+    if _separator_characters(raw) and (
+        any(word.rsplit("/", 1)[-1] in _SHELL_TEXT_RUNNERS for word in words)
+        or not _quoted_separators_are_data(raw)
+    ):
+        return True
     # Substitution runs a command whose status the outer one never reports; double quotes do not
     # stop it, so the raw text is searched (conservative for a single-quoted marker). A bare
     # carriage return, which the splitter keeps inside a word, stays a gap as it always was.

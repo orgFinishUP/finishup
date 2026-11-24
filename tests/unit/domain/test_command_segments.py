@@ -9,6 +9,7 @@ from finishup.domain.command_segments import (
     command_segment_commitments,
     command_segments,
     requested_command_shape,
+    segment_reads_arguments_as_data,
 )
 from finishup.domain.observation import normalize_observed_command, observed_command_commitment
 from finishup.kernel.observed_failures import (
@@ -372,3 +373,48 @@ def test_a_planned_command_reads_its_composition_from_separators_alone(command: 
     assert observed.composition == "masked"
     assert planned.composition == "and_chain"
     assert planned.segments == observed.segments
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "echo 'a; b'",
+        "grep -E 'a|b' notes.txt",
+        "curl 'https://example.test/?a=1&b=2' > out.json",
+        "sed 's/a|b/c/' notes.txt",
+        "git commit -m 'a; b'",
+        "git -C /repo commit -am 'a | b'",
+        "git commit -m 'Fixes #12; more'",
+    ],
+)
+def test_a_plain_call_of_a_known_data_program_reads_its_arguments_as_data(segment: str) -> None:
+    assert segment_reads_arguments_as_data(segment) is True
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        # A program that may run an argument as shell text or as a command.
+        "fish -c 'a; b'",
+        "$SHELL -c 'a; b'",
+        "git rebase -x 'a; b' main",
+        "git -c core.editor='sh -c \"a; b\"' commit",
+        "find . -exec pytest {} \\;",
+        "python -c 'a; b'",
+        # A known program that is not run as itself, or in a form that runs something.
+        "./echo 'a; b'",
+        "/usr/bin/git commit -m 'a; b'",
+        "PATH=. grep 'a|b' f",
+        "timeout 5 grep 'a|b' f",
+        "rg --pre './run; true' needle",
+        "sed 's/a/b/e' f",
+        "printf -v PATH 'a; b'",
+        # A ``#`` outside quotes can start a comment the splitter read on as words.
+        "echo x #'a; b'",
+        # Words that cannot be read.
+        "echo 'unterminated",
+        "",
+    ],
+)
+def test_any_other_segment_may_run_its_arguments(segment: str) -> None:
+    assert segment_reads_arguments_as_data(segment) is False

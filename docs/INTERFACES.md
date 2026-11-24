@@ -13568,6 +13568,11 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `strip_one_wrapper(argv)` step. Each simple command also retains its original `sources` and
   whether it is `nested`, solely for executable-resolution checks; these are never recorded or
   added to canonical verification commitments.
+  `segment_reads_arguments_as_data(segment)` says whether one simple command is a plain call of a
+  program known to only read its arguments (the inert set of `command_may_background`, plus
+  `git commit`). `observation_selection.compound_verification_gap_required` sets a quoted or
+  escaped separator aside only for such a call; for any other program the
+  `compound_outcome_unavailable` gap stays (ADR-046 G3).
   `command_segment_commitments` now also carries up to `MAX_CANONICAL_COMMITMENTS` (48) canonical
   commitments, `MAX_COMMAND_COMMITMENTS` (80) in all (the observed action `command` field, the hook
   structural list, the control-request 2.9.0 `maxItems` and `observed_failures` share that bound;

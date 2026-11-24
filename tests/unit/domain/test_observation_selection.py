@@ -582,3 +582,81 @@ def test_a_quoted_separator_that_a_shell_runs_keeps_the_compound_gap(command: st
     """Quoted text a shell or ``eval`` runs is shell text, even where the walk does not reach it."""
 
     assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A shell the closed runner list cannot name, and an unexpanded one.
+        "fish -c 'pytest -q; true'",
+        "ash -c 'pytest -q; true'",
+        "$SHELL -c 'pytest -q; true'",
+        "\"$SHELL\" -lc 'pytest -q; true'",
+        "cd /app && fish -c 'pytest -q | tail'",
+        # Programs that run one of their arguments as shell text or as a command.
+        "script -qec 'pytest -q; true' /dev/null",
+        "nix-shell --run 'pytest -q; true'",
+        "flock /tmp/lock -c 'pytest -q; true'",
+        "npx -c 'pytest -q; true'",
+        "git rebase -x 'pytest -q || true' main",
+        "tmux send-keys 'pytest -q; true' Enter",
+        "find tests -name 'test_*.py' -exec pytest {} \\;",
+        "awk 'BEGIN { system(\"pytest -q; true\") }'",
+        "python -c 'import os; os.system(\"pytest -q; true\")'",
+        # A program nothing is known about, and a known one that is not run as itself.
+        "docker exec app pytest -k 'a|b'",
+        "./grep 'a|b' notes.txt",
+        "PATH=. grep 'a|b' notes.txt",
+        "rg --pre './run; true' needle",
+    ],
+)
+def test_a_quoted_separator_keeps_the_gap_unless_its_program_only_reads_it(command: str) -> None:
+    """Any program not known to read its arguments as data may run the quoted text as shell text.
+
+    The gap main reported for these was lost when only a closed list of shells brought it back.
+    """
+
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash reads ``${x:- #}`` as an expansion; the splitter reads a comment and drops the rest.
+        "echo ${x:- #} ; pytest -q; true",
+        # After a line continuation bash starts a comment at ``#``, so its quote is no quote.
+        "echo x \\\n#'\npytest -q; true #'",
+        # ANSI-C quoting escapes the quote that seems to close the string.
+        "echo $'it\\'s' ; pytest -q; true #'",
+        # A comment the splitter drops is text it did not account for.
+        "pytest -q # then: lint; build",
+    ],
+)
+def test_text_the_splitter_can_misread_keeps_the_gap(command: str) -> None:
+    """A quiet answer needs every separator character accounted for inside a data program's call."""
+
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'a; b'",
+        "git -C /repo commit -m 'a | b'",
+        "git commit -m 'first line\n\nsecond; third'",
+        "grep -E 'a|b' notes.txt",
+        "cd /app && grep -rn 'foo\\|bar' src",
+        "jq '.items | length' data.json",
+        "curl -s 'https://example.test/?a=1&b=2'",
+        "printf '%s\\n' 'a; b'",
+        "echo 'a; b' > notes.txt",
+        "echo 'a; b' # a note",
+        "sed 's/a|b/c/' notes.txt",
+        # A line continuation joins two lines of one command.
+        "pytest -q \\\n  tests/unit",
+    ],
+)
+def test_a_separator_that_is_data_to_a_known_program_raises_no_gap(command: str) -> None:
+    """The relaxation #1447 made stays for the programs known to only read their arguments."""
+
+    assert compound_verification_gap_required({"command": command}) is False

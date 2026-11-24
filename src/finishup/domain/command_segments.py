@@ -1536,6 +1536,31 @@ def _inert_program(words: Sequence[str]) -> bool:
     return head != "sed" or _inert_sed(words[1:])
 
 
+def segment_reads_arguments_as_data(segment: str) -> bool:
+    """Whether one simple-command segment runs a program known to only read its arguments.
+
+    ``True`` for a program of ``_INERT_PROGRAMS`` in the form ``_inert_program`` accepts, and for
+    ``git commit`` (also after ``git -C DIR``), whose arguments are a message, options and file
+    names: a separator character quoted or escaped in such a call is data, never shell text.
+    ``git commit`` may leave maintenance running, which is why ``command_may_background`` does
+    not list it. ``False`` for everything else, which may run an argument as shell text or as a
+    command: a shell or interpreter, ``$SHELL``, ``find -exec``, ``git rebase -x``, a wrapper or
+    an assignment in front (``env -S``, ``PATH=.``), the program named by a path, a segment whose
+    words cannot be read, and a segment with a ``#`` outside quotes, where bash may start a
+    comment the splitter read on as words, so a quote after it is not a quote.
+    """
+
+    words = segment_words_without_redirections(segment)
+    if not words or "#" in _unquoted(segment):
+        return False
+    if _inert_program(words):
+        return True
+    arguments = words[1:] if words[0] == "git" else []
+    while len(arguments) > 2 and arguments[0] == "-C":
+        del arguments[:2]
+    return arguments[:1] == ["commit"]
+
+
 def _segment_may_background(segment: str, depth: int) -> bool | None:
     if any(token in segment for token in ("$(", "`", "<(", ">(")):
         # A command or process substitution runs its own commands inside this segment.
