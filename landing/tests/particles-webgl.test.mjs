@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mountParticles } from "../src/scripts/particles.js";
+import { mountParticles, renderStills } from "../src/scripts/particles.js";
 
 // A WebGL2 context that records what the artwork asks of it: each upload of the point data
 // (x, y, size, alpha, palette index per dot) and each draw.
@@ -213,4 +213,46 @@ test("with WebGL the closing lockup fills its slot and holds still", (t) => {
   assert.ok(drift < 0.5, `the settled lockup holds still (moved ${drift.toFixed(2)} px)`);
   const xs = before.map(([x]) => x);
   assert.ok(Math.max(...xs) - Math.min(...xs) > slot.w * 0.8, "the lockup spans its slot");
+});
+
+test("reversing scroll direction mid-storm settles cleanly on the target scene without NaN", (t) => {
+  const env = environment(t);
+  const art = env.mount({ count: 800, glCount: 12000, plan: PLAN, blend: 0.28, scores: ["60", "80"] });
+  env.intersect(true);
+  // Scrub down into the storm, reverse back up, then advance into swarm
+  const steps = [1.4, 2.0, 2.25, 2.35, 2.15, 1.95, 2.2, 2.5, 2.8];
+  let now = 0;
+  for (const s of steps) {
+    art.setScroll(s);
+    for (let k = 0; k < 6; k++) {
+      now += 16;
+      env.flush(now);
+      const upload = env.gl.calls.uploads.at(-1);
+      for (const value of upload) assert.ok(Number.isFinite(value), "no NaN during up-and-down scrubbing");
+    }
+  }
+  assert.ok(env.gl.calls.draws.every((count) => count === 12000));
+});
+
+test("renderStills renders every scene once and leaves no lingering animation frames", (t) => {
+  const env = environment(t);
+  let blits = 0;
+  const makeTarget = () => ({
+    width: 0,
+    height: 0,
+    clientWidth: 440,
+    clientHeight: 330,
+    getContext: () => ({
+      setTransform() {},
+      clearRect() {},
+      drawImage() { blits++; },
+    }),
+  });
+  const ok = renderStills([
+    { canvas: makeTarget(), form: "hero", phase: 0 },
+    { canvas: makeTarget(), form: "alone", phase: 0.45 },
+    { canvas: makeTarget(), form: "end", phase: 1 },
+  ], { count: 800, glCount: 4000 });
+  assert.equal(ok, true);
+  assert.equal(blits, 3, "each target still canvas receives a crisp static blit");
 });
