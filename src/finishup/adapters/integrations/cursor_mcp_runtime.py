@@ -11,6 +11,7 @@ FinishUP executable (an ambient PATH install, another channel) is reported as an
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ _MAX_PROJECT_SELECTOR: Final = 8_192
 _MAX_PS_TEXT: Final = 4_096
 _PROJECT_SERVE_MARKER: Final = " mcp serve --host cursor --project-root "
 _STRICT_TEXT_TAIL: Final = " --semantic off"
+# ``ps`` text has no argument boundaries. A space, two dashes and a letter or digit may start
+# another argument, and the argv classifier calls foreign every argument after the root that
+# FinishUP does not render, so root text holding one is refused. That includes option text that
+# runs on into more path (``/x --semantic off/y``): the argv ``/x``, ``--semantic``, ``off/y``
+# renders the same text and is foreign. Other words (``- Copy``, ``-- 2026``, ``-v``) start no
+# long option and stay part of a root that contains spaces.
+_TEXT_LONG_OPTION: Final = re.compile(r" --[^\W_]")
 _PS_EXECUTABLE: Final = "/bin/ps"
 _POLICY_SUFFIXES: Final = frozenset(
     {
@@ -275,11 +283,14 @@ def classify_project_serve_text(
 
     ``ps`` renders argv as one whitespace-joined string, so a ``--project-root`` that Cursor
     expanded to a workspace path containing whitespace (``~/Documents/My Project``) cannot be
-    recovered by splitting. The text after ``mcp serve --host cursor --project-root `` is the root,
-    less one trailing `` --semantic off`` (strict); the root must pass the same lexical selector
-    check as the argv form, and a FinishUP launcher token must precede ``mcp serve``. Returns
-    ``None`` when the text is not that registration. The launcher match compares the tokens before
-    ``mcp serve`` exactly as :func:`classify_serve_argv` does.
+    recovered by splitting. The text after ``mcp serve --host cursor --project-root `` is read as
+    the argv form is: the root, then nothing or one trailing `` --semantic off`` (strict). What is
+    left must pass the same lexical selector check as the argv form and hold no long option, so a
+    trailing ``--flag`` the argv classifier calls foreign is not absorbed into the root. Trailing
+    words that start no long option cannot be told from a root with spaces and are read as part
+    of it: that is the limit of the text form. A FinishUP launcher token must precede
+    ``mcp serve``. Returns ``None`` when the text is not that registration. The launcher match
+    compares the tokens before ``mcp serve`` exactly as :func:`classify_serve_argv` does.
     """
 
     if type(text) is not str or not text or len(text) > _MAX_PS_TEXT:
@@ -298,7 +309,7 @@ def classify_project_serve_text(
     if root.endswith(_STRICT_TEXT_TAIL):
         root = root[: -len(_STRICT_TEXT_TAIL)]
         kind = "strict"
-    if not _valid_project_selector(root):
+    if _TEXT_LONG_OPTION.search(root) or not _valid_project_selector(root):
         return None
     launcher: CursorLauncherMatch | None = None
     if expected_launcher:

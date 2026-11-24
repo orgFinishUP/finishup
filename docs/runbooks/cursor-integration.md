@@ -505,9 +505,18 @@ compares live Cursor-helper children with the installed launcher: `executable_mi
 joins argv with spaces; a project child whose `--project-root` workspace path contains whitespace
 (for example `~/Documents/My Project`) is still classified from that text form, as Linux and WSL 2
 classify it from `/proc`, and a row longer than 4,096 characters is left unclassified on both,
-never read from a cut-off prefix. A tree rendered before issue #468 stays marker-valid and shows
-`state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
-fully quit Cursor.
+never read from a cut-off prefix. After the root both forms accept only nothing or
+`--semantic off`. On Linux and WSL 2 a child with any other trailing argument counts in
+`foreign_process_count`. The macOS text has no argument boundaries, so the scan there cannot
+always tell a trailing argument from a workspace path with spaces: a trailing `--semantic off` is
+read as the route; any other text after the root that starts a long option (a space, two dashes,
+then a letter or digit) counts the child as foreign, as on Linux, including when it is part of
+the workspace path (`My Project --draft`, which Linux and WSL 2 classify); and any other trailing
+text (`-v`, a bare word, a bare `--`) is read as part of the root, so that child counts as
+`policy` or `strict` on macOS and as foreign on Linux and WSL 2. `finishup mcp serve` itself takes
+neither a short option nor a positional argument. A tree rendered before issue #468 stays
+marker-valid and shows `state: modified` with `mcp_binding: ambient_path`; perform one exact
+previewed replace, then fully quit Cursor.
 
 ### Applied-route drift decision (issue #537)
 

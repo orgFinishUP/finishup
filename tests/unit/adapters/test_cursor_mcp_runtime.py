@@ -460,8 +460,6 @@ def test_darwin_scanner_reads_the_whole_process_table(
         (f"{MACOS_HOME}/dev/Documents/My Project", (), "policy"),
         (f"{MACOS_HOME}/dev/Documents/My Project", ("--semantic", "off"), "strict"),
         (f"{MACOS_HOME}/dev/Library/Mobile Documents/com~apple~CloudDocs/a b  c", (), "policy"),
-        (f"{MACOS_HOME}/dev/x --semantic off/y", (), "policy"),
-        (f"{MACOS_HOME}/dev/x --semantic off/y", ("--semantic", "off"), "strict"),
         (f"{MACOS_HOME}/dev/" + "deep dir/" * 40 + "app", ("--semantic", "off"), "strict"),
     ],
 )
@@ -531,6 +529,160 @@ def test_macos_ps_text_classifies_only_the_exact_project_registration() -> None:
     assert classify_project_serve_text(traversing, bound) is None
     assert classify_project_serve_text("/opt/finishup/bin/finishup mcp serve", bound) is None
     assert classify_project_serve_text("", bound) is None
+    for trailing in (
+        " --evil x",
+        " --evil",
+        " --semantic on",
+        " --semantic offline",
+        " --semantic off/y",
+        " --project-binding mcp-roots",
+        " --semantic off --evil x",
+        " --evil x --semantic off",
+        " --semantic off --semantic off",
+    ):
+        assert classify_project_serve_text(text + trailing, bound) is None, trailing
+
+
+def _macos_scan_of_one_cursor_child(
+    monkeypatch: pytest.MonkeyPatch, launcher: tuple[str, ...], argv: tuple[str, ...]
+) -> tuple[CursorMcpProcessSnapshot, ...] | None:
+    """Run the macOS scanner over a faked ``ps`` table: ``argv`` as a Cursor helper's child."""
+
+    import subprocess
+
+    import finishup.adapters.integrations.cursor_mcp_runtime as module
+
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /opt/finishup\n"
+    arg_table = (
+        b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"11 10 mcp-process\n" + b"12 11 " + " ".join(argv).encode() + b"\n"
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return module._darwin_snapshots(launcher)  # pyright: ignore[reportPrivateUsage]
+
+
+_BOUND: tuple[str, ...] = ("/opt/finishup/bin/finishup",)
+_PROJECT_SERVE: tuple[str, ...] = (*_BOUND, "mcp", "serve", "--host", "cursor", "--project-root")
+
+
+@pytest.mark.parametrize("name", ["Project - Copy", "Notes -- 2026", "old --> new", "Project -v2"])
+@pytest.mark.parametrize("tail", [(), ("--semantic", "off")])
+def test_darwin_scanner_keeps_a_root_whose_words_start_no_long_option(
+    monkeypatch: pytest.MonkeyPatch, name: str, tail: tuple[str, ...]
+) -> None:
+    route = "strict" if tail else "policy"
+    argv = (*_PROJECT_SERVE, f"{MACOS_HOME}/a/{name}", *tail)
+    assert classify_serve_argv(argv, _BOUND) == (route, "matched")
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, _BOUND, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", route, "matched"),)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "My Project --draft",
+        "My Project --2026",
+        "My Project --\u00e9t\u00e9",
+        "x --semantic off/y",
+        "x --semantic offline/y",
+    ],
+)
+@pytest.mark.parametrize("tail", [(), ("--semantic", "off")])
+def test_darwin_scanner_counts_a_root_that_holds_long_option_text_as_foreign(
+    monkeypatch: pytest.MonkeyPatch, name: str, tail: tuple[str, ...]
+) -> None:
+    # ``ps`` text cannot tell a directory named ``My Project --draft`` from the root
+    # ``My Project`` followed by an unknown ``--draft`` argument, nor ``x --semantic off/y`` from
+    # the root ``x`` followed by ``--semantic off/y``. The argv classifier calls the second
+    # reading foreign, so the text form refuses both: macOS counts this child as foreign, as main
+    # did, while the NUL-split argv on Linux and WSL 2 still classifies it.
+    argv = (*_PROJECT_SERVE, f"{MACOS_HOME}/a/{name}", *tail)
+    assert classify_serve_argv(argv, _BOUND) == ("strict" if tail else "policy", "matched")
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, _BOUND, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", None, "matched"),)
+
+
+@pytest.mark.parametrize("words", [("-v",), ("extra",), ("--",), ("--", "x"), ("--_x",)])
+@pytest.mark.parametrize("tail", [(), ("--semantic", "off")])
+def test_darwin_scanner_reads_trailing_words_that_start_no_long_option_as_the_root(
+    monkeypatch: pytest.MonkeyPatch, words: tuple[str, ...], tail: tuple[str, ...]
+) -> None:
+    # The known limit of the text form, recorded in the Cursor runbook. Trailing words that
+    # start no long option cannot be told from a workspace path with spaces
+    # (``My Project -v``), so macOS reads them as part of the root and classifies the child,
+    # where the NUL-split argv on Linux and WSL 2, and main, call it foreign. ``mcp serve``
+    # takes no positional argument and no short option.
+    route = "strict" if tail else "policy"
+    argv = (*_PROJECT_SERVE, f"{MACOS_HOME}/a/proj", *words, *tail)
+    assert classify_serve_argv(argv, _BOUND) == ("foreign", "matched")
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, _BOUND, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", route, "matched"),)
+
+
+def test_darwin_scanner_reads_a_root_that_ends_in_the_strict_tail_as_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other half of that limit: a workspace directory literally named ``x --semantic off``
+    # renders the same text as the root ``x`` on the strict route, and macOS reads the route.
+    # Main read it the same way from the whitespace-split tokens.
+    argv = (*_PROJECT_SERVE, f"{MACOS_HOME}/a/x --semantic off")
+    assert classify_serve_argv(argv, _BOUND) == ("policy", "matched")
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, _BOUND, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "strict", "matched"),)
+
+
+_FOREIGN_TAILS: tuple[tuple[str, ...], ...] = (
+    ("--evil", "x"),
+    ("--evil",),
+    ("--\u00c9vil", "x"),
+    ("--semantic", "on"),
+    ("--semantic", "offline"),
+    ("--semantic", "off2"),
+    ("--semantic", "off/y"),
+    ("--semantic", "off/y", "--semantic", "off"),
+    ("--project-binding", "mcp-roots"),
+    ("--project-binding", "registered-projects"),
+    ("--project-binding", "registered-project/y"),
+    ("--project-binding", "registered-project"),
+    ("--project-binding", "registered-project", "--semantic", "off"),
+    ("--semantic", "off", "--project-binding", "registered-project"),
+    ("--semantic", "off", "--semantic", "off"),
+    ("--semantic", "off", "--evil", "x"),
+    ("--evil", "x", "--semantic", "off"),
+)
+
+
+@pytest.mark.parametrize("tail", _FOREIGN_TAILS)
+@pytest.mark.parametrize("root", [f"{MACOS_HOME}/a/proj", f"{MACOS_HOME}/a/My Project"])
+def test_darwin_scanner_reads_trailing_arguments_as_the_argv_classifier_does(
+    monkeypatch: pytest.MonkeyPatch, root: str, tail: tuple[str, ...]
+) -> None:
+    # The ``ps`` text form exists only to recover a root that contains spaces. Long options after
+    # the root that the argv classifier (Linux, WSL 2) calls foreign must read as foreign on
+    # macOS too, whether or not the root has a space.
+    argv = (*_PROJECT_SERVE, root, *tail)
+    assert classify_serve_argv(argv, _BOUND) == ("foreign", "matched")
+    snapshot = _macos_scan_of_one_cursor_child(monkeypatch, _BOUND, argv)
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", None, "matched"),)
+    assert snapshot is not None
+    observation = observe_cursor_mcp_runtime(
+        installed_route="strict", processes=FixedCursorMcpProcesses(snapshot)
+    )
+    assert observation.activation == "full_restart_required"
+    assert observation.live_route_profile is None
+    assert observation.foreign_process_count == 1
+    assert observation.strict_process_count == 0
+    assert observation.policy_process_count == 0
 
 
 def test_darwin_scanner_skips_a_process_row_too_long_to_classify(
