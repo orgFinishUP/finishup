@@ -819,11 +819,14 @@ def test_a_connection_plan_hashes_the_executable_once_per_observation(
     root = tmp_path / "claude"
     plain, _, plain_hashes = _connect_counting_listings(root, monkeypatch, memo=True, window=False)
     windowed, _, windowed_hashes = _connect_counting_listings(root, monkeypatch, memo=True)
-    assert plain_hashes[:2] == (5, 2)
+    # Unwindowed, preparing validates the target six times: the installed startup mode, the
+    # installed observation profile (read so a reconnect keeps an ordinary profile), the status,
+    # the other projects, the preview and the status inside it.
+    assert plain_hashes[:2] == (6, 2)
     assert windowed_hashes[:2] == (1, 1)
     # The apply revalidates outside any plan window, as often as before; only its refresh and
     # the status after it are windows of their own.
-    assert plain_hashes[2] - windowed_hashes[2] == (5 - 1) + (2 - 1)
+    assert plain_hashes[2] - windowed_hashes[2] == (6 - 1) + (2 - 1)
     assert windowed == plain
 
 
