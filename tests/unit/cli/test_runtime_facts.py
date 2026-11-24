@@ -361,6 +361,34 @@ def test_a_heredoc_patch_with_any_bash_delimiter_is_a_workspace_write(
     assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
 
 
+@pytest.mark.parametrize("closing", ["EOF \n", "EOF\t\n", "  EOF\n", "EOF \npytest -q\n"])
+@pytest.mark.parametrize("opener", ["git apply <<'EOF'", "patch -p1 <<EOF", "apply_patch <<'EOF'"])
+def test_a_patch_heredoc_bash_does_not_close_is_still_a_workspace_write(
+    opener: str, closing: str, tmp_path: Path
+) -> None:
+    """A closing line with a trailing blank, or indented without ``<<-``, closes nothing, and
+    bash then feeds the patch tool every line to the end of the script: the edit happens, so
+    the hook records it, from a command string and from a native argv alike."""
+
+    patch = (
+        "*** Begin Patch\n*** Update File: src/a.py\n@@\n-a\n+b\n*** End Patch\n"
+        if opener.startswith("apply_patch")
+        else "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    command = f"{opener}\n{patch}{closing}"
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+    for shell in ("bash", "/bin/bash"):
+        argv: list[JsonValue] = [shell, "-lc", command]
+        assert _facts("shell", {"command": argv}, tmp_path).get("write_scope") == "workspace"
+    # A patch of documentation alone keeps the class its named paths earn.
+    docs = command.replace("src/a.py", "README.md")
+    assert _facts("Bash", {"command": docs}, tmp_path).get("write_scope") == "docs"
+    # A patch tool that only reports writes nothing, however its heredoc ends.
+    if opener.startswith("git apply"):
+        check = command.replace("git apply", "git apply --check")
+        assert _facts("Bash", {"command": check}, tmp_path).get("write_scope") is None
+
+
 def test_shell_redirect_scope(tmp_path: Path) -> None:
     assert (
         _facts("Bash", {"command": "echo x > /opt/elsewhere/y"}, tmp_path)["write_scope"]

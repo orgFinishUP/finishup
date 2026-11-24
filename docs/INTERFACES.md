@@ -13596,7 +13596,11 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   stale_exempt)`). `shell_writes.heredoc_patch_paths(command)` names the files a complete heredoc
   fed to `apply_patch`, `git apply` or `patch` writes (a body ends where bash ends it: on a line
   exactly its delimiter, leading tabs ignored only for `<<-`, so a patch context line ` EOF` is
-  data, #1450; the delimiter is read by the lexer's rule, so `<<\EOF` and `<<'END-PATCH'` feed a
+  data, #1450; when the only closing line is one bash does not accept, the delimiter with a
+  trailing blank or an indent without `<<-`, the body runs to the end of the command, which bash
+  still feeds to the patch tool, so the patch is read to there and stays a write, and
+  `shell_heredocs(command)` returns that body too; a `<<` with no closing line of either kind
+  names nothing; the delimiter is read by the lexer's rule, so `<<\EOF` and `<<'END-PATCH'` feed a
   patch, a `<<<` here-string opens none, and a patch tool fed a delimiter the reader cannot read,
   such as `$'E\x4fF'`, is unplaced, #1451); `heredoc_patch_writes(command) ->
   HeredocPatchWrites(paths, unplaced)` adds whether an applying patch writes files it cannot place

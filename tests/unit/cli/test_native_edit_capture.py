@@ -699,6 +699,58 @@ def test_claude_and_cursor_shell_heredoc_edits_are_captured(
     assert b"{user}" not in diff + write
 
 
+@pytest.mark.parametrize(
+    ("source", "tool", "event"),
+    [
+        (_CLAUDE, "Bash", "PostToolUse"),
+        (_CURSOR, "Shell", "postToolUse"),
+        (_CODEX, "Bash", "PostToolUse"),
+    ],
+)
+@pytest.mark.parametrize("closing", ["EOF \n", "  EOF\n"])
+def test_a_heredoc_patch_bash_does_not_close_is_still_captured(
+    source: ObservationSource, tool: str, event: str, closing: str, tmp_path: Path
+) -> None:
+    """A closing line bash does not accept (a trailing blank, an indent without ``<<-``) leaves
+    the heredoc open to the end of the script, and ``git apply`` still applies what it is fed:
+    the patch is the edit, so its bytes are captured as they are for a closed heredoc."""
+
+    workspace = _WORKSPACES["linux"]
+    command = (
+        "git apply <<'EOF'\n"
+        f"--- {workspace}/app/module.py\n"
+        f"+++ {workspace}/app/module.py\n"
+        "@@ -1 +1 @@\n"
+        "-    return validate(request)\n"
+        "+    return planted_bug(request)\n"
+        f"{closing}"
+    )
+
+    def post(shell_command: str, state: Path) -> dict[ObservationContentKind, bytes]:
+        payload: dict[str, JsonValue] = (
+            _codex_bash("PostToolUse", workspace, shell_command)
+            if source is _CODEX
+            else {
+                "hook_event_name": event,
+                "tool_name": tool,
+                "tool_use_id": "shell-padded-close",
+                "cwd": workspace,
+                "tool_input": {"command": shell_command},
+                "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+            }
+        )
+        return dict(_chunks("PostToolUse", payload, state, source=source, workspace=workspace))
+
+    diff = post(command, tmp_path / "patch")[ObservationContentKind.WORKSPACE_DIFF]
+    assert b"# yoetz edit source: shell\n" in diff
+    assert b"--- app/module.py\n+++ app/module.py\n" in diff and b"planted_bug" in diff
+    assert b"{user}" not in diff
+    # A ``<<`` that feeds no patch tool may be a shift, not a heredoc: the rest of the command is
+    # not captured as a file's content.
+    shift = post('cat <<< "$((1<<3))" > app/size.txt\n3 \n', tmp_path / "shift")
+    assert ObservationContentKind.CHANGED_FILE not in shift
+
+
 def test_script_mediated_edits_carry_no_reviewable_bytes(tmp_path: Path) -> None:
     """Recorded gap: sed/python/``git apply file`` edits have no edit bytes in the command."""
 

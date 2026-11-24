@@ -434,6 +434,56 @@ def test_a_command_execution_places_a_relative_write_under_its_own_cwd(
 
 
 @pytest.mark.parametrize(
+    "closing",
+    ["EOF \n", "  EOF\n", "EOF \npytest -q\n"],
+    ids=["trailing-space", "indented", "then-a-test"],
+)
+def test_a_stream_copy_names_a_heredoc_patch_bash_does_not_close(closing: str) -> None:
+    """Bash feeds a patch heredoc whose closing line it does not accept to the end of the script,
+    so the edit happens. The rollout copy of the call records it as its hook copy does: the
+    completed item's argv and the ``function_call`` row's command string, reconciled by a hook or
+    read outside one."""
+
+    from finishup.cli.observe_hooks import (
+        _stream_command_facts,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    script = "git apply <<'EOF'\n" + _DIFF + closing
+    row = CodexParsedRecord(
+        1,
+        0,
+        200,
+        "response_item",
+        "function_call",
+        JsonObject(
+            {
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "c-padded-close",
+                    "arguments": json.dumps({"cmd": script}),
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    for record in (_command_execution(script, None), row):
+        outside, _gaps = structural_from_stream_record(record, key_material=_KEY)
+        assert outside.get("write_scope") == "workspace", record.item_type
+        reconciled, _gaps = structural_from_stream_record(
+            record, key_material=_KEY, command_facts=_stream_command_facts("/repo", "/repo")
+        )
+        assert reconciled.get("write_scope") == "workspace", record.item_type
+    hook_facts = runtime_structural_facts(
+        {"cwd": "/repo", "tool_input": {"command": script}},
+        tool_name="exec_command",
+        workspace_locator="/repo",
+        inside=lambda value: value.startswith("/repo/"),
+    )
+    assert hook_facts.get("write_scope") == "workspace"
+
+
+@pytest.mark.parametrize(
     ("session_cwd", "scope"),
     [
         ("/repo", "docs"),
