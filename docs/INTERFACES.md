@@ -7565,9 +7565,15 @@ Independent verification support (local control, not MCP):
   read or parse fault stays `invalid_policy`, including a check whose `timeout_seconds` falls
   outside 0.1–300 (however large the number) or whose id or argv the approval model refuses: the
   parser raises `invalid_approved_check_policy` for each. Workspace or store faults report
-  `observation_checks_<op>_failed:unavailable` with exit 20 on every verb, `revoke` included. Each
-  policy failure line is followed by a fixed continuation stating that the route is optional owner
-  configuration and never a `finishup-blocker`.
+  `observation_checks_<op>_failed:unavailable` with exit 20 on every verb, `revoke` included. The
+  one exception is the store's own typed refusal, such as a workspace state document or workspace
+  key it will not read (`STORAGE_CORRUPT`, `STORAGE_UNSAFE`): every verb reports it as
+  `finishup observe status` does, as `observation_checks_<op>_failed:<reason>: <message>` with that
+  code's exit (40 for `STORAGE_CORRUPT`, 20 for `STORAGE_UNSAFE`), and `status`, `preview`, and
+  `run` under `--json` emit the same `error` object with `operation: checks_<op>` and the store's
+  `retryable` flag. The refused file is left untouched. Each policy failure line is followed by a
+  fixed continuation stating that the route is optional owner configuration and never a
+  `finishup-blocker`.
 - `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task
   bundle/workspace lane; newer subject digests stale older pending work, identical
   workspace/policy/approval/state tuples are cached, abandoned running work returns to pending,

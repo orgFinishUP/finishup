@@ -404,6 +404,23 @@ def _typed_failure(
     return exit_code_for(code)
 
 
+def _public_operation_failure(
+    operation: str, error: PublicOperationError, *, json_output: bool
+) -> int:
+    """Report a typed public refusal with its own code, message, exit code and retryable flag."""
+
+    return _typed_failure(
+        operation,
+        error.code.value.lower(),
+        code=error.code,
+        message=error.message,
+        retryable=error.retryable,
+        json_output=json_output,
+        recovery_lines=render_error_recovery_lines(error.safe_details),
+        recovery_json=error_recovery_json(error.safe_details),
+    )
+
+
 def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable[_P, int]]:
     """Map the closed pre-store failures of an observe verb to typed public outcomes.
 
@@ -470,16 +487,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     ),
                 )
             except PublicOperationError as error:
-                return _typed_failure(
-                    operation,
-                    error.code.value.lower(),
-                    code=error.code,
-                    message=error.message,
-                    retryable=error.retryable,
-                    json_output=json_output,
-                    recovery_lines=render_error_recovery_lines(error.safe_details),
-                    recovery_json=error_recovery_json(error.safe_details),
-                )
+                return _public_operation_failure(operation, error, json_output=json_output)
             except BrokenPipeError:
                 # A closed output consumer is not an observation-store failure.
                 raise
@@ -2654,7 +2662,14 @@ _CHECK_POLICY_CONTINUATION: Final = (
 )
 
 
-def _check_policy_failure(operation: str, error: BaseException) -> int:
+def _check_policy_failure(
+    operation: str, error: BaseException, *, json_output: bool = False
+) -> int:
+    if isinstance(error, PublicOperationError):
+        # The store's own typed refusal: a workspace state file or key it will not read
+        # (`STORAGE_CORRUPT`, `STORAGE_UNSAFE`). Report it as `observe status` does, with its code,
+        # message, exit code and retryable flag, so the owner learns what to repair or retry.
+        return _public_operation_failure(f"checks_{operation}", error, json_output=json_output)
     if isinstance(error, ObservationCheckPolicyAbsent):
         reason = "policy_not_configured"
     elif isinstance(error, ObservationCheckPolicyAmbiguous):
@@ -2680,7 +2695,11 @@ def observe_checks_preview(
     try:
         _root, commitment, store, policy = _check_policy_context(workspace, _state=_state)
     except Exception as error:
-        return _check_policy_failure("preview", error)
+        return _check_policy_failure("preview", error, json_output=json_output)
+    try:
+        trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("preview", error, json_output=json_output)
     checks = tuple(
         {
             "id": item.approval_id,
@@ -2695,7 +2714,7 @@ def observe_checks_preview(
         {
             "workspace_commitment": commitment,
             "policy_digest": policy.raw_digest,
-            "trusted": store.policy_digest_is_trusted(commitment, policy.raw_digest),
+            "trusted": trusted,
             "checks": checks,
         },
         json_output=json_output,
@@ -2716,7 +2735,10 @@ def observe_checks_trust(
     if policy_digest != policy.raw_digest:
         typer.echo("observation_checks_trust_failed:digest_mismatch", err=True)
         return 20
-    store.trust_policy_digest(commitment, policy.raw_digest)
+    try:
+        store.trust_policy_digest(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("trust", error)
     typer.echo(f"observation_checks_trusted:{policy.raw_digest}")
     return 0
 
@@ -2729,13 +2751,13 @@ def observe_checks_status(
         store = LocalObservationStore(_state=_state)
         commitment = store.workspace_commitment(str(root))
     except Exception as error:
-        return _check_policy_failure("status", error)
+        return _check_policy_failure("status", error, json_output=json_output)
     try:
         policy, _raw = load_observation_check_policy(root)
     except ObservationCheckPolicyAbsent:
         policy = None
     except Exception as error:
-        return _check_policy_failure("status", error)
+        return _check_policy_failure("status", error, json_output=json_output)
     if policy is None:
         # Absence is the ordinary state of an opt-in feature: report it, do not fail.
         _emit(
@@ -2751,7 +2773,10 @@ def observe_checks_status(
             json_output=json_output,
         )
         return 0
-    trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    try:
+        trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("status", error, json_output=json_output)
     _emit(
         {
             "workspace_commitment": commitment,
@@ -2780,7 +2805,8 @@ def observe_checks_status(
 
 def observe_checks_revoke(*, workspace: str | None, _state: Path | None = None) -> int:
     # Revoke is the way out of a trusted policy: an unresolvable workspace or a store fault is the
-    # same bounded `unavailable` refusal its sibling verbs give, never an untyped crash (#428).
+    # same bounded refusal its sibling verbs give (`unavailable`, or the store's own typed code),
+    # never an untyped crash (#428).
     try:
         root = _resolve_workspace(workspace)
         store = LocalObservationStore(_state=_state)
@@ -2798,7 +2824,7 @@ def observe_checks_run(
     try:
         root, commitment, store, policy = _check_policy_context(workspace, _state=_state)
     except Exception as error:
-        return _check_policy_failure("run", error)
+        return _check_policy_failure("run", error, json_output=json_output)
     try:
         if not store.policy_digest_is_trusted(commitment, policy.raw_digest):
             store.note_coverage_gap(commitment, ObservationGapCode.POLICY_UNTRUSTED.value)
@@ -2857,6 +2883,10 @@ def observe_checks_run(
             json_output=json_output,
         )
         return 0 if all(item["status"] == "passed" for item in results) else 20
+    except PublicOperationError as error:
+        # Only the store's trust read and gap notes raise this here; workspace, capture and
+        # runner faults stay `unavailable` below.
+        return _check_policy_failure("run", error, json_output=json_output)
     except Exception:
         typer.echo("observation_checks_run_failed:unavailable", err=True)
         return 20

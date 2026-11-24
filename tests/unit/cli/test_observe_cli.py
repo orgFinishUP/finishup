@@ -2415,6 +2415,240 @@ def test_checks_operations_do_not_call_a_missing_workspace_a_policy_fault(
     assert "policy_not_configured" not in err
 
 
+_UNPARSEABLE_STATE = b"{not json"
+
+
+def _trusted_policy_with_unparseable_state(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+    """A consented workspace with a trusted check policy whose state file was then damaged.
+
+    Returns the workspace, the state root, the damaged state file and the trusted digest.
+    """
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    state = tmp_path / "state"
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    policy, _raw = load_observation_check_policy(workspace)
+    assert (
+        observe_cli.observe_checks_trust(
+            workspace=str(workspace), policy_digest=policy.raw_digest, _state=state
+        )
+        == 0
+    )
+    commitment = LocalObservationStore(_state=state).workspace_commitment(str(workspace))
+    document = (
+        state / "observation" / "workspaces" / f"{commitment.removeprefix('hmac-sha256:')}.json"
+    )
+    assert document.is_file()
+    document.write_bytes(_UNPARSEABLE_STATE)
+    return workspace, state, document, policy.raw_digest
+
+
+def _checks_verb_kwargs(
+    operation: str, workspace: Path, state: Path, digest: str, *, json_output: bool
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {"workspace": str(workspace), "_state": state}
+    if operation == "trust":
+        kwargs["policy_digest"] = digest
+    elif operation != "revoke":
+        kwargs["json_output"] = json_output
+    return kwargs
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_verbs_name_a_corrupt_workspace_state_file_like_observe_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+) -> None:
+    """The store's typed refusal keeps its code, message and exit on every checks verb.
+
+    `status`, `preview` and `trust` used to let it escape as `internal_error` (exit 70), and
+    `run` and `revoke` reported it as `unavailable` (exit 20), while `observe status` named it.
+    """
+
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    assert observe_cli.observe_status(workspace=str(workspace), json_output=False, _state=state)
+    sibling = capsys.readouterr().err
+    assert sibling == (
+        "observation_status_failed:storage_corrupt: Observation workspace state is invalid.\n"
+    )
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(operation, workspace, state, digest, json_output=False)
+    )
+
+    captured = capsys.readouterr()
+    assert code == 40
+    assert captured.out == ""
+    assert captured.err == sibling.replace(
+        "observation_status_", f"observation_checks_{operation}_"
+    )
+    # The refused file is left byte-identical for repair, never replaced by an empty state.
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "run"])
+def test_checks_verbs_emit_the_json_error_for_a_corrupt_workspace_state_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+) -> None:
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    assert observe_cli.observe_status(workspace=str(workspace), json_output=True, _state=state)
+    sibling = json.loads(capsys.readouterr().out)["error"]
+    assert sibling["code"] == "STORAGE_CORRUPT"
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(operation, workspace, state, digest, json_output=True)
+    )
+
+    captured = capsys.readouterr()
+    assert code == 40
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"error": {**sibling, "operation": f"checks_{operation}"}}
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_commands_exit_with_the_store_code_for_a_corrupt_workspace_state_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+) -> None:
+    """Through the console entry point: exit 40 and the typed line, never `internal_error`."""
+
+    import finishup.adapters.integrations.observation_local as local
+    from finishup.cli.app import main
+
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(local, "state_dir", lambda: state)
+    argv = ["finishup", "observe", "checks", operation, "--workspace", str(workspace)]
+    if operation == "trust":
+        argv += ["--policy-digest", digest]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exit_:
+        main()
+
+    captured = capsys.readouterr()
+    assert exit_.value.code == 40, captured.err
+    assert captured.out == ""
+    assert captured.err == (
+        f"observation_checks_{operation}_failed:storage_corrupt: "
+        "Observation workspace state is invalid.\n"
+    )
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+_CHECKS_VERB_STORE_CALL = {
+    "status": "policy_digest_is_trusted",
+    "preview": "policy_digest_is_trusted",
+    "trust": "trust_policy_digest",
+    "revoke": "revoke_policy_trust",
+    "run": "policy_digest_is_trusted",
+}
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+@pytest.mark.parametrize("method", ["workspace_commitment", "state"])
+def test_checks_verbs_keep_a_retryable_store_refusal_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    method: str,
+) -> None:
+    """A transient unreadable key or state file stays `STORAGE_UNSAFE`, exit 20, retryable."""
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+    from finishup.protocol.errors import PublicErrorCode, PublicOperationError
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    policy, _raw = load_observation_check_policy(workspace)
+
+    def unreadable(self: LocalObservationStore, *args: object) -> object:
+        del self, args
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_UNSAFE, "Observation workspace state is unavailable.", True
+        )
+
+    monkeypatch.setattr(
+        LocalObservationStore,
+        _CHECKS_VERB_STORE_CALL[operation] if method == "state" else method,
+        unreadable,
+    )
+    json_output = operation in {"status", "preview", "run"}
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(
+            operation, workspace, tmp_path / "state", policy.raw_digest, json_output=json_output
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert code == 20
+    if json_output:
+        assert captured.err == ""
+        assert json.loads(captured.out) == {
+            "error": {
+                "code": "STORAGE_UNSAFE",
+                "message": "Observation workspace state is unavailable.",
+                "operation": f"checks_{operation}",
+                "reason": "storage_unsafe",
+                "retryable": True,
+            }
+        }
+    else:
+        assert captured.out == ""
+        assert captured.err == (
+            f"observation_checks_{operation}_failed:storage_unsafe: "
+            "Observation workspace state is unavailable.\n"
+        )
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_verbs_bound_an_untyped_store_fault_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+) -> None:
+    """A store fault with no public code (a full disk, a lock wait that ran out) is `unavailable`.
+
+    `status`, `preview` and `trust` used to let it escape to the console as `internal_error`.
+    """
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    policy, _raw = load_observation_check_policy(workspace)
+
+    def no_space(self: LocalObservationStore, *args: object) -> object:
+        del self, args
+        raise OSError(errno.ENOSPC, "CANARY")
+
+    monkeypatch.setattr(LocalObservationStore, _CHECKS_VERB_STORE_CALL[operation], no_space)
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(
+            operation, workspace, tmp_path / "state", policy.raw_digest, json_output=True
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert code == 20
+    assert captured.out == ""
+    assert captured.err == f"observation_checks_{operation}_failed:unavailable\n"
+
+
 @pytest.mark.anyio
 async def test_manual_drain_attests_rows_for_a_claim_bound_connection(tmp_path: Path) -> None:
     """ADR-051 decision 12: ``observe drain`` to a remote target sends each row attested."""
