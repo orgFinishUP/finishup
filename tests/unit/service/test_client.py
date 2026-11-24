@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import BinaryIO, cast
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -28,6 +28,7 @@ from finishup.ports.control import (
     ControlError,
     ControlMethod,
     ControlResult,
+    ProjectionRenderMode,
     ServiceState,
     ServiceStatus,
     ServiceStopResult,
@@ -1604,7 +1605,9 @@ _FOREIGN_DIGEST = "sha256:" + "0" * 64
         # #1040 (tb4n5 wdm): the holder is this installation (same pid, version and manifest).
         ("same", True, False, ("service_unavailable", "handshake", False)),
         ("same", True, True, ("service_unavailable", "handshake_git_version", False)),
-        # Without a workspace the service never runs Git during the handshake.
+        # Without a workspace the service never runs Git during the handshake. (The connect
+        # path reports such a hello, closed by this installation's holder, as a refusal before
+        # it asks here: ``_refused_by_own_service``.)
         ("same", False, True, ("service_unavailable", "handshake", False)),
         # An unreadable stamp demonstrates nothing either way.
         ("none", True, False, ("service_unavailable", "handshake", False)),
@@ -1697,11 +1700,17 @@ async def test_a_hello_closed_by_this_installations_holder_is_a_failed_handshake
 
     stream = _FakeStream()
     spawned = 0
+    hellos: list[object] = []
 
     async def connect() -> AuthenticatedUnixStream:
         return cast(AuthenticatedUnixStream, stream)
 
-    async def rejected_handshake(*_args: object, **_kwargs: object) -> object:
+    async def rejected_handshake(*_args: object, **kwargs: object) -> object:
+        # The service fails every hello that names the workspace (it cannot resolve it) and
+        # answers the one that names none, so its close is a failed handshake, not a refusal.
+        hellos.append(kwargs.get("workspace_locator"))
+        if kwargs.get("workspace_locator") is None:
+            return object()
         raise ControlProtocolError("handshake_rejected")
 
     async def must_not_supersede(*, deadline: float, replace_newer: bool = False) -> bool:
@@ -1718,6 +1727,7 @@ async def test_a_hello_closed_by_this_installations_holder_is_a_failed_handshake
         "service_holder_identity",
         lambda: _holder(schema_manifest_digest(), __version__),
     )
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: True)
     monkeypatch.setattr(client_module, "_system_git_below_minimum", lambda: True)
 
     def record(**_fields: object) -> str:
@@ -1740,6 +1750,320 @@ async def test_a_hello_closed_by_this_installations_holder_is_a_failed_handshake
     assert refused.value.correlation_id == _CORRELATION_FOR_TEST
     assert stream.closed is True
     assert spawned == 0
+    # The hello, one that names no workspace (answered), then the hello once more (closed
+    # again): asked once, never polled.
+    locator = WorkspaceLocator("/private/repository")
+    assert hellos == [locator, None, locator]
+
+
+class _RefusalProbe:
+    """What the listening service does with the one further hello, which names no workspace."""
+
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+        self.connections = 0
+        self.hellos: list[dict[str, object]] = []
+        self.streams: list[_FakeStream] = []
+
+    async def connect(self) -> AuthenticatedUnixStream:
+        self.connections += 1
+        if self.outcome == "nothing_listening":
+            raise LocalControlTransportError("connection_failed")
+        if self.outcome == "endpoint_unsafe":
+            raise LocalControlTransportError("endpoint_unsafe")
+        stream = _FakeStream()
+        self.streams.append(stream)
+        return cast(AuthenticatedUnixStream, stream)
+
+    async def handshake(self, *_args: object, **kwargs: object) -> object:
+        from finishup.service.control_protocol import ControlProtocolError
+
+        self.hellos.append(kwargs)
+        if self.outcome == "closed_unanswered":
+            raise ControlProtocolError("handshake_rejected")
+        if self.outcome == "closed_before_the_hello":
+            raise LocalControlTransportError("connection_failed")
+        if self.outcome == "answered_another_manifest":
+            raise ControlProtocolError("manifest_mismatch")
+        if self.outcome == "silent":
+            await asyncio.Event().wait()
+        return object()
+
+
+@pytest.mark.parametrize(
+    ("stamp", "lock_held", "ask_again", "outcome", "expected", "connections"),
+    [
+        # Nothing more to ask: the hello never arrived, or named no workspace to fail on.
+        ("same", True, False, "answered", "refusal", 0),
+        # A written hello that named a workspace: one more hello, naming none, decides.
+        ("same", True, True, "closed_unanswered", "refusal", 1),
+        ("same", True, True, "closed_before_the_hello", "refusal", 1),
+        # Answered: the service serves now, and the caller sends its own hello once more.
+        ("same", True, True, "answered", "answered", 1),
+        ("same", True, True, "answered_another_manifest", None, 1),
+        ("same", True, True, "silent", None, 1),
+        # The service stopped listening in between: the plain retryable "nothing is listening".
+        ("same", True, True, "nothing_listening", "absent", 1),
+        ("same", True, True, "endpoint_unsafe", None, 1),
+        # A stamp whose singleton lock is free (its holder exited, its pid may be reused) or
+        # cannot be inspected shows no live holder: never asked and never a refusal.
+        ("same", False, True, "closed_unanswered", None, 0),
+        ("same", False, False, "closed_unanswered", None, 0),
+        ("same", None, True, "closed_unanswered", None, 0),
+        ("same", None, False, "closed_unanswered", None, 0),
+        # A stamp that does not show this installation is never asked and never a refusal.
+        ("other", True, True, "closed_unanswered", None, 0),
+        ("other", True, False, "closed_unanswered", None, 0),
+        ("legacy", True, True, "closed_unanswered", None, 0),
+        ("legacy", True, False, "closed_unanswered", None, 0),
+        ("unknown", True, True, "closed_unanswered", None, 0),
+        ("unknown", True, False, "closed_unanswered", None, 0),
+        ("none", True, True, "closed_unanswered", None, 0),
+        ("none", True, False, "closed_unanswered", None, 0),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_closed_connection_is_a_refusal_only_from_this_installations_own_service(
+    monkeypatch: pytest.MonkeyPatch,
+    stamp: str,
+    lock_held: bool | None,
+    ask_again: bool,
+    outcome: str,
+    expected: str | None,
+    connections: int,
+) -> None:
+    import finishup.service.client as client_module
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    own = schema_manifest_digest()
+    holders: dict[str, object | None] = {
+        "same": _holder(own, __version__),
+        "other": _holder(_FOREIGN_DIGEST, __version__),
+        "legacy": _holder(None, None, legacy=True),
+        "unknown": _holder(None, __version__),
+        "none": None,
+    }
+    probe = _RefusalProbe(outcome)
+    monkeypatch.setattr(client_module, "service_holder_identity", lambda: holders[stamp])
+    # Never the machine's own lock: the row says whether the stamped holder holds the flock.
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: lock_held)
+    monkeypatch.setattr(client_module, "connect_control", probe.connect)
+    monkeypatch.setattr(client_module, "client_handshake", probe.handshake)
+
+    # A silent service is waited for only to the attempt's own deadline.
+    budget = 0.05 if outcome == "silent" else 5.0
+    verdict = await client_module._refused_by_own_service(  # pyright: ignore[reportPrivateUsage]
+        ControlClientKind.MCP_BRIDGE, ask_again=ask_again, deadline=time.monotonic() + budget
+    )
+
+    if expected is None or expected == "answered":
+        assert verdict == expected
+    else:
+        assert isinstance(verdict, ControlError)
+        assert (verdict.reason, verdict.retryable, verdict.phase) == (
+            "service_unavailable",
+            True,
+            None,
+        )
+        assert client_module.accepted_but_unresponsive(verdict) is (expected == "refusal")
+        assert client_module.handshake_failure(verdict) is None
+    assert probe.connections == connections
+    # The further hello names no workspace, and its connection is always closed.
+    assert all(
+        hello.get("workspace_locator") is None and hello.get("workspace_claim") is None
+        for hello in probe.hellos
+    )
+    assert all(stream.closed for stream in probe.streams)
+
+
+@pytest.mark.anyio
+async def test_a_refusal_is_not_asked_about_once_the_attempt_has_no_time_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import finishup.service.client as client_module
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+
+    probe = _RefusalProbe("closed_unanswered")
+    monkeypatch.setattr(
+        client_module,
+        "service_holder_identity",
+        lambda: _holder(schema_manifest_digest(), __version__),
+    )
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: True)
+    monkeypatch.setattr(client_module, "connect_control", probe.connect)
+    monkeypatch.setattr(client_module, "client_handshake", probe.handshake)
+
+    error = await client_module._refused_by_own_service(  # pyright: ignore[reportPrivateUsage]
+        ControlClientKind.CLI, ask_again=True, deadline=time.monotonic() - 1.0
+    )
+
+    assert error is None
+    assert probe.connections == 0
+
+
+@pytest.mark.anyio
+async def test_a_hello_closed_before_its_service_served_again_is_sent_once_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The holder answers the hello that names no workspace: it serves now (a lock that finished
+    draining between the two hellos), so the client's own hello is sent once more and is served,
+    never reported as a failed handshake."""
+
+    import finishup.observability.logging as logging_module
+    import finishup.service.client as client_module
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+    from finishup.service.control_protocol import ControlProtocolError
+
+    streams: list[_FakeStream] = []
+    hellos: list[object] = []
+    recorded: list[dict[str, object]] = []
+    served = SimpleNamespace(name="served")
+
+    async def connect() -> AuthenticatedUnixStream:
+        streams.append(_FakeStream())
+        return cast(AuthenticatedUnixStream, streams[-1])
+
+    async def handshake(*_args: object, **kwargs: object) -> object:
+        hellos.append(kwargs.get("workspace_locator"))
+        if len(hellos) == 1:
+            # Refused: the service was still draining.
+            raise ControlProtocolError("handshake_rejected")
+        return SimpleNamespace(hello=len(hellos))
+
+    def connected(stream: object, session: object, *_args: object, **_kwargs: object) -> object:
+        assert stream is streams[-1]
+        assert session == SimpleNamespace(hello=3)
+        return served
+
+    def record(**fields: object) -> str:
+        recorded.append(fields)
+        return _CORRELATION_FOR_TEST
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    monkeypatch.setattr(client_module, "client_handshake", handshake)
+    monkeypatch.setattr(client_module, "_connected_client", connected)
+    monkeypatch.setattr(
+        client_module,
+        "service_holder_identity",
+        lambda: _holder(schema_manifest_digest(), __version__),
+    )
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: True)
+    monkeypatch.setattr(logging_module, "record_public_error_without_raising", record)
+
+    locator = WorkspaceLocator("/private/repository")
+    client = await client_module._connect_service_attempt(  # pyright: ignore[reportPrivateUsage]
+        ControlClientKind.CLI,
+        workspace_locator=locator,
+        projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+        output_is_controlling_tty=False,
+        timeout_seconds=5.0,
+    )
+
+    assert client is served
+    assert hellos == [locator, None, locator]
+    assert recorded == []
+    # The refused connection and the one that named no workspace are closed; the third is kept.
+    assert [stream.closed for stream in streams] == [True, True, False]
+
+
+@pytest.mark.parametrize("transport", ["connector", "ssh", "https"])
+@pytest.mark.anyio
+async def test_a_server_elsewhere_is_never_classified_by_this_computers_stamp(
+    monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    """A hello a remote transport closed is its own retryable outage, whatever the stamp says."""
+
+    import finishup.service.client as client_module
+    from finishup.service.control_protocol import ControlProtocolError
+
+    async def dial() -> AuthenticatedUnixStream:
+        return cast(AuthenticatedUnixStream, _FakeStream())
+
+    async def rejected_handshake(*_args: object, **_kwargs: object) -> object:
+        raise ControlProtocolError("handshake_rejected")
+
+    def must_not_read_the_stamp() -> object:
+        raise AssertionError("the singleton stamp names this computer's service only")
+
+    monkeypatch.setattr(client_module, "client_handshake", rejected_handshake)
+    monkeypatch.setattr(client_module, "service_holder_identity", must_not_read_the_stamp)
+
+    with pytest.raises(ControlError) as refused:
+        await client_module._connect_service_attempt(  # pyright: ignore[reportPrivateUsage]
+            ControlClientKind.CLI,
+            workspace_locator=None,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            timeout_seconds=5.0,
+            dial=dial,
+            transport=cast(Any, transport),
+        )
+
+    assert (refused.value.reason, refused.value.retryable, refused.value.phase) == (
+        "service_unavailable",
+        True,
+        None,
+    )
+    assert client_module.accepted_but_unresponsive(refused.value) is False
+
+
+@pytest.mark.anyio
+async def test_a_connection_made_under_a_remote_authorization_keeps_its_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a plain local connection is asked whether this computer's service refused it."""
+
+    import finishup.observability.logging as logging_module
+    import finishup.service.client as client_module
+    from finishup import __version__
+    from finishup.protocol.schemas import schema_manifest_digest
+    from finishup.service.control_protocol import ControlProtocolError
+
+    connections = 0
+
+    async def connect() -> AuthenticatedUnixStream:
+        nonlocal connections
+        connections += 1
+        return cast(AuthenticatedUnixStream, _FakeStream())
+
+    async def rejected_handshake(*_args: object, **_kwargs: object) -> object:
+        raise ControlProtocolError("handshake_rejected")
+
+    class _Admitted:
+        def refusal(self) -> str | None:
+            return None
+
+    def record(**_fields: object) -> str:
+        return _CORRELATION_FOR_TEST
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    monkeypatch.setattr(client_module, "client_handshake", rejected_handshake)
+    monkeypatch.setattr(
+        client_module,
+        "service_holder_identity",
+        lambda: _holder(schema_manifest_digest(), __version__),
+    )
+    monkeypatch.setattr(logging_module, "record_public_error_without_raising", record)
+
+    with pytest.raises(ControlError) as refused:
+        await client_module._connect_service_attempt(  # pyright: ignore[reportPrivateUsage]
+            ControlClientKind.CLI,
+            workspace_locator=None,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            timeout_seconds=5.0,
+            authorization=cast(Any, _Admitted()),
+        )
+
+    assert (refused.value.reason, refused.value.retryable, refused.value.phase) == (
+        "service_unavailable",
+        False,
+        "handshake",
+    )
+    assert connections == 1
 
 
 @pytest.mark.anyio

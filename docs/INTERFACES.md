@@ -3737,19 +3737,53 @@ endpoints the daemon's accept loop serves (control and human control): the daemo
 answers nothing, and the connection's admission slot is released immediately. Secret ingress is
 not accepted by that loop (it takes one connection inside a live ceremony), so this refusal never
 applies to it. The close names no reason, and nothing orders it against the peer's first write, so
-what the ordinary client reports depends on which came first. If its hello was already written, it
-reads end of stream or a transport error in place of the hello answer and classifies that like any
-other unanswered hello (`handshake_rejected`, below) by the singleton stamp: `service_incompatible`
-when the stamp shows another installation, otherwise the non-retryable `service_unavailable` with
-`phase` `handshake` or `handshake_git_version`. A hello write that itself fails, because the close
-landed first, is reported as retryable `service_unavailable` with no `phase`. The human-control
-client (`HumanControlClient`) reports the same close as `service_unavailable` (its write or read
-failed) or `ambiguous` (a bare end of stream); its errors carry no retry flag.
+the ordinary client sees either a hello write that fails (the close landed first) or, once its
+hello is written, end of stream or a transport error in place of the hello answer
+(`handshake_rejected`, below). When the service is this installation's own, the client reports
+both as the retryable `service_unavailable` with no `phase` that it reports for an accepted but
+silent endpoint (`accepted_but_unresponsive` in `finishup.service.client`), at once instead of
+after its 5-second attempt. Two facts together show this refusal (`_refused_by_own_service`).
+First, the holder is a live service of this installation: the singleton stamp shows this
+installation's identity (`_stamp_identity` is `same`) and the singleton lock is held. The stamp
+alone is advisory (a holder that exited leaves it behind, and its pid can be reused), so the flock
+decides whether it names a live holder. Second, the service did not fail the hello itself: the
+hello was never written, or it named no workspace, or, for a written hello that named one, the
+client sent one more hello on a new connection, naming no workspace, inside the same attempt, and
+the service closed that unanswered too. A serving service answers that second hello. The client
+then sends its own hello once more, on a third connection inside the same attempt, and that answer
+stands: a service whose refusal ended between the hellos (a lock that finishes draining) serves
+it, and the connection proceeds; a service that fails the hello closes it again, and that close is
+its own failed handshake, classified as one (below; the service records its fault once for each
+hello it failed). If the second connection finds nothing listening, the service stopped in between
+and the plain retryable `service_unavailable` of an absent service is reported. Each extra hello
+is an ordinary connection: the service counts it as client activity for its idle bounds. The
+client cannot see why a connection was closed, so two cases are classified by what it can see: a
+service of this installation that closes every hello for a reason of its own, even one that names
+no workspace, is reported as this refusal, and a service that starts refusing again between the
+second and third hellos (a stop that begins at that moment) can leave the third close reported as
+a failed handshake. Under any other stamp (another installation's, absent, unreadable, partly
+readable, or without identity keys), or a stamp whose lock is not held or cannot be inspected,
+nothing more is sent and the results are the earlier ones: an unanswered hello is classified by
+the stamp (below), `service_incompatible` or the non-retryable `service_unavailable` with `phase`
+`handshake` or `handshake_git_version`, and a hello write that fails is the plain retryable
+`service_unavailable`. Beside a stamp whose lock is free, a hello write that fails (or a
+connection nothing accepts) still lets on-demand startup start a successor, the path back from a
+stale stamp; a written hello closed unanswered there stays the non-retryable failed handshake and
+starts nothing. Every caller treats the refusal as a running service to wait for. On-demand startup
+reports it at once and neither spawns nor supersedes; its poll loop, which runs only after a spawn
+or behind a starting holder, keeps its 50 ms pace to its deadline. The MCP bridge latches it as a
+retryable outage, so each later call makes one quiet handshake (the availability latch, below).
+`finishup service restart` goes on to wait for the holder to release the singleton, then starts the
+successor. A service that stays failed keeps giving this retryable result, one bounded attempt per
+call; nothing here replaces it. The human-control client (`HumanControlClient`) reports the same
+close as `service_unavailable` (its write or read failed) or `ambiguous` (a bare end of stream); its
+errors carry no retry flag.
 
 The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
 closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that
-includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
-reported unavailable rather than causing a second daemon to be spawned.
+includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint, or one
+whose service refused the connection (above), is reported unavailable rather than causing a second
+daemon to be spawned.
 
 The handshake pins the exact schema-manifest digest on both sides. When a listening
 service can decode the peer's hello as a known control-hello shape but the digest does
@@ -3769,7 +3803,9 @@ neither identity key at all is not evidence either: FinishUP 0.1.x stamped only 
 manifest could be read and neither when it could not, and such a stamp lasts as long as its
 process, across an upgrade, so absence cannot tell an older installation from a compatible one
 (a current writer always writes `service_version` and adds the digest when it can read it, so a
-current service never writes that shape). A holder stamped with this installation's identity,
+current service never writes that shape). A holder stamped with this installation's identity that
+is not refusing connections (above: it answered a hello that names no workspace, or its singleton
+lock is not held),
 one whose stamp cannot be read, one whose identity fields are only partly readable (a key absent
 or present but invalid, beside fields that match), and one stamped without any identity key
 yields the non-retryable `ControlError("service_unavailable", phase=...)` described under "A
@@ -3801,9 +3837,11 @@ surfaces as `service_incompatible`; the bridge message then names `finishup serv
 for a newer holder, where it asks the user to reopen the session. A same-identity, partly readable
 or identity-less holder never reaches this path: its unanswered hello is the non-retryable
 `service_handshake_failed` ("A handshake the service failed", below), whose remedy is
-`finishup service diagnostics`. `finishup service restart`, given that error, replaces the holder only
-when its stamp carries no identity key, and otherwise reports it unchanged. The MCP bridge also retires a *compatible* holder
-whose hello reports an older package version than the bridge's, through the same stamped
+`finishup service diagnostics`, or, for a same-identity holder that is refusing connections, the
+retryable refusal described above. `finishup service restart`, given the failed handshake, replaces
+the holder only when its stamp carries no identity key, and otherwise reports it unchanged; given
+the refusal, it waits for the holder to release the singleton. The MCP bridge also retires a
+*compatible* holder whose hello reports an older package version than the bridge's, through the same stamped
 bounded-shutdown path, so the first session opened after an in-place `finishup upgrade --accept`
 switches to the new package. Until that transition, already-open processes use retained runtime
 copies; the transition may require older incompatible sessions to reopen (ADR-007,
@@ -3935,7 +3973,8 @@ own write failed — is consumed, so a failed send emits no unhandled-future rep
 
 The MCP bridge maps every typed `ControlError` reason onto a public error through the public-error
 recorder (`{tool}_public_error`) with sink `reason` equal to the control-reason token (or
-`accepted_but_unresponsive` for an accepted-but-silent listener). `exception_control_error` and
+`accepted_but_unresponsive` for an accepted-but-silent listener or a service of this installation
+that refused the connection: draining, failed or closing). `exception_control_error` and
 `{tool}_internal_error` remain only for genuinely unexpected defects. Absent service uses
 `SERVICE_UNAVAILABLE` with the sanctioned `finishup service run` supervisor copy and same-`request_id`
 replay; an accepted-but-unresponsive listener uses distinct copy that forbids `finishup service run`
@@ -3985,12 +4024,16 @@ unexpected exception, that exception as its cause. A locator the peer got wrong 
 fault: the hello schema bounds `workspace_locator.path` at 8192 characters while the locator
 itself is bounded at 8192 UTF-8 bytes, so a schema-valid path over the byte bound (or one that
 does not encode) is refused as `protocol_mismatch` before any resolver runs, whether or not the
-service resolves locators, exactly as a malformed `workspace_claim` or `workspace_agent` is. The daemon records it once: a typed refusal as
+service resolves locators, exactly as a malformed `workspace_claim` or `workspace_agent` is. The daemon records it once for each hello it fails (when its stamp shows this installation
+and its lock is held, the client sends the same hello twice before it reports the failure, above):
+a typed refusal as
 public error `handshake_service_fault` with `reason_code` the token (component `service.daemon`,
 operation `control_handshake`); an unexpected exception through the unexpected-exception record
 with its class token, origin and `phase: handshake`. Neither record carries the locator, a path,
 Git output or stderr. The client sees only `handshake_rejected` and classifies it by the singleton
-stamp (above): for a holder of this installation, or of unreadable, partly readable or absent
+stamp (above): for a holder of this installation that still answers a hello naming no workspace
+and closes the same hello sent once more (so the close was not a draining or failed service's
+refusal), one whose singleton lock is not held, or one of unreadable, partly readable or absent
 identity, it records
 `service_handshake_failed` (component `service.client`, operation `control_handshake`) and raises
 `ControlError("service_unavailable", retryable=False, phase=<phase>, correlation_id=<that

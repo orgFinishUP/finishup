@@ -2666,19 +2666,22 @@ def _control_error_result(
                 diagnostic_reason="service_unavailable",
             )
         if accepted_but_unresponsive(error):
-            # A listener that accepted and then went silent is running. Prescribing
-            # `finishup service run` here sent an operator to a command that must refuse (#237).
+            # A listener that accepted and then went silent, or a service of this installation
+            # that closed the connection while stopping, locking or failed, is running.
+            # Prescribing `finishup service run` here sent an operator to a command that must
+            # refuse (#237).
             return _control_public_error_result(
                 error,
                 request_id,
                 operation,
                 code=PublicErrorCode.SERVICE_UNAVAILABLE,
                 message=(
-                    "The local FinishUP service is listening but did not answer. Wait and retry; on a "
-                    "local terminal run `finishup service status`. Do not run `finishup service run` — "
-                    "it will refuse while that process holds the singleton. If it is wedged, stop "
-                    "it with `finishup service stop`, then retry this operation with the same "
-                    "request_id."
+                    "The local FinishUP service is listening but did not answer: it stayed "
+                    "silent, or it closed the connection, as a service that is stopping, locking "
+                    "or failed does. Wait and retry; on a local terminal run `finishup service "
+                    "status`. Do not run `finishup service run` — it will refuse while that "
+                    "process holds the singleton. If it is wedged, stop it with `finishup service "
+                    "stop`, then retry this operation with the same request_id."
                 ),
                 retryable=True,
                 host_profile=host_profile,

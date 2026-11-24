@@ -865,6 +865,14 @@ def _unanswered_hello(workspace_locator: WorkspaceLocator | None) -> ControlErro
     ``handshake_git_version`` when this hello named a workspace and the system Git is older than
     the documented minimum. The correlation id resolves the client-side record; the service's
     own record names the cause.
+
+    A third service closes a hello unanswered: one of this installation that refuses the
+    connection because it is draining, failed or closing. That close is not a failed handshake
+    and is not classified here; the connect path asks ``_refused_by_own_service`` first. A hello
+    closed by a holder of this installation that holds the singleton lock reaches this function
+    once that holder has answered a hello that names no workspace and then closed the same hello
+    sent once more, or when the attempt had no time left to ask, or the extra hello got no answer
+    it could use.
     """
 
     holder = service_holder_identity()
@@ -2273,7 +2281,12 @@ class _CheckedHelloStream:
 
 
 class _AcceptedServiceUnresponsive(ControlError):
-    """A fixed endpoint accepted locally but did not complete its bounded handshake."""
+    """A fixed endpoint accepted locally but did not complete its bounded handshake.
+
+    Either it stayed silent for the whole attempt, or it is a service of this installation that
+    refused the connection: it closed it without reading or answering, as a draining, failed or
+    closing service does (``_refused_by_own_service``). Both are a running service to wait for.
+    """
 
     def __init__(self) -> None:
         super().__init__("service_unavailable", retryable=True)
@@ -2315,7 +2328,9 @@ def accepted_but_unresponsive(error: BaseException) -> bool:
 
     "Nothing is listening" and "something is listening and silent" call for opposite next steps,
     and the wire reason is the same for both. The distinction is only ever available here, on the
-    client that observed it (#237).
+    client that observed it (#237). A service of this installation that closed the connection
+    without answering because it is draining, failed or closing is listening too, and is reported
+    the same way (``_refused_by_own_service``).
     """
 
     return type(error) is _AcceptedServiceUnresponsive
@@ -2345,6 +2360,84 @@ async def _best_effort_close_stream(stream: ControlStream) -> None:
     task.add_done_callback(_consume_background_task)
 
 
+type _HolderAnswered = Literal["answered"]
+
+
+async def _refused_by_own_service(
+    client_kind: ControlClientKind, *, ask_again: bool, deadline: float
+) -> ControlError | _HolderAnswered | None:
+    """What a connection this installation's own service refused is reported as, or None.
+
+    A service that is draining (a lock, a stop or a restart waiting on work in flight), failed
+    or closing accepts a connection and closes it at once, reading and answering nothing (the
+    daemon's ``_run_handler``). The close names no reason and nothing orders it against the
+    hello, so this client sees either a hello write that fails or a hello left unanswered, which
+    is also what another installation's service and a failed handshake look like. Two facts
+    together show a refusal. Without both this returns None and the caller's own classification
+    stands.
+
+    First, the holder is a live service of this installation. The owner-only singleton stamp
+    shows this installation's identity (``_stamp_identity`` is ``same``, the fact
+    ``supersede_incompatible_service`` declines a holder on), so the listener is not a service
+    that could not decode the hello, and the singleton flock is held. The stamp alone is
+    advisory: a holder that exited leaves it behind and its pid can be reused, so a stamp whose
+    lock is free, or cannot be inspected, names no live holder and the listener may be anything.
+    A stamp that is absent, unreadable, partly readable or without identity keys shows nothing.
+    None of these is ever read as a refusal.
+
+    Second, the service did not fail the hello itself. The step of its handshake that fails on a
+    hello it can decode is resolving the workspace the hello names (#1040,
+    ``_unanswered_hello``), so nothing more is asked when the hello was never written or named
+    no workspace. For a written hello that named one (``ask_again``) the service is sent one more
+    hello, on a new connection, that names none. A refusing service closes that connection too.
+    A serving service answers it, and then this returns ``"answered"``: the service serves now,
+    so the caller sends its own hello once more and lets that answer stand. A service that fails
+    the hello closes it again (its failed handshake); one whose refusal ended between the two
+    hellos (a lock that finished draining) serves it.
+
+    The refusal is reported as ``_AcceptedServiceUnresponsive``: retryable, and for every caller
+    a running service to wait for, never one to start beside or to replace. That is what this
+    client reported, after its whole attempt bound, while a refused connection was left open. If
+    the second connection finds nothing listening any more, the service has stopped serving
+    since, and that plain retryable result is reported instead. Nothing is waited for beyond the
+    attempt's own ``deadline`` (a monotonic time).
+    """
+
+    holder = service_holder_identity()
+    if holder is None or _stamp_identity(holder) != "same":
+        return None
+    if _singleton_holder_lock_is_held() is not True:
+        return None
+    if not ask_again:
+        return _AcceptedServiceUnresponsive()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    stream: ControlStream | None = None
+    try:
+        async with asyncio.timeout(remaining):
+            stream = await connect_control()
+            await client_handshake(stream, client_kind, __version__)
+    except ControlProtocolError as exc:
+        if exc.reason != "handshake_rejected":
+            # It answered, with something this client does not accept: it is serving.
+            return None
+    except LocalControlTransportError as exc:
+        if stream is None:
+            # Nothing accepted this connection: the service has stopped listening since.
+            gone = _transport_error(exc)
+            return gone if gone.retryable else None
+        # Accepted, then closed before this hello could be written: the same refusal.
+    except TimeoutError:
+        return None
+    else:
+        return "answered"
+    finally:
+        if stream is not None:
+            await _best_effort_close_stream(stream)
+    return _AcceptedServiceUnresponsive()
+
+
 async def _connect_service_attempt(
     client_kind: ControlClientKind,
     *,
@@ -2356,6 +2449,7 @@ async def _connect_service_attempt(
     authorization: AuthorizationCheck | None = None,
     dial: Callable[[], Awaitable[ControlStream]] | None = None,
     transport: ConnectionTransport = "unix",
+    holder_answered: bool = False,
 ) -> ServiceClient:
     """Connect and handshake within one attempt budget, preserving accepted-socket identity.
 
@@ -2365,6 +2459,10 @@ async def _connect_service_attempt(
     ``dial`` replaces the fixed endpoint for a connection to a server elsewhere (an SSH target's
     helper or its direct ``ssh -W`` stream); a transport that names why it failed (a closed
     remote phase) is reported with that phase.
+
+    ``holder_answered`` is set only for the hello sent once more after this installation's
+    holder answered a hello that names no workspace (``_refused_by_own_service``): a close of
+    that hello is the holder's failed handshake and is not asked about again.
     """
 
     agent = None if workspace_binding is None else workspace_binding.agent
@@ -2372,6 +2470,8 @@ async def _connect_service_attempt(
         phase = authorization.refusal()
         if phase is not None:
             raise ControlError("service_unavailable", retryable=True, phase=phase)
+    # The fixed endpoint of this computer's own service, the only one the singleton stamp names.
+    local = dial is None and authorization is None and transport == "unix"
     stream: ControlStream | None = None
     guarded: _CheckedHelloStream | None = None
     deadline = time.monotonic() + timeout_seconds
@@ -2450,6 +2550,11 @@ async def _connect_service_attempt(
             await _best_effort_close_stream(stream)
         if named is not None:
             raise ControlError("service_unavailable", retryable=True, phase=named) from exc
+        if stream is not None and local:
+            # The connection was made, then closed before the hello could be written.
+            refusal = await _refused_by_own_service(client_kind, ask_again=False, deadline=deadline)
+            if isinstance(refusal, ControlError):
+                raise refusal from exc
         raise _transport_error(exc) from exc
     except ControlProtocolError as exc:
         named = await _remote_end_phase(stream, deadline)
@@ -2469,6 +2574,29 @@ async def _connect_service_attempt(
             # of this computer is involved; the caller names the outage the helper recorded.
             raise ControlError("service_unavailable", retryable=True) from exc
         if exc.reason == "handshake_rejected":
+            if local and not holder_answered:
+                verdict = await _refused_by_own_service(
+                    client_kind,
+                    ask_again=workspace_locator is not None or workspace_binding is not None,
+                    deadline=deadline,
+                )
+                if isinstance(verdict, ControlError):
+                    raise verdict from exc
+                remaining = deadline - time.monotonic()
+                if verdict == "answered" and remaining > 0:
+                    # The holder serves now. Its first close was either its failed handshake
+                    # or a refusal that has since ended (a lock that finished draining): the
+                    # same hello, sent once more, tells them apart, and its answer stands. With
+                    # no time left in the attempt, the first close stands as a failed handshake.
+                    return await _connect_service_attempt(
+                        client_kind,
+                        workspace_locator=workspace_locator,
+                        projection_render_mode=projection_render_mode,
+                        output_is_controlling_tty=output_is_controlling_tty,
+                        timeout_seconds=remaining,
+                        workspace_binding=workspace_binding,
+                        holder_answered=True,
+                    )
             raise _unanswered_hello(workspace_locator) from exc
         if transport != "unix" and exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
             raise _remote_release_mismatch() from exc

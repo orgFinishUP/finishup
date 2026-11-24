@@ -657,8 +657,10 @@ def control_failure(
     if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
         stderr_writer(
             _with_holder_pid(
-                "service_unavailable: a local service is listening but did not answer within "
-                "5 seconds; it may still be starting or may be wedged. Wait and retry "
+                "service_unavailable: a local service is listening but did not answer: it "
+                "stayed silent for 5 seconds, or it closed the connection, as a service that "
+                "is stopping, locking or failed does. It may also still be starting or be "
+                "wedged. Wait and retry "
                 "'finishup service status'. Do not run 'finishup service run' -- it will refuse "
                 "while that process holds the singleton; stop it with 'finishup service stop' "
                 "instead"
