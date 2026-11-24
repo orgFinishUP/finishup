@@ -11,7 +11,9 @@ const script = stripTypeScriptTypes(page.match(/<script>\s*([\s\S]*?)<\/script>/
 
 // Run the actual page controller with controlled layout, events and timers. Artwork is
 // stubbed here; its renderers and destruction are exercised by the particle tests.
-function environment({ fits = true } = {}) {
+// One screen of the story is SCREEN_PX of scroll, and the story starts at the top of the page.
+const SCREEN_PX = 800;
+function environment({ fits = true, scrollY = 0 } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(name, fn) {
@@ -63,8 +65,9 @@ function environment({ fits = true } = {}) {
   ids.particles.clientHeight = 800;
   ids.particles.getBoundingClientRect = () => ({ top: 0, bottom: 800, left: 0, right: 1280 });
   ids.story.dataset.screens = "7.5";
+  ids.story.getBoundingClientRect = () => ({ top: -win.scrollY, bottom: 8.5 * SCREEN_PX - win.scrollY, left: 0, right: 1280 });
   const spacer = new Element();
-  spacer.offsetHeight = 6000;
+  spacer.offsetHeight = 7.5 * SCREEN_PX;
   ids.story.querySelector = () => spacer;
   const content = new Element();
   content.getBoundingClientRect = () => ({ top: 100, bottom: fits ? 500 : 850, left: 32, right: 700 });
@@ -111,7 +114,7 @@ function environment({ fits = true } = {}) {
   let activeArt = 0;
   let stillRenders = 0;
   const win = Object.assign(new Events(), {
-    scrollY: 0,
+    scrollY,
     scrollTo({ top }) { this.scrollY = top; },
     matchMedia(query) {
       const media = Object.assign(new Events(), { matches: false });
@@ -308,4 +311,54 @@ test("the accessibility menu opens under its trigger and gives focus back when i
   // Escape with the panel closed is left alone.
   await env.doc.dispatch("keydown", { key: "Escape" });
   assert.equal(env.doc.activeElement, env.setup);
+});
+
+// The rail's current step and the copy shown, after scrolling this many screens into the story.
+async function railAt(env, screens) {
+  env.win.scrollY = screens * SCREEN_PX;
+  await env.win.dispatch("scroll");
+  return railNow(env);
+}
+function railNow(env) {
+  const current = env.railDots.filter((dot) => dot.attributes.get("aria-current") === "step");
+  assert.equal(current.length, 1, "exactly one step is current");
+  assert.deepEqual(env.railDots.filter((dot) => dot.classes.has("on")), current, "the highlight is on the current step");
+  return { step: current[0].dataset.sceneTarget, shown: env.copies.filter((el) => el.classes.has("on")).map((el) => el.dataset.copy) };
+}
+const RAIL_STEPS = ["hero", "alone", "swarm", "robot1", "end"];
+// The three robot lines share one scene and one step.
+const STEP_OF = { hero: "hero", alone: "alone", swarm: "swarm", robot1: "robot1", robot2: "robot1", robot3: "robot1", end: "end" };
+
+test("the scene rail keeps a scene current through every crossfade, scrolling down and back up", async () => {
+  const env = environment();
+  const down = [];
+  let gaps = 0;
+  for (let i = 0; i <= 750; i++) {
+    const { step, shown } = await railAt(env, i / 100);
+    assert.ok(shown.length <= 1, "one copy at a time");
+    // Where a copy is shown the rail names its scene; where none is, it still names a scene.
+    if (shown.length) assert.equal(step, STEP_OF[shown[0]], `at ${i / 100} screens`);
+    else gaps++;
+    if (i > 0) {
+      assert.ok(RAIL_STEPS.indexOf(step) >= RAIL_STEPS.indexOf(down[i - 1]),
+        `at ${i / 100} screens the rail went back from ${down[i - 1]} to ${step}`);
+    }
+    down.push(step);
+  }
+  assert.ok(gaps > 20, "the scroll passes through stretches where no copy is shown");
+  assert.deepEqual([...new Set(down)], RAIL_STEPS, "every step is current in turn, each once");
+  // The step depends on the scroll position alone, so the way back passes the same steps.
+  for (let i = 750; i >= 0; i--) assert.equal((await railAt(env, i / 100)).step, down[i], `back at ${i / 100} screens`);
+});
+
+test("between two scenes the rail marks the nearer one, also on a page loaded there", async () => {
+  // "swarm" has faded out by 3.31 screens and "robot1" starts to fade in at 3.59.
+  for (const [screens, step] of [[3.36, "swarm"], [3.43, "swarm"], [3.47, "robot1"], [3.56, "robot1"]]) {
+    const loaded = environment({ scrollY: screens * SCREEN_PX });
+    assert.deepEqual(railNow(loaded), { step, shown: [] }, `loaded at ${screens} screens`);
+    assert.deepEqual(await railAt(environment(), screens), { step, shown: [] }, `scrolled to ${screens} screens`);
+  }
+  // The robot lines crossfade inside one scene; the step holds while neither line is fully in.
+  assert.deepEqual(await railAt(environment(), 4.4), { step: "robot1", shown: [] });
+  assert.deepEqual(await railAt(environment(), 5.35), { step: "robot1", shown: [] });
 });

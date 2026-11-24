@@ -462,6 +462,18 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           robot1: r0 + 0.5,
           end: e0 + 0.72,
         };
+        // The copy a scroll position belongs to: the one shown there or, in the gap between two
+        // where neither is shown, the nearer one. It depends on the position alone, so it is the
+        // same scrolling down, scrolling back up, and on a page loaded part-way through the story.
+        const copyAt = (screens: number) => {
+          let nearest = COPY_SPECS[0];
+          let least = Infinity;
+          for (const spec of COPY_SPECS) {
+            const away = Math.max(0, spec.in0 - screens, screens - spec.out1);
+            if (away < least) { nearest = spec; least = away; }
+          }
+          return nearest;
+        };
         const byCopy: Record<string, HTMLElement> = {};
         for (const el of copies) if (el.dataset.copy) byCopy[el.dataset.copy] = el;
         const ease = (v: number) => { const u = Math.max(0, Math.min(1, v)); return u * u * (3 - 2 * u); };
@@ -475,7 +487,6 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           const spx = screenPx();
           const screens = Math.max(0, Math.min(totalScreens, -story.getBoundingClientRect().top / spx));
           let active: HTMLElement | undefined;
-          let activeRail = "hero";
           for (const spec of COPY_SPECS) {
             const el = byCopy[spec.name];
             if (!el) continue;
@@ -497,9 +508,12 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
             if (on) {
               active = el;
               activeCopyName = spec.name;
-              activeRail = spec.rail;
             }
           }
+          // The rail's current step is the scene the scroll position is in. It is not taken from
+          // the copy that is shown: between scenes no copy is, and the step must not fall back
+          // to the first one there.
+          const activeRail = copyAt(screens).rail;
           for (const dot of railDots) {
             const isCurrent = dot.dataset.sceneTarget === activeRail;
             dot.classList.toggle("on", isCurrent);
