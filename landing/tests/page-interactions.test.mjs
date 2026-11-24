@@ -97,6 +97,7 @@ function environment({ fits = true, scrollY = 0 } = {}) {
   let finishFonts;
   const doc = Object.assign(new Events(), {
     activeElement: setup,
+    documentElement: { scrollHeight: 8.5 * SCREEN_PX + 95 },
     fonts: { ready: new Promise((resolve) => { finishFonts = resolve; }) },
     getElementById: (id) => ids[id],
     querySelectorAll: (selector) => {
@@ -142,7 +143,7 @@ function environment({ fits = true, scrollY = 0 } = {}) {
   });
   vm.runInContext(script, context, { timeout: 1000 });
   return {
-    ids, doc, win, setup, toastLink, copies, stills, railDots, queries, timers, finishFonts,
+    ids, doc, win, context, setup, toastLink, copies, stills, railDots, queries, timers, finishFonts,
     get activeArt() { return activeArt; },
     get stillRenders() { return stillRenders; },
     setFits(value) { fits = value; },
@@ -361,4 +362,223 @@ test("between two scenes the rail marks the nearer one, also on a page loaded th
   // The robot lines crossfade inside one scene; the step holds while neither line is fully in.
   assert.deepEqual(await railAt(environment(), 4.4), { step: "robot1", shown: [] });
   assert.deepEqual(await railAt(environment(), 5.35), { step: "robot1", shown: [] });
+});
+
+// The still and text views lay the copies out as an ordinary page. These are each copy's top
+// and height in page pixels, and the page's height, as the built page measures them in a
+// 1280x800 window. The window scrolls like a browser's: never past either end of the page.
+const PAGES = {
+  stills: { tops: [72, 670, 1103, 1536, 1969, 2402, 2835], heights: [598, 433, 433, 433, 433, 433, 554], height: 3483 },
+  text: { tops: [72, 504, 731, 951, 1177, 1397, 1617], heights: [432, 227, 220, 227, 220, 220, 376], height: 2088 },
+  animated: { height: 8.5 * SCREEN_PX + 95 },
+};
+const WINDOW_PX = 800;
+function pageEnvironment(options) {
+  const env = environment(options);
+  const view = () => env.ids.story.classes.has("animated") ? "animated" : env.ids.story.classes.has("stills") ? "stills" : "text";
+  env.copies.forEach((el, i) => {
+    el.getBoundingClientRect = () => {
+      const page = PAGES[view()];
+      // In the animated story every copy fills the pinned stage.
+      if (!page.tops) return { top: 0, bottom: WINDOW_PX, left: 0, right: 1280 };
+      const top = page.tops[i] - env.win.scrollY;
+      return { top, bottom: top + page.heights[i], left: 0, right: 1280 };
+    };
+  });
+  env.win.scrollTo = ({ top }) => { env.win.scrollY = Math.max(0, Math.min(PAGES[view()].height - WINDOW_PX, top)); };
+  env.doc.documentElement = { get scrollHeight() { return PAGES[view()].height; } };
+  env.view = view;
+  env.scrollTo = async (top) => { env.win.scrollTo({ top }); await env.win.dispatch("scroll"); };
+  env.shown = () => env.copies.filter((el) => el.classes.has("on") && !el.inert).map((el) => el.dataset.copy);
+  // Where a copy's block sits in the window in the still and text views.
+  env.topOf = (copy) => env.copies.find((el) => el.dataset.copy === copy).getBoundingClientRect().top;
+  return env;
+}
+const COPY_NAMES = ["hero", "alone", "swarm", "robot1", "robot2", "robot3", "end"];
+// A scroll position, in screens, at which each copy is the one shown.
+const SHOWN_AT = { hero: 0.3, alone: 1.6, swarm: 2.9, robot1: 4.0, robot2: 4.9, robot3: 5.7, end: 7.1 };
+
+test("pausing and resuming returns the reader to the very place they paused at", async () => {
+  for (const copy of COPY_NAMES) {
+    const env = pageEnvironment();
+    const toggle = env.ids["motion-toggle"];
+    await env.scrollTo(SHOWN_AT[copy] * SCREEN_PX);
+    assert.deepEqual(env.shown(), [copy]);
+    await toggle.dispatch("click");
+    assert.equal(env.view(), "stills");
+    // The copy the reader was on is at the top of the still view, under the nav. The page is
+    // too short to bring its last copy that high; it is then scrolled to its end.
+    const atEnd = env.win.scrollY === PAGES.stills.height - WINDOW_PX;
+    assert.ok(copy === "hero" ? env.win.scrollY === 0 : env.topOf(copy) === 88 || atEnd, `${copy} is brought to the top of the still view`);
+    assert.equal(atEnd, copy === "end");
+    await toggle.dispatch("click");
+    assert.equal(env.view(), "animated");
+    assert.equal(env.win.scrollY, SHOWN_AT[copy] * SCREEN_PX, `${copy}: resumed at the scroll position paused at`);
+    assert.deepEqual(env.shown(), [copy], `${copy} is shown again`);
+    assert.equal(railNow(env).step, STEP_OF[copy]);
+  }
+});
+
+test("text only and back returns the reader to the same place, also where the text page is too short to show it on top", async () => {
+  for (const copy of COPY_NAMES) {
+    const env = pageEnvironment();
+    const graphics = env.ids["graphics-toggle"];
+    await env.scrollTo(SHOWN_AT[copy] * SCREEN_PX);
+    await graphics.dispatch("click");
+    assert.equal(env.view(), "text");
+    // Three copies fit in the last window of the text page: "robot3" and "end" cannot reach the top.
+    const atEnd = env.win.scrollY === PAGES.text.height - WINDOW_PX;
+    assert.equal(atEnd, copy === "robot3" || copy === "end");
+    await graphics.dispatch("click");
+    assert.equal(env.view(), "animated");
+    assert.equal(env.win.scrollY, SHOWN_AT[copy] * SCREEN_PX, `${copy}: back at the scroll position left`);
+    assert.deepEqual(env.shown(), [copy]);
+  }
+});
+
+test("a pause in a gap between two scenes resumes in that gap, not on a neighbouring scene", async () => {
+  const env = pageEnvironment();
+  await env.scrollTo(3.4 * SCREEN_PX);
+  assert.deepEqual(env.shown(), []);
+  await env.ids["motion-toggle"].dispatch("click");
+  assert.equal(env.topOf("swarm"), 88, "the nearer scene is brought to the top of the still view");
+  await env.ids["motion-toggle"].dispatch("click");
+  assert.equal(env.win.scrollY, 3.4 * SCREEN_PX);
+});
+
+test("a reader who scrolled the still view resumes on the scene they scrolled to", async () => {
+  // Each copy rests where the rail jumps to; the second and third robot lines rest mid-beat.
+  const REST = { hero: 0, alone: 1.5, swarm: 2.75, robot1: 3.95, robot2: 4.875, robot3: 5.825, end: 7.02 };
+  for (const copy of COPY_NAMES) {
+    const env = pageEnvironment();
+    const toggle = env.ids["motion-toggle"];
+    await env.scrollTo(SHOWN_AT.alone * SCREEN_PX);
+    await toggle.dispatch("click");
+    // Scroll the still view until this copy is the first one whole in the window: its top a
+    // little under the nav, or the end of the page for the last copy.
+    await env.scrollTo(PAGES.stills.tops[COPY_NAMES.indexOf(copy)] - 150);
+    await toggle.dispatch("click");
+    assert.equal(env.view(), "animated");
+    assert.deepEqual(env.shown(), [copy], `resumed on ${copy}`);
+    assert.ok(Math.abs(env.win.scrollY - REST[copy] * SCREEN_PX) < 1, `${copy} is at rest: ${env.win.scrollY}`);
+    // A second pause and resume without scrolling stays exactly there.
+    const at = env.win.scrollY;
+    await toggle.dispatch("click");
+    await toggle.dispatch("click");
+    assert.equal(env.win.scrollY, at);
+  }
+});
+
+test("with reduced motion, text only and back keeps the copy the reader was on", async () => {
+  const env = pageEnvironment();
+  const reduced = env.queries.get("(prefers-reduced-motion: reduce)");
+  reduced.matches = true;
+  await reduced.dispatch("change");
+  assert.equal(env.view(), "stills");
+  const graphics = env.ids["graphics-toggle"];
+  await env.scrollTo(1900);
+  await graphics.dispatch("click");
+  assert.equal(env.view(), "text");
+  assert.equal(env.topOf("robot2"), 88, "the copy in view in the stills is on top of the text");
+  await graphics.dispatch("click");
+  assert.equal(env.view(), "stills");
+  assert.equal(env.topOf("robot2"), 88);
+  // Where the text page is too short to put the copy on top, the way back still finds it.
+  await env.scrollTo(PAGES.stills.tops[5] - 100);
+  await graphics.dispatch("click");
+  assert.equal(env.win.scrollY, PAGES.text.height - WINDOW_PX);
+  await graphics.dispatch("click");
+  assert.equal(env.topOf("robot3"), 88);
+  // At the top of the page nothing moves.
+  await env.scrollTo(0);
+  await graphics.dispatch("click");
+  await graphics.dispatch("click");
+  assert.equal(env.win.scrollY, 0);
+});
+
+test("a remembered place holds only while the reader has not scrolled and the window is the same", async () => {
+  const env = pageEnvironment();
+  const graphics = env.ids["graphics-toggle"];
+  const left = SHOWN_AT.robot3 * SCREEN_PX;
+  // Where "swarm" rests in the animated story: where a reader is put who is found on it by
+  // looking at the page, without a remembered position.
+  const rest = 2.75 * SCREEN_PX;
+  // "robot3" cannot reach the top of the short text page; the page is scrolled to its end.
+  await env.scrollTo(left);
+  await graphics.dispatch("click");
+  assert.equal(env.win.scrollY, PAGES.text.height - WINDOW_PX);
+  await env.scrollTo(env.win.scrollY - 40);
+  await env.scrollTo(env.win.scrollY + 40);
+  await graphics.dispatch("click");
+  assert.equal(env.win.scrollY, left, "scrolling away and back to the same spot is still the same place");
+  // Scrolled up by 300, "robot2" and "robot3" are both whole in the window; the upper one counts.
+  await graphics.dispatch("click");
+  await env.scrollTo(env.win.scrollY - 300);
+  await graphics.dispatch("click");
+  assert.deepEqual(env.shown(), ["robot2"], "after a scroll the copy in view is the reader's place");
+  // A window that changed size lays the page out anew, so the remembered offset means nothing.
+  await env.scrollTo(SHOWN_AT.swarm * SCREEN_PX);
+  await graphics.dispatch("click");
+  assert.equal(env.topOf("swarm"), 88);
+  env.context.innerWidth = 1000;
+  await graphics.dispatch("click");
+  assert.deepEqual(env.shown(), ["swarm"]);
+  assert.ok(Math.abs(env.win.scrollY - rest) < 1, "after a resize the reader is put on the copy in view, at rest");
+  // A setting changed outside the page presents the story anew without scrolling it. Back in
+  // the same presentation at the same spot, the place still holds.
+  const forced = env.queries.get("(forced-colors: active)");
+  await env.scrollTo(SHOWN_AT.swarm * SCREEN_PX);
+  await env.ids["motion-toggle"].dispatch("click");
+  assert.equal(env.topOf("swarm"), 88);
+  const paused = env.win.scrollY;
+  forced.matches = true;
+  await forced.dispatch("change");
+  assert.equal(env.view(), "text");
+  assert.equal(env.win.scrollY, paused, "a setting changed outside the page does not scroll it");
+  forced.matches = false;
+  await forced.dispatch("change");
+  assert.equal(env.view(), "stills");
+  await env.ids["motion-toggle"].dispatch("click");
+  assert.equal(env.win.scrollY, SHOWN_AT.swarm * SCREEN_PX);
+});
+
+test("in the still and text views the reader's copy is the first one nearly whole under the nav", async () => {
+  // The copy shown after a return to the animated story tells which copy the reader was taken to be on.
+  const resumedFrom = async (kind, scrollY) => {
+    const env = pageEnvironment();
+    const toggle = env.ids[kind === "stills" ? "motion-toggle" : "graphics-toggle"];
+    await toggle.dispatch("click");
+    assert.equal(env.view(), kind);
+    await env.scrollTo(scrollY);
+    await toggle.dispatch("click");
+    return env.shown();
+  };
+  // Several copies fit in a window of the text view. A copy 7px taller than its neighbours
+  // does not win over the one above it, and the tall last copy does not win from below.
+  assert.deepEqual(await resumedFrom("text", 581), ["swarm"]);
+  assert.deepEqual(await resumedFrom("text", 1247), ["robot3"]);
+  // At the end of the page the reader has reached the last copy, though "robot3" is still
+  // whole at the top of that last window. At the top of the page they are on the first.
+  assert.deepEqual(await resumedFrom("text", PAGES.text.height - WINDOW_PX), ["end"]);
+  assert.deepEqual(await resumedFrom("stills", PAGES.stills.height - WINDOW_PX), ["end"]);
+  assert.deepEqual(await resumedFrom("text", 0), ["hero"]);
+  assert.deepEqual(await resumedFrom("stills", 0), ["hero"]);
+  // A tall copy that is cut off a little by the nav still counts before a short one below it.
+  assert.deepEqual(await resumedFrom("text", 40), ["hero"]);
+  // No copy is four fifths in view here; the one with more of the window counts.
+  assert.deepEqual(await resumedFrom("stills", 150), ["hero"]);
+  assert.deepEqual(await resumedFrom("stills", 250), ["alone"]);
+  // A copy put under the nav is still the reader's after a small scroll either way.
+  for (const kind of ["stills", "text"]) {
+    for (const nudge of [-40, 40]) {
+      const env = pageEnvironment();
+      const toggle = env.ids[kind === "stills" ? "motion-toggle" : "graphics-toggle"];
+      await env.scrollTo(SHOWN_AT.swarm * SCREEN_PX);
+      await toggle.dispatch("click");
+      assert.equal(env.topOf("swarm"), 88);
+      await env.scrollTo(env.win.scrollY + nudge);
+      await toggle.dispatch("click");
+      assert.deepEqual(env.shown(), ["swarm"], `${kind} view scrolled by ${nudge}`);
+    }
+  }
 });

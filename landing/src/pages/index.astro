@@ -269,8 +269,18 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
       let userPaused = false;
       let userTextOnly = false;
       let layoutFits = true;
-      let activeCopyName = "hero";
       let stopStory = () => {};
+      // In the still and text views a copy the reader is put on sits this far below the top of
+      // the window: just under the fixed nav.
+      const READING_TOP = 88;
+      // A place in the story: the copy the reader is on and, when it was read from the animated
+      // story, how many screens they had scrolled into it.
+      type Place = { copy: string; screens: number | null };
+      // Set while the animated story is mounted: reads the reader's place in it, and scrolls to one.
+      let animatedStory: { place(): Place; show(place: Place): void } | null = null;
+      // The place a switch last put the reader at in the still or text view, with the scroll
+      // offset and the window size it left them at. See readingPlace().
+      let kept: { place: Place; scrollY: number; windowSize: string } | null = null;
       let stillsWidth = 0;
       let cancelAutoScroll = () => {};
 
@@ -455,11 +465,15 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
           { name: "robot3", in0: r2 - 0.02, in1: r2 + 0.14, out0: e0 - 0.34, out1: e0 - 0.14, drift: true, rail: "robot1" },
           { name: "end", in0: e0 + 0.20, in1: e0 + 0.40, out0: Infinity, out1: Infinity, drift: false, rail: "end" },
         ];
-        const railTargets: Record<string, number> = {
+        // Where each copy is at rest: fully shown, its form settled. A click on the rail scrolls
+        // to its scene's rest, and a return from the still or text view to the reader's copy's.
+        const restAt: Record<string, number> = {
           hero: 0,
           alone: a0 + 0.55,
           swarm: s0 + 0.55,
           robot1: r0 + 0.5,
+          robot2: r1 + beat / 2,
+          robot3: r2 + beat / 2,
           end: e0 + 0.72,
         };
         // The copy a scroll position belongs to: the one shown there or, in the gap between two
@@ -505,10 +519,7 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
             el.classList.toggle("on", on);
             el.inert = !on;
             el.setAttribute("aria-hidden", String(!on));
-            if (on) {
-              active = el;
-              activeCopyName = spec.name;
-            }
+            if (on) active = el;
           }
           // The rail's current step is the scene the scroll position is in. It is not taken from
           // the copy that is shown: between scenes no copy is, and the step must not fall back
@@ -543,9 +554,9 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         const onRailClick = (e: Event) => {
           const btn = e.currentTarget as HTMLButtonElement;
           const target = btn.dataset.sceneTarget;
-          if (!target || !(target in railTargets)) return;
+          if (!target || !(target in restAt)) return;
           const storyTop = story.getBoundingClientRect().top + window.scrollY;
-          scrollToY(Math.max(0, Math.round(storyTop + railTargets[target] * screenPx())));
+          scrollToY(Math.max(0, Math.round(storyTop + restAt[target] * screenPx())));
         };
         for (const dot of railDots) dot.addEventListener("click", onRailClick);
         window.addEventListener("scroll", onScroll, { passive: true });
@@ -553,8 +564,24 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         window.addEventListener("load", onResize);
         document.fonts?.ready.then(onResize).catch(() => {});
         update();
+        animatedStory = {
+          // The exact scroll position goes with the copy, so a return from another view can
+          // land on the same spot. Past the story's end the position still counts from its top.
+          place() {
+            const screens = -story.getBoundingClientRect().top / screenPx();
+            return { copy: copyAt(Math.max(0, Math.min(totalScreens, screens))).name, screens };
+          },
+          // A place read from the still or text view names only a copy; that copy's rest is shown.
+          show(place) {
+            const screens = place.screens ?? restAt[place.copy] ?? 0;
+            const storyTop = story.getBoundingClientRect().top + window.scrollY;
+            window.scrollTo({ top: Math.max(0, storyTop + screens * screenPx()), behavior: "instant" as ScrollBehavior });
+            update();
+          },
+        };
         stopStory = () => {
           mounted = false;
+          animatedStory = null;
           cancelAnimationFrame(raf);
           for (const dot of railDots) dot.removeEventListener("click", onRailClick);
           window.removeEventListener("scroll", onScroll);
@@ -564,16 +591,69 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         };
       }
 
-      // Preserve the reader's place in the story when toggling between animated and still/text views.
-      function preserveReadingPosition(wasAnimated: boolean, sceneName: string) {
-        const isAnimated = !!story?.classList.contains("animated");
-        if (wasAnimated === isAnimated || sceneName === "hero") return;
-        const target = copies.find((el) => el.dataset.copy === sceneName);
-        if (!target) return;
-        if (!isAnimated) {
-          const top = target.getBoundingClientRect().top + window.scrollY - 88;
+      // The two switches change how the story is presented: animated, as stills, or as text. The
+      // three lay the story out differently, so a scroll offset in one means nothing in another.
+      // What carries over is the reader's place.
+
+      // The reader's copy when the story is laid out as a page (the still and text views): from
+      // the top, the first copy that is at least four fifths in the window or, when none is, the
+      // copy that has the most of the window. The fixed nav covers the top of the window. A copy
+      // a switch has just put under the nav is found again after a small scroll either way.
+      // A reader at the end of the page has reached the last copy, whichever copies the last
+      // window still shows above it; how many those are depends on the size of the window.
+      function copyInView() {
+        const last = copies[copies.length - 1]?.dataset.copy;
+        const atPageEnd = window.scrollY > 0 && window.scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+        if (last && atPageEnd) return last;
+        let fullest = copies[0]?.dataset.copy || "hero";
+        let most = 0;
+        for (const el of copies) {
+          const name = el.dataset.copy;
+          const r = el.getBoundingClientRect();
+          const shown = Math.min(r.bottom, innerHeight) - Math.max(r.top, READING_TOP);
+          if (!name || shown <= 0) continue;
+          if (shown >= 0.8 * (r.bottom - r.top)) return name;
+          if (shown > most) {
+            fullest = name;
+            most = shown;
+          }
+        }
+        return fullest;
+      }
+
+      // A page of another width or height is laid out anew, and a scroll offset kept from the
+      // old one says nothing about it.
+      const windowSize = () => `${innerWidth}x${innerHeight}`;
+
+      function readingPlace(): Place {
+        if (animatedStory) return animatedStory.place();
+        // A reader who has not scrolled since a switch put them here is still where it put
+        // them. The page cannot always show that: a short page cannot bring its last copies up
+        // under the nav, and an earlier copy then sits there instead.
+        if (kept && kept.windowSize === windowSize() && Math.abs(window.scrollY - kept.scrollY) <= 2) return kept.place;
+        return { copy: copyInView(), screens: null };
+      }
+
+      function showPlace(place: Place) {
+        if (animatedStory) {
+          animatedStory.show(place);
+          kept = null;
+          return;
+        }
+        const target = copies.find((el) => el.dataset.copy === place.copy);
+        if (target) {
+          const top = target.getBoundingClientRect().top + window.scrollY - READING_TOP;
           window.scrollTo({ top: Math.max(0, top), behavior: "instant" as ScrollBehavior });
         }
+        kept = { place, scrollY: window.scrollY, windowSize: windowSize() };
+      }
+
+      // Change the presentation and keep the reader on the scene they were on.
+      function switchPresentation(change: () => void) {
+        const place = readingPlace();
+        change();
+        syncPresentation();
+        showPlace(place);
       }
 
       reduced.addEventListener("change", syncPresentation);
@@ -616,23 +696,17 @@ const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + 
         }
       });
       motionToggle?.addEventListener("click", () => {
-        const wasAnimated = !!story?.classList.contains("animated");
-        const scene = activeCopyName;
-        if (userTextOnly) {
-          userTextOnly = false;
-          userPaused = false;
-        } else {
-          userPaused = !userPaused;
-        }
-        syncPresentation();
-        preserveReadingPosition(wasAnimated, scene);
+        switchPresentation(() => {
+          if (userTextOnly) {
+            userTextOnly = false;
+            userPaused = false;
+          } else {
+            userPaused = !userPaused;
+          }
+        });
       });
       graphicsToggle?.addEventListener("click", () => {
-        const wasAnimated = !!story?.classList.contains("animated");
-        const scene = activeCopyName;
-        userTextOnly = !userTextOnly;
-        syncPresentation();
-        preserveReadingPosition(wasAnimated, scene);
+        switchPresentation(() => { userTextOnly = !userTextOnly; });
       });
       window.addEventListener("pagehide", () => { pageActive = false; stopStory(); });
       window.addEventListener("pageshow", (e) => {
